@@ -18,9 +18,11 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config, load_config_or_user_error
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig, ToolConfigEntry
+from mindroom.config.personal_agents import PersonalAgentRosterEntry
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import (
+    _PLATFORM_ADMIN_REQUIRED_MESSAGE,
     ConfigManagerTools,
     _ConfigPatchError,
     _InfoType,
@@ -264,6 +266,98 @@ def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
     assert "Successfully" not in update_result
     assert remove_result.startswith("Error:")
     assert paths.config_path.read_text(encoding="utf-8") == original
+
+
+def _personal_agent_config_manager(tmp_path: Path) -> tuple[RuntimePaths, Config, ConfigManagerTools]:
+    """Write a config whose template personal_agents.mind generates mind_alice for one roster entry."""
+    paths = test_runtime_paths(tmp_path)
+    data = {
+        "models": {"default": {"provider": "openai", "id": "m"}},
+        "administrators": ["@admin:example.org"],
+        "agents": {"helper": {"display_name": "Helper"}},
+        "personal_agents": {"mind": {"agent": {"display_name": "{user}'s Mind", "role": "Personal helper"}}},
+    }
+    entry = PersonalAgentRosterEntry(
+        template="mind",
+        user_id="@alice:example.org",
+        username="alice",
+        agent_name="mind_alice",
+        matrix_username=None,
+        user_display_name="Alice",
+        source_room_id="!lobby:example.org",
+    )
+    config = load_generated(tmp_path, data, entries=[entry])
+    paths.config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return paths, config, ConfigManagerTools(paths)
+
+
+def test_config_reads_of_a_personal_agent_point_to_its_template(tmp_path: Path) -> None:
+    """A personal agent has no agents entry, so reads show its template, field by field."""
+    _, config, config_manager = _personal_agent_config_manager(tmp_path)
+
+    with tool_runtime_context(_caller_context(config_manager, config, requester_id="@admin:example.org")):
+        info = config_manager.get_info(info_type="agent_config", name="mind_alice")
+        inspected = _manage_config(config_manager, operation="inspect", path="/agents/mind_alice")
+        role = _manage_config(config_manager, operation="inspect", path="/agents/mind_alice/role")
+        missing = _manage_config(config_manager, operation="inspect", path="/agents/mind_alice/does_not_exist")
+    with tool_runtime_context(_caller_context(config_manager, config, requester_id="@alice:example.org")):
+        refused = config_manager.get_info(info_type="agent_config", name="mind_alice")
+
+    note = "generated from the template `personal_agents.mind` for @alice:example.org"
+    assert note in info
+    assert "## Template configuration at `/personal_agents/mind`:" in info
+    assert "role: Personal helper" in info
+    assert "## Configuration for 'mind_alice'" not in info
+    assert note in inspected
+    assert "- JSON Pointer: `/personal_agents/mind`" in inspected
+    assert "role: Personal helper" in inspected
+    assert note in role
+    assert "- JSON Pointer: `/personal_agents/mind/agent/role`" in role
+    assert "Personal helper" in role
+    assert "display_name" not in role
+    assert missing == (
+        "Error inspecting authored configuration: Path does not exist in the authored configuration: "
+        "'/personal_agents/mind/agent/does_not_exist'"
+    )
+    assert refused == _PLATFORM_ADMIN_REQUIRED_MESSAGE
+
+
+def test_config_writes_to_a_personal_agent_point_to_its_template_while_it_generates_the_agent(tmp_path: Path) -> None:
+    """A write under a generated agent is refused, unless the same patch removes the template that generates it."""
+    paths, config, config_manager = _personal_agent_config_manager(tmp_path)
+    original = paths.config_path.read_text(encoding="utf-8")
+    authored_agent = {"display_name": "Alice assistant", "role": "Helper"}
+
+    with tool_runtime_context(_caller_context(config_manager, config, requester_id="@admin:example.org")):
+        replaced = _manage_config(
+            config_manager,
+            operation="patch",
+            changes=[{"op": "replace", "path": "/agents/mind_alice/role", "value": "Changed"}],
+        )
+        added = _manage_config(
+            config_manager,
+            operation="patch",
+            changes=[{"op": "add", "path": "/agents/mind_alice", "value": authored_agent}],
+        )
+        unchanged = paths.config_path.read_text(encoding="utf-8")
+        converted = _manage_config(
+            config_manager,
+            operation="patch",
+            changes=[
+                {"op": "remove", "path": "/personal_agents/mind"},
+                {"op": "add", "path": "/agents/mind_alice", "value": authored_agent},
+            ],
+        )
+
+    assert replaced.startswith("Error: '/agents/mind_alice/role' is not editable here.")
+    assert "Patch `/personal_agents/mind/agent/role` instead." in replaced
+    assert added.startswith("Error: '/agents/mind_alice' is not editable here.")
+    assert "Patch `/personal_agents/mind` instead." in added
+    assert unchanged == original
+    assert converted.startswith("✅ Authored configuration patch updated.")
+    saved = yaml.safe_load(paths.config_path.read_text(encoding="utf-8"))
+    assert saved["agents"]["mind_alice"] == authored_agent
+    assert "mind" not in saved.get("personal_agents", {})
 
 
 def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) -> None:
