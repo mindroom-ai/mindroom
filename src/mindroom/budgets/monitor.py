@@ -379,9 +379,8 @@ class BudgetMonitor:
         for user_id, cost_usd in self._costs_since_scan.items():
             self._costs_before_scan[user_id] = self._costs_before_scan.get(user_id, 0.0) + cost_usd
         self._costs_since_scan = {}
-        started = time.monotonic()
         try:
-            snapshot = await asyncio.to_thread(self._collect, config, self.clock())
+            snapshot, scan_seconds = await asyncio.to_thread(self._collect, config, self.clock())
         except Exception:
             # Usage storage is external state; keep enforcing the last good scan and the replies since it started.
             logger.warning("budget_scan_failed", exc_info=True)
@@ -391,10 +390,13 @@ class BudgetMonitor:
         logger.info(
             "budget_scan_completed",
             requested=requested,
-            duration_seconds=round(time.monotonic() - started, 3),
+            duration_seconds=round(scan_seconds, 3),
             scanned_sources=snapshot.scanned_sources,
             unavailable_sources=snapshot.unavailable_sources,
         )
 
-    def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
-        return collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))
+    def _collect(self, config: Config, now: datetime) -> tuple[SpendSnapshot, float]:
+        # Timed in the worker thread, so waiting for a free worker or for the loop to resume is not counted.
+        started = time.monotonic()
+        snapshot = collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))
+        return snapshot, time.monotonic() - started

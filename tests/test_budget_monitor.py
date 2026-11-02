@@ -709,12 +709,12 @@ async def test_each_scan_logs_its_duration_and_whether_something_requested_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scan holds the GIL in a worker thread, so how long each one ran and what started it is logged."""
-    scans = _Scans(monkeypatch, {ALICE: 1.0})
+    _Scans(monkeypatch, {ALICE: 1.0})
     monitor, _current = _monitor(tmp_path, _config(), tick_seconds=0.01, reconcile_seconds=0.05)
 
     with capture_logs() as logs:
         await monitor.sync(_config())
-        await _until(lambda: scans.calls >= 2)
+        await _until(lambda: sum(entry["event"] == "budget_scan_completed" for entry in logs) >= 2)
         await monitor.stop()
 
     completed = [entry for entry in logs if entry["event"] == "budget_scan_completed"]
