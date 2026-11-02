@@ -109,6 +109,9 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         ({"trigger_tokens": None}, False, 60_000, 0, True, ("none", "missing_budget")),
         ({}, False, 10_000, 0, True, ("none", "under_trigger")),
         ({}, False, 60_000, 0, True, ("required", "request_exceeds_limit")),
+        # A request exactly at the limit still fits it, and one exactly at the trigger has not passed it.
+        ({}, False, 59_904, 0, True, ("none", "within_limit")),
+        ({}, False, 10_000, 0, False, ("none", "under_trigger")),
         ({}, False, 12_001, 9_999, False, ("required", "over_trigger_native_disabled")),
         # The request would still reach the trigger with the summary as its only history.
         ({}, False, 12_001, 10_000, False, ("none", "trigger_unreachable")),
