@@ -1545,7 +1545,7 @@ space_room_id: null
             match=(
                 r"agents\.calculator\.matrix_username cannot be changed after the agent's Matrix account has been "
                 r"created\. Configured username 'jarvis' does not match the original requested username "
-                r"'mindroom_calculator'\."
+                r"'mindroom_calculator'\. Remove agents\.calculator\.matrix_username to keep the existing account\.$"
             ),
         ):
             await create_agent_user(

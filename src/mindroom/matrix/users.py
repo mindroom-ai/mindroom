@@ -534,15 +534,18 @@ def _validate_existing_account_request(
     stored_request = existing_account.requested_username or existing_account.username
     if stored_request == requested_username:
         return
-    if agent_name == INTERNAL_USER_AGENT_NAME:
-        setting, account = "mindroom_user.username", "internal Matrix account"
-    else:
-        setting, account = f"agents.{agent_name}.matrix_username", "agent's Matrix account"
-    msg = (
-        f"{setting} cannot be changed after the {account} has been created. "
-        f"Configured username {requested_username!r} does not match the original requested username "
-        f"{stored_request!r}."
+    mismatch = (
+        f"Configured username {requested_username!r} does not match the original requested username {stored_request!r}."
     )
+    if agent_name == INTERNAL_USER_AGENT_NAME:
+        msg = f"mindroom_user.username cannot be changed after the internal Matrix account has been created. {mismatch}"
+    else:
+        # A new MINDROOM_NAMESPACE from pairing again also changes the request; removing the setting keeps the account.
+        setting = f"agents.{agent_name}.matrix_username"
+        msg = (
+            f"{setting} cannot be changed after the agent's Matrix account has been created. {mismatch} "
+            f"Remove {setting} to keep the existing account."
+        )
     raise matrix_startup_error(msg, permanent=True)
 
 
