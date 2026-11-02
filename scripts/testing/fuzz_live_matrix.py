@@ -4816,8 +4816,8 @@ def _declined_edits(
 
 
 _SUPERSESSION_GUARD_MESSAGES = (
-    "Skipping older message — newer unresponded message from same sender in thread",
-    "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
+    "Newer unresponded message from same sender in thread may supersede older message",
+    "Newer pending journal event from same sender may supersede older message in degraded thread replay guard",
 )
 
 
@@ -4842,7 +4842,7 @@ def _supersession_decisions(log_path: Path | None) -> dict[str, tuple[_Supersess
         if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
             continue
         values = dict(pairs)
-        old, newer = values.get("skipped_event_id", ""), values.get("newer_event_id", "")
+        old, newer = values.get("older_event_id", ""), values.get("newer_event_id", "")
         if values.get("agent") != AGENT_NAME or not old.startswith("$") or not newer.startswith("$"):
             continue
         thread_id = values.get("thread_id")

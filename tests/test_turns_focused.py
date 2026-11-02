@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom import constants, interactive
 from mindroom.attachments.storage import register_local_attachment
@@ -1031,40 +1032,65 @@ def _router_relay_event(
     )
 
 
+def _skip_logs(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Return each logged skip of an older message as its event ID and thread."""
+    return [
+        (log["skipped_event_id"], log["thread_id"]) for log in logs if log["event"].startswith("Skipping older message")
+    ]
+
+
 @pytest.mark.asyncio
-async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Config, tmp_path: Path) -> None:
+@pytest.mark.parametrize("history_degraded", [False, True])
+async def test_replayed_turn_is_rejected_before_policy_and_compacted(
+    config: Config,
+    tmp_path: Path,
+    history_degraded: bool,
+) -> None:
     """A turn superseded by a newer unresponded requester message never reaches policy.
 
     The dispatch replay guard must consume the exact callback obligation without
-    recording a turn, evaluating policy, or sending anything.
+    recording a turn, evaluating policy, or sending anything, and the log says
+    which message it skipped.
     """
     harness = _build_harness(config, tmp_path)
-    await _serve_newer_requester_message(harness, config)
+    await _serve_newer_requester_message(harness, config, history_degraded=history_degraded)
     room = _room_with_members(config, "general")
     event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
 
-    await harness.deliver(room, event)
+    with capture_logs() as logs:
+        await harness.deliver(room, event)
 
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
+    assert _skip_logs(logs) == [(event.event_id, _THREAD_ROOT)]
 
 
 @pytest.mark.asyncio
-async def test_a_superseded_turn_whose_reply_keeps_it_runs(config: Config, tmp_path: Path) -> None:
-    """A reply that refuses the supersede, as one whose turn's newer message still waits to replay, has the turn run."""
+@pytest.mark.parametrize("history_degraded", [False, True])
+async def test_a_superseded_turn_whose_reply_keeps_it_runs(
+    config: Config,
+    tmp_path: Path,
+    history_degraded: bool,
+) -> None:
+    """A reply that refuses the supersede, as one whose turn's newer message still waits to replay, has the turn run.
+
+    Nothing logs the turn as skipped.
+    """
     harness = _build_harness(config, tmp_path)
     harness.gateway.supersede_result = False
-    await _serve_newer_requester_message(harness, config)
+    await _serve_newer_requester_message(harness, config, history_degraded=history_degraded)
     room = _room_with_members(config, "general")
     event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
 
-    await harness.deliver(room, event)
+    with capture_logs() as logs:
+        await harness.deliver(room, event)
 
     assert harness.policy.plan_turn_calls == 1
     assert harness.ignored_dispatch_sources == []
+    assert _skip_logs(logs) == []
 
 
 def _thread_upload_event(msgtype: str, *, event_id: str, origin_server_ts: int) -> nio.Event:

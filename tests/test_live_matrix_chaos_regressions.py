@@ -440,7 +440,7 @@ async def test_supersession_rejects_missing_or_foreign_ownership(tmp_path: Path,
             "wrong_log_source": log.replace("$old", "$elsewhere"),
             "wrong_log_newer": log.replace("$new", "$elsewhere"),
             "embedded_log": "message_body='" + log + "'",
-            "malformed_log": log.replace("skipped_event_id", "skipped_event"),
+            "malformed_log": log.replace("older_event_id", "older_event"),
             "wrong_log_thread": log.replace("$root", "$elsewhere"),
             "truncated_log": log.rstrip("\n"),
         }[defect]
@@ -1329,7 +1329,7 @@ async def test_supersession_retry_candidates_do_not_promote_invalid_observations
     invalid_record = {
         "unknown_successor": positive.replace("$new", "$foreign"),
         "wrong_thread": positive.replace("$root", "$foreign"),
-        "malformed": positive.replace("skipped_event_id", "skipped_event"),
+        "malformed": positive.replace("older_event_id", "older_event"),
     }[invalid]
     case.oracle.log_path.write_text((positive if valid_candidate else "") + invalid_record)
     try:
