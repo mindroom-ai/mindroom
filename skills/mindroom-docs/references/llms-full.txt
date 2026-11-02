@@ -14367,7 +14367,7 @@ Set `minimal=True` to run the child in [minimal mode](https://docs.mindroom.chat
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
 Delegated runs do not create a Matrix thread and cannot ask the user interactive questions.
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
-With [background jobs](#background-jobs) on, the subagent calls a parent makes in one step run at the same time; otherwise a parent in a Matrix conversation runs its subagents one at a time.
+Subagent calls that run as [background jobs](#background-jobs) start at the same time when a parent makes several in one step; otherwise a parent in a Matrix conversation runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/).
 Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
 

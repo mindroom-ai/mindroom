@@ -5802,7 +5802,7 @@
         "exclude_toolkits": [],
         "approval_wait_timeout": 300.0
       },
-      "description": "Opt-in managed background tool execution; turning it on or off and its exclusions need a restart."
+      "description": "Managed background tool execution, on by default; turning it on or off and its exclusions need a restart."
     },
     "event_journal": {
       "$ref": "#/$defs/EventJournalConfig",
