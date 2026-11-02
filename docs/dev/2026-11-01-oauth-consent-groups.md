@@ -19,7 +19,7 @@ Assumptions:
 
 - **Providers opt in with a consent group.**
   `OAuthProvider` gains an optional consent group with a key and a display name.
-  The built-in Google providers, Google Cloud included, form the `google` group; each [additional Google workspace](../plugins.md#additional-google-workspaces) forms its own group named after the workspace, so its account picker and hosted-domain rule stay separate from the built-in connection; the Microsoft 365 providers form the `microsoft` group, except Teams Meetings and People, whose `OnlineMeetingTranscript.Read.All` and `User.Read.All` scopes need admin consent.
+  The built-in Google providers, Google Cloud included, form the `google` group; each [additional Google workspace](../plugins.md#additional-google-workspaces) forms its own group named after the workspace, so its account picker and hosted-domain rule stay separate from the built-in connection; the Microsoft 365 providers form the `microsoft` group, except Teams, Teams Meetings, and People, whose `ChannelMessage.Read.All`, `OnlineMeetingTranscript.Read.All`, and `User.Read.All` scopes need admin consent.
   Plugin providers may declare a group too.
   Grouping is never inferred from a shared OAuth client, because copying one refresh token into several connections is safe only for providers whose old refresh tokens stay valid after use (see External constraints).
 - **The server picks the members.**
