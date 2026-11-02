@@ -8,7 +8,12 @@ import threading
 
 import pytest
 
-from mindroom.timing import DispatchPipelineTiming, bind_reply_pipeline_timing, reply_timing_binding
+from mindroom.timing import (
+    DispatchPipelineTiming,
+    ReplyTimingBinding,
+    bind_reply_pipeline_timing,
+    reply_timing_binding,
+)
 from mindroom.tool_system.runtime_context import WorkerProgressPump
 from mindroom.tool_system.sandbox_proxy import _make_progress_sink
 from mindroom.workers.models import WorkerReadyProgress
@@ -120,3 +125,32 @@ def test_progress_sink_stops_noting_once_the_reply_is_delivered() -> None:
     captured_sink(_progress("failed", 4.0))
 
     assert "worker_wait_ms" not in timing.metadata
+
+
+def test_ending_the_binding_waits_for_a_wait_being_noted() -> None:
+    """A sink already noting on a worker thread finishes first; nothing is noted once the binding has ended."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _SlowMetadata(dict):
+        def __setitem__(self, key: str, value: object) -> None:
+            entered.set()
+            release.wait(5)
+            super().__setitem__(key, value)
+
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
+    timing.metadata = _SlowMetadata()
+    binding = ReplyTimingBinding(timing)
+    noter = threading.Thread(target=binding.note_worker_wait, args=(2.0,))
+    noter.start()
+    assert entered.wait(5)
+    ender = threading.Thread(target=binding.end)
+    ender.start()
+    ender.join(0.2)
+    assert ender.is_alive()
+    release.set()
+    ender.join(5)
+    noter.join(5)
+    binding.note_worker_wait(3.0)
+
+    assert dict(timing.metadata) == {"worker_wait_ms": 2000.0}

@@ -7,6 +7,7 @@ import functools
 import inspect
 import logging
 import os
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -199,16 +200,19 @@ class ReplyTimingBinding:
 
     def __init__(self, timing: DispatchPipelineTiming) -> None:
         self._timing: DispatchPipelineTiming | None = timing
+        # Sinks note from worker threads; holding the lock across the check and the write lets end() wait them out.
+        self._lock = threading.Lock()
 
     def note_worker_wait(self, elapsed_seconds: float) -> None:
         """Note a worker start a tool call waited for, unless the reply has been delivered."""
-        timing = self._timing
-        if timing is not None:
-            timing.note_worker_wait(elapsed_seconds)
+        with self._lock:
+            if self._timing is not None:
+                self._timing.note_worker_wait(elapsed_seconds)
 
     def end(self) -> None:
-        """Stop noting into the reply's timing."""
-        self._timing = None
+        """Stop noting into the reply's timing, after any note already under way."""
+        with self._lock:
+            self._timing = None
 
 
 _REPLY_TIMING_BINDING: ContextVar[ReplyTimingBinding | None] = ContextVar("reply_timing_binding", default=None)
