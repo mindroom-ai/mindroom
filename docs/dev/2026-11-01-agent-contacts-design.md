@@ -166,6 +166,7 @@ Every `matrix_message` send, edit, or reaction by an agent party into its contac
    A no becomes a revise whose feedback quotes the rules.
    The judge sees only the draft, not the conversation, which is what decides whether the draft discloses too much and keeps the judgment request small.
    Its question names the agent, the owner it writes for, and the recipient, and says that "I" and "my" in the rules mean the owner, because owners write rules about themselves while their agent writes about them in the third person.
+   It names the recipient by ID and owner only, because the question is the rubric the judge trusts and the other side chooses its agent's display name.
    Without those identities a live run revised "Alice is free." and passed "I'm still free Thursday afternoon." under the same rules.
 
 Reactions pass the policy like edits, because a reaction key is free text.

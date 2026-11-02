@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from mindroom.contacts.parties import party_label, party_name
+from mindroom.contacts.parties import party_name
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, emit_policy
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
@@ -58,10 +58,13 @@ def _contact_rules_question(config: Config, record: ContactRecord, side: SideNam
 
     Owners write rules about themselves as "I" and "my", while their agent writes about them in the third person, so
     the judge learns who writes the message, for whom, and to whom.
+    The question is the rubric the judge trusts, so it names the other side by ID only: that side chooses its agent's
+    display name, which could otherwise rewrite the rubric.
     """
     sender = record.party(side)
     owner = sender.owner
-    recipient = party_label(config, record.party(record.other(side)))
+    other = record.party(record.other(side))
+    recipient = other.id if other.kind == "person" else f"{other.id}, the agent of {other.owner}"
     return JudgmentQuestion(
         id=_CONTACT_RULES_QUESTION_ID,
         instructions=(
