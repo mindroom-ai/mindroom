@@ -337,6 +337,16 @@ async def test_a_notice_that_cannot_be_posted_is_an_error_and_the_request_stays(
 
 
 @pytest.mark.asyncio
+async def test_a_person_without_a_personal_agent_here_is_refused_before_anything_is_stored(tmp_path: Path) -> None:
+    """Nothing on this deployment could ever post or accept a request to someone it never onboarded."""
+    config, paths = _setup(tmp_path)
+    stranger = "@dave:localhost"
+    with pytest.raises(ValueError, match=rf"^{stranger} has no personal agent here"):
+        await _request(config, paths, _runtime(), target=stranger)
+    assert _stored(paths) == []
+
+
+@pytest.mark.asyncio
 async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_path: Path) -> None:
     """A pending or active pair is returned from either side; a notice that never landed is posted again."""
     config, paths = _setup(tmp_path)

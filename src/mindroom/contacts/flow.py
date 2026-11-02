@@ -276,7 +276,10 @@ async def request_contact(
     _check_pair(requester, target_party)
     # The agent of the owner's personal room asks them and accepts for them, which takes the contacts tools.
     poster = personal_room_agent(config, target_party.owner)
-    if poster is not None and agent_party(config, poster) is None:
+    if poster is None:
+        msg = f"{target_party.owner} has no personal agent here, so a request cannot reach them"
+        raise ValueError(msg)
+    if agent_party(config, poster) is None:
         msg = f"{target_party.owner}'s personal agent {poster} does not take contact requests"
         raise ValueError(msg)
 

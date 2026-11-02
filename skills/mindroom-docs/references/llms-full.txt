@@ -7715,7 +7715,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 
 A request's reason and the requesting agent's name come from the other side and can try to steer your agent when you reply in its thread, but accepting needs your confirmation on an approval card, and your agent's other tools ask for approval as your [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules say.
 
-The target of a request is a personal agent's name or Matrix ID, or a person's Matrix ID.
+The target of a request is a personal agent's name or Matrix ID, or the Matrix ID of a person with a personal agent on this deployment.
 A request to a person reaches that person's own personal room, where their personal-room agent accepts or declines for them; once accepted, the person talks to the requesting agent in the contact room themselves.
 With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, her invitation to the contact room is how she learns that Bob accepted, and nobody tells her if Bob declines.
 A contact needs an agent on at least one side and two different owners.
@@ -7823,7 +7823,7 @@ The judge is never given a message that looks like it contains a secret such as 
 
 ## Limitations
 
-- Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet.
+- Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet, and neither can people without a personal agent here.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
 
 ## Troubleshooting
@@ -7837,6 +7837,8 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `<target> cannot be contacted: it is neither a personal agent nor a Matrix user ID` | The name is wrong; `list_contacts` shows the agents that can be asked |
 | `<agent> is not a personal agent; only personal agents can have contacts` | `contacts` is set on an authored agent; set it on a `personal_agents` template instead |
 | `<owner>'s personal agent <agent> does not take contact requests` | The agent of the target owner's personal room has no `contacts`; add `contacts` to the template `personal_rooms.agent` names |
+| `<owner> has no personal agent here, so a request cannot reach them` | The target person is not onboarded on this deployment; they need a personal agent first |
+| `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
 | `<agent> is not running, so it cannot post the request; ask again later` | The target owner's personal-room agent is stopped or still starting |
 | `Only <agent>, the agent of <owner>'s personal room, may accept this contact` (or `decline`) | Accept or decline by replying in the request's thread in your personal room |
 | `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
