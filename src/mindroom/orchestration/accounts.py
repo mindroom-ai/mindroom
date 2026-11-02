@@ -39,12 +39,13 @@ def validate_entity_accounts(config: Config, runtime_paths: constants.RuntimePat
 
 
 def _entity_request(config: Config, entity_name: str) -> ManagedAccountProvisioningRequest:
-    """Request a generated agent's stored Matrix username, so a wiped matrix_state recreates the same ID."""
+    """Request an agent's configured Matrix username, or a generated agent's stored one.
+
+    Both are exact localparts, so a new namespace from pairing again or a wiped matrix_state requests the same ID.
+    """
     instance = config.personal_agent_instance(entity_name)
-    return ManagedAccountProvisioningRequest(
-        entity_name,
-        username=None if instance is None else instance.matrix_username,
-    )
+    source = instance if instance is not None else config.agents.get(entity_name)
+    return ManagedAccountProvisioningRequest(entity_name, username=None if source is None else source.matrix_username)
 
 
 async def _prepare_internal_user(

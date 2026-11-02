@@ -1749,6 +1749,7 @@ agents:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `display_name` | string | *required* | Name shown in Matrix |
+| `matrix_username` | string or null | `null` | Exact localpart of the Matrix account MindRoom creates for the agent, such as `jarvis` for `@jarvis:example.com`, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`. When unset, the account is `mindroom_<agent key>`; unlike that default name, `matrix_username` gets no `_<MINDROOM_NAMESPACE>` suffix. MindRoom uses it when it creates the account, so set it before the agent's first start; changing it to another name later stops startup with `agents.<agent key>.matrix_username cannot be changed after the agent's Matrix account has been created.`, and removing it keeps the existing account. Installs paired with a provisioning service, such as hosted `mindroom.chat`, can register only `mindroom_` names the service allows, so a name such as `jarvis` is refused there. To use an account that already exists, see [Use an Existing Matrix Account](https://docs.mindroom.chat/matrix/#use-an-existing-matrix-account) |
 | `role` | string | `""` | System prompt describing the agent's purpose and expertise |
 | `model` | string | `"default"` | Key of an entry under `models:` |
 | `cheap_model` | string or null | `null` | Cheaper model key this agent may switch to; used by `cold_cache`. Inherits `defaults.cheap_model`. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
@@ -6962,7 +6963,7 @@ Each agent, team, and the router has its own Matrix user, created automatically 
 Account credentials are stored in `matrix_state.yaml` in the storage directory (default `mindroom_data/`).
 
 In chat, address an agent or team by its configured key, such as `@assistant`.
-MindRoom requests localparts such as `mindroom_assistant`, but the account recorded in `matrix_state.yaml` is authoritative, so an agent's actual Matrix ID (for example `@assistant_live:example.com`) can differ from the requested one.
+MindRoom requests localparts such as `mindroom_assistant`, or an agent's [`matrix_username`](https://docs.mindroom.chat/configuration/agents/#configuration-options), but the account recorded in `matrix_state.yaml` is authoritative, so an agent's actual Matrix ID (for example `@assistant_live:example.com`) can differ from the requested one.
 
 `MATRIX_MANAGED_ACCOUNT_AUTH` selects how these accounts authenticate:
 
@@ -6972,6 +6973,26 @@ MindRoom requests localparts such as `mindroom_assistant`, but the account recor
   Provide exactly one of `MATRIX_APPSERVICE_TOKEN` or `MATRIX_APPSERVICE_TOKEN_FILE`; setting either one without `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` stops startup.
   The application-service token is used only to register accounts and log in new devices.
   After switching an existing install to `appservice`, stored passwords are removed from `matrix_state.yaml` once each account logs in.
+
+### Use an Existing Matrix Account
+
+An agent can take over a Matrix account that already exists, such as one another agent platform used, and keep its Matrix ID and rooms.
+Before the agent's first start, while `matrix_state.yaml` has no entry for the agent, add the account under `accounts` with its localpart and password:
+
+```yaml
+accounts:
+  agent_assistant:  # agent_<agent key>
+    username: jarvis
+    password: the-account-password
+```
+
+MindRoom then logs in to that account instead of registering one.
+With `MATRIX_MANAGED_ACCOUNT_AUTH=appservice`, leave out `password`; the account must be inside the application service's exclusive user namespace.
+In `config.yaml`, list every room the account should stay in under the agent's `rooms` by room ID, because an agent leaves joined rooms it is not configured for, except direct messages.
+Room IDs in `rooms` grant no conversation access, so admit the people in those rooms through the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access), such as `access.users`.
+Stop the other platform from using the account first, or both will answer.
+An adopted account needs no `matrix_username`.
+With password auth, a `matrix_username` that names an existing account stops startup with `Matrix account collision` instead of taking it over; with `appservice` auth, MindRoom takes over an existing account inside its namespace.
 
 ## Internal User
 
@@ -7414,6 +7435,7 @@ Every generated agent also gets these settings, whatever the template says:
 - `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have, so owners use `update_agent` instead.
 
 Config validation rejects `private` and `allow_self_config: true` in the template's `agent` and in any `users` override, because a personal agent already belongs to one user.
+It also rejects `matrix_username` there, because the template's own `matrix_username` names every user's account.
 A template or override that would produce an invalid agent fails validation as soon as you save or load it, even before anyone has onboarded, with `personal_agents would generate an invalid agent for a new user:` and the reason.
 
 ## Generated Agents
@@ -7551,7 +7573,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
 - `tools` come from the creator's tools, with the creator's settings for each, and omitting `tools` gives the new agent all of them.
   Asking for a tool the creator lacks is refused with the list of names it may use.
 - `instructions` replace the creator's, and omitting them keeps the creator's.
-- Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings.
+- Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings, except `matrix_username`: the new agent gets its own default Matrix account.
 - Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
   Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
   It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.

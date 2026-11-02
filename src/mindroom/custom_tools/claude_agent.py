@@ -25,11 +25,12 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.providers.names import ROUTE_PROVIDERS
+from mindroom.runtime_shutdown import close_at_process_shutdown
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
@@ -45,6 +46,9 @@ _DEFAULT_PERMISSION_MODE: _PermissionMode = "default"
 _DEFAULT_SESSION_TTL_MINUTES = 60
 _DEFAULT_MAX_SESSIONS = 200
 _DEFAULT_LIMITS = (_DEFAULT_SESSION_TTL_MINUTES * 60, _DEFAULT_MAX_SESSIONS)
+_MIN_SESSION_TTL_SECONDS = 60
+# As often as the shortest TTL, so an idle session closes at most that long after its TTL passed.
+_SWEEP_INTERVAL_SECONDS = _MIN_SESSION_TTL_SECONDS
 _MAX_STDERR_LINES = 12
 _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
@@ -120,6 +124,7 @@ class _ClaudeSessionManager:
         self._sessions: dict[str, _ClaudeSessionState] = {}
         self._lock = asyncio.Lock()
         self._namespace_limits: dict[str, tuple[int, int]] = {}
+        self._sweep: asyncio.Task[None] | None = None
 
     def configure_namespace(
         self,
@@ -129,7 +134,7 @@ class _ClaudeSessionManager:
         max_sessions: int,
     ) -> None:
         """Update limits for one namespace (typically one agent)."""
-        ttl_seconds = max(60, ttl_minutes * 60)
+        ttl_seconds = max(_MIN_SESSION_TTL_SECONDS, ttl_minutes * 60)
         self._namespace_limits[namespace] = (ttl_seconds, max(1, max_sessions))
 
     async def get_or_create(
@@ -139,18 +144,17 @@ class _ClaudeSessionManager:
         options: ClaudeAgentOptions,
     ) -> tuple[_ClaudeSessionState, bool]:
         """Get an existing session or create a new one for the given key."""
-        stale: list[_ClaudeSessionState] = []
+        closing = self._close_many([])
         try:
             async with self._lock:
-                stale.extend(self._collect_expired_locked())
-
                 existing = self._sessions.get(session_key)
                 if existing is not None:
                     existing.last_used_at = monotonic()
                     existing.ttl_seconds = self._namespace_ttl_seconds(namespace)
                     return existing, False
 
-                stale.extend(self._evict_if_needed_locked(namespace))
+                # Evicted sessions close while this one starts, so a shutdown meanwhile waits for their closes.
+                closing = self._close_many(self._evict_if_needed_locked(namespace))
 
                 client = ClaudeSDKClient(options=options)
                 close_requested = asyncio.Event()
@@ -167,9 +171,15 @@ class _ClaudeSessionManager:
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
                 )
                 self._sessions[session_key] = session
+                if self._sweep is None or self._sweep.done():
+                    self._sweep = create_background_task(
+                        self._sweep_idle(),
+                        name="claude_session_sweep",
+                        context=Context(),
+                    )
                 return session, True
         finally:
-            await self._close_many(stale)
+            await closing
 
     async def close(self, session_key: str) -> bool:
         """Close and remove a session by key."""
@@ -189,17 +199,33 @@ class _ClaudeSessionManager:
         await self._close_many([session])
 
     async def get(self, session_key: str) -> _ClaudeSessionState | None:
-        """Get a session by key, cleaning up expired sessions first."""
-        stale: list[_ClaudeSessionState] = []
-        try:
+        """Get a session by key."""
+        async with self._lock:
+            session = self._sessions.get(session_key)
+            if session is not None:
+                session.last_used_at = monotonic()
+            return session
+
+    async def close_all(self) -> None:
+        """Close every session no call is using, and wait for every close under way, so each counts its unread turns.
+
+        Sessions that a call still uses or is still opening, such as an API request's that shutdown leaves running, end
+        with the process; the manager's lock is not taken, because opening a session holds it.
+        """
+        idle = [session for session in self._sessions.values() if not session.lock.locked()]
+        for session in idle:
+            del self._sessions[session.key]
+        await self._close_many(idle)
+        # Closes that started earlier, such as the idle sweep's, finish too.
+        await wait_for_background_tasks(owner=self)
+
+    async def _sweep_idle(self) -> None:
+        """Close each session idle past its TTL, whether or not calls still come, while the manager holds any."""
+        while self._sessions:
+            await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
             async with self._lock:
-                stale.extend(self._collect_expired_locked())
-                session = self._sessions.get(session_key)
-                if session is not None:
-                    session.last_used_at = monotonic()
-                return session
-        finally:
-            await self._close_many(stale)
+                expired = self._collect_expired_locked()
+            await self._close_many(expired)
 
     def _collect_expired_locked(self) -> list[_ClaudeSessionState]:
         now = monotonic()
@@ -277,12 +303,15 @@ class _ClaudeSessionManager:
             raise
         return owner
 
-    async def _close_many(self, sessions: list[_ClaudeSessionState]) -> None:
-        """Close sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short."""
+    def _close_many(self, sessions: list[_ClaudeSessionState]) -> asyncio.Future[list[None]]:
+        """Start closing sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short.
+
+        Return a future that ends once every close has.
+        """
         closes = [
             create_background_task(_close(session), name="claude_session_close", owner=self) for session in sessions
         ]
-        await asyncio.shield(asyncio.gather(*closes))
+        return asyncio.shield(asyncio.gather(*closes))
 
 
 async def _close(session: _ClaudeSessionState) -> None:
@@ -690,7 +719,6 @@ class ClaudeAgentTools(Toolkit):
                 prompt_id = str(uuid4())
                 await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
                 response = await self._collect_response(session, prompt_id)
-                session.last_used_at = monotonic()
             except Exception as exc:
                 # Any failure leaves the session unusable, such as a control request Claude Code never answered.
                 session_error = self._format_session_error(
@@ -701,6 +729,9 @@ class ClaudeAgentTools(Toolkit):
                     fork_session=fork_session,
                     stderr_lines=session.stderr_lines,
                 )
+            finally:
+                # The session is idle from the end of the call, however it ends, such as a stopped one.
+                session.last_used_at = monotonic()
 
         if session_error is not None:
             await self._session_manager.close_session(session)
@@ -817,3 +848,7 @@ class ClaudeAgentTools(Toolkit):
         if not removed:
             return f"No active Claude session for `{session_key}`."
         return f"Closed Claude session `{session_key}`."
+
+
+# The runtime's orderly shutdown closes the sessions, which counts the turns no call read, such as a stopped call's answer.
+close_at_process_shutdown(lambda: ClaudeAgentTools._session_manager.close_all())

@@ -70,7 +70,7 @@ from mindroom.memory.legacy_team_memory import migrate_team_memory
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, gather_shutdown_phase
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, gather_shutdown_phase, run_process_shutdown_closers
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -1825,6 +1825,7 @@ async def _finish_runtime_shutdown(
         reset_matrix_sync_health()
         reset_runtime_state()
         shutdown_primary_worker_manager()
+        await run_process_shutdown_closers()
         await aclose_model_http_client()
 
 

@@ -4,12 +4,17 @@ icon: lucide/message-square
 
 # Matrix Integration
 
-This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant, the room-level reply relation, and the model-selection wire protocol that external clients implement.
+This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant, the custom key namespace, the room-level reply relation, and the model-selection wire protocol that external clients implement.
 User-facing Matrix behavior is on [Matrix Integration](../matrix.md), event-journal decisions and homeserver behaviour are on [Matrix Event-Journal Contracts](matrix-event-journal-contracts.md), and invites and delivery epochs are on [Bot Runtime](bot-runtime.md#durable-dispatch-boundary).
 
 ## Identity Invariant
 
 Code must resolve an entity's Matrix ID through the persisted identity registry, keyed by configured alias, and never derive it from the requested localpart, because the actual account can differ (see [Agent Users](../matrix.md#agent-users)).
+
+## Custom Key Namespace
+
+New custom Matrix event types, state event types, and content keys use the `io.mindroom.*` namespace.
+Existing names under other prefixes, such as the `com.mindroom.*` keys, `org.mindroom.personal_room`, and `chat.mindroom.call_failure`, keep their names and are never migrated, because events already in room history, MindRoom Chat, and documented procedures use those names.
 
 ## Room-Level Reply Relation
 

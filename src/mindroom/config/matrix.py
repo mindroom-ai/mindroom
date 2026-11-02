@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.validation import validate_matrix_localpart
 from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 
 if TYPE_CHECKING:
@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 _MatrixSyncMode = Literal["sliding", "classic"]
 RoomJoinRule = Literal["invite", "public", "knock"]
 RoomDirectoryVisibility = Literal["public", "private"]
-_MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
 
 
 class MatrixSyncConfig(BaseModel):
@@ -83,14 +82,7 @@ class MindRoomUserConfig(BaseModel):
             msg = "mindroom_user.username must be a Matrix localpart (without domain)"
             raise ValueError(msg)
 
-        if not _MATRIX_LOCALPART_PATTERN.fullmatch(normalized):
-            msg = (
-                "mindroom_user.username contains invalid characters; "
-                "allowed: lowercase letters, digits, '.', '_', '=', '-', '/'"
-            )
-            raise ValueError(msg)
-
-        return normalized
+        return validate_matrix_localpart(normalized, field_name="mindroom_user.username")
 
 
 class MatrixSpaceConfig(BaseModel):
