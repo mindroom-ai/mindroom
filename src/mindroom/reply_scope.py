@@ -702,7 +702,7 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
 
 
 class ReplyWriteRefusedError(Exception):
-    """A reply write's rule wrote no row for the prepared payload; nothing was written.
+    """A reply write's rule recorded no row for the prepared payload, so nothing is sent.
 
     ``Recompute`` means a Stop, deletion, or departure committed after the
     payload was rendered; ``Stale`` means the span no longer owns the reply;

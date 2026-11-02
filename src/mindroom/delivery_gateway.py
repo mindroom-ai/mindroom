@@ -647,6 +647,10 @@ class DeliveryGateway:
             )
         return outcome
 
+    async def _send_claimed_event(self, claimed: MatrixDelivery) -> str:
+        """Send one claimed delivery and return the event Matrix accepted."""
+        return (await self._send_claimed(claimed)).event_id
+
     async def _send_frozen(
         self,
         claimed: MatrixDelivery,
@@ -776,12 +780,7 @@ class DeliveryGateway:
 
     def _recovery_worker(self) -> MatrixDeliveryWorker:
         """Use the same writer and exact locks for recovery and normal delivery."""
-
-        async def send(claimed: MatrixDelivery) -> str:
-            delivered = await self._send_claimed(claimed)
-            return delivered.event_id
-
-        return self._response_delivery(send, handoff=None)
+        return self._response_delivery(self._send_claimed_event, handoff=None)
 
     async def _delivered_under_a_previous_device(self, claimed: MatrixDelivery) -> str | None:
         """Return the exact marker-bearing event an earlier device delivered."""
@@ -974,15 +973,6 @@ class DeliveryGateway:
         transaction; a rule that writes no row raises ``ReplyWriteRefusedError``
         and nothing is sent. The returned event is the one the reply shows on.
         """
-        requested: DeliveredMatrixEvent | None = None
-        predicted: dict[str, object] = {}
-
-        async def send(claimed: MatrixDelivery) -> str:
-            nonlocal requested
-            delivered = await self._send_claimed(claimed)
-            if claimed.delivery_id == predicted.get("delivery_id") and claimed.stage == write.stage:
-                requested = delivered
-            return delivered.event_id
 
         async def prepare() -> PreparedReplyRow:
             reply = await self.deps.outbox.replies.load(write.reply_id)
@@ -993,7 +983,6 @@ class DeliveryGateway:
             if stage is DeliveryStage.EDIT:
                 assert reply is not None
                 delivery_id = edit_delivery_id(delivery_id, reply.reply_sequence + 1)
-            predicted["delivery_id"] = delivery_id
             edits = stage is not DeliveryStage.INITIAL and event_id is not None
             payload: dict[str, Any] = (
                 build_edit_event_content(event_id=event_id, new_content=content, new_text=new_text or "")
@@ -1036,7 +1025,10 @@ class DeliveryGateway:
                 write.handle.note(row.applied)
 
         try:
-            delivery = await self._response_delivery(send, handoff=self.deps.turn_handoff).deliver_reply_row(
+            delivery = await self._response_delivery(
+                self._send_claimed_event,
+                handoff=self.deps.turn_handoff,
+            ).deliver_reply_row(
                 ReplyRowRequest(
                     reply_id=write.reply_id,
                     span_id=write.span.span_id,
@@ -1069,8 +1061,6 @@ class DeliveryGateway:
                 write.handle.note_reply(reply)
         # Every row shows on the reply's event, even one prepared as a create and aimed at that event when claimed.
         event_id = delivery.event_id if reply is None or reply.event_id is None else reply.event_id
-        if requested is not None and requested.event_id == event_id:
-            return requested
         return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
 
     async def _run_reply_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
@@ -1083,12 +1073,6 @@ class DeliveryGateway:
         await self._run_reply_effects(applied.post_commit)
         if applied.transition.reply is not None:
             await self.settle_reply_debt(applied.transition.reply.reply_id)
-
-    @staticmethod
-    def _live_span() -> SpanHandle | None:
-        """Return the span this task writes, while it has not ended."""
-        handle = current_span()
-        return None if handle is None or handle.exited else handle
 
     async def end_reply_span(self, handle: SpanHandle, decide: Decide) -> None:
         """Apply a span exit that writes nothing itself, then settle what it left owed."""
@@ -1187,7 +1171,7 @@ class DeliveryGateway:
     ) -> str | None:
         """Send one rendered reply row as an edit of the reply's event, or as its create.
 
-        Raises ``ReplyWriteRefusedError`` when the reply's rule refuses the row.
+        Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row.
         """
         return await self._send_reply_write(
             write,
@@ -1212,7 +1196,7 @@ class DeliveryGateway:
     ) -> str | None:
         """Send one reply row as an edit of ``event_id``, or as the reply's create; return the event it shows on.
 
-        Raises ``ReplyWriteRefusedError`` when the reply's rule refuses the row.
+        Raises ``ReplyWriteRefusedError`` when the reply's rule writes no row.
         """
         if event_id is None:
             return await self.send_text(
@@ -1632,8 +1616,8 @@ class DeliveryGateway:
         request: FinalDeliveryRequest,
     ) -> FinalDeliveryOutcome:
         """Apply before_response hooks and write the reply span's answer as its terminal row."""
-        handle = self._live_span()
-        if handle is None:
+        handle = current_span()
+        if handle is None or handle.exited:
             # Only a running reply span writes an answer; one that ended meanwhile writes nothing.
             return _refused_reply_outcome(None, request, request.tool_trace, request.extra_content)
         try:

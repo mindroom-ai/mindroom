@@ -775,8 +775,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert reply.state is rl.ReplyState.COMPLETED
 
     @pytest.mark.parametrize(
-        ("failed", "note"),
-        [(False, NoteKind.NOTHING_TO_SHOW), (True, NoteKind.DELIVERY_FAILED)],
+        ("failed", "cause", "note"),
+        [
+            (False, FailureCause.NOTHING_TO_SHOW, NoteKind.NOTHING_TO_SHOW),
+            (True, FailureCause.DELIVERY_FAILED, NoteKind.DELIVERY_FAILED),
+        ],
         ids=["finished_empty", "delivery_failed"],
     )
     async def test_a_stream_that_showed_only_its_placeholder_notes_on_it_how_it_finished(
@@ -784,6 +787,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         tmp_path: Path,
         alice: PrincipalStore,
         failed: bool,
+        cause: FailureCause,
         note: NoteKind,
     ) -> None:
         """A stream that finished with no answer, or whose final delivery failed, says so where its placeholder stood."""
@@ -818,7 +822,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 outcome = await end_span_as_locked_turn(gateway, handle, target, outcome)
 
         gateway.deps.runtime.client.room_redact.assert_not_awaited()
-        assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED if failed else FailureCause.NOTHING_TO_SHOW)
+        assert outcome.ending == Failed(cause)
         assert outcome.final_visible_event_id == "$placeholder"
         reply = await alice.replies.for_sources(("$cause",))
         assert reply is not None
@@ -905,8 +909,10 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
             async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
                 placeholder = initial_write(handle, Presentation(), placeholder_only=True)
-                text = "Thinking..."
-                assert await gateway.send_text(SendTextRequest(request.target, text, reply_write=placeholder)) is None
+                assert (
+                    await gateway.send_text(SendTextRequest(request.target, "Thinking...", reply_write=placeholder))
+                    is None
+                )
                 if ending == "whole_answer":
                     outcome = await gateway.deliver_final(request)
                 elif ending == "streamed_answer":
