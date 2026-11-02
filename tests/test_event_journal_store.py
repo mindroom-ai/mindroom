@@ -752,11 +752,15 @@ class TestPrincipalIsolation:
 
 
 async def test_pending_among_reads_every_batch_and_skips_settled_events(journal_store: EventJournalStore) -> None:
-    """A replay guard asking about a long thread learns which events still owe work, past the first query batch."""
+    """A replay guard asking about a long thread learns which events this agent still owes, past the first query batch.
+
+    Another agent still owing the same event says nothing about this one.
+    """
     principal = journal_store.principal("agent@one")
     await admit(principal, "$settled")
     await admit(principal, "$pending")
     await principal.settle("$settled")
+    await admit(journal_store.principal("agent@two"), "$settled")
     unknown = [f"$unknown-{index}" for index in range(600)]
 
     assert await principal.pending_among([*unknown, "$settled", "$pending"]) == frozenset({"$pending"})
