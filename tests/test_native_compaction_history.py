@@ -242,14 +242,18 @@ def test_portable_replay_follows_each_plans_request_limit(tmp_path: Path) -> Non
             assert sent["input"][0] == {"role": "assistant", "content": "Previous answer"}
 
 
-@pytest.mark.parametrize(("static_tokens", "native"), [(999, True), (1_000, False)])
-def test_native_compaction_needs_a_trigger_above_the_request_without_history(
+@pytest.mark.parametrize(
+    ("static_tokens", "limit_tokens", "native"),
+    [(999, 5_000, True), (1_000, 5_000, False), (999, 1_000, False)],
+)
+def test_native_compaction_needs_a_trigger_between_the_request_without_history_and_the_limit(
     tmp_path: Path,
     static_tokens: int,
+    limit_tokens: int,
     *,
     native: bool,
 ) -> None:
-    """A trigger the request reaches without any history would leave the provider nothing to compact."""
+    """A trigger the request reaches without history leaves nothing to compact; one at the limit would never fire."""
     config, _ = _make_config(tmp_path)
     model = responses_adapter(tmp_path, store=False)
     resolved = _inputs(config)
@@ -258,7 +262,7 @@ def test_native_compaction_needs_a_trigger_above_the_request_without_history(
         automatic_compaction=True,
         explicit_compaction_model=False,
         trigger_threshold_tokens=1_000,
-        limit_tokens=5_000,
+        limit_tokens=limit_tokens,
     )
 
     configured = configure_native_history(
