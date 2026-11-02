@@ -592,6 +592,33 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        {"provider": "kimi", "id": "k3", "extra_kwargs": {"kimi_home": "<kimi_home>"}},
+        {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k"},
+    ],
+    ids=["kimi", "deepseek"],
+)
+async def test_an_empty_reasoning_field_is_sent_back_in_the_tool_loop(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+) -> None:
+    """A turn that streamed an empty ``reasoning_content`` with its call sends it back, as thinking APIs require."""
+    built = _Built(
+        tmp_path,
+        model_config,
+        _chat_reply(_chunk({"reasoning_content": ""}), _chunk({"tool_calls": [_CALL]}, finish_reason="tool_calls")),
+    )
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    result = Message(role="tool", content="Rain.", tool_call_id=turn.message.tool_calls[0]["id"])
+
+    await _turn(built, ModelRequest(messages=[_user(), turn.message, result]))
+
+    assert built.body(1)["messages"][1]["reasoning_content"] == ""
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
 async def test_a_chat_request_sends_no_participant_name_and_no_empty_call_list(tmp_path: Path, provider: str) -> None:
     """A stored message's ``name`` is not sent, and an assistant message with no calls sends no ``tool_calls``."""
