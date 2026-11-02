@@ -18048,7 +18048,7 @@
       },
       {
         "name": "microsoft_files_excel_read_range",
-        "description": "Read cell values from one worksheet of an Excel workbook, up to 10,000 cells.",
+        "description": "Read cell values and formulas from one worksheet of an Excel workbook, up to 10,000 cells.\nvalues holds what cells show; formulas holds what they contain, a formula for a computed cell and the\nvalue otherwise, which microsoft_files_excel_update_range takes as expected_formulas.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18095,7 +18095,7 @@
       },
       {
         "name": "microsoft_files_excel_update_range",
-        "description": "Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.\nThe write fails with target_mismatch unless expected_web_url is the workbook's web_url.",
+        "description": "Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.\nThe write fails with target_mismatch unless expected_web_url is the workbook's web_url.\nIt writes nothing and fails with cells_changed when the range no longer holds expected_formulas, such as\nafter someone edited it in Excel; show the requester current_formulas and ask again.\nIt writes nothing and fails with converted_text for text Excel would store as a number, date, time,\nboolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers, or set number_formats to @ for\ncells that keep text. The result reports verified false and lists differences when Excel stored a cell\ndifferently from what was written; tell the requester.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18135,11 +18135,58 @@
                   ]
                 }
               },
-              "description": "Rows of cell values; a string starting with = is written as a formula."
+              "description": "Rows of cell values; a string starting with = is written as a formula, \"\" empties a cell, and\nnull leaves a cell unchanged."
+            },
+            "expected_formulas": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "description": "The range's formulas as microsoft_files_excel_read_range returned them for this\naddress, in the same shape as values. Required."
             },
             "expected_web_url": {
               "type": "string",
               "description": "The workbook's web_url as microsoft_files_get_file or microsoft_files_list_folder\nreturns it; search results show a different form of it. Required."
+            },
+            "number_formats": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional rows of Excel number formats, such as 0.0% or @ for text, set before the\nvalues; null keeps a cell's format."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18159,6 +18206,7 @@
             "worksheet",
             "address",
             "values",
+            "expected_formulas",
             "expected_web_url"
           ]
         },
