@@ -6,7 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.authorization import is_requester_joined_to_room
@@ -405,12 +405,9 @@ class TurnDispatcher:
             prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
             and prepared.handled_turn.sources_all_from_requester(requester_user_id)
             # While another run still waits in the queue, whether another
-            # requester's follow-ups, an entity's reply written for this
-            # requester, or this requester's message for another participant, a
-            # newer message from this requester may only be answered after it, so
-            # letting it absorb this turn would answer out of receipt order or not at all.
-            # The guards below read a text message's mentions themselves, but a voice
-            # message's mentions live in its transcript, not in the stored audio event.
+            # requester's follow-ups or an entity's reply written for this
+            # requester, a newer message from this requester may only be answered
+            # after it, so letting it absorb this turn would answer out of receipt order.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
         thread_history = prepared.dispatch.context.thread_history
@@ -602,16 +599,27 @@ class TurnDispatcher:
             requester_user_id,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
+            pending_turns=self.deps.pending_turns,
             classify=self.deps.ingress.classify_source,
             is_handled=partial(self.deps.turn_store.handled_among, room.room_id),
             for_another_participant=partial(self._for_another_participant, room),
             logger=self.deps.logger,
         )
 
-    def _for_another_participant(self, room: nio.MatrixRoom, source: Mapping[str, object]) -> bool:
-        """Return whether a message mentions only other agents or people, so this agent ignores it."""
+    async def _for_another_participant(self, room: nio.MatrixRoom, event_id: str, source: Mapping[str, object]) -> bool:
+        """Return whether a message may be for other agents or people only, so this agent may never answer it.
+
+        A voice message's audio event mentions nobody: ingress judges it by the
+        transcript it stored for this agent, and one not transcribed yet could be for anyone.
+        """
+        content = source.get("content")
+        voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
+        if voice is not None:
+            content = voice.to_content()
+        elif isinstance(content, dict) and cast("dict[str, object]", content).get("msgtype") == "m.audio":
+            return True
         mentions = mentions_another_participant(
-            dict(source),
+            {**source, "content": content},
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,

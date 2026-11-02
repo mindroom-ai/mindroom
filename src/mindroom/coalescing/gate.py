@@ -309,10 +309,9 @@ class CoalescingGate:
         return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
 
     def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
-        """Return whether a queue still holds a run other than this requester's own messages for this agent."""
+        """Return whether a queue still holds a run other than this requester's own messages."""
         return any(
             pending_event_run_identity(pending_event) != (requester_user_id, None)
-            or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
 

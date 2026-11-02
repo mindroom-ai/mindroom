@@ -751,6 +751,17 @@ class TestPrincipalIsolation:
         assert not await second.is_pending("$shared-id")
 
 
+async def test_pending_among_reads_every_batch_and_skips_settled_events(journal_store: EventJournalStore) -> None:
+    """A replay guard asking about a long thread learns which events still owe work, past the first query batch."""
+    principal = journal_store.principal("agent@one")
+    await admit(principal, "$settled")
+    await admit(principal, "$pending")
+    await principal.settle("$settled")
+    unknown = [f"$unknown-{index}" for index in range(600)]
+
+    assert await principal.pending_among([*unknown, "$settled", "$pending"]) == frozenset({"$pending"})
+
+
 class TestIngestionConsumer:
     """The inactive per-principal nio handshake survives every retry."""
 

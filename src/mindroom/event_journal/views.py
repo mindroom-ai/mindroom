@@ -26,7 +26,7 @@ from .principal_rows import PrincipalRows
 from .replies import ReplyStore
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from mindroom.event_journal.history_recovery import (
         HistoryRecoveryOutcome,
@@ -182,6 +182,12 @@ class PendingTurnView(PrincipalRows):
             excluding_event_id=excluding_event_id,
             limit=limit,
         )
+
+    async def pending_among(self, event_ids: Collection[str]) -> frozenset[str]:
+        """Return which of these events still owe semantic work."""
+        if not event_ids:
+            return frozenset()
+        return await self._read(journal.pending_among, tuple(event_ids))
 
 
 class RelationView(PrincipalRows):
