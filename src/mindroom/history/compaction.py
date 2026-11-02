@@ -497,14 +497,10 @@ async def _rewrite_working_session_for_compaction(
                 summary_input_budget_tokens=summarizer.model.input_budget_tokens,
             )
             break
-        summary_tokens = estimate_summary_text_tokens(chunk.summary)
-        if max_summary_tokens is not None and summary_tokens > max_summary_tokens:
-            # Replay never drops a saved summary, so storing this one would fail a reply that can still fit raw runs.
-            msg = (
-                f"The summary exceeds the history budget ({summary_tokens} estimated tokens; "
-                f"{max_summary_tokens} available)."
-            )
-            _stop_compaction(RuntimeError(msg), persisted_session.session_id, scope, compacted_run_count)
+        # Sized as replay planning sizes a saved summary beside the static prompt, by characters.
+        summary_tokens = estimate_summary_text_tokens(chunk.summary, replay_estimator=None)
+        if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
+            _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
             break
         await before_persist(chunk.included_runs)
         compacted_run_ids = tuple(run.run_id for run in chunk.included_runs)
@@ -535,6 +531,18 @@ async def _rewrite_working_session_for_compaction(
         summary_text=summary_text,
         compacted_run_count=compacted_run_count,
         served_by=summarizer.model,
+    )
+
+
+def _summary_budget_error(summary_tokens: int, max_summary_tokens: int | None) -> RuntimeError | None:
+    """Return why a summary must not be stored when it exceeds ``max_summary_tokens``, the most history a reply replays.
+
+    Replay never drops a saved summary, so storing a larger one would fail a reply that can still fit raw runs.
+    """
+    if max_summary_tokens is None or summary_tokens <= max_summary_tokens:
+        return None
+    return RuntimeError(
+        f"The summary exceeds the history budget ({summary_tokens} estimated tokens; {max_summary_tokens} available).",
     )
 
 
@@ -595,6 +603,8 @@ async def compact_running_turn(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     available_history_budget: int | None,
+    max_summary_tokens: int,
+    replay_estimator: PortableReplayEstimator | None,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
@@ -605,11 +615,17 @@ async def compact_running_turn(
     does; once it starts, ``on_commit`` receives the stored summary and the compaction is reported even when the turn
     is cancelled meanwhile, so the turn's in-memory state always matches the log and a stored fold never reads as
     failed. ``before_tokens`` sizes the request that triggered the fold, and ``rewritten_request_tokens`` sizes it
-    after ``on_commit`` rewrote it, so the report compares one request before and after. Raises when the conversation
+    after ``on_commit`` rewrote it, so the report compares one request before and after. Raises, writing nothing,
+    when the summary, sized by the reply's ``replay_estimator``, exceeds ``max_summary_tokens`` or the conversation
     changed since ``basis`` was read.
     """
     scope = owner_scope(session)
     runs = [*basis.runs, *snapshots]
+    summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
+    # Sized as the rewritten request is, so a stored summary keeps it within the limit; sizing stays off the loop.
+    summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, summary, replay_estimator=replay_estimator)
+    if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
+        raise error
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's
     # requester and metadata, which decide who said each message.
     folded_run = RunRecord(
@@ -619,6 +635,7 @@ async def compact_running_turn(
         metadata=fold.run.metadata,
     )
     transcript = _transcript([*basis.runs, folded_run]) if _compaction_hooks_registered() else ()
+    # Like a compaction before a reply, hooks hear only of a summary that is about to be stored.
     await _emit_compaction_hook(
         event_name=EVENT_COMPACTION_BEFORE,
         scope=scope,
@@ -626,7 +643,6 @@ async def compact_running_turn(
         session_id=session.session_id,
         token_count_before=before_tokens,
     )
-    summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
 
     async def commit_and_report() -> CompactionOutcome:
         # The append runs in the database's lane behind the session's other writes, and leaves the turn's session
