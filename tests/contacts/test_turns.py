@@ -14,7 +14,14 @@ from mindroom import ai
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, _contacts_path, update_contacts
-from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
+from mindroom.contacts.turns import (
+    _ContactAdmission,
+    contact_admission,
+    contact_room,
+    contact_session_check,
+    contact_turn_instructions,
+    contact_turn_tools,
+)
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_entity_id
@@ -162,18 +169,30 @@ def _corrupt_store(paths: RuntimePaths) -> None:
     _contacts_path(paths).write_text("not json", encoding="utf-8")
 
 
-def test_only_an_agent_that_can_be_a_party_reads_the_contacts_store(tmp_path: Path) -> None:
-    """A corrupt store stops only the turns and room tools of agents with contacts, not those of any other agent."""
+def test_only_a_personal_agent_reads_the_contacts_store(tmp_path: Path) -> None:
+    """A corrupt store stops only the turns and room tools of personal agents, not those of any other agent."""
     config, paths = _setup(tmp_path)
     _corrupt_store(paths)
 
     assert contact_room(config, paths, CONTACT_ROOM, "creator") is None
     with pytest.raises(ValueError, match="Contacts file"):
         contact_room(config, paths, CONTACT_ROOM, "mind_bob")
-    # A personal agent that never enabled contacts does not read it either.
-    without, without_paths = setup_without_contacts(tmp_path / "without", contacts=False)
-    _corrupt_store(without_paths)
-    assert contact_room(without, without_paths, CONTACT_ROOM, "mind_alice") is None
+
+
+def test_an_agent_whose_contacts_is_removed_treats_its_active_contacts_as_removed(tmp_path: Path) -> None:
+    """Its contact room admits nobody and stays out of its memory, while the stored contact stays active."""
+    config, paths = _setup(tmp_path)
+    record = _contact(paths)
+    without, _ = setup_without_contacts(tmp_path, contacts=False)
+
+    assert contact_room(without, paths, CONTACT_ROOM, "mind_bob") == (
+        record.model_copy(update={"status": "removed"}),
+        "target",
+    )
+    admission = contact_admission(without, paths, room_id=CONTACT_ROOM, agent_name="mind_bob", sender_ids=[OWNER])
+    assert admission == _ContactAdmission(None)
+    assert contact_session_check(without, paths, "mind_bob")(f"{CONTACT_ROOM}:{THREAD_ID}")
+    assert contact_room(config, paths, CONTACT_ROOM, "mind_alice") == (record, "requester")
 
 
 def _tools(config: Config, side: ContactSide) -> tuple[str, ...]:

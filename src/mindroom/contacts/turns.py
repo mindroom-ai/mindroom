@@ -36,12 +36,15 @@ def contact_room(
 ) -> tuple[ContactRecord, SideName] | None:
     """Return the contact whose room ``room_id`` is or was and this agent's side, in any status, or None.
 
-    Only an agent that can be a party reads the contacts store, so a corrupt store stops no other agent's turns.
+    Only a personal agent reads the contacts store, so a corrupt store stops no other agent's turns.
+    A personal agent whose ``contacts`` was removed keeps no contact, so each of its active contacts reads as removed.
     """
-    if agent_party(config, agent_name) is None:
+    if config.personal_agent_instance(agent_name) is None:
         return None
     for record in read_contacts(runtime_paths).contacts:
         if record.room_id == room_id and (side := record.agent_side(agent_name)) is not None:
+            if record.status == "active" and agent_party(config, agent_name) is None:
+                return record.model_copy(update={"status": "removed"}), side
             return record, side
     return None
 
@@ -83,10 +86,11 @@ def contact_admission(
 def contact_session_check(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Callable[[str], bool]:
     """Return a check of whether a session ID names a conversation in a room that is or was a contact room of this agent.
 
-    The other side drove those conversations, so memory, the knowledge graph, and exploration leave them out.
-    Only an agent that can be a party reads the contacts store.
+    The other side drove those conversations, so memory, the knowledge graph, and exploration leave them out, even
+    once the agent's ``contacts`` was removed.
+    Only a personal agent reads the contacts store.
     """
-    if agent_party(config, agent_name) is None:
+    if config.personal_agent_instance(agent_name) is None:
         return lambda _session_id: False
     rooms = contact_room_ids(runtime_paths, agent_name, include_removed=True)
     return lambda session_id: any(session_in_room(session_id, room_id) for room_id in rooms)

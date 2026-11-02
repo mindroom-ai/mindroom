@@ -518,6 +518,24 @@ async def test_room_cleanup_keeps_an_active_contact_room_for_its_agents_and_leav
 
 
 @pytest.mark.asyncio
+async def test_room_cleanup_leaves_the_contact_rooms_of_an_agent_whose_contacts_is_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without contacts, an agent keeps none of its contact rooms, though the stored contact stays active."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    with _matrix():
+        await _accept(config, paths, runtime, record.id)
+    without, _ = _setup(tmp_path, contacts=False)
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[CONTACT_ROOM]))
+
+    assert await _room_lifecycle(config, paths, "mind_alice")._rooms_to_leave() == []
+    assert await _room_lifecycle(without, paths, "mind_alice")._rooms_to_leave() == [CONTACT_ROOM]
+
+
+@pytest.mark.asyncio
 async def test_room_cleanup_reads_the_contacts_store_only_for_a_personal_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

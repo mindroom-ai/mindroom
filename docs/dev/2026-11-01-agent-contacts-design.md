@@ -67,6 +67,7 @@ Agent parties keep the room across restarts through cleanup exclusions read from
 The invited-rooms store was rejected for this, because it is not persisted for agents whose `accept_invites` is false.
 Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite, which arrives before the contact is stored, and would otherwise rejoin a removed contact's room at its next start.
 A removed contact's room takes no more turns or messages from its agents, because a leave can fail and a running or queued turn can still try to post there.
+An agent whose `contacts` is removed treats each of its active contacts as removed and leaves their rooms, because in a room it no longer reads as a contact room its owner's and the other side's messages would start normal turns with its full tools, and its sends there would skip the policy.
 
 ### Contact turns run as the agent's owner
 
@@ -80,7 +81,7 @@ Ingress also refuses every other sender in a contact room itself, because ordina
 The agent's own messages never start a contact turn, so its earlier messages stay recognizable as its own.
 Messages from the other side and from the owner both run as the owner, so coalescing and the newer-message check also compare the speaker, which keeps one from absorbing or superseding the other.
 An edit made by someone other than the owner never regenerates a reply, because it would otherwise count as the owner revising their own message.
-Ingress reads the contacts store only for personal agents with `contacts`, which keeps a corrupt store from affecting other agents and saves a file check per event for them.
+Ingress reads the contacts store only for personal agents, which keeps a corrupt store from affecting other agents and saves a file check per event for them.
 
 ### Contact detection: once per turn, and from the store for tools
 
@@ -123,7 +124,7 @@ Reusing the authored-subagent persona was rejected, because a persona replaces t
 The other side drives contact turns, so MindRoom must not carry text it wrote into the owner's normal turns, and a skill review would post notices that bypass the policy.
 A tool the owner approves for a contact still reaches what it reaches: a live run with `file` approved let a contact turn overwrite `MEMORY.md`.
 A write guard for memory files was rejected, because the security trust model treats an approved tool as the owner's choice and in-process path filtering confines nothing for tools that run code; the user docs warn about it instead.
-Rooms that were contact rooms stay excluded after the contact ends, as long as the agent keeps `contacts` configured.
+Rooms that were contact rooms stay excluded after the contact ends, even once the agent loses `contacts`.
 
 ### Rules and tools per contact
 

@@ -32,6 +32,7 @@ personal_rooms:
 ```
 
 Setting `contacts` under a template's `agent:` enables contacts for every personal agent built from it, and a `users` override can change or remove it for one person.
+Removing `contacts` from an agent ends its contacts for that agent: it leaves their rooms, sends nothing more into them, and no message there starts its turns.
 An agent with `contacts` gets the `contacts` and `matrix_message` tools automatically, so you do not list them under `tools`.
 Requests are delivered to, and accepted through, the agent of each person's [personal room](https://docs.mindroom.chat/personal-rooms/), so the template that `personal_rooms.agent` names needs `contacts` too, or nobody can send its users a request.
 Agents of other templates can be contacts as well when their template sets `contacts`.

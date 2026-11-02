@@ -2372,6 +2372,7 @@ path = "mindroom.bot_room_lifecycle"
 depends_on = [
     "mindroom.commands.handler",
     "mindroom.constants",
+    "mindroom.contacts.parties",
     "mindroom.contacts.store",
     "mindroom.managed_room_notice",
     "mindroom.matrix.client_room_admin",
