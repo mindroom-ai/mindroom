@@ -38,7 +38,7 @@ from mindroom.custom_tools import claude_agent as claude_agent_module
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import load_scope_session
 from mindroom.message_target import MessageTarget
-from mindroom.orchestrator import _finish_runtime_shutdown
+from mindroom.runtime_shutdown import run_process_shutdown_closers
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
@@ -968,7 +968,7 @@ _TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("tes
 
 @pytest.mark.asyncio
 async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
-    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A session outlives its turn, whose contextvars hold the turn's Agent and tools."""
@@ -988,6 +988,8 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
     assert client.receiver is not None
     assert _TURN_OWNER not in client.reader.get_context()
     assert _TURN_OWNER not in client.receiver.get_context()
+    assert fake_manager._sweep is not None
+    assert _TURN_OWNER not in fake_manager._sweep.get_context()
 
     # A later turn ends the session; the task that connected the client still disconnects it.
     await asyncio.create_task(_in_call(run_context, tools.claude_end_session()))
@@ -1407,9 +1409,11 @@ async def test_a_failed_call_closes_only_the_session_it_used(
 
 
 async def _until(condition: Callable[[], bool]) -> None:
-    """Let other tasks run until ``condition`` holds."""
-    while not condition():  # noqa: ASYNC110 - the queues polled here signal no event to await
-        await asyncio.sleep(0)
+    """Let other tasks run until ``condition`` holds, failing after 10 seconds."""
+    # A pytest-timeout raised inside another spinning task, such as the idle sweep, would leave this loop running.
+    async with asyncio.timeout(10):
+        while not condition():  # noqa: ASYNC110 - the queues polled here signal no event to await
+            await asyncio.sleep(0)
 
 
 async def _stop_when_waiting(call: Coroutine[Any, Any, str]) -> None:
@@ -1777,14 +1781,7 @@ async def _evict(manager: claude_agent_module._ClaudeSessionManager, session_key
 
 
 async def _shut_down(_manager: claude_agent_module._ClaudeSessionManager, _session_key: str) -> None:
-    await _finish_runtime_shutdown(
-        shutdown_wait_task=None,
-        api_task=None,
-        orchestrator_task=None,
-        auxiliary_tasks=[],
-        orchestrator=None,
-        stall_detector=None,
-    )
+    await run_process_shutdown_closers()
 
 
 @pytest.mark.asyncio
@@ -1870,7 +1867,7 @@ async def test_shutdown_leaves_a_session_that_a_call_still_uses(
     try:
         await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=5)
         [_, busy_client] = _BlockingPromptFakeClaudeSDKClient.instances
-        await asyncio.wait_for(_shut_down(fake_manager, "mindroom:session-1:busy"), timeout=5)
+        await asyncio.wait_for(run_process_shutdown_closers(), timeout=5)
         assert set(fake_manager._sessions) == {"mindroom:session-1:busy"}
         assert not idle_client.connected
         assert busy_client.connected
@@ -1881,7 +1878,7 @@ async def test_shutdown_leaves_a_session_that_a_call_still_uses(
 
 @pytest.mark.asyncio
 async def test_shutdown_does_not_wait_for_a_session_that_a_call_still_opens(
-    fake_manager: claude_agent_module._ClaudeSessionManager,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shutdown closes the idle sessions while a call it leaves running, such as an API request's, still opens one."""
@@ -1901,7 +1898,7 @@ async def test_shutdown_does_not_wait_for_a_session_that_a_call_still_opens(
     opening = asyncio.create_task(_in_call(run_context, tools.claude_send("hello", session_label="new")))
     try:
         await asyncio.wait_for(connecting.wait(), timeout=5)
-        await asyncio.wait_for(_shut_down(fake_manager, "mindroom:session-1:new"), timeout=5)
+        await asyncio.wait_for(run_process_shutdown_closers(), timeout=5)
         assert not idle_client.connected
     finally:
         release.set()
@@ -1931,7 +1928,7 @@ async def test_shutdown_waits_for_a_close_the_idle_sweep_started(
     session.last_used_at -= session.ttl_seconds + 1
     await _until(session.close_requested.is_set)
 
-    shutdown = asyncio.create_task(_shut_down(fake_manager, session.key))
+    shutdown = asyncio.create_task(run_process_shutdown_closers())
     done, _pending = await asyncio.wait({shutdown}, timeout=0.2)
     assert not done
     release.set()
