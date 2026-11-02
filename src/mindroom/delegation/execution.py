@@ -561,17 +561,16 @@ def _settle_pending_child_tools(
 
 
 def _prepare_delegation_output(
-    caller: str,
+    identity: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
-    identity: ToolExecutionIdentity,
     raw_path: object,
     tool_name: str,
 ) -> ToolOutputFileRequest | dict[str, object]:
-    """Resolve the caller's output policy without scaffolding or reconciling its workspace."""
-    storage = resolve_agent_storage(caller, config, runtime_paths, execution_identity=identity)
+    """Resolve the output policy of the caller ``identity`` names without scaffolding or reconciling its workspace."""
+    storage = resolve_agent_storage(identity.agent_name, config, runtime_paths, execution_identity=identity)
     workspace = resolve_agent_workspace_from_state_path(
-        caller,
+        identity.agent_name,
         config,
         runtime_paths=runtime_paths,
         state_storage_path=storage.state_root,
@@ -586,7 +585,7 @@ def _prepare_delegation_output(
 
 
 def _finalize_delegation_output(result: str, request: ToolOutputFileRequest | None) -> str:
-    """Apply the shared file policy once and keep the native result text-serializable."""
+    """Apply the shared file policy once and keep the child's result text-serializable."""
     formatted = finalize_tool_output_file(request, result) if request is not None else result
     return formatted if isinstance(formatted, str) else json.dumps(formatted)
 
@@ -629,13 +628,13 @@ async def _run_job_child(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    save_child: Callable[[], Awaitable[None]],
+    runtime: ToolJobRuntime,
 ) -> tuple[DelegationTerminalStatus, str]:
     """Start, run, and settle a child inside its job, which asks for its approvals; return its status and text."""
 
     def failed_unsettled(primary_error: str, stage: str, error: Exception) -> tuple[DelegationTerminalStatus, str]:
         logger.warning(
-            f"Native delegation {stage} failed after execution failure",
+            f"Subagent job {stage} failed after execution failure",
             delegation_id=child.delegation_id,
             error=str(error),
             exc_info=error,
@@ -667,7 +666,7 @@ async def _run_job_child(
                 caller_execution_identity=owner,
             )
             # From here on, recovery after a crash settles the child's audit record from the job's saved child.
-            await save_child()
+            await runtime.save_adapter(job_id, child=child_snapshot(child))
             outcome = await run(config=config, approval_calls=None, fresh=True)
             while outcome.response.status == RunStatus.paused:
                 # The job, not a parent reply, asks for the child's approvals and resumes it with the decided calls.
@@ -675,6 +674,7 @@ async def _run_job_child(
                     child,
                     outcome.response,
                     outcome.toolkit_owners,
+                    runtime=runtime,
                     job_id=job_id,
                     owner=owner,
                     config=config,
@@ -755,7 +755,7 @@ async def _run_delegation_job(
             config=config,
             runtime_paths=runtime_paths,
             refresh_scheduler=refresh_scheduler,
-            save_child=lambda: runtime.save_adapter(job_id, child=child_snapshot(child)),
+            runtime=runtime,
         )
     except BaseException as error:
         await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=child.result, error=error)
@@ -785,10 +785,9 @@ def delegation_call_job(
     keeps current, serves recovery after a crash.
     """
     output_request = _prepare_delegation_output(
-        owner.agent_name,
+        owner,
         config,
         runtime_paths,
-        owner,
         arguments.get(OUTPUT_PATH_ARGUMENT),
         tool_name=tool_name,
     )
@@ -946,10 +945,9 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     output_request = None
     if not isinstance(authorization, str):
         prepared_output = _prepare_delegation_output(
-            caller,
+            caller_identity,
             config,
             runtime_paths,
-            caller_identity,
             args.get(OUTPUT_PATH_ARGUMENT),
             tool_name=tool_name,
         )

@@ -8348,7 +8348,6 @@ visibility = [
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.execution_authority",
-    "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.notices",
 ]
@@ -8755,7 +8754,6 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.response_turn",
     "mindroom.tool_jobs.approvals",
-    "mindroom.tool_jobs.runtime",
 ]
 visibility = ["mindroom.delegation.execution"]
 

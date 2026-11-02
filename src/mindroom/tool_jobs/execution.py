@@ -355,7 +355,6 @@ async def _call_job(
         if isinstance(job, str):
             raise _JobCallError(job)
         return job
-    context, runtime = scope.context, scope.runtime
     # The job's state changes are read against the copy it starts from, so a key a sibling adds to the live state
     # after that copy never reads as deleted by this job.
     baseline = deepcopy(detached.context.session_state)
@@ -363,22 +362,21 @@ async def _call_job(
     async def ask_approval() -> tuple[bool, str | None]:
         # The policy and approver current when the job asks decide, as for a paused reply.
         return await ask_tool_call_approval(
-            runtime,
+            scope.runtime,
             job_id,
             detached,
             owner=owner,
-            config=context.current_config,
-            runtime_paths=context.runtime_paths,
+            config=scope.context.current_config,
+            runtime_paths=scope.context.runtime_paths,
         )
 
     approval = ask_approval if job_approval else None
-    run_id, call_id = job_call.context.run_id, job_call.context.call_id
     return JobSpec(
         tool_name=function.name,
         toolkit_name=job_call.tool.toolkit_name,
         adapter={
-            "run_id": run_id,
-            "tool_call_id": call_id,
+            "run_id": job_call.context.run_id,
+            "tool_call_id": job_call.context.call_id,
             "arguments": encode_tool_result(job_call.arguments),
             "origin": function_provenance(job_call.tool, job_call.arguments),
             "authority": dict(job_call.tool.authority),
@@ -400,7 +398,8 @@ async def _run_managed_call(
 ) -> object:
     """Accept one call as a managed job, wait for it within the caller's budget, and return what it returned.
 
-    ``function`` is the function the loop called, which the job runs; ``job_call`` holds the call's grant.
+    ``function`` is the function the loop called, which a tool's job runs; a subagent call's job runs the child its
+    toolkit prepares (``_call_job``). ``job_call`` holds the call's grant.
     """
     context, runtime = scope.context, scope.runtime
     run_id, call_id = job_call.context.run_id, job_call.context.call_id

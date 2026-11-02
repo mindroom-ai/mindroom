@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom import ai
 from mindroom.approval import manager as approval_manager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -42,6 +41,7 @@ from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     DelegatingLeader,
+    answer_of,
     lookup,
     reserve_job_card,
     saved_jobs,
@@ -170,7 +170,6 @@ class _Conversation:
             self.crashed.append(self.runtime)
         else:
             await self.runtime.shutdown()
-            await self.runtime.close_journal()
         await self._start_runtime()
         await self.runtime.recover()
 
@@ -194,16 +193,12 @@ class _Conversation:
         leader = DelegatingLeader(self.config, self.paths, _IDENTITY, self.agents)
         with tool_runtime_context(context):
             return await asyncio.wait_for(
-                leader.reply(*steps, run_child=ai.run_delegated_child_response, run_id=f"reply{self.turns}"),
+                leader.reply(*steps, run_id=f"reply{self.turns}"),
                 JOB_TEST_TIMEOUT,
             )
 
     async def job(self, job_id: str) -> BackgroundJob:
         return await lookup(self.runtime, job_id, owner=_IDENTITY, depth=0)
-
-    def only_job_id(self) -> str:
-        (job,) = self.runtime.retained_jobs()
-        return job.job_id
 
 
 @contextmanager
@@ -211,11 +206,6 @@ def _reports() -> Iterator[type[_Reports]]:
     _Reports.effects = []
     with registered_toolkit("reports", _Reports):
         yield _Reports
-
-
-def _answer_of(record: RunRecord, call_id: str) -> str:
-    """Return what one call of the leader's run answered, as the run stores it."""
-    return next(str(message.content) for message in record.messages or [] if message.tool_call_id == call_id)
 
 
 def _delegate(call_id: str, **budget: float) -> list:
@@ -234,7 +224,7 @@ async def test_a_released_wait_answers_with_a_handle_that_names_the_subagent(
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
         assert record.status is RunStatus.completed
-        handle = json.loads(_answer_of(record, "first"))
+        handle = json.loads(answer_of(record, "first"))
         assert set(handle) == _HANDLE_KEYS
         assert (handle["tool"], handle["status"]) == ("code", "running")
         job = await conversation.job(handle["job_id"])
@@ -246,7 +236,7 @@ async def test_a_released_wait_answers_with_a_handle_that_names_the_subagent(
             calls(tool_call("job", "wait", action="wait", job_id=handle["job_id"])),
             answer("Read"),
         )
-        result = _answer_of(read, "wait")
+        result = answer_of(read, "wait")
         assert "Exact child result" in result
         assert f"Subagent ID: {handle['subagent_id']}" in result
     finally:
@@ -263,11 +253,11 @@ async def test_a_waiting_parent_reads_the_childs_answer_and_a_follow_up_continue
     conversation = _Conversation(tmp_path, monkeypatch)
     await conversation.open(answer("First answer"), answer("Second answer"))
     try:
-        first = _answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first")
+        first = answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first")
         assert first.startswith("First answer")
         subagent_id = first.rsplit("Subagent ID: ", 1)[1].strip()
         follow_up = calls(tool_call("continue_subagent", "again", subagent_id=subagent_id, message="And now?"))
-        second = _answer_of(await conversation.reply(follow_up, answer("Done")), "again")
+        second = answer_of(await conversation.reply(follow_up, answer("Done")), "again")
         assert second.startswith("Second answer")
         assert second.endswith(f"Subagent ID: {subagent_id}")
         (_, resumed) = conversation.agents.models["code"].requests
@@ -294,7 +284,7 @@ async def test_a_childs_gated_call_asks_as_a_phase_of_its_subagents_job(
         try:
             record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
             assert record.status is RunStatus.completed
-            job_id = json.loads(_answer_of(record, "first"))["job_id"]
+            job_id = json.loads(answer_of(record, "first"))["job_id"]
             await asyncio.wait_for(cards.asked.wait(), JOB_TEST_TIMEOUT)
             assert (await conversation.job(job_id)).status == "awaiting_approval"
             assert cards.posted == [tool_job_run_id(job_id)]
@@ -335,7 +325,7 @@ async def test_a_restart_interrupts_a_running_subagent_and_says_so(
     await conversation.open([Await(hold), *answer("Never")])
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
-        job_id = json.loads(_answer_of(record, "first"))["job_id"]
+        job_id = json.loads(answer_of(record, "first"))["job_id"]
         await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         await conversation.restart()
         job = await conversation.job(job_id)
@@ -423,7 +413,7 @@ async def test_a_job_stopped_before_its_child_started_ends_interrupted_without_r
     await conversation.open(answer("Never"))
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
-        job_id = json.loads(_answer_of(record, "first"))["job_id"]
+        job_id = json.loads(answer_of(record, "first"))["job_id"]
         await asyncio.wait_for(held.wait(), JOB_TEST_TIMEOUT)
         await conversation.restart(crash=crash)
         job = await conversation.job(job_id)
@@ -457,7 +447,7 @@ async def test_subagent_calls_of_one_step_run_together(
             ),
             answer("Both done"),
         )
-        assert {_answer_of(record, "first").split("\n")[0], _answer_of(record, "second").split("\n")[0]} == {
+        assert {answer_of(record, "first").split("\n")[0], answer_of(record, "second").split("\n")[0]} == {
             "One",
             "Two",
         }
@@ -475,7 +465,7 @@ async def test_two_follow_ups_to_one_subagent_in_one_step_run_once(
     conversation = _Conversation(tmp_path, monkeypatch)
     await conversation.open(answer("First answer"), answer("Follow-up answer"), answer("Never"))
     try:
-        first = _answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first")
+        first = answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first")
         subagent_id = first.rsplit("Subagent ID: ", 1)[1].strip()
         record = await conversation.reply(
             calls(
@@ -484,7 +474,7 @@ async def test_two_follow_ups_to_one_subagent_in_one_step_run_once(
             ),
             answer("Done"),
         )
-        answers = [_answer_of(record, "again"), _answer_of(record, "twice")]
+        answers = [answer_of(record, "again"), answer_of(record, "twice")]
         assert sum(answer.startswith("Follow-up answer") for answer in answers) == 1
         assert sum(answer.startswith(f"Delegation to 'code' failed: {SUBAGENT_BUSY}") for answer in answers) == 1
         assert len(conversation.agents.models["code"].requests) == 2
@@ -527,7 +517,7 @@ async def test_a_running_subagent_job_saves_the_child_it_started_with_its_audit_
     await conversation.open([Await(hold), *answer("Never")])
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
-        job_id = json.loads(_answer_of(record, "first"))["job_id"]
+        job_id = json.loads(answer_of(record, "first"))["job_id"]
         await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         saved = delegation_child((await saved_jobs(tmp_path))[job_id])
         assert saved.status == "running"

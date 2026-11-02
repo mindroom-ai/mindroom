@@ -629,6 +629,11 @@ async def start_delegation_job(
     return job
 
 
+def answer_of(record: RunRecord, call_id: str) -> str:
+    """Return what one call of a run answered, as the run stores it."""
+    return next(str(message.content) for message in record.messages or [] if message.tool_call_id == call_id)
+
+
 def install_child_runner(monkeypatch: pytest.MonkeyPatch, run_child: ChildResponseRunner) -> None:
     """Run every subagent job's child turns with ``run_child``, the seam a subagent call's job runs its child through."""
     monkeypatch.setattr(delegate_toolkit, "run_delegated_child_response", run_child)
@@ -826,16 +831,13 @@ async def cancel_settled(
     return requested if drain is None else await asyncio.shield(drain)
 
 
-# A reply owns its tool execution while background tool jobs run: its resources, result claims, and job notices.
-_owned_turn = owned_tool_execution(enabled=lambda *_args, **_kwargs: True)
-
-
 @dataclass
 class DelegatingLeader:
-    """The leader as a reply builds it, whose turns the native driver advances with a test's child runner.
+    """The leader as a reply builds it: its subagent calls run as jobs, or pause for the native driver without jobs.
 
     Each turn builds the leader with ``create_agent`` and runs it on the owned loop with the hooks every agent turn
-    installs; ``drive`` hands its delegations to the native driver, which continues it through the production resume.
+    installs; ``drive`` hands the delegations a turn paused on to the native driver, which continues it through the
+    production resume.
     """
 
     config: Config
@@ -858,18 +860,13 @@ class DelegatingLeader:
         """The leader's provider for its current turn."""
         return self.agents.models["leader"]
 
-    async def _persist(self, record: RunRecord) -> None:
-        await persist_to(self.store, self.session)(record)
-
+    @owned_tool_execution(enabled=lambda *_args, **_kwargs: True)
     async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
         """Run the leader on ``turns`` until it completes or pauses on its delegations.
 
         The turn owns its tool execution as a reply does: its managed calls become jobs whose results the leader's saved
         run acknowledges.
         """
-        return await _owned_turn(self._turn)(*turns, run_id=run_id)
-
-    async def _turn(self, *turns: Sequence[ScriptStep], run_id: str) -> RunRecord:
         set_consumption_storage(lambda: self.store)
         self.agents.models["leader"] = ScriptedModel(list(turns))
         self.build = build = create_agent(
@@ -904,7 +901,7 @@ class DelegatingLeader:
                 session=self.session,
             ),
             hooks=hooks,
-            persist=self._persist,
+            persist=persist_to(self.store, self.session),
             request_template=build.request_template,
         )
         finished = [event.record async for event in events if isinstance(event, RunFinished)]

@@ -1,4 +1,4 @@
-"""Native delegation adapter for the generic durable tool-job owner."""
+"""A subagent call's job: the child it is known by, its saved snapshot, outcome, and cleanup."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def child_snapshot(child: DelegationChild) -> dict[str, Any]:
 
 
 def delegation_child(job: BackgroundJob) -> DelegationChild:
-    """Reconstruct a native child from an opaque durable adapter snapshot."""
+    """Reconstruct the child a subagent job saved in its adapter."""
     if job.kind != "delegation":
         msg = "Job does not represent a native delegation."
         raise SubagentSessionError(msg)
@@ -36,7 +36,7 @@ def delegation_outcome(status: DelegationTerminalStatus, text: str) -> Backgroun
 
 
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
-    # Metadata-only reconstruction still needs the durable native outcome.
+    # A child rebuilt from its saved snapshot has no result, so cleanup must settle it.
     if child.result is None or child.status not in TERMINAL_CHILD_STATUSES:
         return None
     return delegation_outcome(cast("DelegationTerminalStatus", child.status), child.result)
@@ -49,7 +49,10 @@ async def reconcile_delegation(
     runtime_paths: RuntimePaths | None = None,
     child: DelegationChild | None = None,
 ) -> BackgroundOutcome | None:
-    """Reconcile native durable evidence only while no native executor owns its handle."""
+    """Settle a stopped subagent job's child, under its recovery lock when rebuilt from its saved snapshot.
+
+    A live child already settled by its job needs no cleanup.
+    """
     if job.kind != "delegation":
         return None
     child = child or delegation_child(job)

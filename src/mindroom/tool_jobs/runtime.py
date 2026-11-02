@@ -539,7 +539,7 @@ class ToolJobRuntime:
                 toolkit_name=toolkit_name,
                 source_event_id=source_event_id,
                 source_kind=source_kind,
-                # Native adapters mutate this exact mapping; owns_execution verifies its identity.
+                # A subagent job updates this exact mapping; owns_execution verifies its identity.
                 adapter=adapter,
             )
             readable = True

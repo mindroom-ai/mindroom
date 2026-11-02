@@ -1,8 +1,9 @@
-"""Native background jobs retain exact execution and approval ownership.
+"""Background subagent jobs retain exact execution and approval ownership.
 
-The leader runs as ``DelegatingLeader`` builds it: a reply's agent on the owned loop whose turns pause on their
-delegations, which the native driver runs, here with each test's own child runner, and continues through the
-production resume. A child that needs approvals runs as a real child turn of ``code``.
+The leader runs as ``DelegatingLeader`` builds it: a reply's agent on the owned loop whose subagent calls run as
+managed jobs, or, with background jobs off or the ``delegate`` toolkit excluded, pause for the native driver, which
+runs their children and continues through the production resume. A child that needs approvals runs as a real child
+turn of ``code``.
 """
 
 from __future__ import annotations
@@ -72,6 +73,7 @@ from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     DelegatingLeader,
     SpanRecorder,
+    answer_of,
     cancel_settled,
     install_child_runner,
     intercept_job_saves,
@@ -151,11 +153,6 @@ def _registered_reports() -> Iterator[type[_ReportTools]]:
     _ReportTools.effects.clear()
     with registered_toolkit("reports", _ReportTools):
         yield _ReportTools
-
-
-def _tool_message(record: RunRecord, call_id: str) -> str:
-    """Return what one call of the leader's run answered, as the run stores it."""
-    return next(str(message.content) for message in record.messages or [] if message.tool_call_id == call_id)
 
 
 async def _unused_child(*_args: object, **_kwargs: object) -> str:
@@ -353,7 +350,7 @@ class _JobApprovalCards:
 @pytest.mark.parametrize(("detach", "human"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("approval", [None, "approved", "denied", "cancelled"])
 @pytest.mark.parametrize("exclude_after_acceptance", [False, True])
-async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
+async def test_a_background_subagent_runs_its_child_once(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     detach: bool,
@@ -459,7 +456,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert result.status is RunStatus.completed
                 job = the_job()
                 child = delegation_child(job)
-                first = _tool_message(result, "first")
+                first = answer_of(result, "first")
                 if detach:
                     handle = json.loads(first)
                     assert set(handle) == {"job_id", "subagent_id", "status", "tool", "summary", "summary_truncated"}
@@ -489,7 +486,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                         ),
                         JOB_TEST_TIMEOUT,
                     )
-                    first = _tool_message(result, "wait")
+                    first = answer_of(result, "wait")
                 if approval == "cancelled":
                     assert "cancelled" in first
                 else:
@@ -581,7 +578,7 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
                     JOB_TEST_TIMEOUT,
                 )
             assert result.status is RunStatus.completed
-            handle = json.loads(_tool_message(result, "first"))
+            handle = json.loads(answer_of(result, "first"))
             assert handle["status"] == "awaiting_approval"
             assert cards.requested == [(tool_job_run_id(handle["job_id"]), "w", "write_report")]
             assert reports.effects == []
@@ -649,6 +646,7 @@ async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_aut
             child,
             response,
             {(child.child_agent_name, "write_report"): "file"},
+            runtime=runtime,
             job_id=child.delegation_id,
             owner=identity,
             config=config,
@@ -719,7 +717,7 @@ async def test_a_resumed_child_runs_under_the_policy_current_when_it_resumes(
                 )
                 await approving
             assert result.status is RunStatus.completed
-            assert "Child done" in _tool_message(result, "first")
+            assert "Child done" in answer_of(result, "first")
             # The resumed child was built under the reloaded policy, so its newly gated call asked first.
             assert [card[2] for card in cards.requested] == ["write_report", "delete_report"]
             assert reports.effects == ["written", "deleted"]
@@ -728,8 +726,11 @@ async def test_a_resumed_child_runs_under_the_policy_current_when_it_resumes(
 
 
 @pytest.mark.asyncio
-async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The native driver resolves generic lookup rejection instead of aborting its parent run."""
+async def test_a_wait_on_an_unavailable_job_answers_its_call_with_the_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``job`` wait for an unknown ID answers its call with the refusal instead of aborting the reply's run."""
     paths = _runtime_paths(tmp_path)
     config = _config()
     identity = _identity()
@@ -746,12 +747,11 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path, mo
                     leader.reply(
                         calls(tool_call("job", "missing-call", action="wait", job_id="missing")),
                         answer("Job unavailable"),
-                        run_child=_unused_child,
                     ),
                     JOB_TEST_TIMEOUT,
                 )
         assert result.status is RunStatus.completed
-        assert "No job with this ID is available to you in this conversation." in _tool_message(result, "missing-call")
+        assert "No job with this ID is available to you in this conversation." in answer_of(result, "missing-call")
     finally:
         await runtime.shutdown()
 
@@ -812,6 +812,27 @@ async def test_a_delegated_child_s_job_is_owned_by_the_agent_that_delegated(
     assert re.fullmatch(r"[0-9a-f]{64}", job.job_id)
 
 
+def _prepared_child(paths: RuntimePaths) -> tuple[Config, ToolExecutionIdentity, DelegationChild]:
+    """Return a config where ``leader`` may run ``code``, the leader's owner, and a fresh child turn of ``code``."""
+    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    child = prepare_child_turn(
+        "leader",
+        "code",
+        "task",
+        owner=owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
+    )
+    return config, owner, child
+
+
 async def _start_job_body(
     runtime: ToolJobRuntime,
     child: DelegationChild,
@@ -858,22 +879,7 @@ async def test_early_child_failure_retains_liveness_through_settlement(
 ) -> None:
     """Recovery cannot claim a child between startup failure and durable terminal settlement."""
     paths = _runtime_paths(tmp_path)
-    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
-    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    child = prepare_child_turn(
-        "leader",
-        "code",
-        "task",
-        owner=owner,
-        config=config,
-        runtime_paths=paths,
-        depth=0,
-        budget_monitor=None,
-        model=None,
-        agent_mode="standard",
-        previous=None,
-        persona=None,
-    )
+    config, owner, child = _prepared_child(paths)
     settling, release = asyncio.Event(), asyncio.Event()
     original_interrupt = delegation_execution.interrupt_child
 
@@ -1422,27 +1428,12 @@ async def test_child_failure_remains_primary_when_native_interruption_fails(
     cleanup_error: OSError,
     cleanup_text: str,
 ) -> None:
-    """Failed native cleanup reports uncertainty without replacing or falsely settling the child.
+    """Failed child cleanup reports uncertainty without replacing or falsely settling the child.
 
     A cleanup error without text reports its type.
     """
     paths = _runtime_paths(tmp_path)
-    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
-    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    child = prepare_child_turn(
-        "leader",
-        "code",
-        "task",
-        owner=owner,
-        config=config,
-        runtime_paths=paths,
-        depth=0,
-        budget_monitor=None,
-        model=None,
-        agent_mode="standard",
-        previous=None,
-        persona=None,
-    )
+    config, owner, child = _prepared_child(paths)
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
         msg = "primary execution failed"
@@ -1479,24 +1470,9 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Receipt failure cannot erase the execution error or overwrite terminal native evidence."""
+    """Receipt failure cannot erase the execution error or overwrite the child's terminal evidence."""
     paths = _runtime_paths(tmp_path)
-    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
-    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    child = prepare_child_turn(
-        "leader",
-        "code",
-        "task",
-        owner=owner,
-        config=config,
-        runtime_paths=paths,
-        depth=0,
-        budget_monitor=None,
-        model=None,
-        agent_mode="standard",
-        previous=None,
-        persona=None,
-    )
+    config, owner, child = _prepared_child(paths)
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
         msg = "primary execution failed"
@@ -1530,27 +1506,12 @@ async def test_native_job_source_survives_restart(
     tmp_path: Path,
     source_event_id: str | None,
 ) -> None:
-    """A native child keeps the human source that accepted it through settlement and restart."""
+    """A subagent job keeps the human source that accepted it through settlement and restart."""
     paths = _runtime_paths(tmp_path)
-    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
-    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    config, owner, child = _prepared_child(paths)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
         membership_turn_id=source_event_id,
-    )
-    child = prepare_child_turn(
-        "leader",
-        "code",
-        "task",
-        owner=owner,
-        config=config,
-        runtime_paths=paths,
-        depth=0,
-        budget_monitor=None,
-        model=None,
-        agent_mode="standard",
-        previous=None,
-        persona=None,
     )
     runtime = await tool_job_runtime(tmp_path)
 
@@ -1686,7 +1647,7 @@ async def test_a_follow_up_waits_until_the_earlier_turns_job_has_ended(
                 calls(tool_call("run_subagent", "first", task="Report", agent_name="code", background_after=0)),
                 answer("Parent free"),
             )
-            handle = json.loads(_tool_message(first, "first"))
+            handle = json.loads(answer_of(first, "first"))
             await asyncio.wait_for(finishing.wait(), JOB_TEST_TIMEOUT)
             assert (await load_retained_subagent_turn(delegation_child(runtime.retained_jobs()[0]), paths)).status == (
                 "completed"

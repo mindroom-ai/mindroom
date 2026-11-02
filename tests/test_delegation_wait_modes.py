@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initially_excluded", [False, True])
 @pytest.mark.parametrize("team", [False, True])
-async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  # noqa: PLR0915
+async def test_delegate_policy_approval_follows_exclusions_current_at_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     initially_excluded: bool,
@@ -130,15 +130,10 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
             assert stored_run(entity, "parent-run", **options).status is RunStatus.completed
             # The finished reply shows every call it made as finished.
             assert "⏳" not in result.response_text
-            jobs = await saved_jobs(paths.storage_root)
-            if initially_excluded:
-                # The driver that gated the call runs its child in the reply, as it would have before the restart.
-                assert jobs == {}
-                assert len(code.requests) == 1
-            else:
-                # Now excluded: the approved call's wait budget is rejected, so the child never starts.
-                assert code.requests == []
-                assert jobs == {}
+            assert await saved_jobs(paths.storage_root) == {}
+            # The driver that gated the call runs its child in the reply, as it would have before the restart; a call
+            # the reply paused on now runs natively, where its wait budget is rejected before the child starts.
+            assert len(code.requests) == (1 if initially_excluded else 0)
     finally:
         await runtime.shutdown()
         release_background_tool_jobs(paths, instance)

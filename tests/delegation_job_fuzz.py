@@ -200,7 +200,6 @@ class DelegationFuzzRunner:
     """Drive one parent conversation's background children through generated steps over durable storage."""
 
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._root = root
         self.paths = _runtime_paths(root)
         self.config = with_responder_access(
             Config(
@@ -220,17 +219,14 @@ class DelegationFuzzRunner:
         self.config.background_tool_jobs.enabled = True
         self.identity = ToolExecutionIdentity("matrix", "leader", _REQUESTER, "!room:example.org", None, None, "parent")
         self._baseline = asyncio.all_tasks()
-        self._crashing = False
         self._turn_count = 0
         self.gate = asyncio.Event()
         self.children: list[_Child] = []
         self.approvals = _Cards(tool_job_journal(self.paths.storage_root))
         self.turns: list[_Turn] = []
-        self.closed_turns: list[_Turn] = []
         self.executed: Counter[str] = Counter()
         # Notes of calls some resolution approved; only those may ever run.
         self.approved: set[str] = set()
-        self.violations: list[str] = []
         # What first stopped each job's work: a cancellation or a restart; the first cause stands.
         self.causes: dict[str, Literal["cancel", "restart"]] = {}
         # Each child's session, by the child it belongs to.
@@ -292,7 +288,6 @@ class DelegationFuzzRunner:
 
     async def close(self) -> None:
         """End every task this example started and release storage, even after a failed check."""
-        self._crashing = True
         self.gate.set()
         await self._end_tasks()
         await self.runtime.close_journal()
@@ -411,9 +406,7 @@ class DelegationFuzzRunner:
         for child in self.children:
             if child.job_id is not None:
                 self._cause(child.job_id, "restart")
-        self._crashing = True
         await self._end_tasks()
-        self._crashing = False
         self.turns.clear()
         await self._reopen()
 
@@ -465,13 +458,11 @@ class DelegationFuzzRunner:
 
     async def _collect(self) -> None:
         """Check effects, finished turns, and that every answerable card belongs to a job still waiting on it."""
-        assert not self.violations, self.violations
         for name, count in self.executed.items():
             assert count <= 1, (name, count)
             assert name in self.approved, f"{name} ran without approval"
         for turn in [turn for turn in self.turns if turn.task.done()]:
             self.turns.remove(turn)
-            self.closed_turns.append(turn)
             result = turn.task.result()
             # A child's approvals never pause its parent; the job asks for them.
             assert not (isinstance(result, RunRecord) and result.status is RunStatus.paused), turn.name
