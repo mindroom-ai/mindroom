@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -107,6 +108,42 @@ async def test_manual_oauth_fallback_status_is_requester_scoped_and_secret_free(
     assert bob_tool["status"] == "requires_config"
     assert bob_tool["manual_auth_configured"] is False
     assert manual_secret not in repr(alice_tool)
+
+
+@pytest.mark.asyncio
+async def test_requester_scope_status_reads_the_requesters_oauth_connection(tmp_path: Path) -> None:
+    """A saved requester scope is not authoritative, yet a requester-scoped provider reads the requester's connection."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    provider = github_oauth_provider()
+    manager.save_credentials(
+        "github_oauth_client",
+        {"client_id": "github-client-id", "client_secret": "github-client-secret"},
+    )
+    alice_target = _worker_target("@alice:example.test")
+    publish_oauth_credentials(
+        provider,
+        {
+            "token": "github-oauth-token",
+            "refresh_token": "github-refresh-token",
+            "client_id": "github-client-id",
+            "scopes": [],
+            "expires_at": 4_102_444_800.0,
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        credentials_manager=manager,
+        worker_target=resolve_worker_target("user", "code", execution_identity=alice_target.execution_identity),
+    )
+    alice_tool = _github_tool()
+    bob_tool = _github_tool()
+
+    for tool, target in ((alice_tool, alice_target), (bob_tool, _worker_target("@bob:example.test"))):
+        context = replace(_context(runtime_paths, manager, target), status_authoritative=False)
+        await tools_api._update_tools_statuses([tool], context)
+
+    assert alice_tool["status"] == "available"
+    assert bob_tool["status"] == "requires_config"
 
 
 @pytest.mark.asyncio
