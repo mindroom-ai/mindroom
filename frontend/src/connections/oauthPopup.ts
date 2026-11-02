@@ -83,7 +83,7 @@ export async function connectWithPopup(
       onSettled: (error, popupClosesItself) => {
         window.clearTimeout(deadline);
         signal.removeEventListener("abort", onAbort);
-        // A page that answered closes itself after a moment, so its text can be read.
+        // A page that answered closes itself after a moment, or stays open, so its text can be read.
         if (!popup.closed && !popupClosesItself) popup.close();
         if (error) reject(error);
         else resolve();

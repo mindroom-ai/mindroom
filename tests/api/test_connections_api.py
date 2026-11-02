@@ -1330,6 +1330,10 @@ def _finish_group_connect(portal: dict[str, Any], user: str, *, agent: str = "pe
     return _oauth_callback(portal, user, _auth_query(response)["state"][0], response.json()["provider"])
 
 
+# The script with which a popup's last page closes itself after telling its opener.
+_POPUP_SELF_CLOSE = "window.setTimeout(() => window.close(), 1500);"
+
+
 def _connect_one(portal: dict[str, Any], user: str, provider: str) -> None:
     """Connect one member with its own Connect button."""
     response = portal["client"].post(
@@ -1379,6 +1383,7 @@ def test_group_connect_connects_every_member(google_group_portal: dict[str, Any]
     assert "<title>Google connected</title>" in page.text
     assert "Connected Test Drive, Test Sheets. You can close this window." in page.text
     assert '"status": "connected", "provider": "google_drive"' in page.text
+    assert _POPUP_SELF_CLOSE in page.text
     for provider in ("google_drive", "google_sheets"):
         assert _connected(google_group_portal, "alice", "personal", provider) is True
         assert _connected(google_group_portal, "bob", "personal", provider) is False
@@ -1388,7 +1393,7 @@ def test_group_connect_names_a_service_the_user_did_not_grant(
     google_group_portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member whose scope the user unticked on the consent screen stays unconnected, and the page says so."""
+    """A member whose scope the user unticked stays unconnected, and the page stays open to say so."""
     # The lead's exchange answers for the whole sign-in.
     _use_providers(google_group_portal, monkeypatch, _drive(granted_scopes=("drive.scope",)), _sheets())
     page = _finish_group_connect(google_group_portal, "alice")
@@ -1397,6 +1402,9 @@ def test_group_connect_names_a_service_the_user_did_not_grant(
         "Connected Test Drive. Not connected: Test Sheets (access was not granted). You can close this window."
         in page.text
     )
+    # The opener still hears that the flow connected, but the page leaves closing to the user.
+    assert '"status": "connected", "provider": "google_drive"' in page.text
+    assert _POPUP_SELF_CLOSE not in page.text
     assert _connected(google_group_portal, "alice", "personal", "google_drive") is True
     assert _connected(google_group_portal, "alice", "personal", "google_sheets") is False
 
@@ -1405,7 +1413,7 @@ def test_group_connect_that_connects_nothing_is_an_error_page(
     google_group_portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When every member refuses the account, the page is an error and its opener hears that the flow failed."""
+    """When every member refuses the account, the page is an error that stays open, and its opener hears so."""
     refused = {"allowed_email_domains": ("other.example",)}
     _use_providers(google_group_portal, monkeypatch, _drive(**refused), _sheets(**refused))
     page = _finish_group_connect(google_group_portal, "alice")
@@ -1416,6 +1424,7 @@ def test_group_connect_that_connects_nothing_is_an_error_page(
         "Test Sheets (this account is not allowed)." in page.text
     )
     assert '"status": "error", "provider": "google_drive"' in page.text
+    assert _POPUP_SELF_CLOSE not in page.text
     for provider in ("google_drive", "google_sheets"):
         assert _connected(google_group_portal, "alice", "personal", provider) is False
 

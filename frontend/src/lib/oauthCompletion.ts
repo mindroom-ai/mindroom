@@ -14,7 +14,8 @@ interface OAuthCompletionOptions {
   confirmConnected?: () => Promise<boolean>;
   /**
    * Called once. `popupClosesItself` is true when the popup's own page
-   * answered, and closes itself after a moment so that its text can be read.
+   * answered: it closes itself after a moment so that its text can be read,
+   * or stays open for the user to close when it has more to say.
    */
   onSettled: (error?: Error, popupClosesItself?: boolean) => void;
 }

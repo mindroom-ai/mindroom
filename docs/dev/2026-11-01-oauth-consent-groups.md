@@ -34,6 +34,7 @@ Assumptions:
   A member is skipped, and reported on the result page, when its connection changed since the flow started, when the account fails its allowed-domain rules, or when the grant lacks one of its required scopes, which happens when a user unticks a service on Google's granular consent screen.
   Each stored copy names its own provider, so status, refresh, disconnect, and reset stay per service.
   When every member is skipped, the result page is an error.
+  A result page that names a skipped member stays open for the user to close, because the portal shows only which services connected, not why the others did not.
 - **Authorization matches the per-service flow.**
   A group connect requires the same management authority and same-origin request as connecting each member, and a shared agent shows its shared-account confirmation once for the whole group.
 - **Interface.**

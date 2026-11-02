@@ -739,15 +739,22 @@ class _OpenerNotice:
     opener_origin: str | None = None
 
 
-def _opener_notice_script(notice: _OpenerNotice, status: Literal["connected", "cancelled", "error"]) -> str:
+def _opener_notice_script(
+    notice: _OpenerNotice,
+    status: Literal["connected", "cancelled", "error"],
+    *,
+    auto_close: bool = True,
+) -> str:
     """Return page script that tells the popup's opener how the flow ended, then closes the popup after a moment.
 
     The message goes to the opener origin the flow recorded, else to the page's own origin, never to `*`, so only a
     MindRoom page that opened the popup (the Connections page or the dashboard) can read it. On its own origin the
     page posts only to a same-origin opener: one opened from a chat link, or from no page, stays open so its text can
     be read. A recorded origin of another MindRoom host cannot be checked that way, as the opener is cross-origin.
+    Without `auto_close`, the popup stays open after telling its opener, for a page whose text the opener cannot show.
     """
     message = {"type": _OAUTH_OPENER_MESSAGE_TYPE, "status": status, "provider": notice.provider_id}
+    close = f"\n        window.setTimeout(() => window.close(), {_OAUTH_POPUP_CLOSE_DELAY_MS});" if auto_close else ""
     return f"""
       const mindroomTarget = {_script_json(notice.opener_origin)} || window.location.origin;
       let mindroomOpener = null;
@@ -763,8 +770,7 @@ def _opener_notice_script(notice: _OpenerNotice, status: Literal["connected", "c
         // Another site opened this window; it can neither read the message nor show the outcome.
       }}
       if (mindroomOpener) {{
-        mindroomOpener.postMessage({_script_json(message)}, mindroomTarget);
-        window.setTimeout(() => window.close(), {_OAUTH_POPUP_CLOSE_DELAY_MS});
+        mindroomOpener.postMessage({_script_json(message)}, mindroomTarget);{close}
       }}"""
 
 
@@ -1150,17 +1156,21 @@ _GROUP_SKIP_REASONS: dict[OAuthGroupSkipReason, str] = {
 
 
 def _group_callback_response(outcome: _GroupCallbackOutcome, notice: _OpenerNotice) -> HTMLResponse:
-    """Render what a consent group sign-in connected and why any member was not; connecting nothing is an error."""
+    """Render what a consent group sign-in connected and why any member was not; connecting nothing is an error.
+
+    A page that names a skipped member stays open, as the opener shows only which services connected, not why not.
+    """
     names = outcome.service_names
     skipped = "; ".join(
         f"{names[provider_id]} ({_GROUP_SKIP_REASONS[reason]})" for provider_id, reason in outcome.result.skipped
     )
     if not outcome.result.connected:
-        return _oauth_browser_error_response(
+        return _oauth_browser_page(
+            f"{outcome.group_name} not connected",
             f"Nothing was connected: {skipped}.",
+            tone="error",
             status_code=400,
-            title=f"{outcome.group_name} not connected",
-            notice=notice,
+            script=_opener_notice_script(notice, "error", auto_close=False),
         )
     message = f"Connected {', '.join(names[provider_id] for provider_id in outcome.result.connected)}."
     if skipped:
@@ -1169,7 +1179,7 @@ def _group_callback_response(outcome: _GroupCallbackOutcome, notice: _OpenerNoti
         f"{outcome.group_name} connected",
         f"{message} You can close this window.",
         tone="success",
-        script=_opener_notice_script(notice, "connected"),
+        script=_opener_notice_script(notice, "connected", auto_close=not skipped),
     )
 
 
