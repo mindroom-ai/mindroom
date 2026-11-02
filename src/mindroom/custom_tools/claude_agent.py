@@ -350,7 +350,7 @@ def _turn_text(turn: _ClaudeTurn) -> str:
     text = "\n".join(part for part in turn.text_parts if part).strip()
     result = turn.result
     if not text and result is not None and result.result:
-        text = str(result.result).strip()
+        text = result.result.strip()
     if result is not None and result.is_error:
         return f"Claude reported an error: {text or _NO_TEXT}"
     return text
@@ -615,7 +615,7 @@ class ClaudeAgentTools(Toolkit):
                     session.model = resolved_model
                 prompt_id = str(uuid4())
                 await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
-                response_text, tool_names, result = await self._collect_response(session, prompt_id)
+                response = await self._collect_response(session, prompt_id)
                 session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
@@ -631,20 +631,19 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        return self._format_response_output(response_text, tool_names, result)
+        return response
 
     async def _collect_response(  # noqa: C901
         self,
         session: _ClaudeSessionState,
         prompt_id: str,
-    ) -> tuple[str, list[str], ResultMessage | None]:
-        """Read Claude Code's turns through the one that answers the prompt sent as ``prompt_id``.
+    ) -> str:
+        """Read Claude Code's turns through the one that answers the prompt sent as ``prompt_id``, and return the reply.
 
-        Claude Code also starts turns on its own, such as when a background task finishes. Their results are read past
-        unless the prompt was echoed in their turn, which a prompt sent while such a turn runs joins, or Claude Code
-        dropped a prompt there, such as one a hook blocked, which it reports with its reason. Turns read before the
-        answer stay in the reply, and each turn counts toward this call's requester as soon as it ends. A call stopped
-        before it read its answer leaves that answer to end the next call's read, one turn late.
+        Results of turns Claude Code started on its own, such as after a background task, are read past unless the
+        prompt joined that turn, which its echo shows, or Claude Code dropped a prompt there. Turns read before the
+        answer stay in the reply, and each turn counts toward this call's requester as soon as it ends. A stopped
+        call's unread answer, unless it came in a turn Claude Code started itself, ends the next call's read instead.
         """
         tool_names: list[str] = []
         turns = [_ClaudeTurn()]
@@ -676,8 +675,8 @@ class ClaudeAgentTools(Toolkit):
                     break
                 turns.append(_ClaudeTurn())
 
-        text = "\n".join(text for turn in turns if (text := _turn_text(turn))) or _NO_TEXT
-        return text, tool_names, turns[-1].result
+        text = "\n".join(filter(None, map(_turn_text, turns))) or _NO_TEXT
+        return self._format_response_output(text, tool_names, turns[-1].result)
 
     def _format_response_output(
         self,

@@ -40,8 +40,8 @@ class _NightlySoakSDKClient:
         self.connected = True
 
     async def query(self, prompt_messages: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
-        [message] = [message async for message in prompt_messages]
-        prompt = message["message"]["content"]
+        [frame] = [frame async for frame in prompt_messages]
+        prompt = frame["message"]["content"]
         type(self).active_queries += 1
         type(self).max_concurrent_queries = max(type(self).max_concurrent_queries, type(self).active_queries)
         await asyncio.sleep(0.001)

@@ -49,7 +49,7 @@ from tests.conftest import make_conversation_reader_mock, make_matrix_client_moc
 from tests.history_helpers import _forced_compaction_context, _session
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterable, Awaitable, Callable, Iterator
+    from collections.abc import AsyncGenerator, AsyncIterable, Awaitable, Callable, Coroutine, Iterator
 
     from claude_agent_sdk import Message
 
@@ -99,15 +99,11 @@ class _FakeClaudeSDKClient:
         self.model = model
 
     async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
-        await self._read_prompt(prompt)
-
-    async def _read_prompt(self, prompt: AsyncIterable[dict[str, Any]]) -> str:
-        """Record the prompt the tool sends as one stream-json user message, and return its text."""
+        """Record the prompt the tool sends as one stream-json user message."""
         [frame] = [frame async for frame in prompt]
         self.queries.append(frame["message"]["content"])
         self.prompt_ids.append(frame["uuid"])
         self.query_models.append(self.model)
-        return frame["message"]["content"]
 
     def _echo(self, index: int = -1) -> UserMessage:
         """Return Claude Code's replay of a prompt, the newest by default, which arrives inside the turn that uses it."""
@@ -253,8 +249,8 @@ class _InterruptibleFakeClaudeSDKClient(_FakeClaudeSDKClient):
         if _InterruptibleFakeClaudeSDKClient.created_event is not None:
             _InterruptibleFakeClaudeSDKClient.created_event.set()
 
-    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
-        await self._read_prompt(prompt)
+    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
+        await super().query(prompt, session_id=session_id)
         self.query_started.set()
         await self._release_query.wait()
 
@@ -294,8 +290,9 @@ class _BlockingPromptFakeClaudeSDKClient(_FakeClaudeSDKClient):
         super().__post_init__()
         _BlockingPromptFakeClaudeSDKClient.instances.append(self)
 
-    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
-        if await self._read_prompt(prompt) == type(self).blocked_prompt:
+    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
+        await super().query(prompt, session_id=session_id)
+        if self.queries[-1] == type(self).blocked_prompt:
             if type(self).blocked_query_started is not None:
                 type(self).blocked_query_started.set()
             if type(self).release_blocked_query is not None:
@@ -386,8 +383,8 @@ class _CancelledStartFakeClaudeSDKClient(_FakeClaudeSDKClient):
 class _FailingClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client whose query fails with a typed SDK error."""
 
-    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
-        await self._read_prompt(prompt)
+    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
+        await super().query(prompt, session_id=session_id)
         message = "boom"
         raise ClaudeSDKError(message)
 
@@ -404,8 +401,8 @@ class _GatewayProbeClaudeSDKClient(_FakeClaudeSDKClient):
         self._last_session_id = "gateway-session-0"
         _GatewayProbeClaudeSDKClient.instances.append(self)
 
-    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
-        prompt_text = await self._read_prompt(prompt)
+    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
+        await super().query(prompt, session_id=session_id)
         env = self.options.env or {}
         base_url = env.get("ANTHROPIC_BASE_URL")
         if not base_url:
@@ -424,7 +421,7 @@ class _GatewayProbeClaudeSDKClient(_FakeClaudeSDKClient):
         body = {
             "model": self.options.model or "claude-sonnet-5",
             "max_tokens": 256,
-            "messages": [{"role": "user", "content": prompt_text}],
+            "messages": [{"role": "user", "content": self.queries[-1]}],
         }
 
         async with httpx.AsyncClient(timeout=5) as client:
@@ -1242,6 +1239,16 @@ async def test_claude_start_session_error_includes_context(
     assert "- fork_session: False" in result
 
 
+async def _stop_when_waiting(call: Coroutine[Any, Any, str]) -> None:
+    """Run ``call`` until it waits for more of the scripted stream, then stop it, as a stopped reply stops it."""
+    client = cast("_ScriptedClaudeSDKClient", _FakeClaudeSDKClient.instances[0])
+    stopped = asyncio.create_task(call)
+    await client.waiting.wait()
+    stopped.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopped
+
+
 async def _send_metered_turns(
     tmp_path: Path,
     requesters: list[str],
@@ -1289,13 +1296,7 @@ async def _send_metered_turns(
             if not (stop_last and index == len(requesters)):
                 replies.append(await call)
                 continue
-            client = cast("_ScriptedClaudeSDKClient", _FakeClaudeSDKClient.instances[0])
-            client.waiting.clear()
-            stopped = asyncio.ensure_future(call)
-            await client.waiting.wait()
-            stopped.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await stopped
+            await _stop_when_waiting(call)
     report = collect_admin_usage(config=config, runtime_paths=paths)
     return replies, sorted(
         (
@@ -1512,22 +1513,11 @@ async def test_claude_send_after_a_stopped_call_returns(
     """A call stopped before Claude answered never leaves the next call waiting."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
-    sent = asyncio.Event()
-    send_script = _ScriptedClaudeSDKClient.query
-
-    async def send_and_signal(self: _ScriptedClaudeSDKClient, prompt: AsyncIterable[dict[str, Any]]) -> None:
-        await send_script(self, prompt)
-        sent.set()
-
-    monkeypatch.setattr(_ScriptedClaudeSDKClient, "query", send_and_signal)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    first = asyncio.create_task(_in_call(run_context, tools.claude_send("first")))
-    await sent.wait()
-    first.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await first
+    await _in_call(run_context, tools.claude_start_session())
+    await _stop_when_waiting(_in_call(run_context, tools.claude_send("first")))
     second = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
 
     assert second.startswith(f"{second_reply}\n\n")
