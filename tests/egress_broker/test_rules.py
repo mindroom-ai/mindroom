@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import re
 
 import pytest
@@ -1152,38 +1153,39 @@ def test_keep_upgrade_preserves_websocket_handshake() -> None:
 
 _CALENDAR_READS = EgressReadOnly(post_paths=["/calendar/v3/freeBusy"])
 _EVENTS = "/calendar/v3/calendars/primary/events"
+_calendar = functools.partial(SecretRequest, host="www.googleapis.com")
 
 
 @pytest.mark.parametrize(
     ("read_only", "request_facts", "allowed"),
     [
-        (_CALENDAR_READS, SecretRequest(method="GET", path=_EVENTS), True),
-        (_CALENDAR_READS, SecretRequest(method="HEAD", path=_EVENTS), True),
-        (_CALENDAR_READS, SecretRequest(method="get", path=_EVENTS), True),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy"), True),
-        (_CALENDAR_READS, SecretRequest(method="post", path="/calendar/v3/freeBusy"), True),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/x"), True),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusyX"), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/batch"), False),
-        (_CALENDAR_READS, SecretRequest(method="PUT", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="PATCH", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="DELETE", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="OPTIONS", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="GET", path="/ws", websocket=True), False),
-        (_CALENDAR_READS, SecretRequest(method="GET", path=_EVENTS, method_override=True), False),
+        (_CALENDAR_READS, _calendar(method="GET", path=_EVENTS), True),
+        (_CALENDAR_READS, _calendar(method="HEAD", path=_EVENTS), True),
+        (_CALENDAR_READS, _calendar(method="get", path=_EVENTS), True),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy"), True),
+        (_CALENDAR_READS, _calendar(method="post", path="/calendar/v3/freeBusy"), True),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy/x"), True),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusyX"), False),
+        (_CALENDAR_READS, _calendar(method="POST", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/batch"), False),
+        (_CALENDAR_READS, _calendar(method="PUT", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="PATCH", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="DELETE", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="OPTIONS", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="GET", path="/ws", websocket=True), False),
+        (_CALENDAR_READS, _calendar(method="GET", path=_EVENTS, method_override=True), False),
         (
             _CALENDAR_READS,
-            SecretRequest(method="POST", path="/calendar/v3/freeBusy", method_override=True),
+            _calendar(method="POST", path="/calendar/v3/freeBusy", method_override=True),
             False,
         ),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/../events"), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/%2e%2e/events"), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy//x"), False),
-        (None, SecretRequest(method="GET", path=_EVENTS), False),
-        (None, SecretRequest(method="HEAD", path=_EVENTS), False),
-        (None, SecretRequest(method="POST", path="/calendar/v3/freeBusy"), False),
-        (None, SecretRequest(method="DELETE", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy/../events"), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy/%2e%2e/events"), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy//x"), False),
+        (None, _calendar(method="GET", path=_EVENTS), False),
+        (None, _calendar(method="HEAD", path=_EVENTS), False),
+        (None, _calendar(method="POST", path="/calendar/v3/freeBusy"), False),
+        (None, _calendar(method="DELETE", path=_EVENTS), False),
     ],
 )
 def test_read_only_allows_matrix(

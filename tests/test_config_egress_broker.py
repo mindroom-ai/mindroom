@@ -593,3 +593,75 @@ def test_config_refuses_agents_it_does_not_define() -> None:
         Config(agents=agents, egress_broker={"services": services})
     config = Config(agents=agents, egress_broker={"services": {"search": {"preset": "openai", "agents": ["coder"]}}})
     assert config.egress_broker.services["search"].agents == ["coder"]
+
+
+_APP = {"credentials_service": "acme_app", "repositories": {"acme/api": "read_write", "Acme/docs": "read"}}
+
+
+def test_github_app_drops_a_presets_login_and_saves_as_authored() -> None:
+    """A GitHub App service sends only its App's tokens, so the preset's login is left out and its placeholders kept."""
+    service = EgressService.model_validate({"preset": "github", "github_app": _APP})
+
+    assert service.github_app is not None
+    assert service.github_app.repositories == {"acme/api": "read_write", "Acme/docs": "read"}
+    assert service.oauth_provider is None
+    assert service.placeholder_env == EGRESS_PRESETS["github"]["placeholder_env"]
+    assert [rule.host for rule in service.rules] == ["api.github.com", "uploads.github.com", "github.com"]
+    assert service.authored_model_dump() == {"preset": "github", "github_app": _APP}
+    assert EgressService.model_validate({"preset": "github"}).github_app is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("oauth_provider", "github"),
+        ("read_only", {"post_paths": []}),
+        ("oauth_on_shared_workers", True),
+        ("admin_key", True),
+    ],
+)
+def test_github_app_refuses_other_credential_sources(field: str, value: object) -> None:
+    """A GitHub App service takes no account and no administrator key, so authoring one next to it is an error."""
+    with pytest.raises(
+        ValidationError,
+        match=f"a github_app service sends only its App's tokens, so it cannot set {field}",
+    ):
+        EgressService.model_validate({"preset": "github", "github_app": _APP, field: value})
+
+
+def test_github_app_access_ignores_case_as_github_does() -> None:
+    """A request names a repository in any case; an unlisted one has no access."""
+    service = EgressService.model_validate({"preset": "github", "github_app": _APP})
+    assert service.github_app is not None
+
+    assert service.github_app.access("ACME/API") == "read_write"
+    assert service.github_app.access("acme/docs") == "read"
+    assert service.github_app.access("acme/other") is None
+
+
+@pytest.mark.parametrize(
+    ("repositories", "message"),
+    [
+        ({}, "github_app needs at least one repository"),
+        ({"acme": "read"}, "github_app repository 'acme' must be owner/repository"),
+        ({"acme/api/extra": "read"}, "github_app repository 'acme/api/extra' must be owner/repository"),
+        ({"acme/a b": "read"}, "github_app repository 'acme/a b' must be owner/repository"),
+        ({"acme/api": "read", "other/api": "read"}, "must all belong to one owner"),
+        ({"acme/api": "read", "Acme/API": "read_write"}, "lists a repository twice"),
+        ({"acme/api": "write"}, "Input should be 'read' or 'read_write'"),
+    ],
+)
+def test_github_app_repositories_are_validated(repositories: dict[str, str], message: str) -> None:
+    """Repositories are `owner/repository` of the one installation's owner, each listed once, read or read_write."""
+    with pytest.raises(ValidationError, match=message):
+        EgressService.model_validate(
+            {"preset": "github", "github_app": {"credentials_service": "acme_app", "repositories": repositories}},
+        )
+
+
+def test_github_app_credentials_service_uses_credential_name_rules() -> None:
+    """The App credential is named like any stored credential, so a path or blank name is refused."""
+    with pytest.raises(ValidationError, match="credentials_service"):
+        EgressService.model_validate(
+            {"preset": "github", "github_app": {"credentials_service": "../app", "repositories": {"acme/api": "read"}}},
+        )

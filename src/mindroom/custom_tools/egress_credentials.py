@@ -70,7 +70,9 @@ class EgressCredentialsTools(Toolkit):
 
         Call this when a request fails with `credential_not_configured`, or before telling the user
         which credential they need. Returns each configured service with whether this agent has a
-        credential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).
+        credential for it (`configured`) and which one the broker uses (`active_source`: `key`, `oauth`, or
+        `github_app`). A `github_app` service lists the repositories its GitHub App covers in
+        `github_app_repositories`, each `read` or `read_write`; it takes no key and covers no other repository.
         `source` says who defined the service: `config` for the administrator, `user` for the user's own.
         `oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`
         whether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with
@@ -117,13 +119,13 @@ class EgressCredentialsTools(Toolkit):
         config: Config,
         name: str,
         service: EgressService,
-    ) -> dict[str, str | bool | None]:
+    ) -> dict[str, str | bool | dict[str, str] | None]:
         """Describe one service's credential sources in this agent's scope, as the broker would use them.
 
         A service whose status cannot be read is reported as not configured and not connectable, so one failing
         provider or unreadable secret does not fail the listing of the others. Only the error type is logged.
         """
-        entry: dict[str, str | bool | None] = {
+        entry: dict[str, str | bool | dict[str, str] | None] = {
             "name": name,
             "display_name": service.display_name or name,
             "source": service_source(config.egress_broker, name),
@@ -132,6 +134,8 @@ class EgressCredentialsTools(Toolkit):
             entry["separate_account"] = True
         if service.admin_key:
             entry["admin_key"] = True
+        if service.github_app is not None:
+            entry["github_app_repositories"] = dict(service.github_app.repositories)
         try:
             status = service_status(
                 manager,
@@ -217,6 +221,8 @@ class EgressCredentialsTools(Toolkit):
             "`source` is `config` for a service the administrator defined and `user` for one the user added themselves. "
             "`admin_key: true` marks a service whose one key only an administrator sets, for every agent that uses it, "
             "so when it is not configured ask an administrator, not the user. "
+            "A service with `github_app_repositories` uses a GitHub App the administrator set up, which covers only "
+            "those repositories at the listed access; only an administrator can change them. "
             f"{fix}"
             '`oauth_access: "read"` means Agent Keys may use the account only to read, so writes fail with `read_only` '
             "until whoever allows the account allows read and write there. "
@@ -227,7 +233,7 @@ class EgressCredentialsTools(Toolkit):
         )
 
     @staticmethod
-    def _payload(services: list[dict[str, str | bool | None]], link: str | None, note: str) -> str:
+    def _payload(services: list[dict[str, str | bool | dict[str, str] | None]], link: str | None, note: str) -> str:
         return json.dumps(
             {"tool": "egress_credentials", "services": services, "manage_url": link, "note": note},
             sort_keys=True,

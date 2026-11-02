@@ -762,7 +762,7 @@ def _broker_reads(
         runtime_paths=paths,
         credentials_manager=get_runtime_credentials_manager(paths),
         worker_target=claims.to_worker_target(),
-        request=secrets.SecretRequest(method=method, path="/"),
+        request=secrets.SecretRequest(method=method, host="api.github.com", path="/"),
         read_only=config.egress_broker.services[service].read_only,
         separate_account=False,
     )
@@ -1197,6 +1197,31 @@ def test_an_administrator_key_is_one_key_whichever_scope_sets_it(egress_config_f
         assert (row["configured"], row["admin_key"], row["agents"]) == (True, True, ["test_agent"])
     assert client.delete("/api/egress-broker/services/search/secret?agent_name=test_agent").status_code == 204
     assert secrets.load_secret(manager, None, "search", admin_key=True) is None
+
+
+def test_the_dashboard_shows_a_github_app_service_and_refuses_a_key_for_it(egress_config_file: Path) -> None:
+    """The panel lists the App's repositories and credential state in every scope, and stores no key for it."""
+    from mindroom.api import main  # noqa: PLC0415
+
+    app = {"credentials_service": "acme_app", "repositories": {"acme/api": "read"}}
+    _add_services(egress_config_file, acme={"preset": "github", "github_app": app})
+    client = _admin_client(egress_config_file)
+    manager = get_runtime_credentials_manager(main._app_runtime_paths(main.app))
+    manager.save_credentials(
+        "acme_app",
+        {"auth_type": "github_app", "app_id": 1, "installation_id": 2, "private_key_file": "/run/secrets/app.pem"},
+    )
+
+    for agent_name in (None, "test_agent"):
+        row = _service(client, "acme", agent_name)
+        assert (row["configured"], row["active_source"], row["github_app_repositories"]) == (
+            True,
+            "github_app",
+            {"acme/api": "read"},
+        )
+    put = client.put("/api/egress-broker/services/acme/secret", json={"secret": "a-key"})
+    assert put.status_code == 422, put.text
+    assert secrets.load_secret(manager, None, "acme") is None
 
 
 def test_the_dashboard_lists_a_service_for_agents_its_list_leaves_out(egress_config_file: Path) -> None:

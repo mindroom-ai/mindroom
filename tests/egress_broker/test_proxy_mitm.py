@@ -29,9 +29,11 @@ from mindroom.egress_broker.mitm import _verifying_context
 from mindroom.egress_broker.rules import EgressRules, read_only_allows
 from mindroom.egress_broker.secrets import (
     Secret,
+    SecretGitHubAppUnavailable,
     SecretMissing,
     SecretNeedsReconnect,
     SecretReadOnly,
+    SecretRepositoryNotAllowed,
     SecretRequest,
     SecretUnavailable,
 )
@@ -706,7 +708,7 @@ async def test_read_only_write_is_refused_and_audited(
         "message": _READ_ONLY_MESSAGE,
     }
     assert tls_upstream.hits == []
-    assert lookup.requests == [SecretRequest(method="POST", path="/echo")]
+    assert lookup.requests == [SecretRequest(method="POST", host="localhost", path="/echo")]
     await assert_audited(
         audit,
         kind="denied",
@@ -744,9 +746,9 @@ async def test_read_only_get_is_forwarded_with_token(
     assert upgrade.status == 403
     assert json.loads(upgrade.body)["error"] == "read_only"
     assert lookup.requests == [
-        SecretRequest(method="GET", path="/echo"),
-        *[SecretRequest(method="GET", path="/echo", method_override=True)] * 3,
-        SecretRequest(method="GET", path="/ws", websocket=True),
+        SecretRequest(method="GET", host="localhost", path="/echo"),
+        *[SecretRequest(method="GET", host="localhost", path="/echo", method_override=True)] * 3,
+        SecretRequest(method="GET", host="localhost", path="/ws", websocket=True),
     ]
     assert tls_upstream.hits == ["/echo"]
 
@@ -910,6 +912,71 @@ async def test_oauth_refresh_outage_gets_retryable_503(
     }
     assert tls_upstream.hits == []
     await assert_audited(audit, kind="request", status=503, service="svc", path="/echo", code="oauth_refresh_failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "status", "kind", "body"),
+    [
+        (
+            SecretRepositoryNotAllowed(repository="acme/other"),
+            403,
+            "denied",
+            {
+                "error": "repository_not_allowed",
+                "service": "svc",
+                "repository": "acme/other",
+                "message": "The svc GitHub App does not cover acme/other. Only an administrator can add repositories to it.",
+            },
+        ),
+        (
+            SecretMissing(github_app=True),
+            403,
+            "denied",
+            {
+                "error": "credential_not_configured",
+                "service": "svc",
+                "message": "The svc GitHub App credential is not stored. Only an administrator can store it.",
+            },
+        ),
+        (
+            SecretGitHubAppUnavailable(),
+            503,
+            "request",
+            {
+                "error": "github_app_token_failed",
+                "service": "svc",
+                "message": "GitHub did not issue a token for the svc GitHub App. "
+                "Retry in a minute; if it keeps failing, tell an administrator.",
+            },
+        ),
+    ],
+    ids=["unlisted-repository", "app-not-stored", "mint-failed"],
+)
+async def test_github_app_refusals_reach_the_agent_without_reaching_upstream(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+    result: SecretResult,
+    status: int,
+    kind: str,
+    body: dict[str, object],
+) -> None:
+    """A GitHub App service's refusals name the service and an administrator, link no page, and are audited."""
+    await broker(
+        single_rule_config(),
+        resolve_secret=lambda _claims, _service, _routed, _request: result,
+        manage_url=MANAGE_URL,
+    )
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == status
+    assert response.json() == body
+    assert tls_upstream.hits == []
+    await assert_audited(audit, kind=kind, status=status, service="svc", path="/echo", code=body["error"])
 
 
 # The end of a personal scope's refusal where the personal page, the only place that sets its keys, is not served.
@@ -1724,7 +1791,10 @@ async def test_a_named_service_still_reads_only_with_an_account_allowed_to_read(
 
     assert (write.status_code, write.json()["error"]) == (403, "read_only")
     assert read.status_code == 200
-    assert lookup.requests == [SecretRequest(method="POST", path="/echo"), SecretRequest(method="GET", path="/echo")]
+    assert lookup.requests == [
+        SecretRequest(method="POST", host="localhost", path="/echo"),
+        SecretRequest(method="GET", host="localhost", path="/echo"),
+    ]
     assert tls_upstream.hits == ["/echo"]
 
 

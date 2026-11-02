@@ -42,14 +42,14 @@ from mindroom.embeddings.embedder_health import (
     get_embedder_failure,
 )
 from mindroom.embeddings.errors import extract_classified_embedder_detail
+from mindroom.github_app_auth import (
+    GitHubAppTokenBinding,
+    get_runtime_github_app_token_provider,
+)
 from mindroom.knowledge.file_listing import (
     OversizedKnowledgeFile,
     collected_oversized_files,
     warn_oversized_knowledge_file,
-)
-from mindroom.knowledge.github_app_auth import (
-    GitHubAppTokenBinding,
-    get_runtime_github_app_token_provider,
 )
 from mindroom.knowledge.index_metadata import (
     Publication,

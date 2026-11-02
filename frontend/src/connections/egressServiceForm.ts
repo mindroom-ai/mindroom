@@ -230,7 +230,8 @@ function defaultDisplayName(form: EgressServiceForm): string {
  * A preset service keeps `{preset: id}` and only the fields the user set,
  * because the server expands the preset and later preset updates still apply.
  * `initial` supplies what the form cannot show: the operator-only
- * `oauth_on_shared_workers`, and an OAuth provider override on the same preset.
+ * `oauth_on_shared_workers` and `github_app`, and an OAuth provider override
+ * on the same preset.
  * The operator-only `admin_key` and `agents` come from the form, and an admin
  * key's service gets no account login, which the server would refuse.
  * Fields the loaded service emptied on purpose stay empty, so an unchanged
@@ -301,6 +302,8 @@ export function serializeService(
     authored.oauth_on_shared_workers = initial.oauth_on_shared_workers;
   if (adminKey) authored.admin_key = true;
   if (operator && form.agents.length > 0) authored.agents = form.agents;
+  if (operator && initial?.github_app !== undefined)
+    authored.github_app = initial.github_app;
   return authored;
 }
 

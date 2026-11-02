@@ -192,10 +192,10 @@ def save_user_service(
     holds the ids of the registry's providers (`ConfigPlugins.oauth_providers`).
 
     Raises UserServiceConflictError when `config_services` has the name, and ValueError for an invalid name, a
-    service that sets `oauth_on_shared_workers`, `admin_key`, or `agents`, an OAuth provider (a preset's included)
-    that the registry does not know, that a shared or unscoped agent would use, or whose token a rule would send off
-    its provider's preset hosts, a placeholder user services may not set, a service with more than 50 rules or over
-    16 KiB, a 51st service in the scope, or a scope document over 256 KiB.
+    service that sets `oauth_on_shared_workers`, `admin_key`, `agents`, or `github_app`, an OAuth provider (a preset's
+    included) that the registry does not know, that a shared or unscoped agent would use, or whose token a rule would
+    send off its provider's preset hosts, a placeholder user services may not set, a service with more than 50 rules or
+    over 16 KiB, a 51st service in the scope, or a scope document over 256 KiB.
     """
     validate_egress_service_name(name)
     if name in config_services:
@@ -435,6 +435,7 @@ def _check_user_service(service: EgressService) -> None:
         "oauth_on_shared_workers": service.oauth_on_shared_workers,
         "admin_key": service.admin_key,
         "agents": service.agents is not None,
+        "github_app": service.github_app is not None,
     }
     for operator_field, is_set in operator_fields.items():
         if is_set:

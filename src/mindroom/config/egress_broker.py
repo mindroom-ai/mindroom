@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
+from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.credentials.policy import (
     egress_credential_service,
     is_oauth_client_config_service,
@@ -62,6 +63,13 @@ RESERVED_PLACEHOLDER_NAMES = frozenset(_RESERVED_EXACT | _RESERVED_PROXY_VARS | 
 _CREDENTIAL_FIELDS = ("oauth_provider", "placeholder_env", "oauth_on_shared_workers", "read_only")
 # EgressService fields that only matter for a connected account; admin_key services use only a key, so cannot set them.
 _ACCOUNT_FIELDS = ("oauth_provider", "read_only", "oauth_on_shared_workers")
+# EgressService fields a github_app service cannot set: it sends only the tokens its App mints.
+_GITHUB_APP_EXCLUDED_FIELDS = (*_ACCOUNT_FIELDS, "admin_key")
+# One repository as GitHub names it in URLs: `owner/repository`.
+_GITHUB_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+# What a GitHub App token may do in one repository: read it, or read and write it.
+type GitHubRepositoryAccess = Literal["read", "read_write"]
 
 
 class EgressAuth(BaseModel):
@@ -211,6 +219,49 @@ class EgressReadOnly(BaseModel):
         return [_checked_path_prefix(path, "post_paths entry") for path in value]
 
 
+class EgressGitHubApp(BaseModel):
+    """A GitHub App installation whose short-lived tokens, limited to some repositories, are a service's credential."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    credentials_service: CredentialServiceName = Field(
+        description=(
+            "Stored credential that holds the App, as Git knowledge bases use it: auth_type github_app, app_id, "
+            "installation_id, and private_key_file"
+        ),
+    )
+    repositories: dict[str, GitHubRepositoryAccess] = Field(
+        description=(
+            "Repositories the tokens cover, as owner/repository: read or read_write; all of one owner, the account "
+            "the App is installed on"
+        ),
+    )
+
+    @field_validator("repositories")
+    @classmethod
+    def validate_repositories(cls, value: dict[str, GitHubRepositoryAccess]) -> dict[str, GitHubRepositoryAccess]:
+        """Require at least one `owner/repository`, all of one owner, each listed once whatever its case."""
+        if not value:
+            msg = "github_app needs at least one repository"
+            raise ValueError(msg)
+        for repository in value:
+            if not _GITHUB_REPOSITORY_PATTERN.fullmatch(repository):
+                msg = f"github_app repository '{repository}' must be owner/repository"
+                raise ValueError(msg)
+        if len({repository.split("/")[0].casefold() for repository in value}) > 1:
+            msg = "github_app repositories must all belong to one owner, the account the App is installed on"
+            raise ValueError(msg)
+        if len({repository.casefold() for repository in value}) < len(value):
+            msg = "github_app lists a repository twice (GitHub names ignore case)"
+            raise ValueError(msg)
+        return value
+
+    def access(self, repository: str) -> GitHubRepositoryAccess | None:
+        """Return the access listed for `owner/repository`, compared ignoring case as GitHub does; None if unlisted."""
+        folded = repository.casefold()
+        return next((access for name, access in self.repositories.items() if name.casefold() == folded), None)
+
+
 class EgressService(BaseModel):
     """One egress service configuration."""
 
@@ -313,6 +364,14 @@ class EgressService(BaseModel):
             "Agent Keys. Only config.yaml may set it, and presets never do"
         ),
     )
+    github_app: EgressGitHubApp | None = Field(
+        default=None,
+        description=(
+            "Send tokens that the broker mints from a GitHub App installation, limited to the listed repositories, "
+            "instead of a key or connected account; a preset's oauth_provider and read_only are left out. Only "
+            "config.yaml may set it, and presets never do"
+        ),
+    )
 
     @model_validator(mode="wrap")
     @classmethod
@@ -324,7 +383,8 @@ class EgressService(BaseModel):
         Afterwards only the authored fields stay in `model_fields_set`,
         so `Config.authored_model_dump()` keeps `{preset: github}` as written and later preset updates still apply.
         A `restrict_only` service takes no login, placeholders, or `read_only` from its preset, since it never sends a
-        credential, and an `admin_key` service no login or `read_only`, since it uses only its key.
+        credential, and an `admin_key` or `github_app` service no login or `read_only`, since it uses only its key or
+        App.
         """
         authored = cast("dict[str, object]", data) if isinstance(data, dict) else {}
         name = authored.get("preset")
@@ -340,7 +400,7 @@ class EgressService(BaseModel):
         if authored.get("restrict_only") is True:
             for credential_field in _CREDENTIAL_FIELDS:
                 defaults.pop(credential_field, None)
-        if authored.get("admin_key") is True:
+        if authored.get("admin_key") is True or authored.get("github_app") is not None:
             for account_field in _ACCOUNT_FIELDS:
                 defaults.pop(account_field, None)
         service = handler({**defaults, **authored})
@@ -377,7 +437,15 @@ class EgressService(BaseModel):
 
     @model_validator(mode="after")
     def _check_operator_fields(self) -> EgressService:
-        """Reject account settings on an `admin_key` service, which sends only its key, and an empty `agents` list."""
+        """Reject account settings on an `admin_key` service, which sends only its key, and an empty `agents` list.
+
+        A `github_app` service sends only its App's tokens, so it takes neither an account nor an administrator key.
+        """
+        if self.github_app is not None:
+            for excluded_field in _GITHUB_APP_EXCLUDED_FIELDS:
+                if getattr(self, excluded_field):
+                    msg = f"a github_app service sends only its App's tokens, so it cannot set {excluded_field}"
+                    raise ValueError(msg)
         if self.admin_key:
             for account_field in _ACCOUNT_FIELDS:
                 if getattr(self, account_field):

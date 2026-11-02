@@ -32,14 +32,14 @@ from urllib.parse import urlparse
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.file_locks import current_inherited_file_lock
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
+from mindroom.github_app_auth import (
+    GitHubAppTokenProvider,
+    get_runtime_github_app_token_provider,
+)
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
     git_tracked_relative_paths_from_checkout,
     include_knowledge_relative_path,
-)
-from mindroom.knowledge.github_app_auth import (
-    GitHubAppTokenProvider,
-    get_runtime_github_app_token_provider,
 )
 from mindroom.knowledge.legacy_git_checkout import adopt_in_tree_git_dir
 from mindroom.knowledge.redaction import (

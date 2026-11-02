@@ -24,6 +24,7 @@ from mindroom.egress_broker.env import (
     personal_page_served,
     primary_callback_hosts,
 )
+from mindroom.egress_broker.github_app import github_app_secret
 from mindroom.egress_broker.messages import ScopeInfo
 from mindroom.egress_broker.oauth_source import oauth_status, resolve_oauth_token
 from mindroom.egress_broker.proxy import EgressBroker
@@ -40,6 +41,7 @@ from mindroom.egress_broker.secrets import (
 )
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.egress_broker.user_services import consistent_read, effective_config, services_for_agent
+from mindroom.github_app_auth import GitHubAppTokenProvider
 from mindroom.logging_config import get_logger
 from mindroom.origins import configured_public_url
 from mindroom.runtime_env_policy import (
@@ -260,8 +262,9 @@ def _routed_key(
 ) -> Secret | SecretServiceChanged | None:
     """Return the scope's key for `name` if, once it is read, the effective config still defines `name` as `routed`.
 
-    An `admin_key` service's key is its administrator key. None without a key, and for a service with its own account
-    (`oauth_separate_account`), which uses only that account. Under `consistent_read` no user-service write lands
+    An `admin_key` service's key is its administrator key. None without a key, for a service with its own account
+    (`oauth_separate_account`), which uses only that account, and for a `github_app` service, which uses only its
+    App. Under `consistent_read` no user-service write lands
     during the read and the check. A config change does not take that lock, so the check reads the current config
     after the key: a key saved after the config moved `name` to other hosts is only read once the new config is
     current, and the check then refuses it.
@@ -269,7 +272,7 @@ def _routed_key(
     with consistent_read():
         key = (
             None
-            if routed.oauth_separate_account
+            if routed.oauth_separate_account or routed.github_app is not None
             else load_secret(credentials_manager, target, name, admin_key=routed.admin_key)
         )
         current = config.current()
@@ -289,11 +292,14 @@ async def _resolve_secret(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
     oauth_executor: ThreadPoolExecutor,
+    github_app_tokens: GitHubAppTokenProvider,
 ) -> SecretResult:
     """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token.
 
     A service whose `agents` list leaves out the claims' routing agent resolves nothing (`SecretNotForAgent`).
-    A service with its own account gets only that account's token, never a key stored under its name.
+    A service with its own account gets only that account's token, never a key stored under its name, and a
+    `github_app` service only a token its App mints for the request's repository (`github_app_secret`), which
+    `github_app_tokens` caches until shortly before it expires.
 
     `routed` is the definition of `name` whose rule routed the request. The requester's effective config (the
     config's services plus the scope's own) must still define `name` as `routed`, or the result is
@@ -308,6 +314,14 @@ async def _resolve_secret(
     stored = await asyncio.to_thread(_routed_key, config, credentials_manager, target, name, routed)
     if stored is not None:
         return stored
+    if routed.github_app is not None:
+        return await github_app_secret(
+            routed.github_app,
+            request,
+            service=name,
+            credentials_manager=credentials_manager,
+            tokens=github_app_tokens,
+        )
     if routed.oauth_provider is None:
         return SecretMissing(admin_key=routed.admin_key)
     current = config.current()
@@ -385,6 +399,8 @@ class _BrokerService:
                 runtime_paths=self._runtime_paths,
                 credentials_manager=credentials_manager,
                 oauth_executor=oauth_executor,
+                # Its own provider: a provider's refresh lock serves one event loop, and this is the broker's.
+                github_app_tokens=GitHubAppTokenProvider(),
             ),
             audit=audit,
             dial_policy=dial_policy,
