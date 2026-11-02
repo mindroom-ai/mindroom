@@ -267,8 +267,8 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
 
     assert provider.model_names == ["large"]
     assert prepare.await_args is not None
-    assert prepare.await_args.kwargs["resolved_inputs"].active_model_name == "large"
-    assert prepare.await_args.kwargs["resolved_inputs"].active_context_window == 48_000
+    plan = prepare.await_args.kwargs["resolved_inputs"].execution_plan
+    assert (plan.compaction_model_name, plan.replay_window_tokens) == ("large", 48_000)
 
 
 @pytest.mark.asyncio
@@ -307,8 +307,13 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
     assert provider.model_names == ["call_fast"]
     assert prepare.await_args is not None
     resolved_inputs = prepare.await_args.kwargs["resolved_inputs"]
-    assert resolved_inputs.active_model_name == "call_fast"
-    assert resolved_inputs.active_context_window == 16_000
+    assert (
+        resolved_inputs.execution_plan.compaction_model_name,
+        resolved_inputs.execution_plan.replay_window_tokens,
+    ) == (
+        "call_fast",
+        16_000,
+    )
 
 
 @pytest.mark.asyncio

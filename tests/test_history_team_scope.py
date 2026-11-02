@@ -173,7 +173,8 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     assert kwargs["allow_native_compaction"] is not scheduled
     resolved_inputs = kwargs["resolved_inputs"]
     assert resolved_inputs.history_settings is built.history_settings
-    assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("default", 1_500)
+    plan = resolved_inputs.execution_plan
+    assert (plan.compaction_model_name, plan.replay_window_tokens) == ("default", 1_500)
     # The provisional first request holds the leader's prompt, every tool it offers, and the turn the run sends.
     frame = kwargs["frame"]
     assert frame.system_messages == tuple(built.spec.leader.system_messages)

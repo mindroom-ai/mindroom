@@ -1002,22 +1002,20 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
 
 
 @pytest.mark.parametrize(
-    ("context_window_tokens", "reserve_tokens", "spent_tokens", "expected"),
+    ("context_window_tokens", "reserve_tokens", "expected"),
     [
-        (1_000, 100, 25, 875),
-        (1_000, 800, 10, 490),
-        (1_000, 100, 2_000, 0),
-        (0, 100, 10, 0),
-        (-10, 5, 3, 0),
+        (1_000, 100, 900),
+        (1_000, 800, 500),
+        (0, 100, 0),
+        (-10, 5, 0),
     ],
 )
 def test_context_budget_after_reserve_preserves_replay_budget_bounds(
     context_window_tokens: int,
     reserve_tokens: int,
-    spent_tokens: int,
     expected: int,
 ) -> None:
-    assert context_budget_after_reserve(context_window_tokens, reserve_tokens, spent_tokens) == expected
+    assert context_budget_after_reserve(context_window_tokens, reserve_tokens) == expected
 
 
 def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(

@@ -257,15 +257,10 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
     )
     return PreparedScopeHistory(
         session=session,
-        resolved_inputs=HistoryPreparationInputs(
-            history_settings=history_settings,
-            active_model_name="test-model",
-            active_context_window=10_000,
-            execution_plan=execution_plan,
-        ),
+        resolved_inputs=HistoryPreparationInputs(history_settings=history_settings, execution_plan=execution_plan),
         compaction_decision=CompactionDecision(mode="none", reason="auto_disabled"),
         native_history=None,
-        sizer=request_sizer(_MODEL, _config(), "default"),
+        model=_MODEL,
         static_tokens=10,
     )
 
@@ -324,7 +319,7 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
 
     assert result is prepared
     resolved_inputs = prepare_common.await_args.kwargs["resolved_inputs"]
-    assert resolved_inputs.active_context_window == 6_000
+    assert resolved_inputs.execution_plan.replay_window_tokens == 6_000
     assert resolved_inputs.execution_plan.limit_tokens == 6_000
 
 
@@ -821,7 +816,8 @@ async def test_prepare_agent_execution_context_sizes_history_against_the_model_t
     )
 
     resolved_inputs = prepare_scope_history.await_args.kwargs["resolved_inputs"]
-    assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("large", 48_000)
+    plan = resolved_inputs.execution_plan
+    assert (plan.compaction_model_name, plan.replay_window_tokens) == ("large", 48_000)
 
 
 @pytest.mark.asyncio

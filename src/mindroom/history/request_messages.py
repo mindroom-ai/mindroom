@@ -171,7 +171,7 @@ def build_request(
     prompt.images = media.images or None
     prompt.files = media.files or None
     prompt.videos = media.videos or None
-    return _with_scope_summary([*deepcopy(history), *turn.in_request_order()], summary)
+    return request_layout(summary=summary, history=deepcopy(history), turn=turn)
 
 
 def request_layout(
@@ -180,7 +180,7 @@ def request_layout(
     history: Sequence[Message],
     turn: TurnMessages | None = None,
 ) -> list[Message]:
-    """Return the messages after a request's system messages as ``build_request`` lays them out, sharing them.
+    """Return the messages after a request's system messages, sharing them: the scope summary, history, then the turn.
 
     It is the layout a request is sized by, which leaves the messages unchanged; a request that is sent takes the
     copies ``build_request`` makes.

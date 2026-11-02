@@ -204,10 +204,10 @@ def _resolve_fallback_summary_input_budget(
     return fallback_budget if unavailable_reason is None else None
 
 
-def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int, spent_tokens: int = 0) -> int:
-    """Return the usable context budget after clamped reserve and known prompt cost."""
+def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int) -> int:
+    """Return the usable context budget after the clamped reserve."""
     normalized_reserve_tokens = _normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
-    return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
+    return max(0, context_window_tokens - normalized_reserve_tokens)
 
 
 def _resolve_replay_window(

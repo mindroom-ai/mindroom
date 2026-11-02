@@ -2347,7 +2347,6 @@ def _finalize_with_history_budget(
     resolved_inputs = replace(
         prepared.resolved_inputs,
         history_settings=history_settings,
-        active_context_window=64_000,
         execution_plan=execution_plan,
     )
     return finalize_history_preparation(

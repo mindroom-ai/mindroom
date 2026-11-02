@@ -334,13 +334,14 @@ async def compact_scope_history(
 
     The caller decided the reply needs it. ``max_summary_tokens`` is the most history the reply can replay; no chunk
     whose summary exceeds it, as ``model``'s route sizes it, is stored. ``available_history_budget`` and
-    ``before_tokens`` are the history's budget and size the notices show. ``progress`` receives the progress after
+    ``before_tokens`` are the history's budget and size the notices show; ``before_tokens`` is also the size the
+    ``compaction:before`` hook receives. ``progress`` receives the progress after
     each stored chunk that leaves runs to replay, and ``complete`` the outcome after the last stored chunk.
     """
     scope = owner_scope(session)
     history_settings = summarizer.history_settings
-    visible_runs = runs = scope_visible_runs(session)
-    if not runs:
+    visible_runs = scope_visible_runs(session)
+    if not visible_runs:
         await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
 
@@ -391,7 +392,7 @@ async def compact_scope_history(
             persisted_session=session,
             working_session=working_session,
             summarizer=summarizer,
-            runs=runs,
+            runs=visible_runs,
             max_summary_tokens=max_summary_tokens,
             model=model,
             before_persist=before_persist,

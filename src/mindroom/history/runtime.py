@@ -114,8 +114,6 @@ class HistoryPreparationInputs:
     """Fully resolved policy/model/token inputs for one history preparation."""
 
     history_settings: ResolvedHistorySettings
-    active_model_name: str
-    active_context_window: int | None
     execution_plan: ResolvedHistoryExecutionPlan
 
 
@@ -134,8 +132,8 @@ class PreparedScopeHistory:
     compaction_decision: CompactionDecision
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None
-    # How the run's requests are sized, which the final replay plan sizes with too.
-    sizer: RequestSizer
+    # The model the run's requests go to, whose route sizes the final replay plan.
+    model: ModelProvider
     # The size of the provisional first request without its summary and history.
     static_tokens: int
     compaction_reply_outcome: CompactionReplyOutcome = "none"
@@ -179,7 +177,7 @@ async def prepare_scope_history(
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
             native_history=configure_native(session=None, runs=()),
-            sizer=sizer,
+            model=sizer.model,
             static_tokens=static_tokens,
         )
 
@@ -245,8 +243,8 @@ async def prepare_scope_history(
             request_size = await asyncio.to_thread(sizer.size, request(native=native_history))
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
-        # Compaction skips history that already fits its budget, so a trigger-level pass targets the trigger. Notices
-        # show the history's share of the request.
+        # A trigger-level pass reports its budget against the trigger, any other against the limit; notices show the
+        # history's share of the request.
         target = (
             execution_plan.trigger_tokens
             if compaction_decision.reason == "over_trigger_native_disabled"
@@ -300,7 +298,7 @@ async def prepare_scope_history(
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
-        sizer=sizer,
+        model=sizer.model,
         static_tokens=static_tokens,
         # A compaction rewrote the history that request held.
         request_size=request_size if compaction_decision.mode != "required" else None,
@@ -591,7 +589,7 @@ def finalize_history_preparation(
             compaction_model=execution_plan.compaction_model_name,
             reason=describe_compaction_unavailability(execution_plan),
         )
-    model = prepared_scope_history.sizer.model
+    model = prepared_scope_history.model
     static_tokens = model.request_tokens(frame.request(summary=None, history=()))
     session = prepared_scope_history.session
     native_history = prepared_scope_history.native_history
@@ -679,7 +677,7 @@ def _fitting_history_budget(
     may overcount less. A static part at or over the limit leaves no room.
     """
     budget = max(0, limit - static_tokens)
-    if not reported or budget == 0 or history_tokens <= 0:
+    if not reported or history_tokens <= 0:
         return budget
     return min(budget, budget * estimated_history_tokens // history_tokens)
 
@@ -710,8 +708,6 @@ def resolve_entity_preparation_inputs(
     )
     return HistoryPreparationInputs(
         history_settings=history_settings,
-        active_model_name=runtime_model.model_name,
-        active_context_window=runtime_model.context_window,
         execution_plan=resolve_history_execution_plan(
             config=config,
             history_settings=history_settings,
