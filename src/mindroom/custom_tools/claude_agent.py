@@ -25,7 +25,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -205,14 +205,17 @@ class _ClaudeSessionManager:
             return session
 
     async def close_all(self) -> None:
-        """Close every session no call is using, which counts the turns no call read.
+        """Close every session no call is using, and wait for every close under way, so each counts its unread turns.
 
-        A session still in use, such as by an API request that shutdown leaves running, ends with the process.
+        A session that a call shutdown leaves running, such as an API request's, still uses or still opens ends with
+        the process, so the manager's lock, which opening a session holds, is not taken.
         """
-        async with self._lock:
-            idle_keys = [key for key, session in self._sessions.items() if not session.lock.locked()]
-            idle = [self._sessions.pop(key) for key in idle_keys]
+        idle = [session for session in self._sessions.values() if not session.lock.locked()]
+        for session in idle:
+            del self._sessions[session.key]
         await self._close_many(idle)
+        # Closes that started earlier, such as the idle sweep's, finish too.
+        await wait_for_background_tasks(owner=self)
 
     async def _sweep_idle(self) -> None:
         """Close each session idle past its TTL, whether or not calls still come, while the manager holds any."""

@@ -1880,6 +1880,67 @@ async def test_shutdown_leaves_a_session_that_a_call_still_uses(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_does_not_wait_for_a_session_that_a_call_still_opens(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown closes the idle sessions while a call it leaves running, such as an API request's, still opens one."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+    await _in_call(run_context, tools.claude_send("quick", session_label="idle"))
+    [idle_client] = _FakeClaudeSDKClient.instances
+    connecting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def connect_slowly(client: _FakeClaudeSDKClient) -> None:
+        connecting.set()
+        await release.wait()
+        client.connected = True
+
+    monkeypatch.setattr(_FakeClaudeSDKClient, "connect", connect_slowly)
+    opening = asyncio.create_task(_in_call(run_context, tools.claude_send("hello", session_label="new")))
+    try:
+        await asyncio.wait_for(connecting.wait(), timeout=5)
+        await asyncio.wait_for(_shut_down(fake_manager, "mindroom:session-1:new"), timeout=5)
+        assert not idle_client.connected
+    finally:
+        release.set()
+        await asyncio.wait_for(opening, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_close_the_idle_sweep_started(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown waits for the sweep's close of an expired session, which counts the turns no call read."""
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+    await _in_call(run_context, tools.claude_send("hello"))
+    [session] = fake_manager._sessions.values()
+    client = cast("_FakeClaudeSDKClient", session.client)
+    release = asyncio.Event()
+    disconnect = client.disconnect
+
+    async def disconnect_slowly() -> None:
+        await release.wait()
+        await disconnect()
+
+    monkeypatch.setattr(client, "disconnect", disconnect_slowly)
+    session.last_used_at -= session.ttl_seconds + 1
+    await _until(session.close_requested.is_set)
+
+    shutdown = asyncio.create_task(_shut_down(fake_manager, session.key))
+    done, _pending = await asyncio.wait({shutdown}, timeout=0.2)
+    assert not done
+    release.set()
+    await asyncio.wait_for(shutdown, timeout=5)
+    assert not client.connected
+    assert not [task for task in asyncio.all_tasks() if task.get_name() == "claude_session_close"]
+
+
+@pytest.mark.asyncio
 async def test_claude_turn_that_switches_models_counts_each_model(
     tmp_path: Path,
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
