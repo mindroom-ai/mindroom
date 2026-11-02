@@ -169,6 +169,7 @@ class Servers:
         self.uploads: list[tuple[str, bytes]] = []
         self.writes: list[str] = []
         self.rate_limit_once: set[str] = set()
+        self.rate_limit_page: str | None = None
         self.added_in_chat_during_upload: dict[str, dict[str, Any]] = {}
         self.refuse_writes = False
 
@@ -219,6 +220,8 @@ class Servers:
         if self.refuse_writes:
             return httpx.Response(403, json={"errcode": "M_FORBIDDEN", "error": "Not allowed to change emoji"})
         if self.rate_limited("write"):
+            if self.rate_limit_page is not None:
+                return httpx.Response(429, text=self.rate_limit_page)
             return httpx.Response(429, json=RATE_LIMITED)
         event = {"content": content, "unsigned": {"prev_content": self.packs.get(state_key, {})}}
         if len(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode()) > EVENT_CONTENT_LIMIT_BYTES:
@@ -367,6 +370,23 @@ def test_rate_limited_upload_and_write_are_retried(
     assert capsys.readouterr().out == "Imported 2 emoji and 1 aliases; skipped 0 taken, 1 unusable, 0 failed.\n"
 
 
+def test_a_rate_limit_page_without_json_stops_with_its_status(
+    servers: Servers,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy's rate limit carries no retry_after_ms, so the run stops and names the status instead of a JSON error."""
+    waits: list[float] = []
+    monkeypatch.setattr(time, "sleep", waits.append)
+    servers.rate_limit_once = {"write"}
+    servers.rate_limit_page = "<html>Too many requests</html>"
+    assert main(HOMESERVER) == 1
+    err = capsys.readouterr().err
+    assert "answered 429" in err
+    assert "Expecting value" not in err
+    assert waits == []
+
+
 def test_slack_error_stops_before_any_upload(servers: Servers, capsys: pytest.CaptureFixture[str]) -> None:
     """A Slack token without the emoji:read scope stops the run with Slack's error code."""
     servers.slack_answer = {"ok": False, "error": "missing_scope"}
@@ -408,6 +428,24 @@ def test_missing_tokens_exit_with_an_error(
         main(HOMESERVER)
     assert stopped.value.code == 2
     assert variable in capsys.readouterr().err
+    assert servers.authorization == {}
+
+
+@pytest.mark.parametrize("variable", ["SLACK_TOKEN", "MATRIX_ACCESS_TOKEN"])
+def test_a_token_with_a_control_character_is_refused_without_printing_it(
+    servers: Servers,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+) -> None:
+    """A token read from a two-line file never reaches a header, whose error would quote it."""
+    monkeypatch.setenv(variable, "first-secret-line\nsecond-secret-line")
+    with pytest.raises(SystemExit) as stopped:
+        main(HOMESERVER)
+    assert stopped.value.code == 2
+    output = capsys.readouterr()
+    assert variable in output.err
+    assert "secret-line" not in output.out + output.err
     assert servers.authorization == {}
 
 

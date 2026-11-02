@@ -116,7 +116,11 @@ def _matrix(client: httpx.Client, method: str, path: str, **kwargs: Any) -> http
     for _ in range(MAX_ATTEMPTS - 1):
         if response.status_code != 429:
             break
-        time.sleep(response.json().get("retry_after_ms", 1000) / 1000)
+        try:
+            body = response.json()
+        except ValueError:
+            break  # A proxy's rate-limit page has no JSON; the error below names the status.
+        time.sleep((body.get("retry_after_ms", 1000) if isinstance(body, dict) else 1000) / 1000)
         response = client.request(method, path, **kwargs)
     if not response.is_success:
         msg = f"{method} {response.url.path} answered {response.status_code}: {response.text}"
@@ -224,13 +228,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Join the room and report what would be imported, but upload and write nothing",
     )
     args = parser.parse_args(argv)
-    # Neither token has whitespace, and httpx's error for a header that ends in whitespace quotes the token.
+    # Neither token has whitespace or control characters, and httpx's error for such a header quotes the token.
     slack_token = os.environ.get("SLACK_TOKEN", "").strip()
     matrix_token = os.environ.get("MATRIX_ACCESS_TOKEN", "").strip()
     if not slack_token:
         parser.error("Set SLACK_TOKEN to a Slack token with the emoji:read scope")
     if not matrix_token:
         parser.error("Set MATRIX_ACCESS_TOKEN to the access token of an account that may change the server emoji")
+    for name, token in (("SLACK_TOKEN", slack_token), ("MATRIX_ACCESS_TOKEN", matrix_token)):
+        if not token.isprintable():
+            parser.error(f"{name} contains a line break or another control character")
     try:
         with (
             httpx.Client(
