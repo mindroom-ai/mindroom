@@ -239,9 +239,15 @@ class BotRoomLifecycle:
         room only while the contact is active.
         """
         invited = read_invited_rooms(self.deps.runtime_paths, self._config(), self.deps.agent_name)
-        if not invited or self._config().personal_agent_instance(self.deps.agent_name) is None:
+        if not invited:
             return invited
-        return invited - contact_room_ids(self.deps.runtime_paths, self.deps.agent_name, include_removed=True)
+        return invited - self._contact_room_ids(include_removed=True)
+
+    def _contact_room_ids(self, *, include_removed: bool = False) -> frozenset[str]:
+        """Return this agent's contact rooms; only a personal agent reads the contacts store, since only it has any."""
+        if self._config().personal_agent_instance(self.deps.agent_name) is None:
+            return frozenset()
+        return contact_room_ids(self.deps.runtime_paths, self.deps.agent_name, include_removed=include_removed)
 
     async def _invited_room_ids_after_joined_invites(self) -> frozenset[str]:
         """Return invited rooms once every pending invite this client already joined is persisted.
@@ -442,8 +448,7 @@ class BotRoomLifecycle:
         configured_rooms.update(await self.deps.get_cleanup_exclusions())
         configured_rooms.update(await self._invited_room_ids_after_joined_invites())
         # A contact room is kept while its contact is active, whatever this agent's invite policy says.
-        contact_rooms = await asyncio.to_thread(contact_room_ids, self.deps.runtime_paths, self.deps.agent_name)
-        configured_rooms.update(contact_rooms)
+        configured_rooms.update(await asyncio.to_thread(self._contact_room_ids))
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             # The router maintains the root Space and the server emoji room outside the configured rooms.
             state = matrix_state_for_runtime(self.deps.runtime_paths)
