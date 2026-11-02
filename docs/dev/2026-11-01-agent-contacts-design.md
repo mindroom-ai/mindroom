@@ -82,7 +82,7 @@ Because the owner is the requester, ordinary `access` admits the turn, so `autho
 Ingress also refuses every other sender in a contact room itself, because ordinary `access` would admit an administrator there.
 The agent's own messages never start a contact turn, so its earlier messages stay recognizable as its own.
 Messages from the other side and from the owner both run as the owner, so coalescing and the newer-message check also compare the speaker, which keeps one from absorbing or superseding the other.
-An edit made by someone other than the owner never regenerates a reply, because it would otherwise count as the owner revising their own message.
+No edit regenerates a contact turn, because its reply never shows.
 Ingress reads the contacts store only for personal agents, which keeps a corrupt store from affecting other agents and saves a file check per event for them.
 
 ### Contact detection: once per turn, and from the store for tools
@@ -202,4 +202,4 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 
 ## Open Questions
 
-- A live run with two personal agents on 2026-11-01 passed every scenario but agents naming each other as `recipient`, which is fixed since and not yet rerun live; a live agent-to-agent exchange up to the consecutive-message limit, an owner's edit regenerating a contact turn, minimal mode, and worker-routed tools have not run live yet.
+- A live run with two personal agents on 2026-11-01 passed every scenario but agents naming each other as `recipient`, which is fixed since and not yet rerun live; a live agent-to-agent exchange up to the consecutive-message limit, minimal mode, and worker-routed tools have not run live yet.
