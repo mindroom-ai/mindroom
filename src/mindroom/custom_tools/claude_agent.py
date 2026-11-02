@@ -657,7 +657,8 @@ class ClaudeAgentTools(Toolkit):
         Claude Code also starts turns on its own, such as when a background task finishes. Their results are read past
         unless the prompt was echoed in their turn, which a prompt sent while such a turn runs joins, or Claude Code
         dropped a prompt there, such as one a hook blocked, which it reports with its reason. Turns read before the
-        answer stay in the reply, and each turn counts toward this call's requester as soon as it ends.
+        answer stay in the reply, and each turn counts toward this call's requester as soon as it ends. A call stopped
+        before it read its answer leaves that answer to end the next call's read, one turn late.
         """
         tool_names: list[str] = []
         turns = [_ClaudeTurn()]
