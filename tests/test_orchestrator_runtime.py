@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import ipaddress
 import os
+import re
 import signal
 import socket
 import ssl
@@ -592,6 +593,29 @@ async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_st
     async with httpx.AsyncClient(trust_env=False) as client:
         with pytest.raises(httpx.ConnectError):
             await client.get(f"http://127.0.0.1:{port}/api/health")
+
+
+@pytest.mark.asyncio
+async def test_a_taken_api_address_is_a_startup_error_without_a_traceback(tmp_path: Path) -> None:
+    """Another process on the API port is a misconfiguration, so the run reports it as a startup error, not a crash."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts"),
+            capture_logs() as logs,
+            pytest.raises(PermanentStartupError, match=re.escape(f"Cannot listen on the API address 127.0.0.1:{port}")),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=port)
+
+    assert _logged_errors(logs) == [("MindRoom startup failed", None, False)]
 
 
 @pytest.mark.asyncio
