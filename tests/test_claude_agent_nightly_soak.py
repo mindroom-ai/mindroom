@@ -32,8 +32,8 @@ class _NightlySoakSDKClient:
 
     def __post_init__(self) -> None:
         self.connected = False
-        self._last_text = ""
         self._session_counter = 0
+        self.stream: asyncio.Queue[AssistantMessage | ResultMessage] = asyncio.Queue()
         _NightlySoakSDKClient.instances.append(self)
 
     async def connect(self) -> None:
@@ -56,28 +56,32 @@ class _NightlySoakSDKClient:
             _, file_name, line = prompt.split(":", 2)
             lines = type(self).shared_files.setdefault(file_name, [])
             lines.append(line)
-            self._last_text = f"wrote:{file_name}:{len(lines)}"
+            text = f"wrote:{file_name}:{len(lines)}"
         elif prompt.startswith("read:"):
             _, file_name = prompt.split(":", 1)
             lines = type(self).shared_files.get(file_name, [])
-            self._last_text = "|".join(lines)
+            text = "|".join(lines)
         else:
-            self._last_text = f"ok:{prompt}"
+            text = f"ok:{prompt}"
 
         self._session_counter += 1
+        self.stream.put_nowait(AssistantMessage(content=[TextBlock(text=text)], model="claude-soak"))
+        self.stream.put_nowait(
+            ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id=f"soak-session-{self._session_counter}",
+                total_cost_usd=0.0,
+            ),
+        )
         type(self).active_queries -= 1
 
     async def receive_messages(self) -> AsyncGenerator[AssistantMessage | ResultMessage]:
-        yield AssistantMessage(content=[TextBlock(text=self._last_text)], model="claude-soak")
-        yield ResultMessage(
-            subtype="success",
-            duration_ms=1,
-            duration_api_ms=1,
-            is_error=False,
-            num_turns=1,
-            session_id=f"soak-session-{self._session_counter}",
-            total_cost_usd=0.0,
-        )
+        while True:
+            yield await self.stream.get()
 
     async def interrupt(self) -> None:
         return

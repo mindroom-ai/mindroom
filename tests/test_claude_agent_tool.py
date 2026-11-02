@@ -17,6 +17,7 @@ import httpx
 import pytest
 from claude_agent_sdk import (
     AssistantMessage,
+    ClaudeAgentOptions,
     ClaudeSDKError,
     ProcessError,
     ResultMessage,
@@ -75,7 +76,7 @@ def _as_agent(agent_name: str, *, model_id: str | None = None) -> Iterator[None]
 
 @dataclass
 class _FakeClaudeSDKClient:
-    """Minimal ClaudeSDKClient test double."""
+    """Minimal ClaudeSDKClient test double: one message stream, which each prompt's reply joins."""
 
     options: Any
 
@@ -89,6 +90,7 @@ class _FakeClaudeSDKClient:
         self.set_models: list[str | None] = []
         self.model = self.options.model
         self.query_models: list[str | None] = []
+        self.stream: asyncio.Queue[Message] = asyncio.Queue()
         _FakeClaudeSDKClient.instances.append(self)
 
     async def connect(self) -> None:
@@ -99,28 +101,37 @@ class _FakeClaudeSDKClient:
         self.model = model
 
     async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
-        """Record the prompt the tool sends as one stream-json user message."""
+        """Record the prompt the tool sends as one stream-json user message, and send its reply."""
         [frame] = [frame async for frame in prompt]
         self.queries.append(frame["message"]["content"])
         self.prompt_ids.append(frame["uuid"])
         self.query_models.append(self.model)
+        for message in await self._reply():
+            await self.stream.put(message)
 
     def _echo(self, index: int = -1) -> UserMessage:
         """Return Claude Code's replay of a prompt, the newest by default, which arrives inside the turn that uses it."""
         return UserMessage(content=self.queries[index], uuid=self.prompt_ids[index])
 
+    async def _reply(self) -> list[Message]:
+        """Return the messages Claude Code sends for the newest prompt."""
+        return [
+            self._echo(),
+            AssistantMessage(content=[TextBlock(text=f"Echo: {self.queries[-1]}")], model="claude-sonnet"),
+            ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="claude-session-123",
+                total_cost_usd=0.0012,
+            ),
+        ]
+
     async def receive_messages(self) -> AsyncGenerator[Message]:
-        yield self._echo()
-        yield AssistantMessage(content=[TextBlock(text=f"Echo: {self.queries[-1]}")], model="claude-sonnet")
-        yield ResultMessage(
-            subtype="success",
-            duration_ms=1,
-            duration_api_ms=1,
-            is_error=False,
-            num_turns=1,
-            session_id="claude-session-123",
-            total_cost_usd=0.0012,
-        )
+        while True:
+            yield await self.stream.get()
 
     async def interrupt(self) -> None:
         self.interrupted = True
@@ -186,32 +197,44 @@ _FIRST_ECHO = UserMessage(content="Stands for Claude Code's replay of the first 
 
 @dataclass
 class _ScriptedClaudeSDKClient(_FakeClaudeSDKClient):
-    """Fake client whose one message stream gets the next script after each prompt and otherwise waits for more.
-
-    ``waiting`` is set once a read has taken everything and waits for more.
-    """
+    """Fake client whose message stream gets the next script after each prompt."""
 
     turns: ClassVar[list[list[Message]]] = []
 
+    async def _reply(self) -> list[Message]:
+        script = type(self).turns.pop(0)
+        return [self._echo() if item is _ECHO else self._echo(0) if item is _FIRST_ECHO else item for item in script]
+
+
+@dataclass
+class _BufferedFakeClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client that, like the SDK, stops reading Claude Code's output once 100 messages sit unread.
+
+    Claude Code answers a control request after everything it sent before, so the answer then never arrives.
+    """
+
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.stream: asyncio.Queue[Message] = asyncio.Queue()
-        self.waiting = asyncio.Event()
+        self.stream = asyncio.Queue(maxsize=100)
+        self.sending: asyncio.Task[None] | None = None
 
-    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
-        await super().query(prompt, session_id=session_id)
-        for message in type(self).turns.pop(0):
-            if message is _ECHO:
-                message = self._echo()  # noqa: PLW2901
-            elif message is _FIRST_ECHO:
-                message = self._echo(0)  # noqa: PLW2901
-            self.stream.put_nowait(message)
+    def send_on_its_own(self, messages: list[Message]) -> None:
+        """Have Claude Code send ``messages`` in a turn it starts on its own, such as after a background task."""
 
-    async def receive_messages(self) -> AsyncGenerator[Message]:
-        while True:
-            if self.stream.empty():
-                self.waiting.set()
-            yield await self.stream.get()
+        async def send() -> None:
+            for message in messages:
+                await self.stream.put(message)
+
+        self.sending = asyncio.create_task(send())
+
+    async def set_model(self, model: str | None = None) -> None:
+        if self.sending is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(self.sending), timeout=1)
+            except TimeoutError as error:
+                message = "Control request timeout: set_model"
+                raise Exception(message) from error  # noqa: TRY002 - the SDK raises a plain Exception
+        await super().set_model(model)
 
 
 @dataclass
@@ -301,13 +324,17 @@ class _BlockingPromptFakeClaudeSDKClient(_FakeClaudeSDKClient):
 
 @dataclass
 class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
-    """Fake client that, like the SDK, starts a reader task on connect and stops it on disconnect."""
+    """Fake client that, like the SDK, starts a reader task on connect and stops it on disconnect.
+
+    ``receiver`` is the task that reads its messages.
+    """
 
     instances: ClassVar[list[_ReaderTaskFakeClaudeSDKClient]] = []
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.reader: asyncio.Task[None] | None = None
+        self.receiver: asyncio.Task[Any] | None = None
         self.connect_task: asyncio.Task[Any] | None = None
         self.disconnect_task: asyncio.Task[Any] | None = None
         _ReaderTaskFakeClaudeSDKClient.instances.append(self)
@@ -316,6 +343,11 @@ class _ReaderTaskFakeClaudeSDKClient(_FakeClaudeSDKClient):
         await super().connect()
         self.connect_task = asyncio.current_task()
         self.reader = asyncio.create_task(asyncio.Event().wait())
+
+    async def receive_messages(self) -> AsyncGenerator[Message]:
+        self.receiver = asyncio.current_task()
+        async for message in super().receive_messages():
+            yield message
 
     async def disconnect(self) -> None:
         self.disconnect_task = asyncio.current_task()
@@ -397,12 +429,9 @@ class _GatewayProbeClaudeSDKClient(_FakeClaudeSDKClient):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self._last_text = ""
-        self._last_session_id = "gateway-session-0"
         _GatewayProbeClaudeSDKClient.instances.append(self)
 
-    async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
-        await super().query(prompt, session_id=session_id)
+    async def _reply(self) -> list[Message]:
         env = self.options.env or {}
         base_url = env.get("ANTHROPIC_BASE_URL")
         if not base_url:
@@ -439,21 +468,19 @@ class _GatewayProbeClaudeSDKClient(_FakeClaudeSDKClient):
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = str(block.get("text", ""))
                     break
-        self._last_text = text or "gateway-empty"
-        self._last_session_id = str(payload.get("id", "gateway-session-unknown"))
-
-    async def receive_messages(self) -> AsyncGenerator[Message]:
-        yield self._echo()
-        yield AssistantMessage(content=[TextBlock(text=self._last_text)], model="claude-probe")
-        yield ResultMessage(
-            subtype="success",
-            duration_ms=1,
-            duration_api_ms=1,
-            is_error=False,
-            num_turns=1,
-            session_id=self._last_session_id,
-            total_cost_usd=0.001,
-        )
+        return [
+            self._echo(),
+            AssistantMessage(content=[TextBlock(text=text or "gateway-empty")], model="claude-probe"),
+            ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id=str(payload.get("id", "gateway-session-unknown")),
+                total_cost_usd=0.001,
+            ),
+        ]
 
 
 async def _in_call[T](context: ToolCallContext, call: Awaitable[T]) -> T:
@@ -685,6 +712,57 @@ async def test_claude_send_switches_a_reused_session_to_each_reply_model(
 
 
 @pytest.mark.asyncio
+async def test_claude_send_switches_models_after_claude_code_sends_many_messages_on_its_own(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Messages Claude Code sends while no call reads never stall the session, so a later call can switch models."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BufferedFakeClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+    with _as_agent("general", model_id="claude-opus-5-5"):
+        await _in_call(run_context, tools.claude_send("Run the tests in the background"))
+    [client] = cast("list[_BufferedFakeClaudeSDKClient]", _FakeClaudeSDKClient.instances)
+    steps = [_claude_response("claude-opus-5-5", f"msg-{step}", 10, text=f"Step {step}.") for step in range(150)]
+    client.send_on_its_own([*steps, _self_started_result(30)])
+
+    with _as_agent("general", model_id="claude-haiku-5-5"):
+        reply = await asyncio.wait_for(_in_call(run_context, tools.claude_send("What now?")), timeout=10)
+
+    assert client.set_models == ["claude-haiku-5-5"]
+    assert reply.startswith("Step 0.\nStep 1.\n")
+    assert "Step 149.\nEcho: What now?\n\n" in reply
+
+
+@pytest.mark.asyncio
+async def test_claude_send_replaces_a_session_whose_control_request_failed(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A control request that fails, such as one Claude Code never answers, closes the session for the next call."""
+
+    class _UnansweredControlClaudeSDKClient(_FakeClaudeSDKClient):
+        async def set_model(self, model: str | None = None) -> None:  # noqa: ARG002
+            message = "Control request timeout: set_model"
+            raise Exception(message)  # noqa: TRY002 - the SDK raises a plain Exception
+
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _UnansweredControlClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+    with _as_agent("general", model_id="claude-opus-5-5"):
+        await _in_call(run_context, tools.claude_send("Start"))
+    with _as_agent("general", model_id="claude-haiku-5-5"):
+        failed = await _in_call(run_context, tools.claude_send("Next"))
+        retried = await _in_call(run_context, tools.claude_send("Next"))
+
+    assert "Claude session error: Control request timeout: set_model" in failed
+    assert "Echo: Next" in retried
+    first, second = _FakeClaudeSDKClient.instances
+    assert first.connected is False
+    assert second.options.model == "claude-haiku-5-5"
+
+
+@pytest.mark.asyncio
 async def test_claude_send_tool_model_overrides_agent_model(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
@@ -907,7 +985,9 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
 
     client = _ReaderTaskFakeClaudeSDKClient.instances[0]
     assert client.reader is not None
+    assert client.receiver is not None
     assert _TURN_OWNER not in client.reader.get_context()
+    assert _TURN_OWNER not in client.receiver.get_context()
 
     # A later turn ends the session; the task that connected the client still disconnects it.
     await asyncio.create_task(_in_call(run_context, tools.claude_end_session()))
@@ -1145,17 +1225,31 @@ async def test_claude_send_error_does_not_deadlock(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_error", "reported"),
+    [
+        pytest.param(
+            ProcessError("Command failed", exit_code=-9),
+            "Command failed (exit code: -9)",
+            id="with-an-error",
+        ),
+        pytest.param(None, "Claude Code stopped sending messages.", id="without-an-error"),
+    ],
+)
 async def test_claude_cli_exit_while_reading_response_closes_session(
     fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
+    exit_error: ProcessError | None,
+    reported: str,
 ) -> None:
-    """A CLI that exits mid-turn raises a typed SDK error from the response stream, which closes the session."""
+    """A CLI that exits mid-turn ends the call with a session error, which closes the session."""
 
     class _ExitingClaudeSDKClient(_FakeClaudeSDKClient):
         async def receive_messages(self) -> AsyncGenerator[Message]:
+            await self.stream.get()
             yield AssistantMessage(content=[TextBlock(text="partial")], model="claude-sonnet")
-            message = "Command failed"
-            raise ProcessError(message, exit_code=-9)
+            if exit_error is not None:
+                raise exit_error
 
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ExitingClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
@@ -1163,7 +1257,7 @@ async def test_claude_cli_exit_while_reading_response_closes_session(
 
     result = await asyncio.wait_for(_in_call(run_context, tools.claude_send("hello")), timeout=1)
 
-    assert "Claude session error: Command failed (exit code: -9)" in result
+    assert f"Claude session error: {reported}" in result
     assert "Session context:" in result
     assert not fake_manager._sessions
 
@@ -1239,11 +1333,19 @@ async def test_claude_start_session_error_includes_context(
     assert "- fork_session: False" in result
 
 
+async def _until(condition: Callable[[], bool]) -> None:
+    """Let other tasks run until ``condition`` holds."""
+    while not condition():  # noqa: ASYNC110 - the queues polled here signal no event to await
+        await asyncio.sleep(0)
+
+
 async def _stop_when_waiting(call: Coroutine[Any, Any, str]) -> None:
-    """Run ``call`` until it waits for more of the scripted stream, then stop it, as a stopped reply stops it."""
-    client = cast("_ScriptedClaudeSDKClient", _FakeClaudeSDKClient.instances[0])
+    """Run ``call`` until it sent its prompt and read all Claude Code sent, then stop it as a stopped reply does."""
+    [session] = claude_agent_module.ClaudeAgentTools._session_manager._sessions.values()
+    client = cast("_FakeClaudeSDKClient", session.client)
+    prompts = len(client.queries) + 1
     stopped = asyncio.create_task(call)
-    await client.waiting.wait()
+    await _until(lambda: len(client.queries) == prompts and client.stream.empty() and session.messages.empty())
     stopped.cancel()
     with pytest.raises(asyncio.CancelledError):
         await stopped
@@ -1256,10 +1358,12 @@ async def _send_metered_turns(
     api_requests: bool = False,
     model: str | None = None,
     stop_last: bool = False,
+    after: Callable[[], Awaitable[object]] | None = None,
 ) -> tuple[list[str], list[tuple[str | None, str, int, int, int, int]]]:
     """Send one prompt per requester on one session; return the replies and each requester's usage by model.
 
     With ``stop_last``, the last call is stopped, as a stopped reply stops it, once it waits for more of the stream.
+    ``after`` runs once the calls are done, outside every conversation, before the usage is read.
     """
     config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
     load_scope = partial(
@@ -1297,6 +1401,8 @@ async def _send_metered_turns(
                 replies.append(await call)
                 continue
             await _stop_when_waiting(call)
+    if after is not None:
+        await after()
     report = collect_admin_usage(config=config, runtime_paths=paths)
     return replies, sorted(
         (
@@ -1583,6 +1689,57 @@ async def test_claude_turns_read_by_a_stopped_call_still_count(
     assert rows == [
         ("@alice:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0),
         ("@bob:localhost", "claude-sonnet-5-5", 300, 30, 0, 0),
+    ]
+
+
+async def _end_session(manager: claude_agent_module._ClaudeSessionManager, session_key: str) -> None:
+    await manager.close(session_key)
+
+
+async def _expire(manager: claude_agent_module._ClaudeSessionManager, session_key: str) -> None:
+    session = manager._sessions[session_key]
+    session.last_used_at -= session.ttl_seconds + 1
+    await manager.get("other-conversation")
+
+
+async def _evict(manager: claude_agent_module._ClaudeSessionManager, session_key: str) -> None:
+    namespace = manager._sessions[session_key].namespace
+    manager.configure_namespace(namespace=namespace, ttl_minutes=60, max_sessions=1)
+    await manager.get_or_create("other-conversation", namespace, ClaudeAgentOptions())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close", [_end_session, _expire, _evict], ids=["end-session", "expiry", "eviction"])
+async def test_a_stopped_calls_unread_answer_counts_when_its_session_closes(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+    close: Callable[[claude_agent_module._ClaudeSessionManager, str], Awaitable[None]],
+) -> None:
+    """The answer a stopped call left unread counts toward that call's requester when the session closes."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turns = [[_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)], [_ECHO]]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
+
+    async def answer_then_close() -> None:
+        [session] = fake_manager._sessions.values()
+        client = cast("_ScriptedClaudeSDKClient", session.client)
+        # Claude Code answers the stopped call's prompt, and nothing reads that answer.
+        for message in [_claude_response("claude-sonnet-5-5", "msg-2", 500), _claude_result(60)]:
+            client.stream.put_nowait(message)
+        await _until(client.stream.empty)
+        await close(fake_manager, session.key)
+
+    _replies, rows = await _send_metered_turns(
+        tmp_path,
+        ["@alice:localhost", "@bob:localhost"],
+        stop_last=True,
+        after=answer_then_close,
+    )
+
+    assert rows == [
+        ("@alice:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0),
+        ("@bob:localhost", "claude-sonnet-5-5", 500, 60, 0, 0),
     ]
 
 

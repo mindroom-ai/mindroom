@@ -14903,7 +14903,7 @@ Calls to the same session run one after another.
 When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_send()` reply.
 `resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_end_session()` first.
 `claude_session_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
-Errors from the Claude SDK include the last lines of Claude CLI stderr to help debug gateway or CLI problems.
+A `claude_send()` that fails returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes its session, so the next call starts a new one.
 Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests to reuse one Claude session; see [Session continuity](https://docs.mindroom.chat/openai-api/#session-continuity).
 
 | Option | Type | Default | Notes |

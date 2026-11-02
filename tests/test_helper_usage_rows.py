@@ -300,8 +300,7 @@ async def _claude_agent(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> Pat
         usage={"input_tokens": 50, "output_tokens": 9, "cache_read_input_tokens": 5},
     )
     turn = claude_agent._ClaudeTurn(responses={"msg-1": response}, result=result)
-    with helper_usage_owner_context(owner):
-        await claude_agent._record_turn_usage(turn, None)
+    await claude_agent._record_turn_usage(turn, None, owner, None)
     return paths.storage_root
 
 
