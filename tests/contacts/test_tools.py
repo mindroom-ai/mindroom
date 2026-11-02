@@ -356,7 +356,10 @@ async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_pa
             requester_id=CO_OWNER,
             target="mind_alice",
         )
-    assert (again.id, again.notice_event_id, again.reason) == (missing.id, "$late", "Plan the dinner")
+    # The notice nobody saw goes out with the reason the requester just approved, and the other side changes nothing.
+    assert (again.id, again.notice_event_id, again.reason) == (missing.id, "$late", "Another reason")
+    assert [record.reason for record in _stored(paths)] == ["Another reason"]
+    assert "Another reason" in str(send.await_args)
     assert reverse.id == missing.id
     send.assert_awaited_once()
     assert send.await_args.kwargs == {"transaction_id": f"contact-request-{missing.id}"}

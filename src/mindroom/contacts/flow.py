@@ -256,8 +256,9 @@ async def request_contact(
     """Record a contact request from ``agent_name`` or its owner, post it to the target owner, and return it.
 
     The flag says whether this call posted a request notice. A pending or active contact between the same two parties,
-    in either direction, is returned unchanged instead, and its request notice is posted when it never landed. Asking
-    again with other rules or tools is refused, because only ``update_contact`` changes them.
+    in either direction, is returned unchanged instead, and its request notice is posted when it never landed, with the
+    reason its requester gave last. Asking again with other rules or tools is refused, because only ``update_contact``
+    changes them.
     """
     config, paths = context.current_config, context.runtime_paths
     own = _own_party(context, agent_name)
@@ -282,6 +283,9 @@ async def request_contact(
     def create(book: ContactBook) -> ContactRecord:
         existing = _existing_contact(book, requester, target_party, rules=rules, tools=tools)
         if existing is not None:
+            # Nobody has read a request whose notice never landed, so its requester's new reason replaces the old one.
+            if existing.status == "pending" and existing.notice_event_id is None and existing.requester == requester:
+                existing.reason = reason.strip()
             return existing.model_copy(deep=True)
         record = ContactRecord(
             id=uuid4().hex[:12],
