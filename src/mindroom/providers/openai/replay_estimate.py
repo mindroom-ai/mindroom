@@ -1,9 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Size the history a Responses request replays explicitly, as the request sends it.
+"""Size a Responses request as the model context its body gives the model.
 
-History budgets take the larger of this estimate and the canonical one. A typed ``input_image`` block counts by
-the visual patches OpenAI bills for it, read from the image header when the bytes are inline, never by its encoded
-transport bytes. Encrypted reasoning counts by the reasoning tokens its response reported, never by its ciphertext.
+A typed ``input_image`` block counts by the visual patches OpenAI bills for it, read from the image header when the
+bytes are inline, never by its encoded transport bytes. Encrypted reasoning counts by the reasoning tokens its response
+reported, never by its ciphertext.
 """
 
 from __future__ import annotations
@@ -12,23 +12,19 @@ import base64
 import io
 import math
 import struct
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.history.message_content import image_content_for_token_estimation
-from mindroom.llm.messages import is_own_model_message, stable_serialize
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
 from mindroom.providers.openai.response_replay import recorded_output
-from mindroom.providers.openai.responses_wire import responses_input, responses_replay
-from mindroom.token_counting.counts import count, opaque_tokens
+from mindroom.token_counting.counts import opaque_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import TokenCounter
     from mindroom.token_counting.requests import RequestParts
 
-__all__ = ["estimate_responses_replay_tokens", "responses_body_parts", "responses_replay_uses_visual_tokens"]
+__all__ = ["responses_body_parts", "responses_replay_uses_visual_tokens"]
 
 # Header bytes read from an inline image; longer metadata before the frame falls back to the patch ceiling.
 _HEADER_SCAN_BYTES = 64 * 1024
@@ -37,46 +33,6 @@ _HEADER_SCAN_BYTES = 64 * 1024
 def responses_replay_uses_visual_tokens(model_id: str) -> bool:
     """Return whether images are priced by their visual patches, which only models with known patch budgets allow."""
     return model_id.startswith(OPENAI_IMAGE_PATCH_MODEL_PREFIXES)
-
-
-def estimate_responses_replay_tokens(
-    messages: Sequence[Message],
-    *,
-    counter: TokenCounter,
-    model_id: str,
-    cache_system_prompt: bool,
-    explicit_breakpoint: bool,
-    provider: str,
-) -> int:
-    """Count the ``input`` an explicitly replayed Responses request sends for ``messages``, its text with ``counter``.
-
-    An attachment file that cannot be read raises ``InvalidRequest`` naming ``provider``, as the request would.
-    """
-    replayed = responses_input(
-        responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
-        cache_system_prompt=cache_system_prompt,
-        explicit_breakpoint=explicit_breakpoint,
-        provider=provider,
-    )
-    formatted = [_without_reasoning_ciphertext(item) for item in replayed]
-    reasoning_tokens = _earlier_reasoning_tokens(messages, replayed)
-    if not responses_replay_uses_visual_tokens(model_id):
-        return count(counter, stable_serialize(formatted)) + reasoning_tokens
-    estimated_input = []
-    image_tokens = 0
-    for item in formatted:
-        projected = dict(item)
-        for field_name in ("content", "output"):
-            content = item.get(field_name)
-            if isinstance(content, list):
-                projected[field_name] = [image_content_for_token_estimation(block) for block in content]
-                image_tokens += sum(
-                    _image_tokens(block, model_id)
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "input_image"
-                )
-        estimated_input.append(projected)
-    return count(counter, stable_serialize(estimated_input)) + image_tokens + reasoning_tokens
 
 
 def responses_body_parts(
@@ -121,6 +77,15 @@ def responses_body_parts(
         parts.value([tool for tool in body.get("tools") or () if not tool.get("defer_loading")])
 
 
+def _image_content_for_token_estimation(value: object) -> object:
+    """Remove transport fields only from a typed image block, retaining its shape."""
+    if isinstance(value, dict):
+        block = cast("dict[object, object]", value)
+        if block.get("type") == "input_image":
+            return {key: item for key, item in block.items() if key not in {"image_url", "file_id"}}
+    return value
+
+
 def _replayed_reasoning_ids(items: Sequence[Any]) -> set[object]:
     return {
         item["id"]
@@ -141,7 +106,7 @@ def _without_image_transport(items: list[Any], model_id: str) -> tuple[list[Any]
         for field_name in ("content", "output"):
             content = item.get(field_name) if isinstance(item, dict) else None
             if isinstance(content, list):
-                projected[field_name] = [image_content_for_token_estimation(block) for block in content]
+                projected[field_name] = [_image_content_for_token_estimation(block) for block in content]
                 image_tokens += sum(
                     _image_tokens(block, model_id)
                     for block in content
@@ -156,34 +121,6 @@ def _without_ciphertext(item: Any) -> Any:  # noqa: ANN401
     if isinstance(item, dict) and "encrypted_content" in item:
         return {key: value for key, value in item.items() if key != "encrypted_content"}
     return item
-
-
-def _without_reasoning_ciphertext(item: Any) -> Any:  # noqa: ANN401
-    """Drop encrypted reasoning, whose base64 length says nothing about the tokens the provider counts."""
-    if isinstance(item, dict) and item.get("type") == "reasoning" and "encrypted_content" in item:
-        return {key: value for key, value in item.items() if key != "encrypted_content"}
-    return item
-
-
-def _earlier_reasoning_tokens(messages: Sequence[Message], replayed: list[Any]) -> int:
-    """Charge each earlier answer whose encrypted reasoning the request replays the reasoning tokens it reported.
-
-    A model that renders earlier turns' reasoning (``reasoning.context: all_turns``) holds it in context. The
-    running turn's own reasoning is left to mid-turn sizing, which adds each of its responses' reported thinking.
-    """
-    replayed_ids = {
-        item["id"]
-        for item in replayed
-        if isinstance(item, dict)
-        and item.get("type") == "reasoning"
-        and item.get("encrypted_content")
-        and item.get("id")
-    }
-    return sum(
-        message.metrics.tokens.reasoning_tokens
-        for message in messages
-        if message.role == "assistant" and not is_own_model_message(message) and replayed_ids & _reasoning_ids(message)
-    )
 
 
 def _reasoning_ids(message: Message) -> set[object]:

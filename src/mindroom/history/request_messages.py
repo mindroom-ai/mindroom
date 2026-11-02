@@ -174,6 +174,20 @@ def build_request(
     return _with_scope_summary([*deepcopy(history), *turn.in_request_order()], summary)
 
 
+def request_layout(
+    *,
+    summary: ScopeSummary | None,
+    history: Sequence[Message],
+    turn: TurnMessages | None = None,
+) -> list[Message]:
+    """Return the messages after a request's system messages as ``build_request`` lays them out, sharing them.
+
+    It is the layout a request is sized by, which leaves the messages unchanged; a request that is sent takes the
+    copies ``build_request`` makes.
+    """
+    return _with_scope_summary([*history, *(turn.in_request_order() if turn is not None else ())], summary)
+
+
 def build_resume_request(
     *,
     paused: Sequence[Message],
@@ -229,5 +243,6 @@ __all__ = [
     "filter_tool_calls",
     "replayable_messages",
     "replayed_history",
+    "request_layout",
     "scope_history_messages",
 ]

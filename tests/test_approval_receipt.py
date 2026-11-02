@@ -849,7 +849,6 @@ def _state_stub() -> object:
         run=context(),
         record=RunRecord(run_id="run-1"),
         request_index=0,
-        loop_start_ids=frozenset(),
         request_template=EMPTY_REQUEST,
         digests=RequestDigests(ScriptedModel([])),
     )

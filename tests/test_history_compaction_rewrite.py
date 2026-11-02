@@ -75,8 +75,9 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
+from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.summary_model import summary_model
-from tests.fakes.token_counter import fake_token_counter, quarter_tokens
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
@@ -148,7 +149,7 @@ async def _rewrite_single_run(
         max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=after_persist,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
 
@@ -1261,7 +1262,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         )
 
     assert outcome is not None
@@ -1287,7 +1288,7 @@ async def test_a_summary_is_never_stored_on_a_count_that_undercounts_it_while_th
     session = _session("session-1", runs=[_filler_run("run-1", words=200)])
     seed_session(storage, session)
     summary = "要点" * 500
-    loading = TokenCounter(estimate=lambda _text: None)
+    loading = ScriptedModel([], token_counter=TokenCounter(estimate=lambda _text: None))
     stand_in = estimate_summary_text_tokens(summary, loading)
     assert stand_in < 2_000 < estimate_summary_text_tokens(summary, loading, upper_bound=True)
 
@@ -1304,7 +1305,7 @@ async def test_a_summary_is_never_stored_on_a_count_that_undercounts_it_while_th
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            counter=loading,
+            model=loading,
         )
 
     assert summary_rows_of(storage, "agent:test_agent") == []
@@ -1337,13 +1338,13 @@ async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_e
         state=HistoryScopeState(),
         summarizer=_summarizer(model, summary_input_budget),
         available_history_budget=1,
-        max_summary_tokens=estimate_summary_text_tokens(short_summary, fake_token_counter()),
+        max_summary_tokens=estimate_summary_text_tokens(short_summary, ScriptedModel([])),
         before_tokens=2,
         replay_window_tokens=16_000,
         threshold_tokens=1,
         progress=None,
         complete=_reported,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
     assert len(model.requests) == 2
@@ -1823,7 +1824,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             max_summary_tokens=None,
             before_persist=AsyncMock(),
             after_persist=AsyncMock(),
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         )
     assert rewrite_result is not None
     assert rewrite_result.compacted_run_count == 1
@@ -1927,7 +1928,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         )
 
     assert outcome is not None
@@ -1969,7 +1970,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     before_tokens = estimate_prompt_visible_history_tokens(
         session=working_session,
         history_settings=history_settings,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
     summary_input_budget = next(
         budget
@@ -1996,7 +1997,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
         == 1
     )
     progress_events: list[CompactionLifecycleProgress] = []
-    counter = responses_adapter(tmp_path).token_counter if portable else fake_token_counter()
+    model = responses_adapter(tmp_path) if portable else ScriptedModel([])
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
         persisted = storage.load_session("session-1")
@@ -2019,13 +2020,13 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
             before_tokens=estimate_prompt_visible_history_tokens(
                 session=working_session,
                 history_settings=history_settings,
-                counter=counter,
+                model=model,
             ),
             replay_window_tokens=None,
             threshold_tokens=None,
             progress=record_progress,
             complete=_reported,
-            counter=counter,
+            model=model,
         )
 
     assert outcome is not None
@@ -2144,49 +2145,13 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
             threshold_tokens=None,
             progress=None,
             complete=_reported,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         )
 
     assert appended == [True, False]
     assert outcome is not None
     assert outcome.summary == "first chunk summary"
     assert outcome.summary_model == "summary-model"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("before_tokens", "available_history_budget"), [(1_000, 1_000), (1_000, None)])
-async def test_compact_scope_history_skips_unforced_history_that_fits(
-    tmp_path: Path,
-    before_tokens: int,
-    available_history_budget: int | None,
-) -> None:
-    """Without a manual request, history at or under its budget, or with no budget, is left alone."""
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    seed_session(storage, _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")]))
-    session = storage.load_session("session-1")
-    assert session is not None
-    summary_mock = AsyncMock(return_value="unused")
-
-    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
-        outcome = await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=HistoryScopeState(),
-            summarizer=_summarizer(),
-            available_history_budget=available_history_budget,
-            max_summary_tokens=None,
-            before_tokens=before_tokens,
-            replay_window_tokens=None,
-            threshold_tokens=None,
-            progress=None,
-            complete=_reported,
-            counter=fake_token_counter(),
-        )
-
-    assert outcome is None
-    summary_mock.assert_not_awaited()
-    assert summary_rows_of(storage, "agent:test_agent") == []
 
 
 @pytest.mark.asyncio

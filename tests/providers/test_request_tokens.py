@@ -1,0 +1,230 @@
+"""Each provider route sizes a request from the body its own builder renders for it (``ModelProvider.request_tokens``).
+
+The goldens under ``tests/fixtures/agno_parity/providers`` hold the bodies the routes send; sizing reads those bodies,
+so whatever a route sends for a message, a tool, or a setting is what its size counts.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import httpx
+import httpx2
+import pytest
+
+from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.provider import ModelRequest, TokenCounter
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
+from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
+from tests.providers.anthropic_family_support import provider_for
+from tests.providers.gemini_ollama_support import FAMILIES as GEMINI_OLLAMA_FAMILIES
+from tests.providers.gemini_ollama_support import build_adapter
+from tests.providers.golden_support import golden_id, golden_paths, golden_request, load_golden, pipeline_provider
+from tests.providers.openai_family_support import OPENAI_FAMILIES, golden_provider
+
+if TYPE_CHECKING:
+    from mindroom.llm.provider import ModelProvider
+
+GOLDENS = golden_paths((*OPENAI_FAMILIES, *CLAUDE_FAMILIES, *GEMINI_OLLAMA_FAMILIES))
+# Body fields no model reads as text: ids, roles, block types, cache breakpoints, signatures, ciphertext, media.
+_TRANSPORT_KEYS = frozenset(
+    {
+        "id",
+        "call_id",
+        "tool_call_id",
+        "tool_use_id",
+        "type",
+        "role",
+        "status",
+        "cache_control",
+        "prompt_cache_breakpoint",
+        "signature",
+        "data",
+        "encrypted_content",
+        "encrypted_index",
+        "thought_signature",
+        "media_type",
+        "mime_type",
+        "image_url",
+        "file_id",
+        "file_data",
+        "file_uri",
+        "url",
+        "detail",
+        "format",
+        "index",
+        "thoughtSignature",
+        "mimeType",
+        "fileUri",
+        "toolCallId",
+        "filename",
+        "displayName",
+        "file_url",
+        "images",
+    },
+)
+# The body fields a request's model context lives in, per wire.
+_CONTEXT_FIELDS = ("messages", "input", "contents", "system", "systemInstruction", "instructions", "tools")
+
+
+class _Recorder:
+    """A counter that records every text it counts and counts a quarter token per character."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def counter(self) -> TokenCounter:
+        def estimate(text: str) -> int:
+            self.texts.append(text)
+            return len(text) // 4
+
+        return TokenCounter(estimate=estimate)
+
+
+def _adapter(path: Path, root: Path) -> ModelProvider:
+    golden = load_golden(path)
+    family = path.parent.name
+    config = golden["input"]["model_config"]
+    if family in CLAUDE_FAMILIES:
+        return provider_for(config, root, httpx2.AsyncClient())
+    if family in GEMINI_OLLAMA_FAMILIES:
+        return build_adapter(config, root, lambda _request: httpx.Response(500))
+    return golden_provider(golden, root).adapter
+
+
+def _strings(value: object, key: str | None = None) -> list[str]:
+    """Return the string leaves of a sent body value that a model reads, leaving transport fields out."""
+    if key in _TRANSPORT_KEYS:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, dict):
+        if value.get("defer_loading"):
+            # A deferred tool ships for the API to load on a search, and costs nothing until then.
+            return []
+        return [text for name, nested in value.items() for text in _strings(nested, name)]
+    if isinstance(value, list):
+        return [text for nested in value for text in _strings(nested, key)]
+    return []
+
+
+@pytest.mark.parametrize("path", GOLDENS, ids=golden_id)
+def test_a_route_sizes_every_text_its_body_sends(path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every text a route's golden body carries for the model is among what its size, through the pipeline, counts.
+
+    The pipeline sizes the request its stages send the adapter, such as the media fallback's note in place of media a
+    route omits and portable tool search's ``call_tool`` calls.
+    """
+    golden = load_golden(path)
+    adapter = _adapter(path, tmp_path)
+    request = golden_request(golden["input"], native=adapter.native_history_route)
+    recorder = _Recorder()
+    monkeypatch.setattr(type(adapter), "token_counter", property(lambda _self: recorder.counter()), raising=False)
+    pipeline_provider(adapter).request_tokens(request)
+    counted = "".join(recorder.texts)
+    body = golden["request"]["body"]
+    sent = [text for field in _CONTEXT_FIELDS for text in _strings(body.get(field), field)]
+    missing = [
+        text
+        for text in sent
+        if text not in counted
+        and json.dumps(text, ensure_ascii=False)[1:-1] not in counted
+        # A route's note in place of a file it cannot send counts within that file's allowance.
+        and not text.startswith(("[Attached document not sent inline", "[Attachment omitted"))
+    ]
+    assert missing == []
+
+
+@pytest.mark.parametrize("path", GOLDENS, ids=golden_id)
+def test_an_answer_and_what_follows_it_add_no_more_than_their_own_size(path: Path, tmp_path: Path) -> None:
+    """A request sized from an answer on is never more than the request before it plus that tail."""
+    golden = load_golden(path)
+    adapter = _adapter(path, tmp_path)
+    request = golden_request(golden["input"], native=adapter.native_history_route)
+    for index, message in enumerate(request.messages):
+        if message.role != "assistant" or index == 0:
+            continue
+        prefix = replace(request, messages=request.messages[:index])
+        assert adapter.request_tokens(request) <= adapter.request_tokens(prefix) + adapter.request_tokens(
+            request,
+            start=index,
+        )
+
+
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
+_REASONING = "The forecast says rain in the evening, so a light jacket and closed shoes are the right call. " * 12
+_THINKING = "Weigh the evening forecast against the walking plan before suggesting what to pack. " * 12
+
+
+def _route(family: str, tmp_path: Path) -> ModelProvider:
+    """Return the adapter one of ``family``'s goldens configures, built under its own directory."""
+    root = tmp_path / family
+    root.mkdir()
+    return _adapter(sorted((_FIXTURES / family).glob("*.json"))[0], root)
+
+
+def _conversation(answer: Message) -> ModelRequest:
+    return ModelRequest(
+        messages=(
+            Message(role="system", content="You are a concise travel assistant."),
+            Message(role="user", content="What should I pack for Paris tomorrow?"),
+            answer,
+            Message(role="user", content="And for the evening?"),
+        ),
+    )
+
+
+def _difference(route: ModelProvider, answer: Message, without: Message) -> int:
+    """Return how much more the request holding ``answer`` gives the model than the one holding ``without``."""
+    return route.request_tokens(_conversation(answer)) - route.request_tokens(_conversation(without))
+
+
+@pytest.mark.parametrize(("family", "replays"), [("kimi", True), ("deepseek", True), ("openai_chat", False)])
+def test_a_chat_route_counts_the_reasoning_content_it_sends_back(family: str, replays: bool, tmp_path: Path) -> None:
+    """The Kimi and DeepSeek routes send each earlier answer's ``reasoning_content`` back, so its size counts it."""
+    route = _route(family, tmp_path)
+    plain = Message(role="assistant", content="Pack a light rain jacket.", from_history=True)
+    reasoned = replace(plain, reasoning_content=_REASONING)
+
+    added = _difference(route, reasoned, plain)
+
+    reasoning = route.request_tokens(ModelRequest(messages=(Message(role="user", content=_REASONING),)))
+    assert added >= reasoning * 0.9 if replays else added == 0
+
+
+@pytest.mark.parametrize(("family", "replays"), [("anthropic", True), ("bedrock_claude", False)])
+def test_claude_counts_earlier_thinking_where_it_replays_it(family: str, replays: bool, tmp_path: Path) -> None:
+    """Claude with a thinking binding replays an earlier turn's thinking; Bedrock, which takes no binding, drops it."""
+    route = _route(family, tmp_path)
+    text = {"type": "text", "text": "Pack a light rain jacket."}
+    thinking = {"type": "thinking", "thinking": _THINKING, "signature": "c2lnbmF0dXJl"}
+    provenance = model_provenance(route.identity.id, route.identity.provider)
+
+    def answer(*blocks: dict[str, Any]) -> Message:
+        return Message(
+            role="assistant",
+            content="Pack a light rain jacket.",
+            provider_data={**provenance, CLAUDE_BLOCKS_KEY: list(blocks)},
+            from_history=True,
+        )
+
+    added = _difference(route, answer(thinking, text), answer(text))
+
+    thought = route.request_tokens(ModelRequest(messages=(Message(role="user", content=_THINKING),)))
+    assert added >= thought * 0.9 if replays else added == 0
+
+
+def test_gemini_counts_a_replayed_thought_signature_as_its_reported_reasoning(tmp_path: Path) -> None:
+    """A thought signature costs about the reasoning its reply reported, on the run's own replies and history alike."""
+    route = _route("gemini", tmp_path)
+    provenance = model_provenance(route.identity.id, route.identity.provider)
+    metrics = MessageMetrics(tokens=TokenCounts(output_tokens=320, reasoning_tokens=300))
+    plain = Message(role="assistant", content="Pack a light rain jacket.", provider_data=provenance, metrics=metrics)
+    signed = replace(plain, provider_data={**provenance, "thought_signature": "c2lnbmF0dXJl"})
+
+    assert _difference(route, signed, plain) == 300
+    assert _difference(route, replace(signed, from_history=True), replace(plain, from_history=True)) == 300

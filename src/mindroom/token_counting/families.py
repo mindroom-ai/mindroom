@@ -12,16 +12,12 @@ import threading
 import time
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING
 
 import tiktoken
 import tiktoken.model
 
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.logging_config import get_logger
-
-if TYPE_CHECKING:
-    from mindroom.llm.provider import PortableReplayEstimator
 
 __all__ = ["counter_for_model", "finish_loading", "load_o200k", "openai_model_counter", "start_loading_o200k"]
 
@@ -185,7 +181,6 @@ def counter_for_model(
     *,
     local_encoder: bool = False,
     family: str | None = None,
-    replay: PortableReplayEstimator | None = None,
 ) -> TokenCounter:
     """Return the counter of the model ``identity`` names.
 
@@ -195,8 +190,8 @@ def counter_for_model(
     """
     name = identity.id.lower().rsplit("/", 1)[-1]
     if local_encoder and (encoding := _own_encoding(name)) is not None:
-        return TokenCounter(estimate=partial(_encoding_tokens, encoding), replay=replay)
-    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(family or name)), replay=replay)
+        return TokenCounter(estimate=partial(_encoding_tokens, encoding))
+    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(family or name)))
 
 
 def openai_model_counter(model_id: str) -> TokenCounter:

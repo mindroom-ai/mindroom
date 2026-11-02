@@ -41,9 +41,11 @@ def resolve_history_execution_plan(
     history_settings: ResolvedHistorySettings,
     active_model_name: str,
     active_context_window: int | None,
-    static_prompt_tokens: int | None,
 ) -> ResolvedHistoryExecutionPlan:
-    """Resolve all history-budget policy for one run scope in one place."""
+    """Resolve all history-budget policy for one run scope in one place.
+
+    Its budgets bound a whole request, the system prompt, tools, history, and turn together, as providers report one.
+    """
     compaction_config = history_settings.compaction_config
     compaction_model_name = compaction_config.model or active_model_name
     compaction_context_window = config.get_model_context_window(compaction_model_name)
@@ -64,21 +66,15 @@ def resolve_history_execution_plan(
     )
 
     threshold_tokens = None
-    replay_budget_tokens = None
-    hard_replay_budget_tokens = None
-    if replay_window_tokens is not None and static_prompt_tokens is not None:
-        hard_replay_budget_tokens = context_budget_after_reserve(
-            replay_window_tokens,
-            compaction_config.reserve_tokens,
-            static_prompt_tokens,
-        )
+    trigger_tokens = None
+    limit_tokens = None
+    if replay_window_tokens is not None:
+        limit_tokens = context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens)
+        # Without automatic compaction nothing compacts at the trigger, so a request fits the limit.
+        trigger_tokens = limit_tokens
         if history_settings.automatic_compaction:
             threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
-            # The trigger budget after the static prompt, kept within the hard budget.
-            replay_budget_tokens = min(max(0, threshold_tokens - static_prompt_tokens), hard_replay_budget_tokens)
-        else:
-            # Without automatic compaction nothing trims history at the trigger, so replay fits the hard budget.
-            replay_budget_tokens = hard_replay_budget_tokens
+            trigger_tokens = min(threshold_tokens, limit_tokens)
 
     return ResolvedHistoryExecutionPlan(
         automatic_compaction=history_settings.automatic_compaction,
@@ -88,12 +84,11 @@ def resolve_history_execution_plan(
         replay_window_tokens=replay_window_tokens,
         trigger_threshold_tokens=threshold_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
-        static_prompt_tokens=static_prompt_tokens,
-        replay_budget_tokens=replay_budget_tokens,
+        trigger_tokens=trigger_tokens,
+        limit_tokens=limit_tokens,
         summary_input_budget_tokens=summary_input_budget_tokens,
         compaction_timeout_seconds=compaction_config.timeout_seconds,
         unavailable_reason=unavailable_reason,
-        hard_replay_budget_tokens=hard_replay_budget_tokens,
         compaction_fallback_model_name=compaction_config.fallback_model,
         compaction_fallback_summary_input_budget_tokens=fallback_summary_input_budget_tokens,
     )
@@ -103,51 +98,46 @@ def classify_compaction_decision(  # noqa: PLR0911
     *,
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
-    current_history_tokens: int,
+    request_tokens: int,
+    summary_request_tokens: int,
     allow_native_compaction: bool,
-    summary_tokens: int,
 ) -> CompactionDecision:
-    """Classify compaction as none or required before the next reply.
+    """Classify compaction as none or required before the next reply, from its first request's size.
 
-    Between the trigger and hard budgets, native provider compaction owns the
-    history, so a run without an active native route (a text-only provider, or a
-    scheduled run with a history limit) compacts at the trigger budget instead,
-    unless its saved summary already fills the trigger budget.
+    Between the trigger and the limit, native provider compaction owns the history, so a run without an active native
+    route (a text-only provider, or a scheduled run with a history limit) compacts at the trigger instead, unless the
+    request would still reach the trigger with the summary as its only history (``summary_request_tokens``).
     """
-    trigger_budget = plan.replay_budget_tokens
-    hard_budget = plan.hard_replay_budget_tokens
+    trigger = plan.trigger_tokens
+    limit = plan.limit_tokens
     decision = partial(
         CompactionDecision,
-        current_history_tokens=current_history_tokens,
-        trigger_budget_tokens=trigger_budget,
-        hard_budget_tokens=hard_budget,
+        request_tokens=request_tokens,
+        trigger_tokens=trigger,
+        limit_tokens=limit,
     )
 
     if force_compact_before_next_run:
         if not plan.text_compaction_available:
             return decision(mode="none", reason="forced_unavailable")
-        return decision(
-            mode="required",
-            reason="forced",
-            fitted_replay_tokens=min(current_history_tokens, hard_budget or 0),
-        )
+        return decision(mode="required", reason="forced")
     if not plan.automatic_compaction:
         return decision(mode="none", reason="auto_disabled")
     if not plan.text_compaction_available:
         return decision(mode="none", reason="compaction_unavailable")
-    if trigger_budget is None:
+    if trigger is None:
         return decision(mode="none", reason="missing_budget")
-    if current_history_tokens <= trigger_budget:
-        return decision(mode="none", reason="under_trigger", fitted_replay_tokens=current_history_tokens)
-    if hard_budget is not None and current_history_tokens > hard_budget:
-        return decision(mode="required", reason="history_exceeds_hard_budget", fitted_replay_tokens=hard_budget)
+    if request_tokens <= trigger:
+        return decision(mode="none", reason="under_trigger")
+    if limit is not None and request_tokens > limit:
+        return decision(mode="required", reason="history_exceeds_hard_budget")
     if not allow_native_compaction:
-        # Compaction leaves the summary, so a trigger budget the summary already fills (or a zero budget, when the
-        # static prompt reaches the threshold) cannot be met and would rewrite the summary every reply.
-        if summary_tokens >= trigger_budget:
-            return decision(mode="none", reason="trigger_unreachable", fitted_replay_tokens=current_history_tokens)
-        return decision(mode="required", reason="over_trigger_native_disabled", fitted_replay_tokens=trigger_budget)
-    return decision(mode="none", reason="within_hard_budget", fitted_replay_tokens=current_history_tokens)
+        # Compaction leaves the summary, so a trigger the request reaches with the summary alone (or one the static
+        # prompt reaches) cannot be met and would rewrite the summary every reply.
+        if summary_request_tokens >= trigger:
+            return decision(mode="none", reason="trigger_unreachable")
+        return decision(mode="required", reason="over_trigger_native_disabled")
+    return decision(mode="none", reason="within_hard_budget")
 
 
 def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> str | None:

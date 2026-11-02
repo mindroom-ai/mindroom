@@ -30,9 +30,8 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session_state
-from tests.fakes.scripted_model import Await
+from tests.fakes.scripted_model import Await, ScriptedModel
 from tests.fakes.summary_model import Reply, ScriptedSummaryModel, summary_model, summary_steps, summary_turn
-from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import (
     _completed_run,
     _forced_compaction_context,
@@ -112,7 +111,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
             before_tokens=0,
             progress=None,
             complete=_reported,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         )
         if content:
             assert await operation is not None

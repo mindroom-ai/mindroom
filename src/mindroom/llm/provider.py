@@ -64,11 +64,9 @@ class TokenCounter:
     """How a route estimates the tokens of text its model receives; ``mindroom.token_counting`` reads it for every count.
 
     ``estimate`` counts locally, never over the network, and returns None while its encoder is still loading.
-    ``replay`` is how the route sizes explicitly replayed history, or None to size it canonically.
     """
 
     estimate: Callable[[str], int | None]
-    replay: PortableReplayEstimator | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -350,18 +348,6 @@ class NativeHistoryRoute(Protocol):
         ...
 
 
-class PortableReplayEstimator(Protocol):
-    """A route that sizes explicitly replayed history the way its requests send it."""
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        """Return whether the estimate prices images by their visual cost instead of their transport bytes."""
-        ...
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
-        """Return the route's estimate of ``messages`` as one explicit replay, or None to size them canonically."""
-        ...
-
-
 class ModelProvider(Protocol):
     """A model behind one provider route."""
 
@@ -445,7 +431,6 @@ __all__ = [
     "ModelTurn",
     "NativeCompactionReplay",
     "NativeHistoryRoute",
-    "PortableReplayEstimator",
     "ReasoningDelta",
     "ReportedUsage",
     "RequestOverrides",

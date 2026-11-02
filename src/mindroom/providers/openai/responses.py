@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import InvalidRequest
@@ -16,7 +17,6 @@ from mindroom.providers.openai.adapter_common import SDKClients, request_setting
 from mindroom.providers.openai.chat_wire import SDK_OPTION_KEYS
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
-    estimate_responses_replay_tokens,
     responses_body_parts,
     responses_replay_uses_visual_tokens,
 )
@@ -39,7 +39,6 @@ if TYPE_CHECKING:
 
     from openai import AsyncOpenAI
 
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import (
         Capabilities,
         ModelIdentity,
@@ -80,7 +79,6 @@ class ResponsesAdapter:
         return counter_for_model(
             self.identity,
             local_encoder=self.identity.endpoint == OPENAI_BASE_URL_DEFAULT or self.wire.route == "codex",
-            replay=self,
         )
 
     def native_compaction_settings(
@@ -108,40 +106,20 @@ class ResponsesAdapter:
         )
         return NativeCompactionReplay(route=route, threshold=threshold)
 
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        """Return whether replayed images are priced by their visual patches."""
-        return responses_replay_uses_visual_tokens(self.identity.id)
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
-        """Count the input an explicitly replayed request sends for ``messages``, for history budgets.
-
-        Messages with an attachment file that cannot be read are sized canonically: the request replaces that media
-        with the media fallback's note.
-        """
-        try:
-            return estimate_responses_replay_tokens(
-                messages,
-                counter=self.token_counter,
-                model_id=self.identity.id,
-                cache_system_prompt=self.settings.cache_system_prompt,
-                explicit_breakpoint=self.wire.explicit_breakpoint,
-                provider=self.identity.provider,
-            )
-        except InvalidRequest:
-            return None
-
     def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
         """Estimate the model context ``request`` gives the model, from the body ``stream`` would send to replay it whole.
 
         A request that continues a stored response sends only what follows it, but the model reads the whole history.
+        Images count by their visual patches on a model priced by them, read from each image's header; an image file
+        that cannot be read is sent as the media fallback's note, so it counts the media allowance instead.
         """
-        return route_request_tokens(
-            self.token_counter,
-            request,
-            start,
-            self._parts,
-            keep_images=responses_replay_uses_visual_tokens(self.identity.id),
-        )
+        size = partial(route_request_tokens, self.token_counter, request, start, self._parts)
+        if not responses_replay_uses_visual_tokens(self.identity.id):
+            return size()
+        try:
+            return size(keep_images=True)
+        except InvalidRequest:
+            return size()
 
     def context_key(self, request: ModelRequest) -> str:
         """Identify the instructions, tools, and settings the body ``stream`` sends for ``request``."""

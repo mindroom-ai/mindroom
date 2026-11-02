@@ -292,12 +292,16 @@ async def test_folded_request_usage_survives_approval_resume(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("resume_probe")
-async def test_resumed_run_does_not_anchor_on_its_paused_response(
+async def test_resumed_run_compacts_before_its_first_request_from_its_paused_response_size(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: SummaryCalls,
 ) -> None:
-    """The response that paused reported a request near the window; the resume sizes its own request afresh."""
+    """The response that paused reported a request near the window, so the resume compacts before its first request.
+
+    The resume's first request extends the paused response's request by that response and the approved result, so it
+    is sized from the reported 999,900 tokens and exceeds the 1,000,000 window minus the reserve.
+    """
     model = _PausingLoop(
         tool_rounds=5,
         usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_900 if number == 5 else 10)),
@@ -305,10 +309,12 @@ async def test_resumed_run_does_not_anchor_on_its_paused_response(
     agent = _resumable(tmp_path, monkeypatch, model, context_window=1_000_000)
 
     paused = await _pause(agent)
+    assert summary_calls.inputs == []
     await _resume(agent, paused)
 
-    assert summary_calls.inputs == []
+    assert len(summary_calls.inputs) == 1
     assert len(model.requests) == 6
+    assert len(_summaries(model.requests[5].messages)) == 1
 
 
 @pytest.mark.asyncio

@@ -70,13 +70,12 @@ def _make_execution_plan() -> ResolvedHistoryExecutionPlan:
         explicit_compaction_model=False,
         compaction_model_name="summary-model",
         replay_window_tokens=64_000,
-        trigger_threshold_tokens=12_000,
+        trigger_threshold_tokens=10_000,
         reserve_tokens=4_096,
-        static_prompt_tokens=0,
-        replay_budget_tokens=10_000,
+        trigger_tokens=10_000,
+        limit_tokens=59_904,
         summary_input_budget_tokens=20_000,
         compaction_timeout_seconds=600.0,
-        hard_replay_budget_tokens=59_904,
     )
 
 
@@ -101,42 +100,45 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
 
 
 @pytest.mark.parametrize(
-    ("plan_changes", "force", "history_tokens", "allow_native", "expected"),
+    ("plan_changes", "force", "request_tokens", "summary_request_tokens", "allow_native", "expected"),
     [
-        ({}, True, 70_000, True, ("required", "forced", 59_904)),
-        ({"text_compaction_available": False}, True, 5_000, True, ("none", "forced_unavailable", None)),
-        ({"automatic_compaction": False}, False, 60_000, True, ("none", "auto_disabled", None)),
-        ({"text_compaction_available": False}, False, 60_000, True, ("none", "compaction_unavailable", None)),
-        ({"replay_budget_tokens": None}, False, 60_000, True, ("none", "missing_budget", None)),
-        ({}, False, 10_000, True, ("none", "under_trigger", 10_000)),
-        ({}, False, 60_000, True, ("required", "history_exceeds_hard_budget", 59_904)),
-        ({}, False, 12_001, False, ("required", "over_trigger_native_disabled", 10_000)),
-        ({}, False, 12_001, True, ("none", "within_hard_budget", 12_001)),
+        ({}, True, 70_000, 0, True, ("required", "forced")),
+        ({"text_compaction_available": False}, True, 5_000, 0, True, ("none", "forced_unavailable")),
+        ({"automatic_compaction": False}, False, 60_000, 0, True, ("none", "auto_disabled")),
+        ({"text_compaction_available": False}, False, 60_000, 0, True, ("none", "compaction_unavailable")),
+        ({"trigger_tokens": None}, False, 60_000, 0, True, ("none", "missing_budget")),
+        ({}, False, 10_000, 0, True, ("none", "under_trigger")),
+        ({}, False, 60_000, 0, True, ("required", "history_exceeds_hard_budget")),
+        ({}, False, 12_001, 9_999, False, ("required", "over_trigger_native_disabled")),
+        # The request would still reach the trigger with the summary as its only history.
+        ({}, False, 12_001, 10_000, False, ("none", "trigger_unreachable")),
+        ({}, False, 12_001, 0, True, ("none", "within_hard_budget")),
     ],
 )
 def test_compaction_policy_classifies_every_branch(
     plan_changes: dict[str, object],
     *,
     force: bool,
-    history_tokens: int,
+    request_tokens: int,
+    summary_request_tokens: int,
     allow_native: bool,
-    expected: tuple[str, str, int | None],
+    expected: tuple[str, str],
 ) -> None:
-    """Each decision keeps its precedence, reason, and fitted replay size, and reports the plan's budgets."""
+    """Each decision keeps its precedence and reason, and reports the request's size and the plan's totals."""
     plan = replace(_make_execution_plan(), **plan_changes)
 
     decision = classify_compaction_decision(
         plan=plan,
         force_compact_before_next_run=force,
-        current_history_tokens=history_tokens,
+        request_tokens=request_tokens,
+        summary_request_tokens=summary_request_tokens,
         allow_native_compaction=allow_native,
-        summary_tokens=0,
     )
 
-    assert (decision.mode, decision.reason, decision.fitted_replay_tokens) == expected
-    assert decision.current_history_tokens == history_tokens
-    assert decision.trigger_budget_tokens == plan.replay_budget_tokens
-    assert decision.hard_budget_tokens == plan.hard_replay_budget_tokens
+    assert (decision.mode, decision.reason) == expected
+    assert decision.request_tokens == request_tokens
+    assert decision.trigger_tokens == plan.trigger_tokens
+    assert decision.limit_tokens == plan.limit_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +188,9 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
         compaction_decision=classify_compaction_decision(
             plan=_make_execution_plan(),
             force_compact_before_next_run=False,
-            current_history_tokens=12_001,
+            request_tokens=12_001,
+            summary_request_tokens=0,
             allow_native_compaction=True,
-            summary_tokens=0,
         ),
         compaction_reply_outcome="none",
         replay_plan=ResolvedReplayPlan(
@@ -221,10 +223,9 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
         "decision": "none",
         "outcome": "none",
         "reason": "within_hard_budget",
-        "current_history_tokens": 12_001,
-        "trigger_budget_tokens": 10_000,
-        "hard_budget_tokens": 59_904,
-        "fitted_replay_tokens": 12_001,
+        "request_tokens": 12_001,
+        "trigger_tokens": 10_000,
+        "limit_tokens": 59_904,
         "replay_plan": {
             "mode": "configured",
             "estimated_tokens": 12_001,

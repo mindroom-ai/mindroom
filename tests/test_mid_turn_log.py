@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import constants
-from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_request_messages_tokens
+from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
@@ -24,6 +24,7 @@ from mindroom.history.storage import (
 from mindroom.history.summary_message import is_scope_summary, mark_summary_follows
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage import summary_rows
@@ -32,7 +33,7 @@ from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.summary_rows import Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.fakes.token_counter import fake_token_counter
+from tests.fakes.scripted_model import estimate_only_model
 from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids
 
 if TYPE_CHECKING:
@@ -507,11 +508,6 @@ def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: 
     assert is_scope_summary(built[0])
     assert built[1].content == "Task B"
     assert [message.content for message in built[-3:]] == ["Task A", "A done", "Task C"]
-    planned = estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=_ALL_HISTORY,
-        counter=fake_token_counter(),
-    )
-    assert (
-        estimate_request_messages_tokens([m for m in built if m.from_history], counter=fake_token_counter()) == planned
-    )
+    model = estimate_only_model()
+    planned = estimate_prompt_visible_history_tokens(session=session, history_settings=_ALL_HISTORY, model=model)
+    assert model.request_tokens(ModelRequest(messages=tuple(m for m in built if m.from_history))) == planned

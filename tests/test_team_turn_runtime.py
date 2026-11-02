@@ -902,7 +902,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The leader loop gets mid-turn compaction and the approval receipt hook before each request, and the notices.
+    """The leader loop gets the approval receipt hook and mid-turn compaction before each request, and the notices.
 
     No approval receipt is bound around a fresh turn, so none of its requests carries one.
     """
@@ -929,8 +929,8 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     hooks = captured["hooks"]
     assert isinstance(hooks, LoopHooks)
     assert [hook.__qualname__.split(".")[0] for hook in hooks.before_request] == [
-        "mid_turn_compaction_hook",
         "approval_receipt_hook",
+        "mid_turn_compaction_hook",
     ]
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()

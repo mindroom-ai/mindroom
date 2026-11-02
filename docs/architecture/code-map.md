@@ -357,6 +357,7 @@ Matrix sync callback
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
 | `providers/assistant_turn.py` | What adapters share to build a turn: the `mindroom_model` provenance stamp and timings, the progress event of a provider chunk without events, the events that end a finished turn, and the split of a leading inline `<think>` block into reasoning |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
+| `llm/request_identity.py` | The identity of what a model request holds before each message, which each answer records for the request it answered |
 | `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces that file with its note |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
@@ -384,7 +385,7 @@ Matrix sync callback
 | `session_storage/legacy_scope_metadata.py` | The layout version 7 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
 | `session_storage/legacy_run_requirements.py` | The layout version 8 step, and the Agno-layout conversion's decode, that fold each paused run's stored requirements into the tool rows they copy, so a paused call is stored once |
 | `session_storage/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
-| `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
+| `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: the limit check, folding, and the scoped or run-local summary |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
@@ -392,10 +393,12 @@ Matrix sync callback
 | `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |
 | `history/request_messages.py` | A model request assembled from a scope's stored runs, its compaction summary, and the current turn |
 | `history/replay.py` | Materializes, estimates, and fits persisted history within one replay budget |
+| `history/request_size.py` | The one sizing rule of every model request: the latest answer's reported size when the request extends that answer's request, else the route's estimate; and the frame a reply's requests hold around its history |
 | `history/runtime.py` | Prepares a scope's history before a reply (replay plan and compaction check) and runs its mid-turn and run-local compactions |
 | `history/compaction.py` | Scoped compaction: summarizing a scope's runs, or a running turn, into its summary rows |
 | `token_counting/families.py` | The local token counter of each model: its own tiktoken encoding on routes serving OpenAI's models, else o200k_base scaled by a per-family margin; loads o200k_base in the background |
 | `token_counting/counts.py` | Every token count, from the route's local estimate, with a stand-in while the vocabulary loads, and verified text fitting |
+| `token_counting/requests.py` | How a route sizes and identifies a request from the parts its body builder renders: text, JSON values, and priced costs such as media allowances |
 | `skill_learning/capture.py` | The final model request of a counting response, kept for the review to fork |
 | `skill_learning/runner.py` | In-memory reply counts per conversation; starts a review when a count reaches the interval, stops it when a new response starts, and posts change notices |
 | `skill_learning/reviewer.py` | One bounded skill review: a fork of the response's final request with its tools unchanged, or a redacted digest replay when the request cannot be forked or another review model is set |

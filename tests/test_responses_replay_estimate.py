@@ -1,4 +1,7 @@
-"""History budgets size Responses history as its explicit replay sends it, pricing images by their visual patches."""
+"""A Responses request is sized as its explicit replay sends it, pricing images by their visual patches.
+
+The route's ``request_tokens`` owns the rule; the history estimates and the reply's preparation size through it.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import base64
 import json
 from base64 import b64encode
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import BytesIO
 from random import Random
@@ -18,7 +22,13 @@ from structlog.testing import capture_logs
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
+from mindroom.history.replay import (
+    estimate_prompt_visible_history_tokens,
+    estimate_summary_tokens,
+    prompt_visible_history,
+)
+from mindroom.history.request_messages import TurnMessages
+from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -28,14 +38,15 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Image
 from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message, stable_serialize
-from mindroom.llm.provider import NativeCompactionReplay
+from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import checkpoint_estimated_tokens
-from mindroom.providers.openai.responses_wire import responses_input, responses_replay
+from mindroom.providers.openai.replay_estimate import responses_replay_uses_visual_tokens
+from mindroom.providers.openai.responses_wire import conversation_digest, responses_input, responses_replay
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import count, opaque_tokens
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from tests.conftest import seed_session
-from tests.fakes.token_counter import fake_token_counter
+from tests.fakes.scripted_model import ScriptedModel
 from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint, replay_settings
 from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
@@ -57,6 +68,11 @@ def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[
         explicit_breakpoint=adapter.wire.explicit_breakpoint,
         provider=adapter.identity.provider,
     )
+
+
+def _sized(adapter: ResponsesAdapter, *messages: Message, start: int = 0) -> int:
+    """Return what the request holding ``messages`` gives ``adapter``'s model, from message ``start`` on."""
+    return adapter.request_tokens(ModelRequest(messages=messages), start=start)
 
 
 def _png(size: tuple[int, int] = (256, 256), *, compress_level: int = 6) -> bytes:
@@ -106,7 +122,6 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
         config=config,
         runtime_paths=runtime_paths,
         history_settings=config.resolve_scope("test_agent").history_settings,
-        static_prompt_tokens=100,
         active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
@@ -122,21 +137,23 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
 
     monkeypatch.setattr(json, "dumps", record_serialization)
     for _ in range(2):
+        # A request holding only the summary and the history.
         tokens = estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=resolved.history_settings,
-            counter=adapter.token_counter,
+            model=adapter,
         )
+        summary_tokens = estimate_summary_tokens(session, adapter)
         decision = classify_compaction_decision(
             plan=resolved.execution_plan,
             force_compact_before_next_run=False,
-            current_history_tokens=tokens,
+            request_tokens=tokens,
+            summary_request_tokens=summary_tokens,
             allow_native_compaction=True,
-            summary_tokens=0,
         )
         assert decision.mode == "none", (tokens, decision.reason)
         # The summary plus the image's visual cost, never its encoded bytes.
-        assert estimate_summary_tokens(session, adapter.token_counter) < tokens < 2000
+        assert summary_tokens < tokens < 2000
     monkeypatch.undo()
     assert serialized_sizes
     # Estimation must not serialize image transport even for a discarded fallback.
@@ -145,81 +162,56 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     assert _replayed_input(adapter, [message]) == request_before
 
 
-@pytest.mark.parametrize("floor", ["canonical", "provider"])
-@pytest.mark.parametrize("native", [False, True])
-def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: str, *, native: bool) -> None:
-    """Unknown models retain content-block floors and conservatively price viewed images."""
+@pytest.mark.parametrize("representation", ["content_block", "attachment"])
+def test_a_model_without_a_patch_budget_prices_an_image_as_its_replay_sends_it(
+    tmp_path: Path,
+    representation: str,
+) -> None:
+    """A model with no patch budget counts an image block as the text it sends and an attachment at its allowance.
+
+    The attachment's encoded bytes never count.
+    """
     buffer = BytesIO()
-    # Seeded pixels keep the provider-dominant transport fixture reproducible.
-    pixels = (
-        PillowImage.new("RGB", (256, 256), "blue")
-        if floor == "canonical"
-        else PillowImage.frombytes("RGB", (256, 256), Random(0).randbytes(256 * 256 * 3))  # noqa: S311
+    # Seeded noise keeps the encoded attachment far larger than its allowance.
+    PillowImage.frombytes("RGB", (256, 256), Random(0).randbytes(256 * 256 * 3)).save(  # noqa: S311
+        buffer,
+        format="PNG",
+        compress_level=0,
     )
-    pixels.save(buffer, format="PNG", compress_level=0)
-    if floor == "canonical":
+    adapter = responses_adapter(tmp_path, "unrecognized-image-model")
+    assert not responses_replay_uses_visual_tokens(adapter.identity.id)
+    assert responses_replay_uses_visual_tokens(responses_adapter(tmp_path).identity.id)
+    if representation == "content_block":
         block = {"type": "input_image", "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode()}
         message = Message(role="user", content=[block])
+        expected = count(adapter.token_counter, stable_serialize(_replayed_input(adapter, [message])))
     else:
-        message = Message(
-            role="user",
-            content="Describe.",
-            images=[Image(id="mindroom_viewed_fixture", content=buffer.getvalue(), format="png")],
-        )
-    adapter = responses_adapter(tmp_path, "unrecognized-image-model")
-    counter = adapter.token_counter
-    request_before = _replayed_input(adapter, [message])
-    provider_tokens = count(counter, stable_serialize(request_before))
-    if floor == "canonical":
-        # The content block's transport counts as text, by whichever of the two counts is larger.
-        expected_tokens = max(count(counter, stable_serialize(block)), provider_tokens)
-    else:
-        # Historical viewed images use a bounded visual fallback rather than encoded transport text.
-        assert provider_tokens > 100_000
-        expected_tokens = adapter.estimate_portable_replay_tokens([Message(role="user", content="Describe.")]) + 5_000
-    messages = [message]
-    route = "unknown-image-route" if native else None
-    if native:
-        items = [{"type": "compaction", "encrypted_content": "checkpoint"}]
-        messages.insert(
-            0,
-            Message(
-                role="assistant",
-                provider_data={"mindroom_native_compaction": {"route": route, "items": items}},
-            ),
-        )
-        expected_tokens += checkpoint_estimated_tokens(items, counter)
-    session = _session("session", runs=[_completed_run("recent", messages=messages)])
-    before = deepcopy(session)
-    tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=_ALL_HISTORY,
-        native_route=route,
-        counter=adapter.token_counter,
-    )
-    assert tokens == expected_tokens
-    assert session == before
-    assert _replayed_input(adapter, [message]) == request_before
+        message = Message(role="user", content="Describe.", images=[Image(content=buffer.getvalue(), format="png")])
+        assert count(adapter.token_counter, stable_serialize(_replayed_input(adapter, [message]))) > 100_000
+        expected = _sized(adapter, Message(role="user", content="Describe.")) + MEDIA_ALLOWANCE_TOKENS
+    before = deepcopy(message)
+
+    assert _sized(adapter, message) == expected
+    assert message == before
 
 
 def test_responses_image_budget_preserves_visual_cost_and_ignores_png_encoding_size(tmp_path: Path) -> None:
     """The same pixels cost the same budget across lossless encodings."""
     adapter = responses_adapter(tmp_path)
     estimates = [
-        adapter.estimate_portable_replay_tokens(
-            [
-                Message(
-                    role="user",
-                    content="Describe.",
-                    images=[Image(content=_png(compress_level=compression), format="png")],
-                ),
-            ],
+        _sized(
+            adapter,
+            Message(
+                role="user",
+                content="Describe.",
+                images=[Image(content=_png(compress_level=compression), format="png")],
+            ),
         )
         for compression in (0, 9)
     ]
     assert estimates[0] == estimates[1]
     assert 77 <= estimates[0] < 500
-    assert estimates[0] > adapter.estimate_portable_replay_tokens([Message(role="user", content="Describe.")])
+    assert estimates[0] > _sized(adapter, Message(role="user", content="Describe."))
 
 
 def test_responses_image_budget_reads_only_bounded_header_bytes(
@@ -238,9 +230,7 @@ def test_responses_image_budget_reads_only_bounded_header_bytes(
 
     adapter = responses_adapter(tmp_path)
     monkeypatch.setattr(base64, "b64decode", record_decode)
-    tokens = adapter.estimate_portable_replay_tokens(
-        [Message(role="user", content=[{"type": "input_image", "image_url": payload}])],
-    )
+    tokens = _sized(adapter, Message(role="user", content=[{"type": "input_image", "image_url": payload}]))
     assert 77 <= tokens < 200
     assert decoded_sizes
     assert max(decoded_sizes) <= 64 * 1024
@@ -257,8 +247,9 @@ def test_responses_jpeg_header_beyond_scan_budget_uses_conservative_allowance(tm
     with PillowImage.open(BytesIO(image)) as decoded:
         decoded.load()
         assert decoded.size == (1024, 1024)
-    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
-        [Message(role="user", content="Describe.", images=[Image(content=image, format="jpeg")])],
+    tokens = _sized(
+        responses_adapter(tmp_path),
+        Message(role="user", content="Describe.", images=[Image(content=image, format="jpeg")]),
     )
     assert 36_000 <= tokens < 36_100
 
@@ -266,13 +257,12 @@ def test_responses_jpeg_header_beyond_scan_budget_uses_conservative_allowance(tm
 def test_responses_unrecognized_webp_header_uses_conservative_allowance(tmp_path: Path) -> None:
     """A WebP chunk with no known dimensions is priced at the ceiling, never at made-up dimensions."""
     header = b"RIFF\x10\x00\x00\x00WEBPJUNK\x04\x00\x00\x00test"
-    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
-        [
-            Message(
-                role="user",
-                content=[{"type": "input_image", "image_url": "data:image/webp;base64," + b64encode(header).decode()}],
-            ),
-        ],
+    tokens = _sized(
+        responses_adapter(tmp_path),
+        Message(
+            role="user",
+            content=[{"type": "input_image", "image_url": "data:image/webp;base64," + b64encode(header).decode()}],
+        ),
     )
     assert 36_000 <= tokens < 36_100
 
@@ -301,12 +291,13 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
             estimate_prompt_visible_history_tokens(
                 session=session,
                 history_settings=_ALL_HISTORY,
-                native_route=native.route,
-                counter=adapter.token_counter,
+                model=adapter,
+                native=native,
             ),
         )
     assert estimates[0] == estimates[1]
-    assert checkpoint_estimated_tokens(items, adapter.token_counter) < estimates[0] < 2000
+    # The checkpoint's ciphertext counts a quarter token per character.
+    assert opaque_tokens(len(items[0]["encrypted_content"])) < estimates[0] < 2000
 
 
 @pytest.mark.parametrize(
@@ -333,14 +324,13 @@ def test_responses_image_header_dimensions_keep_nonzero_visual_budget(
     buffer = BytesIO()
     mode = "RGBA" if isinstance(color, tuple) else "RGB"
     PillowImage.new(mode, (1024, 1024), color).save(buffer, format=image_format, **options)
-    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
-        [
-            Message(
-                role="user",
-                content="Describe.",
-                images=[Image(content=buffer.getvalue(), format=image_format.lower(), detail=detail)],
-            ),
-        ],
+    tokens = _sized(
+        responses_adapter(tmp_path),
+        Message(
+            role="user",
+            content="Describe.",
+            images=[Image(content=buffer.getvalue(), format=image_format.lower(), detail=detail)],
+        ),
     )
     visual_tokens = 308 if detail == "low" else 1229
     assert visual_tokens <= tokens < visual_tokens + 100
@@ -373,8 +363,9 @@ def test_responses_unknown_image_dimensions_use_documented_allowance(
     visual_tokens: int,
 ) -> None:
     """Remote or unreadable images retain cost without fetching or parsing arbitrary text."""
-    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
-        [Message(role="user", content=[{"type": "input_image", "image_url": source, "detail": detail}])],
+    tokens = _sized(
+        responses_adapter(tmp_path),
+        Message(role="user", content=[{"type": "input_image", "image_url": source, "detail": detail}]),
     )
     assert visual_tokens <= tokens < visual_tokens + 100
 
@@ -398,29 +389,33 @@ def test_responses_image_budget_obeys_documented_patch_bounds(
     visual_tokens: int,
 ) -> None:
     """Documented patch examples and default detail policies constrain image sizing."""
-    tokens = responses_adapter(tmp_path, model_id).estimate_portable_replay_tokens(
-        [Message(role="user", content="Describe.", images=[Image(content=_png(size), format="png", detail=detail)])],
+    tokens = _sized(
+        responses_adapter(tmp_path, model_id),
+        Message(role="user", content="Describe.", images=[Image(content=_png(size), format="png", detail=detail)]),
     )
     assert visual_tokens <= tokens < visual_tokens + 100
 
 
 def test_responses_image_file_id_retains_unknown_dimension_allowance(tmp_path: Path) -> None:
     """An uploaded image has visual cost even without locally available bytes."""
-    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
-        [Message(role="user", content=[{"type": "input_image", "file_id": "file_image", "detail": "high"}])],
+    tokens = _sized(
+        responses_adapter(tmp_path),
+        Message(role="user", content=[{"type": "input_image", "file_id": "file_image", "detail": "high"}]),
     )
     assert 3000 <= tokens < 3100
 
 
-def test_responses_history_with_an_unreadable_attachment_is_sized_canonically(tmp_path: Path) -> None:
-    """An attachment file that is gone leaves the route no estimate; the request sends the media note in its place."""
+def test_responses_history_with_an_unreadable_attachment_is_still_sized(tmp_path: Path) -> None:
+    """An attachment file that is gone still leaves the request a size, with a cost for the image it held.
+
+    Sending the request is where the media fallback replaces the attachment with its note.
+    """
+    adapter = responses_adapter(tmp_path)
     gone = Image(filepath=str(tmp_path / "gone.png"), mime_type="image/png")
+    question = Message(role="user", content="Describe.", images=[gone], from_history=True)
+    turn = Message(role="user", content="And now?")
 
-    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
-        [Message(role="user", content="Describe.", images=[gone])],
-    )
-
-    assert tokens is None
+    assert _sized(adapter, question, turn) > _sized(adapter, replace(question, images=None), turn)
 
 
 def _reasoned_answer(ciphertext: str, *, reasoning_tokens: int = 0, own_turn: bool = False) -> list[Message]:
@@ -453,25 +448,61 @@ def test_responses_budget_ignores_encrypted_reasoning_length(tmp_path: Path) -> 
     adapter = responses_adapter(tmp_path, store=False)
     short, long = _reasoned_answer("gAAAA"), _reasoned_answer("gAAAA" + "Zm9vYmFy" * 5000)
     assert any(item.get("type") == "reasoning" for item in _replayed_input(adapter, long))
-    assert adapter.estimate_portable_replay_tokens(long) == adapter.estimate_portable_replay_tokens(short)
+    assert _sized(adapter, *long) == _sized(adapter, *short)
 
 
 @pytest.mark.parametrize("model_id", ["gpt-6-astra", "gpt-5.2-codex"])
-@pytest.mark.parametrize(("own_turn", "charged"), [(False, 20_000), (True, 0)])
-def test_responses_budget_charges_earlier_reasoning_its_reported_tokens(
+@pytest.mark.parametrize("own_turn", [False, True])
+@pytest.mark.parametrize("start", [0, 1])
+def test_responses_budget_charges_replayed_reasoning_its_reported_tokens(
     tmp_path: Path,
     model_id: str,
+    start: int,
     *,
     own_turn: bool,
-    charged: int,
 ) -> None:
-    """A model that renders earlier turns' reasoning holds it in context; the running turn's is sized mid-turn."""
+    """Encrypted reasoning a request replays counts the tokens its answer reported, the run's own answer or a copy.
+
+    From ``start`` 1 the request is sized from the answer on, as a request anchored on the answer before it is.
+    """
     adapter = responses_adapter(tmp_path, model_id, store=False)
     reasoned = _reasoned_answer("gAAAA", reasoning_tokens=20_000, own_turn=own_turn)
     unreasoned = _reasoned_answer("gAAAA", own_turn=own_turn)
     assert any(item.get("type") == "reasoning" for item in _replayed_input(adapter, reasoned))
-    tokens = adapter.estimate_portable_replay_tokens(reasoned) - adapter.estimate_portable_replay_tokens(unreasoned)
-    assert tokens == charged
+    assert _sized(adapter, *reasoned, start=start) - _sized(adapter, *unreasoned, start=start) == 20_000
+
+
+@pytest.mark.parametrize(("own_turn", "charged"), [(True, 700), (False, 0)])
+def test_a_chained_request_charges_the_reasoning_of_the_runs_own_answers(
+    tmp_path: Path,
+    *,
+    own_turn: bool,
+    charged: int,
+) -> None:
+    """A request that continues a stored response sends no reasoning, but the provider keeps the run's own reasoning.
+
+    An earlier turn's answer, a copy from history, keeps none.
+    """
+    adapter = responses_adapter(tmp_path, store=True)
+    question = Message(role="user", content="Plan the trip.", from_history=not own_turn)
+    answer = Message(
+        role="assistant",
+        content="Ready",
+        provider_data={"response_id": "resp_plan", "mindroom_conversation_sha256": conversation_digest([question])},
+        metrics=MessageMetrics(tokens=TokenCounts(reasoning_tokens=700)),
+        from_history=not own_turn,
+    )
+    follow_up = Message(role="user", content="Book it.")
+    request = ModelRequest(messages=(question, answer, follow_up))
+    assert responses_replay(
+        request.messages,
+        store=True,
+        portable_replay=False,
+        native_compaction=None,
+    ).previous_response_id
+
+    unreasoned = replace(answer, metrics=MessageMetrics())
+    assert adapter.request_tokens(request) - _sized(adapter, question, unreasoned, follow_up) == charged
 
 
 def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments(tmp_path: Path) -> None:
@@ -501,27 +532,14 @@ def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments(t
         Message(role="tool", tool_call_id="call_example", content=literal),
     ]
     adapter = responses_adapter(tmp_path, store=False)
-    assert adapter.estimate_portable_replay_tokens(messages) == count(
+    assert _sized(adapter, *messages) == count(
         adapter.token_counter,
         stable_serialize(_replayed_input(adapter, messages)),
     )
 
 
-def test_models_without_a_patch_budget_count_the_replayed_input_as_text(tmp_path: Path) -> None:
-    """A model with no documented patch budget prices the replayed input, images included, as serialized text."""
-    adapter = responses_adapter(tmp_path, "unrecognized-image-model")
-    messages = [Message(role="user", content="Describe.", images=[Image(content=_png(), format="png")])]
-
-    assert adapter.portable_replay_uses_visual_tokens() is False
-    assert responses_adapter(tmp_path).portable_replay_uses_visual_tokens() is True
-    assert adapter.estimate_portable_replay_tokens(messages) == count(
-        adapter.token_counter,
-        stable_serialize(_replayed_input(adapter, messages)),
-    )
-
-
-def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> None:
-    """A checkpoint already covers the summary message before it, which the projection drops."""
+def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced(tmp_path: Path) -> None:
+    """A checkpoint already covers the summary message before it, which the route's projection drops."""
     route = "route-1"
     checkpoint = Message(
         role="assistant",
@@ -536,18 +554,20 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced() -> 
         },
     )
     runs = [_completed_run("run-1", messages=[Message(role="user", content="question"), checkpoint])]
+    adapter = responses_adapter(tmp_path, store=False)
+    native = NativeCompactionReplay(route=route, threshold=100)
 
     without_summary = estimate_prompt_visible_history_tokens(
         session=_session("session", runs=runs),
         history_settings=_ALL_HISTORY,
-        native_route=route,
-        counter=fake_token_counter(),
+        model=adapter,
+        native=native,
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_session("session", runs=runs, summary=ScopeSummary(text="S" * 400, updated_at=datetime.now(UTC))),
         history_settings=_ALL_HISTORY,
-        native_route=route,
-        counter=fake_token_counter(),
+        model=adapter,
+        native=native,
     )
 
     assert with_summary == without_summary
@@ -580,7 +600,7 @@ def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]
 
 @pytest.mark.asyncio
 async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(tmp_path: Path) -> None:
-    """A reply on a Responses route sizes its stored history and fits its replay with the route's own count."""
+    """A reply on a Responses route sizes its first request and fits its replay with the route's own count."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     spaced_answer = Message(role="assistant", content="x " * 2000)
@@ -591,31 +611,29 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
             runs=[_completed_run("run-1", messages=[Message(role="user", content="Hi"), spaced_answer])],
         ),
     )
-    adapter = responses_adapter(tmp_path)
+    model = pipeline_provider(responses_adapter(tmp_path))
+    model_name = entity_model_name(config, "test_agent")
     inputs = resolve_entity_preparation_inputs(
         config=config,
         runtime_paths=runtime_paths,
         history_settings=config.resolve_scope("test_agent").history_settings,
-        static_prompt_tokens=0,
-        active_model_name=entity_model_name(config, "test_agent"),
+        active_model_name=model_name,
         active_context_window=None,
     )
-    route_estimate = estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=inputs.history_settings,
-        counter=adapter.token_counter,
+    frame = RequestFrame(
+        ModelRequest(messages=()),
+        (Message(role="system", content="You answer briefly."),),
+        TurnMessages(prompt=Message(role="user", content="And now?")),
     )
-    canonical_estimate = estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=inputs.history_settings,
-        counter=fake_token_counter(),
-    )
+    history = prompt_visible_history(session, inputs.history_settings)
+    route_size = model.request_tokens(frame.request(summary=None, history=history))
+    canonical_size = ScriptedModel([]).request_tokens(frame.request(summary=None, history=history))
+    without_history = model.request_tokens(frame.request(summary=None, history=()))
 
     prepared = await prepare_scope_history(
-        model=pipeline_provider(adapter),
+        sizer=request_sizer(model, config, model_name),
+        frame=frame,
         resolved_inputs=inputs,
-        non_prompt_tokens=0,
-        static_fingerprint="static",
         runtime_paths=runtime_paths,
         config=config,
         scope_context=ScopeSessionContext(
@@ -629,14 +647,10 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         compaction_lifecycle=None,
         pipeline_timing=None,
     )
-    final = finalize_history_preparation(
-        prepared_scope_history=prepared,
-        config=config,
-        static_prompt_tokens=0,
-        pipeline_timing=None,
-    )
+    final = finalize_history_preparation(prepared_scope_history=prepared, frame=frame, pipeline_timing=None)
 
-    assert route_estimate > canonical_estimate
-    assert prepared.compaction_decision.current_history_tokens == route_estimate
+    assert route_size > canonical_size
+    assert prepared.compaction_decision.request_tokens == route_size
     assert final.replay_plan is not None
-    assert final.replay_plan.estimated_tokens == route_estimate
+    assert final.replay_plan.estimated_tokens == route_size - without_history
+    assert final.prepared_context_tokens == route_size

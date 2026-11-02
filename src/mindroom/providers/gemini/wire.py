@@ -28,13 +28,12 @@ from google.genai.types import (
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import canonical_mime_type, image_mime_type, rendered_label
-from mindroom.llm.messages import is_own_model_message, stable_serialize, system_text, tool_result_view
+from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.errors import media_ids
 from mindroom.providers.media_files import read_media_file
-from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -47,7 +46,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
-    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, TokenCounter, ToolSpec
+    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
     from mindroom.token_counting.requests import RequestParts
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
@@ -175,33 +174,6 @@ async def format_contents(
         # with a model turn, so the text and media that follow tool results go before them.
         content["parts"].sort(key=lambda part: "function_response" in part)
     return contents, system_text(messages) or None
-
-
-def estimate_replay_tokens(messages: Sequence[Message], *, counter: TokenCounter) -> int:
-    """Count what an explicitly replayed request sends for ``messages``, its text with ``counter``.
-
-    The system instruction and text parts count as the model reads them, without the escaping JSON adds; function
-    calls, function responses, and server-side tool parts count as serialized, the last as though the request asked
-    for them. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each earlier
-    reply that replays one adds its reasoning tokens; the running turn's own replies are left to mid-turn sizing, which
-    adds each response's reported thinking. Media is left to the history estimate's allowances.
-    """
-    texts = [system_text(messages)]
-    structured: list[dict[str, Any]] = []
-    reasoning_tokens = 0
-    for message in messages:
-        if message.role == "system":
-            continue
-        message_parts = _message_parts(message, _ROLE_MAP.get(message.role, message.role), server_tool_parts=True)
-        if not is_own_model_message(message) and any("thought_signature" in part for part in message_parts):
-            reasoning_tokens += message.metrics.tokens.reasoning_tokens
-        for part in message_parts:
-            if isinstance(part.get("text"), str):
-                texts.append(part["text"])
-            else:
-                structured.append({key: value for key, value in part.items() if key != "thought_signature"})
-    sent = "".join(texts) + (stable_serialize(structured) if structured else "")
-    return count(counter, sent) + reasoning_tokens
 
 
 def gemini_request_parts(request: ModelRequest, start: int, parts: RequestParts) -> None:
@@ -692,7 +664,6 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
 __all__ = [
     "GeminiReply",
     "MediaRoute",
-    "estimate_replay_tokens",
     "format_contents",
     "function_declarations",
     "gemini_request_parts",

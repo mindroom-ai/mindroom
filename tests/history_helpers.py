@@ -648,22 +648,6 @@ _TEST_MODEL = ModelIdentity(id="test-model", provider="test")
 
 
 @dataclass
-class ReplayEstimate:
-    """A route that sizes every explicit replay at ``tokens`` (None: no estimate), keeping the last replay it sized."""
-
-    tokens: int | None
-    uses_visual_tokens: bool = False
-    messages: list[Message] = field(default_factory=list)
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
-        self.messages = messages
-        return self.tokens
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return self.uses_visual_tokens
-
-
-@dataclass
 class ToolLoopRequest:
     """One request a ``ToolLoopModel`` received, with its roles and contents spelled out."""
 

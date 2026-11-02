@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -28,7 +29,6 @@ from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     save_desktop_credentials,
 )
-from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -42,7 +42,6 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit, toolkit_offers
 from tests.conftest import test_runtime_paths
-from tests.fakes.token_counter import fake_token_counter
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import _created, _load, _personal, _with_template
 from tests.turn_model_helpers import turn_model
@@ -1846,12 +1845,12 @@ def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewri
     ("provider", "model_id"),
     [("openai", "gpt-4o-mini"), ("anthropic", "claude-opus-5")],
 )
-def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
+def test_request_estimate_leaves_out_hidden_deferred_definitions(
     tmp_path: Path,
     provider: str,
     model_id: str,
 ) -> None:
-    """The history budget must not charge definitions that tool search keeps off the request."""
+    """The history budget must not charge definitions that tool search keeps off the request, as its route sizes it."""
 
     def estimate(tools: list[object]) -> int:
         raw = _base_config_data()
@@ -1859,12 +1858,12 @@ def test_static_prompt_estimate_leaves_out_hidden_deferred_definitions(
         raw["agents"]["code"]["tools"] = tools  # type: ignore[index]
         config = _validated_config(tmp_path, raw)
         agent = _code_agent(config, tmp_path)
-        return build_static_token_estimator(
-            fake_token_counter(),
-            prompt_for_turn(agent),
-            PreparedTools(functions=agent.spec.functions).specs(),
-            agent.request_template.deferred_tools.names,
-        ).non_prompt_tokens
+        request = replace(
+            agent.request_template,
+            messages=tuple(prompt_for_turn(agent)),
+            tools=PreparedTools(functions=agent.spec.functions).specs(),
+        )
+        return agent.spec.model.request_tokens(request)
 
     base = estimate(["sleep"])
     eager = estimate(["sleep", "github"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,12 +15,10 @@ from mindroom import execution_preparation
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
@@ -48,9 +47,8 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
 )
 from mindroom.history import runtime as history_runtime
-from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.policy import resolve_history_execution_plan
-from mindroom.history.prompt_tokens import build_static_token_estimator
+from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
     CompactionDecision,
@@ -59,9 +57,8 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import TokenCounter
+from mindroom.llm.provider import ModelRequest, TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -76,12 +73,12 @@ from tests.conftest import (
     unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel
-from tests.fakes.token_counter import fake_token_counter, quarter_tokens
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import replay_settings
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
@@ -103,6 +100,23 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_NAMESPACE": "",
         },
     )
+
+
+# The model a reply's requests go to in cases that prepare without an agent build; it counts a quarter token per character.
+_MODEL = ScriptedModel([])
+
+
+def _sizing() -> dict[str, Any]:
+    """Return the request frame and sizer of a reply with no system prompt and no tools, for ``_prepare_execution_context_common``."""
+    return {
+        "frame": partial(RequestFrame, ModelRequest(messages=()), ()),
+        "sizer": request_sizer(_MODEL, _config(), "default"),
+    }
+
+
+def _text_tokens(estimate: Callable[[str], int]) -> Callable[[TurnMessages], int]:
+    """Size a turn by ``estimate`` of its rendered text, as a request holding only that turn."""
+    return lambda turn: estimate(render_prepared_messages_text(turn.in_request_order()))
 
 
 def _bound_agent_config(tmp_path: Path, *, tools: tuple[str, ...] = ()) -> tuple[Config, RuntimePaths]:
@@ -166,7 +180,7 @@ def _build_thread_history_messages_for_test(
     """Build the fallback thread turn through ``_build_thread_history_messages`` with a plain turn's options.
 
     ``options`` names the arguments a test sets; the turn's transient context, sender, display names, timestamp, event
-    id, render limits, static budget, and attachment context otherwise stay unset.
+    id, render limits, static budget, and attachment context otherwise stay unset; turns are sized by ``quarter_tokens``.
     """
     turn_options: dict[str, Any] = {
         "transient_context_messages": (),
@@ -181,6 +195,7 @@ def _build_thread_history_messages_for_test(
         "missing_sender_label": None,
         "static_token_budget": None,
         "attachment_context": None,
+        "turn_tokens": _text_tokens(quarter_tokens),
     }
     return _build_thread_history_messages(prompt, thread_history, **(turn_options | options))
 
@@ -204,7 +219,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         history_settings=history_settings,
         active_model_name="test-model",
         active_context_window=10_000,
-        static_prompt_tokens=10,
     )
     session = ConversationSession(
         session_id="thread-session",
@@ -233,8 +247,8 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         ),
         compaction_decision=CompactionDecision(mode="none", reason="auto_disabled"),
         native_history=None,
-        counter=fake_token_counter(),
-        static_fingerprint="static",
+        sizer=request_sizer(_MODEL, _config(), "default"),
+        static_tokens=10,
     )
 
 
@@ -256,7 +270,7 @@ def test_thread_fallback_finds_the_newest_messages_that_fit_in_few_counts() -> N
         response_sender_id="@mindroom_test_agent:localhost",
         config=_config(),
         static_token_budget=5_000,
-        estimate_static_tokens_fn=estimate,
+        turn_tokens=_text_tokens(estimate),
     )
 
     assert len(counted) < 20
@@ -408,7 +422,7 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
 ) -> None:
     """Persisted replay should avoid building unused Matrix fallback context."""
 
-    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
     def fail_if_fallback_context_is_built(*_args: object, **_kwargs: object) -> tuple[Message, ...]:
@@ -430,7 +444,7 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         config=_config(),
         timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
+        **_sizing(),
         fallback_static_token_budget=100,
     )
 
@@ -452,8 +466,8 @@ async def test_interactive_selection_keeps_context_after_question(
     """Selection history ends at the answer, preserving intervening clarification."""
     provisional_prompts: list[str] = []
 
-    async def prepare_scope_history(prepared_prompt: str) -> PreparedScopeHistory:
-        provisional_prompts.append(prepared_prompt)
+    async def prepare_scope_history(provisional: TurnMessages) -> PreparedScopeHistory:
+        provisional_prompts.append(render_prepared_messages_text(provisional.in_request_order()))
         scope = _prepared_scope_with_persisted_replay()
         return scope if persisted_replay else replace(scope, session=None)
 
@@ -484,7 +498,7 @@ async def test_interactive_selection_keeps_context_after_question(
         config=_config(),
         timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
+        **_sizing(),
         fallback_static_token_budget=100,
     )
 
@@ -558,29 +572,6 @@ def test_scheduled_limit_caps_larger_plans_only() -> None:
     assert _prepared_history_with_scheduled_limit(no_plan, 2) is no_plan
 
 
-@pytest.mark.parametrize("limit", [0, 2])
-def test_a_scheduled_limit_leaves_nothing_to_size_the_next_reply_by(limit: int) -> None:
-    """A scheduled run replays at most its limit, so the size its provider reports cannot size the whole history."""
-    prepared = PreparedHistoryState(
-        replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=500, add_history_to_context=True),
-        replays_persisted_history=True,
-        prepared_context_tokens=1_500,
-        request_basis="basis",
-        native_history=None,
-    )
-    published = build_prepared_history_metadata_content(prepared)[AI_RUN_METADATA_KEY]["prepared_context"]
-    assert published["request_basis"] == "basis"
-
-    capped = _prepared_history_with_scheduled_limit(prepared, limit)
-
-    # The run records no request basis, even over metadata seeded from a paused run that recorded one, so the next
-    # reply sizes its history by estimate.
-    seed = build_prepared_history_metadata_content(prepared)
-    merged = deep_merge_metadata(without_run_usage(seed), build_prepared_history_metadata_content(capped))
-    assert merged is not None
-    assert "request_basis" not in merged[AI_RUN_METADATA_KEY]["prepared_context"]
-
-
 def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
     """A message cap must compose with, rather than replace, an existing run cap."""
     runs_plan = PreparedHistoryState(
@@ -605,7 +596,7 @@ def test_scheduled_limit_does_not_widen_a_run_limited_plan() -> None:
 async def test_scheduled_history_limit_shares_budget_between_inline_and_persisted_history() -> None:
     """Persisted inline context consumes the budget while transient turn context does not."""
 
-    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
     transient_context = Message(
@@ -630,7 +621,7 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
         config=_config(),
         timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
+        **_sizing(),
         fallback_static_token_budget=100,
     )
 
@@ -652,7 +643,7 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
 async def test_scheduled_history_limit_does_not_count_current_event_as_history() -> None:
     """The fired task stays visible without consuming one of the prior-message slots."""
 
-    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
     prepared = await _prepare_execution_context_common(
@@ -673,7 +664,7 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
         config=_config(),
         timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
+        **_sizing(),
         fallback_static_token_budget=100,
     )
 
@@ -690,7 +681,7 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
 async def test_scheduled_history_limit_ignores_events_after_current() -> None:
     """Newer thread events cannot displace prior context from a scheduled turn's budget."""
 
-    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
     prepared = await _prepare_execution_context_common(
@@ -712,7 +703,7 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
         config=_config(),
         timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
+        **_sizing(),
         fallback_static_token_budget=100,
     )
 
@@ -726,7 +717,7 @@ async def test_scheduled_history_limit_ignores_events_after_current() -> None:
 async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None:
     """With history_limit=0 the scheduled turn sees no persisted replay and no thread fallback."""
 
-    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
     prepared = await _prepare_execution_context_common(
@@ -745,7 +736,7 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
         config=_config(),
         timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
+        **_sizing(),
         fallback_static_token_budget=100,
     )
 
@@ -772,7 +763,7 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
 ) -> None:
     """A routed scheduled prompt stays current and does not consume its own history budget."""
 
-    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+    async def prepare_scope_history(_provisional: TurnMessages) -> PreparedScopeHistory:
         return _prepared_scope_with_persisted_replay()
 
     relayed_prompt = "@general ⏰ [Automated Task]\nPoll the deployment queue"
@@ -805,7 +796,7 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
         config=_config(),
         timezone="UTC",
         prepare_scope_history_fn=prepare_scope_history,
-        estimate_static_tokens_fn=lambda text: len(text.split()),
+        **_sizing(),
         fallback_static_token_budget=100,
     )
 
@@ -893,23 +884,17 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
 
     tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
-    counter = build.spec.model.token_counter
-    estimator = build_static_token_estimator(
-        counter,
-        system_messages,
-        tools,
-        build.request_template.deferred_tools.names,
-    )
-    assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(
-        render_prepared_messages_text(prepared.turn.in_request_order()),
-    )
     assert prepare_scope_history.await_count == 1
-    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens
-    assert prepare_scope_history.await_args.kwargs["static_fingerprint"] == estimator.fingerprint
-    assert (
-        estimator.non_prompt_tokens
-        > build_static_token_estimator(counter, system_messages, (), frozenset()).non_prompt_tokens
-    )
+    kwargs = prepare_scope_history.await_args.kwargs
+    model = build.spec.model
+    assert kwargs["sizer"].model is model
+    frame = kwargs["frame"]
+    assert frame.system_messages == tuple(system_messages)
+    assert {tool.name for tool in frame.template.tools} >= {tool.name for tool in tools}
+    # The prepared turn records the size of a request holding the system message, the offered tools, and the turn.
+    sent = replace(frame.template, messages=(*system_messages, *prepared.turn.in_request_order()))
+    assert prepared.prepared_history.prepared_context_tokens == model.request_tokens(sent)
+    assert model.request_tokens(sent) > model.request_tokens(replace(sent, tools=()))
 
 
 @pytest.mark.asyncio
@@ -965,11 +950,12 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     """A team turn's history is sized by the messages the leader receives, as an agent turn's is."""
     config, runtime_paths = _bound_agent_config(tmp_path)
     leader_system_messages = (Message(role="system", content="You lead the team."),)
+    model = ScriptedModel([])
     monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
-    static_prompt_tokens: list[object] = []
+    frames: list[RequestFrame] = []
 
-    def finalize_history_preparation(**kwargs: object) -> PreparedHistoryState:
-        static_prompt_tokens.append(kwargs["static_prompt_tokens"])
+    def finalize_history_preparation(*, frame: RequestFrame, **_kwargs: object) -> PreparedHistoryState:
+        frames.append(frame)
         return PreparedHistoryState(replays_persisted_history=replays_persisted_history, native_history=None)
 
     monkeypatch.setattr(execution_preparation, "finalize_history_preparation", finalize_history_preparation)
@@ -986,7 +972,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
         leader_system_messages=leader_system_messages,
         leader_tools=(),
-        model=ScriptedModel([]),
+        model=model,
         prompt="Current request",
         thread_history=[
             make_visible_message(sender="@alice:localhost", body="Earlier question", event_id="$older"),
@@ -1004,10 +990,14 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     )
 
     assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
-    estimator = build_static_token_estimator(fake_token_counter(), leader_system_messages, (), frozenset())
-    # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
-    sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
-    assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))
+    sent = ModelRequest(messages=(*leader_system_messages, *prepared.turn.in_request_order()))
+    # Persisted replay is fitted around a request holding the turn as sent; fallback replay records that request's size.
+    sized = (
+        model.request_tokens(frames[0].request(summary=None, history=()))
+        if replays_persisted_history
+        else prepared.prepared_history.prepared_context_tokens
+    )
+    assert sized == model.request_tokens(sent)
 
 
 @pytest.mark.asyncio
@@ -1219,7 +1209,6 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         max_message_length=200,
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1251,7 +1240,7 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
         response_sender_id="@mindroom_code:localhost",
         config=config,
         static_token_budget=budget,
-        estimate_static_tokens_fn=estimate,
+        turn_tokens=_text_tokens(estimate),
     ).in_request_order()
 
     kept = [message.content for message in messages[1:-1]]
@@ -1274,7 +1263,7 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
         response_sender_id="@mindroom_code:localhost",
         config=config,
         static_token_budget=1_000,
-        estimate_static_tokens_fn=estimate,
+        turn_tokens=_text_tokens(estimate),
     ).in_request_order()
     assert len(untrimmed) == len(history) + 1
     assert untrimmed[0].content == render_msg_tag(sender="@alice:localhost", body="message 1", event_id="$m1")
@@ -1296,7 +1285,6 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
             history,
             response_sender_id="@mindroom_code:localhost",
             config=_config(),
-            estimate_static_tokens_fn=quarter_tokens,
         ).in_request_order(),
     )
     messages = _build_thread_history_messages_for_test(
@@ -1305,7 +1293,7 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
         static_token_budget=estimate(full_text),
-        estimate_static_tokens_fn=estimate,
+        turn_tokens=_text_tokens(estimate),
     ).in_request_order()
 
     assert [message.content for message in messages[:-1]] == [
@@ -1328,7 +1316,7 @@ def test_fallback_thread_history_marks_history_dropped_entirely() -> None:
         response_sender_id="@mindroom_code:localhost",
         config=config,
         static_token_budget=30,
-        estimate_static_tokens_fn=estimate,
+        turn_tokens=_text_tokens(estimate),
     ).in_request_order()
 
     assert [message.content for message in messages] == [
@@ -1347,7 +1335,6 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
         current_event_id="$current",
         member_display_names={"@alice:localhost": "Banana Man"},
         config=_config(),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1491,7 +1478,6 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 3
@@ -1541,7 +1527,6 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1589,7 +1574,6 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1618,7 +1602,6 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         ],
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1655,7 +1638,6 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1690,7 +1672,6 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1740,7 +1721,6 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1779,7 +1759,6 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1810,7 +1789,6 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1831,7 +1809,6 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1851,7 +1828,6 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1879,7 +1855,6 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -2180,7 +2155,6 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         [reply, _hook_message("deep_research done · confident · 2 rounds", "$done")],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [

@@ -1524,7 +1524,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a job actor, participation decides first, compaction rewrites next, and the receipt hook comes last.
+    """Without a job actor, participation decides first, the receipt joins next, and compaction sizes the result.
 
     The rest of the hooks are wired. A reply with a job actor projects its job definitions before participation.
     """
@@ -1543,8 +1543,8 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     hooks = captured["hooks"]
     assert [function.__qualname__.split(".")[0] for function in hooks.before_request] == [
         "participation_hook",
-        "mid_turn_compaction_hook",
         "approval_receipt_hook",
+        "mid_turn_compaction_hook",
     ]
     assert hooks.answer_tool_calls is not None
     assert hooks.rewrite_tool_calls is None

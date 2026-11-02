@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 from mindroom.llm.messages import stable_serialize
@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 
 _MAX_HISTORY_VIEWED_IMAGES = 4
 _MAX_HISTORY_VIEWED_IMAGE_BYTES = 10 * 1024 * 1024
-HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS = 5_000
 
 
 def message_media_entries(message: Message) -> tuple[tuple[str, Sequence[Image | Audio | Video | File] | None], ...]:
@@ -93,15 +92,6 @@ def _content_with_viewed_image_omission(message: Message, omitted: int) -> str:
     )
     content = render_message_content(message)
     return f"{content}\n\n{notice}" if content else notice
-
-
-def image_content_for_token_estimation(value: object) -> object:
-    """Remove transport fields only from a typed image block, retaining its shape."""
-    if isinstance(value, dict):
-        block = cast("dict[object, object]", value)
-        if block.get("type") == "input_image":
-            return {key: item for key, item in block.items() if key not in {"image_url", "file_id"}}
-    return value
 
 
 def render_message_content(message: Message) -> str:

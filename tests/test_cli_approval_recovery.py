@@ -1062,7 +1062,6 @@ async def _checkpointed_batch(
         run=catalog.run,
         record=record,
         request_index=1,
-        loop_start_ids=frozenset(),
         request_template=EMPTY_REQUEST,
         digests=RequestDigests(ScriptedModel([])),
     )
