@@ -14,9 +14,9 @@ from mindroom.authorization import (
     is_sender_allowed_for_responder,
 )
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.contacts.turns import contact_room, leaves_to_other_agent
+from mindroom.contacts.turns import contact_room, unmentioned_message_answerer
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
@@ -647,8 +647,6 @@ class TurnPolicy:
         )
         if router_plan is not None:
             return router_plan
-        if self._leaves_to_other_contact_agent(dispatch):
-            return DispatchPlan(kind="ignore")
 
         action = await self._resolve_response_action(
             dispatch,
@@ -659,20 +657,32 @@ class TurnPolicy:
             return DispatchPlan(kind="ignore")
         return DispatchPlan(kind="respond", response_action=action)
 
-    def _leaves_to_other_contact_agent(self, dispatch: PreparedDispatch) -> bool:
-        """Return whether an unmentioned message in this agent's contact room is the other agent's to answer."""
+    def _only_the_contact_answerer(
+        self,
+        dispatch: PreparedDispatch,
+        candidates: ResponderCandidatePermissions,
+    ) -> ResponderCandidatePermissions:
+        """Narrow the candidates to the agent that answers an unmentioned message in this agent's contact room.
+
+        That agent answers whatever access lets the writer use; mentions and every other room keep the candidates.
+        """
         context = dispatch.context
-        return (
-            not context.am_i_mentioned
-            and not context.mentioned_agents
-            and not context.has_non_agent_mentions
-            and leaves_to_other_agent(
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                room_id=dispatch.target.room_id,
-                agent_name=self.deps.agent_name,
-                sender_id=dispatch.envelope.origin.transport_sender_id,
-            )
+        if context.am_i_mentioned or context.mentioned_agents or context.has_non_agent_mentions:
+            return candidates
+        answerer = unmentioned_message_answerer(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room_id=dispatch.target.room_id,
+            agent_name=self.deps.agent_name,
+            sender_id=dispatch.envelope.origin.transport_sender_id,
+        )
+        if answerer is None:
+            return candidates
+        answerer_id = current_entity_id(answerer, self.deps.runtime_paths).full_id
+        return replace(
+            candidates,
+            allowed=[responder for responder in candidates.allowed if responder.full_id == answerer_id],
+            pending=[responder for responder in candidates.pending if responder.full_id == answerer_id],
         )
 
     def _adaptive_response_action(
@@ -705,12 +715,15 @@ class TurnPolicy:
         requester_user_id = dispatch.requester_user_id
         planning_thread_history = context.planning_thread_history
         availability = self._responder_availability()
-        candidates = classify_responder_candidates_from_cached_room(
-            room,
-            requester_user_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            self.deps.agent_reply_memberships,
+        candidates = self._only_the_contact_answerer(
+            dispatch,
+            classify_responder_candidates_from_cached_room(
+                room,
+                requester_user_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                self.deps.agent_reply_memberships,
+            ),
         )
         available_responders_in_room = self._filter_materializable_responders(candidates.allowed, availability)
         pending_responders_in_room = self._filter_materializable_responders(candidates.pending, availability)

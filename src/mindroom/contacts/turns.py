@@ -185,22 +185,27 @@ def contact_counterparty_agent(
     return other.id
 
 
-def leaves_to_other_agent(
+def unmentioned_message_answerer(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     room_id: str,
     agent_name: str,
     sender_id: str,
-) -> bool:
-    """Return whether this agent leaves an unmentioned message in its contact room to the other agent.
+) -> str | None:
+    """Return the agent that answers a person's unmentioned message in this agent's active contact room, or None.
 
-    Each agent of a contact runs a message there as its own owner, so both would answer it; a message the other
-    agent's owner wrote is that agent's to answer.
+    Each agent of a contact runs a message there as its own owner, so access cannot choose between them.
+    The writer's own agent answers: the other agent's owner's message is that agent's, while this agent's owner's, or
+    a person party's, who has no agent there, is this agent's alone.
+    None leaves the choice to access, as for an agent's message or in any other room.
     """
     found = contact_room(config, runtime_paths, room_id, agent_name)
-    if found is None:
-        return False
+    if found is None or found[0].status != "active":
+        return None
     record, side = found
     other = record.counterparty(side)
-    return other.kind == "agent" and resolve_human_requester_alias(sender_id, config, runtime_paths) == other.owner
+    sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
+    if sender == other.owner:
+        return other.id if other.kind == "agent" else agent_name
+    return agent_name if sender == record.party(side).owner else None

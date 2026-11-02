@@ -70,6 +70,7 @@ from tests.conftest import (
     install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
+    make_visible_message,
     message_origin,
     patch_response_runner_module,
     publish_test_plugins,
@@ -423,6 +424,7 @@ async def _plan(
     owner: str,
     mentioned: tuple[str, ...] = (),
     thread_id: str | None = None,
+    history: tuple[str, ...] = (),
 ) -> str:
     """Return whether ``agent_name`` answers ``sender``'s message in the contact room, which runs as ``owner``."""
     return (
@@ -434,6 +436,7 @@ async def _plan(
             owner=owner,
             mentioned=mentioned,
             thread_id=thread_id,
+            history=history,
         )
     ).kind
 
@@ -447,9 +450,13 @@ async def _dispatch_plan(
     owner: str,
     mentioned: tuple[str, ...] = (),
     thread_id: str | None = None,
+    history: tuple[str, ...] = (),
     room_id: str = CONTACT_ROOM,
 ) -> DispatchPlan:
-    """Return how ``agent_name`` handles ``sender``'s message in ``room_id``, which runs as ``owner``."""
+    """Return how ``agent_name`` handles ``sender``'s message in ``room_id``, which runs as ``owner``.
+
+    ``history`` names the agents that wrote in the thread before.
+    """
     room = nio.MatrixRoom(room_id, _agent(paths, agent_name))
     for user_id in (OWNER, CO_OWNER, DAVE, _agent(paths, "mind_alice"), _agent(paths, "mind_bob")):
         room.add_member(user_id, user_id, None)
@@ -458,7 +465,10 @@ async def _dispatch_plan(
         am_i_mentioned=agent_name in mentioned,
         is_thread=thread_id is not None,
         thread_id=thread_id,
-        thread_history=thread_history_result([], is_full_history=True),
+        thread_history=thread_history_result(
+            [make_visible_message(sender=_agent(paths, name)) for name in history],
+            is_full_history=True,
+        ),
         mentioned_agents=mentioned_ids,
         has_non_agent_mentions=False,
     )
@@ -528,21 +538,32 @@ async def test_agents_mentioned_together_in_a_contact_room_never_form_a_team(tmp
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
-@pytest.mark.parametrize("thread_id", [None, THREAD_ID])
+@pytest.mark.parametrize("access", [None, {"users": [OWNER, CO_OWNER]}], ids=["own_owner", "both_owners"])
+@pytest.mark.parametrize(
+    ("thread_id", "history"),
+    [(None, ()), (THREAD_ID, ()), (THREAD_ID, ("mind_alice", "mind_bob"))],
+    ids=["timeline", "new_thread", "thread_of_both_agents"],
+)
 async def test_an_unmentioned_message_in_a_contact_room_is_answered_only_by_its_writers_agent(
     tmp_path: Path,
+    access: dict[str, Any] | None,
     thread_id: str | None,
+    history: tuple[str, ...],
 ) -> None:
-    """Each agent runs a contact-room message as its own owner, so only the writer's own agent answers it unmentioned."""
-    config, paths = _setup(tmp_path)
+    """Each agent runs a contact-room message as its own owner, so only the writer's own agent answers it unmentioned.
+
+    Access that lets each owner use both agents leaves the message to the writer's agent all the same.
+    """
+    config, paths = _setup(tmp_path, access=access)
     _contact(paths)
+    where = {"thread_id": thread_id, "history": history}
 
     # Alice wrote it: her agent answers for her, and Bob's agent leaves it to hers.
-    assert await _plan(config, paths, "mind_alice", sender=OWNER, owner=OWNER, thread_id=thread_id) == "respond"
-    assert await _plan(config, paths, "mind_bob", sender=OWNER, owner=CO_OWNER, thread_id=thread_id) == "ignore"
+    assert await _plan(config, paths, "mind_alice", sender=OWNER, owner=OWNER, **where) == "respond"
+    assert await _plan(config, paths, "mind_bob", sender=OWNER, owner=CO_OWNER, **where) == "ignore"
     # Bob wrote it: the other way around.
-    assert await _plan(config, paths, "mind_bob", sender=CO_OWNER, owner=CO_OWNER, thread_id=thread_id) == "respond"
-    assert await _plan(config, paths, "mind_alice", sender=CO_OWNER, owner=OWNER, thread_id=thread_id) == "ignore"
+    assert await _plan(config, paths, "mind_bob", sender=CO_OWNER, owner=CO_OWNER, **where) == "respond"
+    assert await _plan(config, paths, "mind_alice", sender=CO_OWNER, owner=OWNER, **where) == "ignore"
     # A mentioned agent still answers the other side's owner, and the writer's own agent stays silent.
     mentioned = ("mind_bob",)
     assert await _plan(config, paths, "mind_bob", sender=OWNER, owner=CO_OWNER, mentioned=mentioned) == "respond"

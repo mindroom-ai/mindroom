@@ -97,7 +97,7 @@ Carrying a flag from ingress was rejected, because tool calls from normal turns 
 
 ### Who answers in a contact room
 
-An owner's unmentioned message is answered only by that owner's agent, because each agent of a contact runs a message there as its own owner, so both agents would otherwise answer every message an owner writes.
+An owner's unmentioned message is answered only by that owner's agent, because each agent of a contact runs a message there as its own owner, so access cannot choose between them: both agents would otherwise answer every message an owner writes, or neither would when access lets each owner use both agents.
 Agents never form a team in a room that is or was a contact room, because a team turn would show an unrestricted reply to the other side; each mentioned agent answers alone as its own owner's contact turn.
 In its own active contact room an agent can always name the other agent as `recipient`, because that agent's access never admits this agent's owner, the requester of every turn there, while its ingress admits the relay and runs it as its own owner; recipient discovery everywhere else still follows access.
 A live run found the two agents unable to name each other before this, so `defaults.max_consecutive_agent_replies` had never bounded a real exchange.
