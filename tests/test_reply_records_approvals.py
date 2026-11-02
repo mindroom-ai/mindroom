@@ -39,7 +39,7 @@ from mindroom.reply_presentation import (
     note_segment,
     render_body,
 )
-from mindroom.response_sources import ResponseSources, Unclaimed, UnclaimedReason
+from mindroom.response_sources import Unclaimed, UnclaimedReason
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -54,6 +54,7 @@ from tests.conftest import (
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_reply_records_turns import (
     _admit_edit,
+    _coalesced_turn,
     _FlakyHomeserver,
     _model_stream,
     _pending_turn,
@@ -155,20 +156,20 @@ async def _respond(
     bot: AgentBot,
     *,
     resume: AsyncMock | None = None,
-    target: MessageTarget | None = None,
     request: ResponseRequest | None = None,
 ) -> None:
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = target or _target()
+    request = request or _plain_request(_target())
+    session_id = request.response_envelope.target.session_id
     with (
         patch_response_runner_module(
-            stream_agent_response=_pausing_stream(replace(_paused(), session_id=target.session_id)),
+            stream_agent_response=_pausing_stream(replace(_paused(), session_id=session_id)),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ),
         patch.object(type(runner.approvals), "_continue_entity_call", resume or AsyncMock()),
     ):
-        await runner.generate_response(request or _plain_request(target))
+        await runner.generate_response(request)
 
 
 def _resume_until_cancelled(resuming: asyncio.Event) -> AsyncMock:
@@ -226,27 +227,10 @@ async def test_an_approved_resume_completes_the_reply_it_paused(tmp_path: Path) 
 async def test_a_coalesced_turn_s_approval_ends_the_reply_it_paused(tmp_path: Path, ending: str) -> None:
     """A coalesced turn's approval finds the answer or the note its reply ends with, as a single message's does."""
     async with _approval_bot(tmp_path, requires_human=ending == "failed") as bot:
-        await bot.journal_principal().admit(
-            InboundEvent(
-                event_id="$event2",
-                room_id=_target().room_id,
-                thread_id=None,
-                kind=EventKind.MESSAGE,
-                event_class=EventClass.ACTIONABLE,
-                sender="@user:localhost",
-                origin_server_ts=2,
-                source={},
-            ),
-        )
-        coalesced = replace(
-            _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2"),
-            sources=ResponseSources(("$event2", "$event"), ("$event", "$event2")),
-        )
-        if ending == "approved":
-            resume = AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {}))
-            await _respond(bot, resume=resume, request=coalesced)
-        else:
-            await _respond(bot, request=coalesced)
+        # A pause waiting for a human never resumes here, so only the approved turn's resume runs.
+        resume = AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {}))
+        await _respond(bot, resume=resume, request=await _coalesced_turn(bot))
+        if ending == "failed":
             runner = unwrap_extracted_collaborator(bot._response_runner)
             continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event2")
             assert continuation is not None
@@ -456,7 +440,7 @@ async def test_a_message_in_another_conversation_is_answered_while_an_approval_w
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         # In thread mode the paused request roots its own thread, and a later top-level message starts another one.
         paused = _target(thread_id="$event")
-        await _respond(bot, target=paused)
+        await _respond(bot, request=_plain_request(paused))
         model = AsyncMock(return_value="Other answer.")
         with patch_response_runner_module(
             stream_agent_response=_model_stream(model),

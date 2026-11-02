@@ -88,6 +88,7 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
     unless ``changes`` names others.
     """
     requester_id = changes.get("requester_id", "@user:localhost")
+    sources = changes.get("sources", ResponseSources(("$source",), ("$source",)))
     defaults: dict[str, Any] = {
         "execution_identity": ToolExecutionIdentity(
             channel="matrix",
@@ -108,13 +109,13 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
         "requester_id": requester_id,
         "origin": message_origin(sender_id=requester_id),
         "response_event_id": "$waiting",
-        "sources": ResponseSources(("$source",), ("$source",)),
+        "sources": sources,
+        # The paused span's rows are named by its turn's messages, as a response names them.
+        "final_delivery_id": sources.delivery_id,
         "calls": (),
         "state": "ready",
     }
-    merged = defaults | changes
-    # The paused span's rows are named by its turn's messages, as a response names them.
-    return ApprovalContinuation(**({"final_delivery_id": merged["sources"].delivery_id} | merged))
+    return ApprovalContinuation(**(defaults | changes))
 
 
 def decided_calls(

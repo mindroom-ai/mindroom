@@ -1243,10 +1243,8 @@ async def _blocked_stream(
     return response
 
 
-@pytest.mark.parametrize("interruption", ["superseded", "restart"])
-async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path: Path, interruption: str) -> None:
-    """A retry that splits a coalesced turn continues its reply for the first message and answers the second anew."""
-    bot = await _streaming_bot(tmp_path)
+async def _coalesced_turn(bot: AgentBot) -> ResponseRequest:
+    """Admit ``$event2`` after ``$event`` and return the turn that answers both, driven by the newer one."""
     await bot.journal_principal().admit(
         InboundEvent(
             event_id="$event2",
@@ -1259,10 +1257,17 @@ async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path
             source={},
         ),
     )
-    coalesced = replace(
+    return replace(
         _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2"),
         sources=ResponseSources(("$event2", "$event"), ("$event", "$event2")),
     )
+
+
+@pytest.mark.parametrize("interruption", ["superseded", "restart"])
+async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path: Path, interruption: str) -> None:
+    """A retry that splits a coalesced turn continues its reply for the first message and answers the second anew."""
+    bot = await _streaming_bot(tmp_path)
+    coalesced = await _coalesced_turn(bot)
     response = None
     first_answer = "Answer one."
     if interruption == "superseded":
