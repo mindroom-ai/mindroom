@@ -533,7 +533,8 @@ class ChatStream:
         """End the consumed stream and return the text it held back; ``parts`` then holds the finished turn."""
         events = self._add_text(self._think.finish())
         self.parts.content = "".join(self._content) or None
-        self.parts.reasoning = "".join(self._reasoning) or None
+        # An empty reasoning field means the model reasoned to nothing, which a route replaying reasoning sends back.
+        self.parts.reasoning = "".join(self._reasoning) if self._reasoning else None
         calls = [self._calls[index] for index in sorted(self._calls)]
         self.parts.tool_calls = _completed_tool_calls(calls)
         return events
