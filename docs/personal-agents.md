@@ -207,7 +207,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
 - `tools` come from the creator's tools, with the creator's settings for each, and omitting `tools` gives the new agent all of them.
   Asking for a tool the creator lacks is refused with the list of names it may use.
 - `instructions` replace the creator's, and omitting them keeps the creator's.
-- Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings.
+- Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings, except `matrix_username`: the new agent gets its own default Matrix account.
 - Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
   Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
   It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.
