@@ -100,7 +100,7 @@ Carrying a flag from ingress was rejected, because tool calls from normal turns 
 An owner's unmentioned message is answered only by that owner's agent, because each agent of a contact runs a message there as its own owner, so access cannot choose between them: both agents would otherwise answer every message an owner writes, or neither would when access lets each owner use both agents.
 Agents never form a team in a room that is or was a contact room, because a team turn would show an unrestricted reply to the other side; each mentioned agent answers alone as its own owner's contact turn.
 In its own active contact room an agent can always name the other agent as `recipient`, because that agent's access never admits this agent's owner, the requester of every turn there, while its ingress admits the relay and runs it as its own owner; recipient discovery everywhere else still follows access.
-A live run found the two agents unable to name each other before this, so `defaults.max_consecutive_agent_replies` had never bounded a real exchange.
+A first live run found the two agents unable to name each other before this; a re-run had them wake each other through `recipient`, each turn running as its own owner, until `defaults.max_consecutive_agent_replies` stopped the exchange and a person's message reset the count.
 
 ### Contact turns answer only through `matrix_message`
 
@@ -215,4 +215,4 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 
 ## Open Questions
 
-- A live run with two personal agents on 2026-11-01 passed every scenario but agents naming each other as `recipient`, which is fixed since and not yet rerun live; a live agent-to-agent exchange up to the consecutive-message limit, minimal mode, and worker-routed tools have not run live yet.
+- Two live runs with two personal agents on 2026-11-01 passed every scenario once the `recipient` fix landed; minimal mode, worker-routed tools, and a sustained runaway past the consecutive-message limit, which the models would not produce in three attempts, have not run live.
