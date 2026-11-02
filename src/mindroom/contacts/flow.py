@@ -457,7 +457,8 @@ async def accept_contact(
     try:
         await _seat_parties(context, record, room_id, agents)
         accepted = await run_blocking_until_complete(update_contacts, paths, activate)
-    except ValueError:
+    # Any failure, a cancellation included, leaves the room, which no contact refers to yet.
+    except BaseException:
         await _leave_contact_room(context, record, room_id)
         raise
     await _announce_acceptance(context, accepted, poster)

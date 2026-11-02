@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -372,6 +373,48 @@ async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pendin
     for client in runtime.clients.values():
         client.room_leave.assert_not_awaited()
     assert _kept(paths) == set()
+    assert [stored.status for stored in _stored(paths)] == ["pending"]
+    runtime.sent("mind_alice").assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("no ingestion session"), asyncio.CancelledError()])
+async def test_a_join_that_fails_unexpectedly_also_leaves_the_room(tmp_path: Path, failure: BaseException) -> None:
+    """Any failure while seating the agents, not only a refusal, makes them leave the room before it propagates."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    async def change(_room_id: str, membership: str) -> bool:
+        if membership == "join":
+            raise failure
+        return True
+
+    runtime.bots["mind_bob"].change_local_membership.side_effect = change
+    with _matrix(), pytest.raises(type(failure)):
+        await _accept(config, paths, runtime, record.id)
+
+    assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
+    assert _kept(paths) == set()
+    assert [stored.status for stored in _stored(paths)] == ["pending"]
+    runtime.sent("mind_alice").assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_acceptance_that_cannot_be_stored_leaves_the_room(tmp_path: Path) -> None:
+    """A store write that fails after both agents joined leaves the room, and the request stays pending."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    with (
+        _matrix(),
+        patch("mindroom.contacts.flow.update_contacts", side_effect=OSError("disk full")),
+        pytest.raises(OSError, match=r"^disk full$"),
+    ):
+        await _accept(config, paths, runtime, record.id)
+
+    assert _joined(runtime) == _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert [stored.status for stored in _stored(paths)] == ["pending"]
     runtime.sent("mind_alice").assert_not_awaited()
 
