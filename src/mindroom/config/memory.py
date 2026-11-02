@@ -156,7 +156,7 @@ class _MemoryFileConfig(BaseModel):
     max_entrypoint_tokens: int = Field(
         default=50000,
         ge=1,
-        description="Maximum estimated tokens (characters / 4) of whole lines to preload from MEMORY.md",
+        description="Maximum tokens, as the turn's model counts them, of whole lines to preload from MEMORY.md",
     )
 
 

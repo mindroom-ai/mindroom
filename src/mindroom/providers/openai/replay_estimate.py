@@ -15,16 +15,17 @@ import struct
 from typing import TYPE_CHECKING, Any
 
 from mindroom.history.message_content import image_content_for_token_estimation
-from mindroom.llm.messages import is_own_model_message
+from mindroom.llm.messages import is_own_model_message, stable_serialize
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
 from mindroom.providers.openai.response_replay import recorded_output
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
-from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
+from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.messages import Message
+    from mindroom.llm.provider import TokenCounter
 
 __all__ = ["estimate_responses_replay_tokens", "responses_replay_uses_visual_tokens"]
 
@@ -40,12 +41,13 @@ def responses_replay_uses_visual_tokens(model_id: str) -> bool:
 def estimate_responses_replay_tokens(
     messages: Sequence[Message],
     *,
+    counter: TokenCounter,
     model_id: str,
     cache_system_prompt: bool,
     explicit_breakpoint: bool,
     provider: str,
 ) -> int:
-    """Count the ``input`` an explicitly replayed Responses request sends for ``messages``.
+    """Count the ``input`` an explicitly replayed Responses request sends for ``messages``, its text with ``counter``.
 
     An attachment file that cannot be read raises ``InvalidRequest`` naming ``provider``, as the request would.
     """
@@ -58,7 +60,7 @@ def estimate_responses_replay_tokens(
     formatted = [_without_reasoning_ciphertext(item) for item in replayed]
     reasoning_tokens = _earlier_reasoning_tokens(messages, replayed)
     if not responses_replay_uses_visual_tokens(model_id):
-        return approximate_o200k_tokens(stable_serialize(formatted)) + reasoning_tokens
+        return count(counter, stable_serialize(formatted)) + reasoning_tokens
     estimated_input = []
     image_tokens = 0
     for item in formatted:
@@ -73,7 +75,7 @@ def estimate_responses_replay_tokens(
                     if isinstance(block, dict) and block.get("type") == "input_image"
                 )
         estimated_input.append(projected)
-    return approximate_o200k_tokens(stable_serialize(estimated_input)) + image_tokens + reasoning_tokens
+    return count(counter, stable_serialize(estimated_input)) + image_tokens + reasoning_tokens
 
 
 def _without_reasoning_ciphertext(item: Any) -> Any:  # noqa: ANN401

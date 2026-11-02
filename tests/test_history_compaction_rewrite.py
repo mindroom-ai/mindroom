@@ -56,6 +56,7 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
@@ -64,7 +65,6 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.errors import classify_provider_error
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -77,6 +77,7 @@ from tests.conftest import (
     seed_session,
 )
 from tests.fakes.summary_model import summary_model
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
@@ -148,6 +149,7 @@ async def _rewrite_single_run(
         max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=after_persist,
+        counter=fake_token_counter(),
     )
 
 
@@ -216,21 +218,21 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
         compacted_runs=runs,
         max_input_tokens=1_000_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
     assert len(full_runs) == len(runs)
 
-    tight_budget = estimate_compaction_input_tokens(full_input) - 50
+    tight_budget = quarter_tokens(full_input) - 50
     summary_input, included_runs = build_summary_input(
         previous_summary="existing summary",
         compacted_runs=runs,
         max_input_tokens=tight_budget,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert 0 < len(included_runs) < len(runs)
-    assert estimate_compaction_input_tokens(summary_input) <= tight_budget
+    assert quarter_tokens(summary_input) <= tight_budget
 
 
 def test_build_summary_input_leaves_the_stored_runs_unchanged() -> None:
@@ -255,7 +257,7 @@ def test_build_summary_input_leaves_the_stored_runs_unchanged() -> None:
         compacted_runs=[run],
         max_input_tokens=1_000_000,
         history_settings=_ALL_HISTORY_SETTINGS,
-        token_estimator=estimate_compaction_input_tokens,
+        token_estimator=quarter_tokens,
     )
 
     assert run.messages == stored
@@ -306,7 +308,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_shrinkable_error
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 2
-    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
+    assert quarter_tokens(summary_inputs[1]) < quarter_tokens(summary_inputs[0])
 
 
 def _filler_run(run_id: str, *, words: int, marker: str = "") -> RunRecord:
@@ -639,8 +641,12 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
             ),
         ],
     )
+
     primary = summary_model()
-    fallback = summary_model(model_id="fallback-model-id")
+    fallback = summary_model(
+        model_id="fallback-model-id",
+        token_counter=TokenCounter(estimate=lambda text: 999 if text == "probe" else quarter_tokens(text)),
+    )
     summary_mock = AsyncMock(
         side_effect=[
             ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()),
@@ -681,10 +687,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     assert "RUN2-MARKER" in summary_inputs[2]
     retry_sleep.assert_not_awaited()
     # The second chunk rebuilds its input with the fallback's token estimator.
-    assert (
-        build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"].keywords["model_id"]
-        == fallback.identity.id
-    )
+    assert build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"]("probe") == 999
     assert folded_run_ids(storage) == ["run-1", "run-2"]
     assert summary_rows_of(storage, "agent:test_agent") == [
         StoredSummaryRow(summary="first chunk summary", legacy=False),
@@ -1182,7 +1185,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1192,7 +1195,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1259,7 +1262,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
 
     assert outcome is not None
@@ -1270,6 +1273,42 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         ("compaction:before", ["run-2"], ["v" * 200, "b" * 200]),
         ("compaction:after", [] if second_chunk_stored else ["run-2"], stored_lines),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_summary_is_never_stored_on_a_count_that_undercounts_it_while_the_vocabulary_loads(
+    tmp_path: Path,
+) -> None:
+    """Every later reply replays a stored summary, so the check before storing it counts its bytes until o200k_base loads.
+
+    A quarter token per character counts this text at a fraction of its tokens.
+    """
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_filler_run("run-1", words=200)])
+    seed_session(storage, session)
+    summary = "要点" * 500
+    loading = TokenCounter(estimate=lambda _text: None)
+    stand_in = estimate_summary_text_tokens(summary, loading)
+    assert stand_in < 2_000 < estimate_summary_text_tokens(summary, loading, upper_bound=True)
+
+    with pytest.raises(RuntimeError, match="The summary exceeds the history budget"):
+        await compact_scope_history(
+            storage=storage,
+            session=session,
+            state=HistoryScopeState(),
+            summarizer=_summarizer(summary_model(summary), 50_000),
+            available_history_budget=1,
+            max_summary_tokens=2_000,
+            before_tokens=2,
+            replay_window_tokens=16_000,
+            threshold_tokens=1,
+            progress=None,
+            complete=_reported,
+            counter=loading,
+        )
+
+    assert summary_rows_of(storage, "agent:test_agent") == []
 
 
 @pytest.mark.asyncio
@@ -1299,13 +1338,13 @@ async def test_compact_scope_history_keeps_earlier_chunks_when_a_later_summary_e
         state=HistoryScopeState(),
         summarizer=_summarizer(model, summary_input_budget),
         available_history_budget=1,
-        max_summary_tokens=estimate_summary_text_tokens(short_summary, replay_estimator=None),
+        max_summary_tokens=estimate_summary_text_tokens(short_summary, fake_token_counter()),
         before_tokens=2,
         replay_window_tokens=16_000,
         threshold_tokens=1,
         progress=None,
         complete=_reported,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
 
     assert len(model.requests) == 2
@@ -1757,7 +1796,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
                 compacted_runs=list(working_session.runs),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1766,7 +1805,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
-            token_estimator=estimate_compaction_input_tokens,
+            token_estimator=quarter_tokens,
         )[1]
         == []
     )
@@ -1785,6 +1824,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             max_summary_tokens=None,
             before_persist=AsyncMock(),
             after_persist=AsyncMock(),
+            counter=fake_token_counter(),
         )
     assert rewrite_result is not None
     assert rewrite_result.compacted_run_count == 1
@@ -1858,7 +1898,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
                 compacted_runs=list(session.runs),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1867,7 +1907,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
             history_settings=_ALL_HISTORY_SETTINGS,
-            token_estimator=estimate_compaction_input_tokens,
+            token_estimator=quarter_tokens,
         )[1]
         == []
     )
@@ -1888,7 +1928,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
             threshold_tokens=1,
             progress=None,
             complete=_reported,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
 
     assert outcome is not None
@@ -1930,7 +1970,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     before_tokens = estimate_prompt_visible_history_tokens(
         session=working_session,
         history_settings=history_settings,
-        replay_estimator=None,
+        counter=fake_token_counter(),
     )
     summary_input_budget = next(
         budget
@@ -1941,7 +1981,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
@@ -1951,13 +1991,13 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
-                token_estimator=estimate_compaction_input_tokens,
+                token_estimator=quarter_tokens,
             )[1],
         )
         == 1
     )
     progress_events: list[CompactionLifecycleProgress] = []
-    replay_estimator = responses_adapter(tmp_path) if portable else None
+    counter = responses_adapter(tmp_path).token_counter if portable else fake_token_counter()
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
         persisted = storage.load_session("session-1")
@@ -1980,13 +2020,13 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
             before_tokens=estimate_prompt_visible_history_tokens(
                 session=working_session,
                 history_settings=history_settings,
-                replay_estimator=replay_estimator,
+                counter=counter,
             ),
             replay_window_tokens=None,
             threshold_tokens=None,
             progress=record_progress,
             complete=_reported,
-            replay_estimator=replay_estimator,
+            counter=counter,
         )
 
     assert outcome is not None
@@ -2105,7 +2145,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
             threshold_tokens=None,
             progress=None,
             complete=_reported,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
 
     assert appended == [True, False]
@@ -2142,7 +2182,7 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
             threshold_tokens=None,
             progress=None,
             complete=_reported,
-            replay_estimator=None,
+            counter=fake_token_counter(),
         )
 
     assert outcome is None

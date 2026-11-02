@@ -62,6 +62,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import _forced_compaction_context, _make_config, _reported, _session
 from tests.identity_helpers import persist_actual_entity_accounts
 from tests.turn_model_helpers import turn_model
@@ -300,8 +301,7 @@ async def _claude_agent(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> Pat
         usage={"input_tokens": 50, "output_tokens": 9, "cache_read_input_tokens": 5},
     )
     turn = claude_agent._ClaudeTurn(responses={"msg-1": response}, result=result)
-    with helper_usage_owner_context(owner):
-        await claude_agent._record_turn_usage(turn, None)
+    await claude_agent._record_turn_usage(turn, session_model=None, owner=owner, requester_id=None)
     return paths.storage_root
 
 
@@ -374,7 +374,7 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         resolved_inputs=inputs,
         history_budget=None,
         before_tokens=0,
-        replay_estimator=None,
+        counter=fake_token_counter(),
         config=config,
         runtime_paths=paths,
     )

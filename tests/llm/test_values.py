@@ -41,6 +41,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import TOKEN_FIELDS, MessageMetrics, RunMetrics, TokenCounts
+from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -304,7 +305,7 @@ class _ScriptedProvider:
     identity = ModelIdentity(id="scripted", provider="Synthetic")
     capabilities = Capabilities()
     native_history_route = None
-    replay_estimator = None
+    token_counter = fake_token_counter()
 
     def __init__(self, events: Sequence[StreamEvent]) -> None:
         self._events = events
@@ -381,9 +382,7 @@ def test_model_request_defaults_are_immutable_and_empty() -> None:
 
 def test_capabilities_default_to_the_least_capable_route() -> None:
     assert Capabilities() == Capabilities(structured_output="json_mode", omitted_media=frozenset())
-    assert Capabilities(conservative_token_estimates=True, omitted_media=frozenset({"video"})).omitted_media == {
-        "video",
-    }
+    assert Capabilities(omitted_media=frozenset({"video"})).omitted_media == {"video"}
 
 
 # --- errors ----------------------------------------------------------------------------------------------------

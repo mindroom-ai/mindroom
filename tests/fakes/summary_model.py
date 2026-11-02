@@ -6,14 +6,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, TurnCompleted, UsageReported
+from mindroom.llm.provider import ModelIdentity, TurnCompleted, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from tests.fakes.scripted_model import Await, ScriptedModel
+from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
-    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent
+    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, TokenCounter
     from tests.fakes.scripted_model import ScriptStep
 
 # A reply is the summary text, a finished turn, an exception the request raises, or the scripted events of the
@@ -70,14 +71,14 @@ def summary_model(
     *replies: Reply,
     model_id: str = "summary-model",
     provider: str = "fake",
-    claude: bool = False,
+    token_counter: TokenCounter | None = None,
     default: str | None = "ok",
 ) -> ScriptedSummaryModel:
-    """Return a summary model named ``model_id``; ``claude`` gives it Claude's conservative input sizing."""
+    """Return a summary model named ``model_id``, counting with ``token_counter``, a quarter token per character if None."""
     return ScriptedSummaryModel(
         turns=[_steps(reply) for reply in replies],
         identity=ModelIdentity(id=model_id, provider=provider),
-        capabilities=Capabilities(conservative_token_estimates=claude),
+        token_counter=token_counter or fake_token_counter(),
         default=summary_steps(default) if default is not None else None,
     )
 
