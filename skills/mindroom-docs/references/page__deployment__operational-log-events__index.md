@@ -343,7 +343,7 @@ Request logs hold each request as MindRoom hands it to the provider's client lib
 Credentials such as tokens, cookies, passwords, API keys, authorization headers, and PEM private keys are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 Export `MINDROOM_TIMING=1` before startup to log timing for tool calls and one INFO-level `Dispatch pipeline timing` summary per turn, including `time_to_model_request_ms` and context, queue, payload, agent-build, and model spans.
-A streamed reply that showed a worker warmup notice, because a tool call waited more than 1.5 seconds for a worker or its worker failed to start, also carries `worker_wait_ms`, the longest such wait, which matches `wait_ms` of that start's [`worker_cold_start`](#worker_cold_start) record.
+A reply whose tool call waited more than 1.5 seconds for a worker to start, or whose worker failed to start, also carries `worker_wait_ms`, the longest such wait, which matches `wait_ms` of that start's [`worker_cold_start`](#worker_cold_start) record; a streamed reply also shows a warmup notice during that wait.
 
 ```bash
 LOG_LEVEL=DEBUG MINDROOM_LOG_FORMAT=json MINDROOM_TIMING=1 mindroom run
