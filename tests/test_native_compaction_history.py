@@ -242,6 +242,40 @@ def test_portable_replay_follows_each_plans_request_limit(tmp_path: Path) -> Non
             assert sent["input"][0] == {"role": "assistant", "content": "Previous answer"}
 
 
+@pytest.mark.parametrize(("static_tokens", "native"), [(999, True), (1_000, False)])
+def test_native_compaction_needs_a_trigger_above_the_request_without_history(
+    tmp_path: Path,
+    static_tokens: int,
+    *,
+    native: bool,
+) -> None:
+    """A trigger the request reaches without any history would leave the provider nothing to compact."""
+    config, _ = _make_config(tmp_path)
+    model = responses_adapter(tmp_path, store=False)
+    resolved = _inputs(config)
+    plan = replace(
+        resolved.execution_plan,
+        automatic_compaction=True,
+        explicit_compaction_model=False,
+        trigger_threshold_tokens=1_000,
+        limit_tokens=5_000,
+    )
+
+    configured = configure_native_history(
+        model,
+        plan=plan,
+        history_settings=resolved.history_settings,
+        session=None,
+        allowed=True,
+        runs=(),
+        static_tokens=static_tokens,
+    )
+
+    assert configured is not None
+    threshold = configured.native_compaction.threshold if configured.native_compaction is not None else None
+    assert threshold == (1_000 if native else None)
+
+
 @pytest.mark.parametrize("change", ["none", "model", "endpoint", "summary", "disabled", "missing", "invalid_threshold"])
 def test_restore_native_policy_requires_latest_compatible_response(tmp_path: Path, change: str) -> None:
     """A rebuild must not recover stale policy from an older checkpoint or foreign route."""
