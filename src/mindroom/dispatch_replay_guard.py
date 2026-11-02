@@ -39,8 +39,8 @@ async def has_newer_unresponded_in_thread(
     """Return True when full thread history proves a newer unhandled requester turn exists.
 
     Only a message the journal still owes work can become that turn: one this
-    agent already settled without answering, such as a voice note for another
-    agent ignored before a restart, never will.
+    agent already settled without answering, such as a voice note it ignored as
+    addressed to another agent, never will.
     """
     if not may_be_superseded_by_newer_requester_turn:
         return False
@@ -145,6 +145,7 @@ async def has_newer_unresponded_journal_thread_event(
             after_origin_server_ts=int(event.server_timestamp),
             excluding_event_id=event.event_id,
         )
+        handled = await is_handled([candidate.event_id for candidate in candidates]) if candidates else frozenset()
     except Exception as exc:
         logger.warning(
             "Failed to read pending thread events for degraded thread replay guard",
@@ -155,19 +156,29 @@ async def has_newer_unresponded_journal_thread_event(
         )
         return False
 
-    handled = await is_handled([candidate.event_id for candidate in candidates]) if candidates else frozenset()
     for candidate in candidates:
         content = candidate.source.get("content")
         body = cast("Mapping[str, object]", content).get("body") if isinstance(content, Mapping) else None
-        if await _is_unresponded_requester_event(
-            candidate,
-            source=candidate.source,
-            body=body,
-            requester_user_id=requester_user_id,
-            classify=classify,
-            handled=handled,
-            for_another_participant=for_another_participant,
-        ):
+        try:
+            unresponded = await _is_unresponded_requester_event(
+                candidate,
+                source=candidate.source,
+                body=body,
+                requester_user_id=requester_user_id,
+                classify=classify,
+                handled=handled,
+                for_another_participant=for_another_participant,
+            )
+        except Exception:
+            # A candidate that cannot be judged, such as one whose transcript cannot be read, proves nothing.
+            logger.exception(
+                "Failed to judge a pending journal event for degraded thread replay guard",
+                event_id=event.event_id,
+                candidate_event_id=candidate.event_id,
+                thread_id=thread_id,
+            )
+            continue
+        if unresponded:
             logger.info(
                 "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
                 skipped_event_id=event.event_id,

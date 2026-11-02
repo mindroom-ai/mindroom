@@ -160,7 +160,7 @@ from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import make_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Iterable
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Iterable
     from pathlib import Path
 
     from mindroom.coalescing.ingress_ticket import IngressTicket
@@ -1189,6 +1189,37 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
 
     assert len(harness.runner.requests) == (1 if answered else 0)
     assert harness.ignored_dispatch_sources == ([] if answered else [(event.event_id,)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_read", ["prepared_voice_for_source", "handled_among"])
+async def test_a_newer_message_that_cannot_be_judged_does_not_supersede_on_degraded_history(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_read: str,
+) -> None:
+    """A degraded-history replay acts only on proof, so a newer message whose transcript or outcome cannot be read lets the older turn run."""
+    harness = _build_harness(config, tmp_path)
+    newer = await _serve_newer_requester_message(harness, config, mentions="general", voice=True, history_degraded=True)
+    read = getattr(harness.turn_store, failing_read)
+
+    async def fail_for_newer(*args: object) -> object:
+        if newer.event_id in cast("Collection[str]", args[-1]):
+            msg = "disk I/O error"
+            raise OSError(msg)
+        return await read(*args)
+
+    monkeypatch.setattr(harness.turn_store, failing_read, fail_for_newer)
+    room = _room_with_members(config, "general", "research")
+    event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
+    event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    assert harness.ignored_dispatch_sources == []
+    assert harness.retried_dispatch_sources == []
 
 
 @pytest.mark.asyncio
