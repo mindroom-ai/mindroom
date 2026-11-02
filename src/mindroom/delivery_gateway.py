@@ -326,7 +326,7 @@ class _SentNote:
     """A note row the reply's rule took or refused."""
 
     row: _NoteRow
-    # The event the row was delivered as; ``None`` when its delivery failed or the rule refused it.
+    # The reply's event the row shows on; ``None`` when its delivery failed or the rule wrote no row.
     event_id: str | None
     refused: bool
 
