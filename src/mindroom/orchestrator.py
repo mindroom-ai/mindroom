@@ -249,16 +249,15 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         logger.info("embedded_api_server_started", host=bound_host, port=bound_port)
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
-        """Surface a signal as the runtime's shutdown request; a repeated SIGINT forces exit, as in Uvicorn."""
+        """Surface a signal as the runtime's shutdown request; a SIGINT during shutdown forces exit, as in Uvicorn."""
         del frame
         signal_number = int(sig)
-        repeated = self.received_signal_name is not None
+        if self._shutdown_requested.is_set() and signal_number == int(signal.SIGINT):
+            self.force_exit = True
         # A signal handler can interrupt a log write, which is not reentrant, so it
         # only records the signal; the serve loop's exit log reports it.
         self.received_signal_name = _signal_name(signal_number)
         self._shutdown_requested.set()
-        if repeated and signal_number == int(signal.SIGINT):
-            self.force_exit = True
 
     async def on_tick(self, counter: int) -> bool:
         """End the main loop once the runtime requests shutdown, always through Uvicorn's shutdown.
@@ -1764,10 +1763,7 @@ async def _await_api_task_graceful_shutdown(
     grace_deadline = time.monotonic() + _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS
     monitored_tasks: set[asyncio.Task] = {api_task, orchestrator_task}
     try:
-        while api_task in monitored_tasks:
-            timeout_seconds = grace_deadline - time.monotonic()
-            if timeout_seconds <= 0:
-                break
+        while (timeout_seconds := grace_deadline - time.monotonic()) > 0:
             done, _pending = await asyncio.wait(
                 monitored_tasks,
                 timeout=timeout_seconds,
