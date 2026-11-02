@@ -2354,6 +2354,18 @@ async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
     assert state.replay_plan is not None
     assert state.replay_plan.estimated_tokens == 0
     assert state.prepared_context_tokens == prepared.static_tokens
+    # A limit the request exceeds without its history leaves the history no room, whatever the reported size says.
+    plan = replace(prepared.resolved_inputs.execution_plan, limit_tokens=prepared.static_tokens - 1)
+    over = finalize_history_preparation(
+        prepared_scope_history=replace(
+            prepared,
+            resolved_inputs=replace(prepared.resolved_inputs, execution_plan=plan),
+        ),
+        frame=request_frame(system=system_prompt),
+        pipeline_timing=None,
+    )
+    assert over.replay_plan is not None
+    assert over.replay_plan.estimated_tokens == 0
 
 
 @pytest.mark.asyncio
