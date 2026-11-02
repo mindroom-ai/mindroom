@@ -94,8 +94,6 @@ class _ClaudeSessionState:
     stderr_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
-    # Prompts whose result is still unread, oldest first, each marked once a turn has taken it up: echoed or dropped.
-    unanswered: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -320,12 +318,16 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
         metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider=ROUTE_PROVIDERS["anthropic"])
     if not metrics.reported:
         return
-    await record_helper_usage(
-        HelperUsage(run_id=uuid4().hex, model=None, provider=None, metrics=metrics),
-        owner=owner,
-        kind="claude_agent",
-        requester_id=current_requester_id(),
-    )
+    try:
+        await record_helper_usage(
+            HelperUsage(run_id=uuid4().hex, model=None, provider=None, metrics=metrics),
+            owner=owner,
+            kind="claude_agent",
+            requester_id=current_requester_id(),
+        )
+    except Exception as error:
+        # Claude has already done the work, so a usage write failure must not hide its reply.
+        logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
 
 
 async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str, typing.Any]]:
@@ -338,42 +340,23 @@ async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str
     }
 
 
-def _settle_prompts(session: _ClaudeSessionState, result: ResultMessage) -> list[str]:
-    """Stop waiting for the prompts ``result`` answers, and return them.
+def _takes_up_prompt(message: UserMessage | SystemMessage, prompt_id: str, turn: _ClaudeTurn) -> bool:
+    """Return whether ``message`` shows that ``turn`` took up the prompt sent as ``prompt_id``.
 
-    A result answers the prompts its turn took up, which may be a turn Claude Code started on its own. Otherwise, a
-    result of a turn Claude Code did not start itself answers the oldest prompt, one that ran no turn, such as a
-    command headless Claude Code does not offer. Results are read only while the reading call's own prompt waits, so
-    an oldest prompt always exists.
-    """
-    answered = [prompt for prompt, echoed in session.unanswered.items() if echoed]
-    if not answered and (result.origin is None or result.origin["kind"] == "human"):
-        answered = [next(iter(session.unanswered))]
-    for prompt in answered:
-        del session.unanswered[prompt]
-    return answered
-
-
-def _note_prompt_taken_up(
-    session: _ClaudeSessionState,
-    turn: _ClaudeTurn,
-    message: UserMessage | SystemMessage,
-) -> None:
-    """Mark the waiting prompt the turn being read took up, if ``message`` shows one.
-
-    A prompt's echo marks that prompt. Claude Code's notice that it dropped a prompt without running it, such as one
-    a hook blocked, marks the oldest prompt not yet echoed and gives the turn its reason.
+    That is the prompt's echo, or Claude Code's notice that it dropped a prompt without running it, such as one a
+    hook blocked, whose reason then joins the turn's text.
     """
     if isinstance(message, UserMessage):
-        if message.uuid in session.unanswered:
-            session.unanswered[message.uuid] = True
-        return
+        return message.uuid == prompt_id
     if not message.data.get("prevent_continuation"):
-        return
-    dropped = next((prompt for prompt, echoed in session.unanswered.items() if not echoed), None)
-    if dropped is not None:
-        session.unanswered[dropped] = True
-        turn.text_parts.append(message.data["content"])
+        return False
+    turn.text_parts.append(message.data["content"])
+    return True
+
+
+def _self_started(result: ResultMessage) -> bool:
+    """Return whether Claude Code started the turn ``result`` ends on its own, such as after a background task."""
+    return result.origin is not None and result.origin["kind"] != "human"
 
 
 def _turn_text(turn: _ClaudeTurn) -> str:
@@ -645,10 +628,8 @@ class ClaudeAgentTools(Toolkit):
                     await session.client.set_model(resolved_model)
                     session.model = resolved_model
                 prompt_id = str(uuid4())
-                session.unanswered[prompt_id] = False
-                # A stopped call still sends its prompt, so every prompt waiting for a result reached Claude Code.
-                await asyncio.shield(session.client.query(_prompt_message(trimmed_prompt, prompt_id)))
-                response_text, tool_names, turns = await self._collect_response(session, prompt_id)
+                await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
+                response_text, tool_names, result = await self._collect_response(session, prompt_id)
                 session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
@@ -664,32 +645,28 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        try:
-            for turn in turns:
-                await _record_turn_usage(turn, resolved_model)
-        except Exception as error:
-            # Claude has already done the work, so a usage write failure must not hide its reply.
-            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-        return self._format_response_output(response_text, tool_names, turns[-1].result)
+        return self._format_response_output(response_text, tool_names, result)
 
     async def _collect_response(
         self,
         session: _ClaudeSessionState,
         prompt_id: str,
-    ) -> tuple[str, list[str], list[_ClaudeTurn]]:
+    ) -> tuple[str, list[str], ResultMessage | None]:
         """Read Claude Code's turns through the one that answers the prompt sent as ``prompt_id``.
 
-        Claude Code also starts turns on its own, such as when a background task finishes, and a prompt sent while
-        such a turn runs joins it; a call stopped before reading its result leaves that result unread. Turns read
-        before this prompt's answer stay in its reply and usage, so the agent still sees what Claude reported.
+        Claude Code also starts turns on its own, such as when a background task finishes. Their results are read past
+        unless the prompt was echoed in their turn, which a prompt sent while such a turn runs joins, or Claude Code
+        dropped a prompt there, such as one a hook blocked, which it reports with its reason. Turns read before the
+        answer stay in the reply, and each turn counts toward this call's requester as soon as it ends.
         """
         tool_names: list[str] = []
         turns = [_ClaudeTurn()]
+        answered = False
 
         async for message in session.client.receive_messages():
             turn = turns[-1]
             if isinstance(message, UserMessage | SystemMessage):
-                _note_prompt_taken_up(session, turn, message)
+                answered = _takes_up_prompt(message, prompt_id, turn) or answered
             elif isinstance(message, AssistantMessage):
                 # Placeholder messages, such as a request that failed every retry, name no real model.
                 if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
@@ -703,11 +680,13 @@ class ClaudeAgentTools(Toolkit):
             elif isinstance(message, ResultMessage):
                 turn.result = message
                 session.claude_session_id = message.session_id
-                if prompt_id in _settle_prompts(session, message):
+                await _record_turn_usage(turn, session.model)
+                if answered or not _self_started(message):
                     break
                 turns.append(_ClaudeTurn())
 
-        return "\n".join(text for turn in turns if (text := _turn_text(turn))) or _NO_TEXT, tool_names, turns
+        text = "\n".join(text for turn in turns if (text := _turn_text(turn))) or _NO_TEXT
+        return text, tool_names, turns[-1].result
 
     def _format_response_output(
         self,

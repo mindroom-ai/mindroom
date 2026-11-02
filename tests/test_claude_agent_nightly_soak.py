@@ -15,7 +15,7 @@ from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.tool_function import ToolFunction
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterable
 
 
 @dataclass
@@ -39,7 +39,9 @@ class _NightlySoakSDKClient:
     async def connect(self) -> None:
         self.connected = True
 
-    async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
+    async def query(self, prompt_messages: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:  # noqa: ARG002
+        [message] = [message async for message in prompt_messages]
+        prompt = message["message"]["content"]
         type(self).active_queries += 1
         type(self).max_concurrent_queries = max(type(self).max_concurrent_queries, type(self).active_queries)
         await asyncio.sleep(0.001)
@@ -65,7 +67,7 @@ class _NightlySoakSDKClient:
         self._session_counter += 1
         type(self).active_queries -= 1
 
-    async def receive_response(self) -> AsyncGenerator[AssistantMessage | ResultMessage]:
+    async def receive_messages(self) -> AsyncGenerator[AssistantMessage | ResultMessage]:
         yield AssistantMessage(content=[TextBlock(text=self._last_text)], model="claude-soak")
         yield ResultMessage(
             subtype="success",

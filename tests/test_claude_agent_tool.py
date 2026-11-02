@@ -190,13 +190,17 @@ _FIRST_ECHO = UserMessage(content="Stands for Claude Code's replay of the first 
 
 @dataclass
 class _ScriptedClaudeSDKClient(_FakeClaudeSDKClient):
-    """Fake client whose one message stream gets the next script after each prompt and otherwise waits for more."""
+    """Fake client whose one message stream gets the next script after each prompt and otherwise waits for more.
+
+    ``waiting`` is set once a read has taken everything and waits for more.
+    """
 
     turns: ClassVar[list[list[Message]]] = []
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.stream: asyncio.Queue[Message] = asyncio.Queue()
+        self.waiting = asyncio.Event()
 
     async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
         await super().query(prompt, session_id=session_id)
@@ -209,6 +213,8 @@ class _ScriptedClaudeSDKClient(_FakeClaudeSDKClient):
 
     async def receive_messages(self) -> AsyncGenerator[Message]:
         while True:
+            if self.stream.empty():
+                self.waiting.set()
             yield await self.stream.get()
 
 
@@ -1242,8 +1248,12 @@ async def _send_metered_turns(
     *,
     api_requests: bool = False,
     model: str | None = None,
+    stop_last: bool = False,
 ) -> tuple[list[str], list[tuple[str | None, str, int, int, int, int]]]:
-    """Send one prompt per requester on one session; return the replies and each requester's usage by model."""
+    """Send one prompt per requester on one session; return the replies and each requester's usage by model.
+
+    With ``stop_last``, the last call is stopped, as a stopped reply stops it, once it waits for more of the stream.
+    """
     config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
     load_scope = partial(
         load_scope_session,
@@ -1255,7 +1265,7 @@ async def _send_metered_turns(
     )
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model=model)
     replies: list[str] = []
-    for requester in requesters:
+    for index, requester in enumerate(requesters, start=1):
         # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
         requester_context = (
             detached_requester_context(
@@ -1272,14 +1282,20 @@ async def _send_metered_turns(
             else tool_runtime_context(replace(context, requester_id=requester))
         )
         with helper_usage_context(load_scope()), requester_context:
-            replies.append(
-                await _in_call(
-                    ToolCallContext(run_id="run-1", session_id="session", user_id=None),
-                    tools.claude_send(
-                        "Fix the bug",
-                    ),
-                ),
+            call = _in_call(
+                ToolCallContext(run_id="run-1", session_id="session", user_id=None),
+                tools.claude_send("Fix"),
             )
+            if not (stop_last and index == len(requesters)):
+                replies.append(await call)
+                continue
+            client = cast("_ScriptedClaudeSDKClient", _FakeClaudeSDKClient.instances[0])
+            client.waiting.clear()
+            stopped = asyncio.ensure_future(call)
+            await client.waiting.wait()
+            stopped.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await stopped
     report = collect_admin_usage(config=config, runtime_paths=paths)
     return replies, sorted(
         (
@@ -1456,9 +1472,10 @@ async def test_claude_send_returns_why_a_hook_blocked_its_prompt(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("turns", "stop_while_writing", "second_reply"),
+    ("turns", "second_reply"),
     [
         pytest.param(
+            # Accepted limit: the stopped prompt's answer is the next result Claude Code did not start itself.
             [
                 [_ECHO],
                 [
@@ -1469,63 +1486,73 @@ async def test_claude_send_returns_why_a_hook_blocked_its_prompt(
                     _claude_result(60),
                 ],
             ],
-            False,
-            "First.\nSecond.",
-            id="answer-unread",
+            "First.",
+            id="answer-unread-stays-one-turn-late",
         ),
         pytest.param(
             # Claude Code was running a turn of its own, which the stopped prompt joined after the stop.
             [[], [_FIRST_ECHO, _self_started_result(30), _NO_TURN]],
-            False,
             _NO_TURN.result,
             id="prompt-joined-a-self-started-turn",
         ),
         pytest.param(
-            [
-                [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000, text="First."), _claude_result(200)],
-                [_NO_TURN],
-            ],
-            True,
-            f"First.\n{_NO_TURN.result}",
-            id="stopped-while-writing",
+            # Claude Code reports the hook's block before the stopped prompt's echo in the turn both reach.
+            [[], [_HOOK_BLOCK, _FIRST_ECHO, _BACKGROUND_NOTE, _self_started_result(30)]],
+            f"{_BLOCK_REASON}\nThe background tests passed.",
+            id="then-a-hook-blocks-the-next-prompt",
         ),
     ],
 )
-async def test_claude_send_after_a_stopped_call_returns_its_own_reply(
+async def test_claude_send_after_a_stopped_call_returns(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
     turns: list[list[Message]],
-    stop_while_writing: bool,
     second_reply: str,
 ) -> None:
-    """A call stopped before Claude answered leaves that answer unread, and the next call reads past it to its own."""
+    """A call stopped before Claude answered never leaves the next call waiting."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
-    writing, written, write_released = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    if not stop_while_writing:
-        write_released.set()
+    sent = asyncio.Event()
     send_script = _ScriptedClaudeSDKClient.query
 
-    async def send_when_released(self: _ScriptedClaudeSDKClient, prompt: AsyncIterable[dict[str, Any]]) -> None:
-        writing.set()
-        await write_released.wait()
+    async def send_and_signal(self: _ScriptedClaudeSDKClient, prompt: AsyncIterable[dict[str, Any]]) -> None:
         await send_script(self, prompt)
-        written.set()
+        sent.set()
 
-    monkeypatch.setattr(_ScriptedClaudeSDKClient, "query", send_when_released)
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "query", send_and_signal)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     first = asyncio.create_task(_in_call(run_context, tools.claude_send("first")))
-    await writing.wait()
+    await sent.wait()
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first
-    write_released.set()
-    await asyncio.wait_for(written.wait(), timeout=10)
-    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send("second")), timeout=10)
+    second = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
 
     assert second.startswith(f"{second_reply}\n\n")
+
+
+@pytest.mark.asyncio
+async def test_claude_turns_read_by_a_stopped_call_still_count(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call stopped while it waits for its own answer still counts the turns it already read."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    turns = [
+        [_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)],
+        [_BACKGROUND_NOTE, _self_started_result(30)],
+    ]
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
+
+    _replies, rows = await _send_metered_turns(tmp_path, ["@alice:localhost", "@bob:localhost"], stop_last=True)
+
+    assert rows == [
+        ("@alice:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0),
+        ("@bob:localhost", "claude-sonnet-5-5", 300, 30, 0, 0),
+    ]
 
 
 @pytest.mark.asyncio
