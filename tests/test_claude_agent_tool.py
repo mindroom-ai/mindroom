@@ -1473,6 +1473,47 @@ async def test_claude_send_returns_why_a_hook_blocked_its_prompt(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("read", "reply"),
+    [
+        pytest.param(
+            [
+                _TASK_OUTPUT,
+                SystemMessage(subtype="informational", data={"subtype": "informational", "prevent_continuation": True}),
+                _BACKGROUND_NOTE,
+                _self_started_result(30),
+            ],
+            "The background tests passed.",
+            id="drop-notice-without-text",
+        ),
+        pytest.param(
+            [
+                _claude_response("claude-sonnet-5-5", "msg-1", 500, text="Done."),
+                replace(_claude_result(60), origin={"producer": "session-task"}),
+            ],
+            "Done.",
+            id="origin-without-kind",
+        ),
+    ],
+)
+async def test_claude_send_reads_claude_code_messages_that_leave_fields_out(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+    read: list[Message],
+    reply: str,
+) -> None:
+    """A drop notice without a reason ends the read without text, and an origin without a kind counts as none."""
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [read])
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    result = await asyncio.wait_for(_in_call(run_context, tools.claude_send("Deploy it")), timeout=10)
+
+    assert result.startswith(f"{reply}\n\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("turns", "second_reply"),
     [
         pytest.param(

@@ -342,7 +342,8 @@ async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str
 
 def _self_started(result: ResultMessage) -> bool:
     """Return whether Claude Code started the turn ``result`` ends on its own, such as after a background task."""
-    return result.origin is not None and result.origin["kind"] != "human"
+    # The CLI supplies the origin; one without a kind counts as none.
+    return (result.origin or {}).get("kind") not in {None, "human"}
 
 
 def _turn_text(turn: _ClaudeTurn) -> str:
@@ -655,7 +656,9 @@ class ClaudeAgentTools(Toolkit):
                 answered = answered or message.uuid == prompt_id
             elif isinstance(message, SystemMessage) and message.data.get("prevent_continuation"):
                 # Claude Code dropped a prompt without running it, such as one a hook blocked, and says why.
-                turn.text_parts.append(message.data["content"])
+                reason = message.data.get("content")
+                if isinstance(reason, str) and reason:
+                    turn.text_parts.append(reason)
                 answered = True
             elif isinstance(message, AssistantMessage):
                 # Placeholder messages, such as a request that failed every retry, name no real model.
