@@ -53,7 +53,6 @@ logger = get_logger(__name__)
 
 type _Decision = Literal["accept", "decline"]
 
-_CONTACT_REQUEST_KEY = "io.mindroom.contact_request"
 _SOURCE_HOOK = "native:contacts"
 _PERSON_HAS_NO_SIDE = "A person has no rules or tools; only an agent's side can have them"
 _NOT_PENDING: dict[_Decision, str] = {
@@ -168,7 +167,7 @@ async def _post_request_notice(context: ToolRuntimeContext, record: ContactRecor
         raise ValueError(msg)
     content = build_message_content(
         _notice_body(config, paths, record),
-        extra_content={"msgtype": "m.notice", SKIP_MENTIONS_KEY: True, _CONTACT_REQUEST_KEY: record.id},
+        extra_content={"msgtype": "m.notice", SKIP_MENTIONS_KEY: True},
     )
     delivered = await send_message_result(client, room_id, content, transaction_id=f"contact-request-{record.id}")
     if delivered is None:

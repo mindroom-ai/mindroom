@@ -262,7 +262,6 @@ async def test_request_records_pending_and_posts_notice_with_txn_id(tmp_path: Pa
     assert send.await_args.kwargs == {"transaction_id": f"contact-request-{record.id}"}
     assert content["msgtype"] == "m.notice"
     assert content[SKIP_MENTIONS_KEY] is True
-    assert content["io.mindroom.contact_request"] == record.id
     assert "m.relates_to" not in content
     for text in (
         OWNER,
