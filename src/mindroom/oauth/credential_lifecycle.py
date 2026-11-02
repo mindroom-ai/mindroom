@@ -597,21 +597,55 @@ async def _exchange_and_store_oauth_credentials_locked(
     token_url: str,
     transaction: OAuthCredentialTransaction,
 ) -> dict[str, Any]:
+    result = await _exchange_oauth_code(
+        context.provider,
+        context.runtime_paths,
+        code,
+        code_verifier,
+        token_url=token_url,
+    )
+    safe_result = await _safe_token_result(context.provider, result, context.runtime_paths)
+    return await _publish_connection_locked(transaction, safe_result.token_data)
+
+
+async def _exchange_oauth_code(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    code: str,
+    code_verifier: str | None,
+    *,
+    token_url: str,
+) -> OAuthTokenResult:
+    """Exchange one code at its authorization-bound token endpoint under the adapter re-entry guard."""
     adapter_scope = _oauth_provider_adapter_active.set(True)
     try:
-        result = await context.provider.exchange_code(
-            code,
-            context.runtime_paths,
-            token_url=token_url,
-            code_verifier=code_verifier,
-        )
-        await asyncio.to_thread(context.provider.validate_claims, result, context.runtime_paths)
-        safe_result = context.provider.token_result_with_safe_claims(result)
+        return await provider.exchange_code(code, runtime_paths, token_url=token_url, code_verifier=code_verifier)
     finally:
         _oauth_provider_adapter_active.reset(adapter_scope)
+
+
+async def _safe_token_result(
+    provider: OAuthProvider,
+    result: OAuthTokenResult,
+    runtime_paths: RuntimePaths,
+) -> OAuthTokenResult:
+    """Apply the provider's account rules and keep only what may be stored, under the adapter re-entry guard."""
+    adapter_scope = _oauth_provider_adapter_active.set(True)
+    try:
+        await asyncio.to_thread(provider.validate_claims, result, runtime_paths)
+        return provider.token_result_with_safe_claims(result)
+    finally:
+        _oauth_provider_adapter_active.reset(adapter_scope)
+
+
+async def _publish_connection_locked(
+    transaction: OAuthCredentialTransaction,
+    safe_token_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish a new connection, keeping the stored refresh token the grant omits, and commit."""
     token_data = _token_data_preserving_refresh_token(
         (await transaction.snapshot()).credentials,
-        safe_result.token_data,
+        safe_token_data,
     )
     published = await transaction.publish(
         token_data,
@@ -653,16 +687,13 @@ async def exchange_and_store_oauth_group_credentials(
     The exchange runs outside every member transaction, so no credential lock is held across provider I/O.
     Each member is stored in its own transaction and skipped, never failed, when it cannot take the grant.
     """
-    adapter_scope = _oauth_provider_adapter_active.set(True)
-    try:
-        result = await lead.exchange_code(
-            code,
-            members[0].context.runtime_paths,
-            token_url=token_url,
-            code_verifier=code_verifier,
-        )
-    finally:
-        _oauth_provider_adapter_active.reset(adapter_scope)
+    result = await _exchange_oauth_code(
+        lead,
+        members[0].context.runtime_paths,
+        code,
+        code_verifier,
+        token_url=token_url,
+    )
     connected: list[str] = []
     skipped: list[tuple[str, OAuthGroupSkipReason]] = []
     for member in members:
@@ -687,22 +718,13 @@ async def _store_oauth_group_member(
         if (await transaction.generations()).connection_generation != member.expected_connection_generation:
             return "changed"
         member_result = replace(result, token_data={**result.token_data, "_oauth_provider": provider.id})
-        adapter_scope = _oauth_provider_adapter_active.set(True)
         try:
-            await asyncio.to_thread(provider.validate_claims, member_result, context.runtime_paths)
-            safe_result = provider.token_result_with_safe_claims(member_result)
+            safe_result = await _safe_token_result(provider, member_result, context.runtime_paths)
         except OAuthClaimValidationError:
             return "account_not_allowed"
-        finally:
-            _oauth_provider_adapter_active.reset(adapter_scope)
         if not oauth_credentials_have_required_scopes(provider, safe_result.token_data):
             return "scopes_not_granted"
-        token_data = _token_data_preserving_refresh_token(
-            (await transaction.snapshot()).credentials,
-            safe_result.token_data,
-        )
-        await transaction.publish(token_data, advance_connection_generation=True)
-        await transaction.commit()
+        await _publish_connection_locked(transaction, safe_result.token_data)
     return None
 
 
