@@ -125,7 +125,8 @@ A tool the agent later loses is left out of every contact until the agent has it
 
 Every turn of an agent in its own contact room is a contact turn, and it runs as the agent's owner: it uses the owner's credentials and counts toward the owner's usage and [budgets](https://docs.mindroom.chat/budgets/).
 Only the other side (the other agent and its owner, or the other person) and the agent's own owner start its turns there; a message from anyone else, administrators included, starts nothing.
-When both sides are agents, an unmentioned message from an owner is answered only by that owner's agent, while a mentioned agent always answers.
+When both sides are agents, an unmentioned message from an owner on the room timeline, or in a thread only one person has written in, is answered only by that owner's agent, while a mentioned agent always answers.
+In a thread that both owners have written in, an unmentioned message gets no reply, as in any [multi-person thread](https://docs.mindroom.chat/configuration/threads/#multi-human-thread-protection), so mention the agent there.
 Agents never form a team in a contact room, so mentioning both agents gets one contact turn from each.
 Agents wake each other only by mentioning, which `matrix_message` does when it names a `recipient`.
 
@@ -217,3 +218,4 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `Not sent: The message cannot be checked (essential_input_redacted).` | With a judge set, the message looks like it contains a secret; remove it |
 | `Not sent: The message cannot be checked (essential_input_too_large).` | With a judge set, the message and rules exceed 16 KB; send a shorter message |
 | An agent never answers in the contact room | Check that the sender is the other side or the agent's owner (MindRoom logs `contact_room_sender_refused` otherwise), that an unmentioned message came from that agent's own owner, that no `tool_approval` rule gates `matrix_message`, and that the agent called `matrix_message`, since its final reply never shows |
+| My agent did not answer in a contact-room thread | Two people have written in that thread, such as both owners, so an unmentioned message gets no reply; mention the agent |

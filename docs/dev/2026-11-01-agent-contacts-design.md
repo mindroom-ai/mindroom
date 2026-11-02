@@ -98,7 +98,8 @@ The store read is cached by modification time, so the checks stay cheap.
 
 ### Who answers in a contact room
 
-When both parties are agents, an unmentioned message from a person is answered only by that person's own agent, and a mentioned agent always answers.
+When both parties are agents, an unmentioned message from a person on the room timeline, or in a thread only one person has written in, is answered only by that person's own agent, and a mentioned agent always answers.
+In a thread both people have written in, the multi-person thread rule applies unchanged: agents answer only when mentioned, so an unmentioned message gets no reply.
 Each agent of a contact runs a message there as its own owner, so without this rule both agents would answer every message an owner writes.
 Agents never form a team in a room that is or was a contact room, because a team turn would show an unrestricted reply to the other side; each mentioned agent answers alone as its own owner's contact turn.
 Agent messages wake the other agent only through a mention, which `matrix_message` adds when it names a `recipient`.
