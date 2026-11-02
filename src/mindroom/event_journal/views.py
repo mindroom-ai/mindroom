@@ -461,6 +461,7 @@ class MatrixDeliveryView(_MembershipEpochView):
         return await self._write(
             matrix_delivery_rows.enqueue_delivery,
             delivery_id=delivery_id,
+            admitted_event_id=delivery_id,
             stage=stage,
             event_type=event_type,
             room_id=room_id,

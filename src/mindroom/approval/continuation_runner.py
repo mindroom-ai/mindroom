@@ -361,6 +361,7 @@ class ApprovalContinuationRunner:
                 requester_id=requester_id,
                 response_event_id=response_event_id,
                 sources=request.sources,
+                final_delivery_id=shown.handle.span.delivery_id,
                 calls=plan.calls,
                 state=continuation_state,
                 delegation_storage_bindings=paused.delegation_storage_bindings,

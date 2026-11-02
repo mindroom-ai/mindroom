@@ -43,6 +43,7 @@ def enqueue_delivery(
     principal_id: str,
     *,
     delivery_id: str,
+    admitted_event_id: str,
     stage: DeliveryStage,
     event_type: str,
     room_id: str,
@@ -57,7 +58,7 @@ def enqueue_delivery(
     reply_sequence: int | None = None,
     reply_row: ReplyRowFacts | None = None,
 ) -> str | None:
-    """Record delivery intent unless the membership that authorized it has ended.
+    """Record delivery intent unless the membership that admitted ``admitted_event_id``, which authorized it, has ended.
 
     The fence retires a room's unattempted deliveries because they answer a
     conversation the bot has left. This closes the other half of the same
@@ -76,7 +77,7 @@ def enqueue_delivery(
     follows the delivery type's explicit replay-or-retain policy.
 
     """
-    admitted_owner = journal.admitted_membership_owner(transaction, principal_id, delivery_id)
+    admitted_owner = journal.admitted_membership_owner(transaction, principal_id, admitted_event_id)
     attempted = outbox.is_attempted(
         transaction,
         principal_id,
@@ -157,6 +158,7 @@ def enqueue_final_answer(
         transaction,
         principal_id,
         delivery_id=delivery_id,
+        admitted_event_id=delivery_id,
         stage=DeliveryStage.FINAL,
         event_type=event_type,
         room_id=room_id,
@@ -465,6 +467,8 @@ def enqueue_reply_row(
             transaction,
             principal_id,
             delivery_id=delivery_id,
+            # The message driving the span authorized its rows, whatever names them.
+            admitted_event_id=span.sources.pending_event_ids[0],
             stage=stage,
             event_type=_REPLY_ROW_EVENT_TYPE,
             room_id=reply.room_id,
