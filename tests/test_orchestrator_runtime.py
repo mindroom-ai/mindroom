@@ -32,6 +32,7 @@ from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
 import mindroom.workers.runtime as workers_runtime_module
+from mindroom import runtime_shutdown as runtime_shutdown_module
 from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
@@ -1595,6 +1596,35 @@ class TestAgentBot(AgentBotTestBase):
 
         assert auxiliary_cancelled.is_set()
         orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runtime_shutdown_runs_every_process_closer_when_one_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failing process-wide closer neither skips the closers after it nor ends the rest of the cleanup."""
+        closed: list[str] = []
+
+        async def failing() -> None:
+            closed.append("failing")
+            msg = "closer failed"
+            raise RuntimeError(msg)
+
+        async def succeeding() -> None:
+            closed.append("succeeding")
+
+        monkeypatch.setattr(runtime_shutdown_module, "_PROCESS_SHUTDOWN_CLOSERS", [failing, succeeding])
+
+        await _finish_runtime_shutdown(
+            shutdown_wait_task=None,
+            api_task=None,
+            orchestrator_task=None,
+            auxiliary_tasks=[],
+            orchestrator=None,
+            stall_detector=None,
+        )
+
+        assert closed == ["failing", "succeeding"]
 
     @pytest.mark.asyncio
     async def test_runtime_cleanup_preserves_unrequested_cancellation_after_cleanup_failure(
