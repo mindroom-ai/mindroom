@@ -195,24 +195,9 @@ def _raise_embedded_api_server_exit(
     reason: str,
     cause: BaseException | None = None,
 ) -> NoReturn:
-    """Raise the fatal lifecycle error for an unexpected API server exit."""
-    logger.error(
-        "fatal_embedded_api_server_exit",
-        **api_server.log_context(),
-        reason=reason,
-        exc_info=(type(cause), cause, cause.__traceback__) if cause is not None else None,
-    )
-    msg = "Embedded API server exited unexpectedly"
-    if cause is not None:
-        raise RuntimeError(msg) from cause
-    raise RuntimeError(msg)
-
-
-def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
-    """Raise the fatal lifecycle error for an unexpected orchestrator exit."""
-    logger.error("fatal_orchestrator_exit", reason=reason)
-    msg = "MindRoom orchestrator exited unexpectedly"
-    raise RuntimeError(msg)
+    """Raise the fatal lifecycle error for an unexpected API server exit, which `_run_runtime` logs."""
+    msg = f"Embedded API server on {api_server.host}:{api_server.port} exited unexpectedly: {reason}"
+    raise RuntimeError(msg) from cause
 
 
 class _SignalAwareUvicornServer(uvicorn.Server):
@@ -1688,8 +1673,8 @@ async def _consume_completed_runtime_tasks(
     shutdown_requested: asyncio.Event,
     api_server: _EmbeddedApiServerContext,
 ) -> None:
-    """Consume completed runtime tasks and raise the first non-cancellation failure."""
-    failures: list[Exception] = []
+    """Consume completed runtime tasks and raise the first non-cancellation failure, which `_run_runtime` logs."""
+    failure: Exception | None = None
     for task in (orchestrator_task, api_task, shutdown_wait_task):
         if task is None or task not in done:
             continue
@@ -1715,9 +1700,8 @@ async def _consume_completed_runtime_tasks(
                         task_name=task_name,
                     )
                     continue
-                _raise_orchestrator_exit(
-                    reason="Orchestrator task finished while application shutdown was not requested",
-                )
+                msg = "MindRoom orchestrator exited unexpectedly"
+                raise RuntimeError(msg)  # noqa: TRY301 - handled below like a failed task's own error
             logger.info(
                 "runtime_task_completed",
                 task_name=task_name,
@@ -1728,10 +1712,13 @@ async def _consume_completed_runtime_tasks(
             logger.info("runtime_task_cancelled", task_name=task.get_name())
             continue
         except Exception as exc:
-            logger.exception("runtime_task_failed", task_name=task.get_name())
-            failures.append(exc)
-    if failures:
-        raise failures[0]
+            if failure is None:
+                failure = exc
+            else:
+                # Only the first failure is raised, so a second one is reported here or never.
+                logger.exception("runtime_task_failed", task_name=task.get_name())
+    if failure is not None:
+        raise failure
 
 
 async def _await_api_task_completion(
