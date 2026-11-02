@@ -4,7 +4,7 @@ Run from the repository with ``uv run python -m scripts.utilities.import_slack_e
 Supply a Slack token with the ``emoji:read`` scope in ``SLACK_TOKEN``, and in ``MATRIX_ACCESS_TOKEN``
 the access token of an account that may change the room's emoji packs.
 Each emoji keeps its Slack name, and a Slack alias becomes another name for its image.
-Names the packs already have are left alone, so another run imports only the emoji that are new in Slack.
+Names the packs have are left alone; a re-run imports every other Slack emoji, even one removed or renamed in the room.
 ``--dry-run`` reports what a run would import, without uploading or changing anything.
 """
 

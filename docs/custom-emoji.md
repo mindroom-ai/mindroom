@@ -148,7 +148,8 @@ By default the emoji go to `#emoji:<server name>`, with the server name of the a
 Pass another alias or the room ID with `--room`, such as `#emoji_<namespace>:<server name>` for a room MindRoom created with `MINDROOM_NAMESPACE` set.
 
 - Each emoji keeps its Slack name and its image as Slack serves it, and a Slack alias becomes another name for the same image.
-- A name the packs already have is never overwritten and counts as taken, so a later run imports only the emoji that are new in Slack.
+- A name the packs already have is never overwritten and counts as taken.
+  A later run imports every Slack emoji whose name no pack has, so an emoji removed or renamed in the room since an earlier run comes back under its Slack name.
 - An alias of a standard emoji, such as `alias:+1`, and a name with a space or `:`, which MindRoom Chat cannot insert, count as unusable.
 - An image that cannot be downloaded, read, or uploaded counts as failed and is named in an error line; the next run tries it again.
 - When a pack is full, the script opens another one with the same name, as MindRoom Chat does.
