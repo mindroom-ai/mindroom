@@ -113,8 +113,8 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
         "state": "ready",
     }
     merged = defaults | changes
-    # A paused reply's span delivers the run's final answer under its first pending source.
-    return ApprovalContinuation(**({"final_delivery_id": merged["sources"].pending_event_ids[0]} | merged))
+    # The paused span's rows are named by all its turn's messages, as a response names them.
+    return ApprovalContinuation(**({"final_delivery_id": "+".join(merged["sources"].pending_event_ids)} | merged))
 
 
 def decided_calls(
@@ -160,7 +160,7 @@ async def continuation_claim(
     """Return the claim of a span for a continuation's sources and reply, as the bot instance ``generation`` makes it."""
     return rl.ClaimRequest(
         span_id=uuid4().hex,
-        delivery_id=continuation.source_event_ids[0],
+        delivery_id=continuation.final_delivery_id,
         sources=continuation.sources,
         bot_generation=generation,
         now_ns=time.time_ns(),

@@ -6037,6 +6037,9 @@ class TestOutbox:
 class TestApprovalContinuations:
     """A paused run remains owned by its original journal sources."""
 
+    # The rows of the coalesced turn's paused reply, its answer's included, are named by both its messages.
+    RUN_DELIVERY = "$source-1+$source-2"
+
     @pytest.mark.parametrize("next_count", [None, 3])
     async def test_continuation_count_survives_reopen_and_advance(
         self,
@@ -6277,7 +6280,7 @@ class TestApprovalContinuations:
         """Deleting source text cannot steal the response owned by an approval."""
         await self.admit_sources(alice)
         await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.INITIAL,
             room_id=ROOM,
             thread_id="$thread",
@@ -6290,7 +6293,7 @@ class TestApprovalContinuations:
             await admit(alice, f"$redact-{index}", redacts=f"$source-{index}", kind=EventKind.REDACTION)
 
         assert await alice.is_pending("$source-1")
-        initial = await alice.load_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.INITIAL)
+        initial = await alice.load_matrix_delivery(delivery_id=self.RUN_DELIVERY, stage=DeliveryStage.INITIAL)
         assert initial is not None
         assert not initial.retired
 
@@ -6518,7 +6521,7 @@ class TestApprovalContinuations:
         await paused_for_approval(alice, self.continuation())
         await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
@@ -7159,7 +7162,7 @@ class TestApprovalContinuations:
         claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
@@ -7186,15 +7189,15 @@ class TestApprovalContinuations:
         claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
         assert claimed is not None
         await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
             payload={"msgtype": "m.text", "body": "finished"},
         )
-        await alice.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
+        await alice.claim_matrix_delivery(delivery_id=self.RUN_DELIVERY, stage=DeliveryStage.FINAL)
         await alice.record_permanent_matrix_delivery_failure(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             reason="matrix event exceeds the hard size limit",
         )
@@ -7586,16 +7589,16 @@ class TestApprovalContinuations:
         assert await alice.is_pending("$source-2")
 
         await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
             payload=text("finished"),
             edits_event_id="$waiting",
         )
-        await alice.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
+        await alice.claim_matrix_delivery(delivery_id=self.RUN_DELIVERY, stage=DeliveryStage.FINAL)
         await alice.acknowledge_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             event_id="$finished",
             delivered_projections=(),
@@ -7671,7 +7674,7 @@ class TestApprovalContinuations:
         )
         assert failing is not None
         await alice.enqueue_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
@@ -7696,16 +7699,16 @@ class TestApprovalContinuations:
         await paused_for_approval(responder, self.continuation())
         await claim_continuation(responder, "approval-1", runtime_generation="runtime-a")
         await responder.enqueue_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
             payload=text("finished"),
             edits_event_id="$waiting",
         )
-        await responder.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
+        await responder.claim_matrix_delivery(delivery_id=self.RUN_DELIVERY, stage=DeliveryStage.FINAL)
         await responder.acknowledge_matrix_delivery(
-            delivery_id="$source-1",
+            delivery_id=self.RUN_DELIVERY,
             stage=DeliveryStage.FINAL,
             event_id="$finished",
             delivered_projections=(),
@@ -8057,6 +8060,7 @@ class TestApprovalContinuations:
                 entity_name="removed" if index != 2 else "configured",
                 response_event_id=f"$waiting-{index}",
                 sources=ResponseSources((source_event_id,), (source_event_id,)),
+                final_delivery_id=source_event_id,
             )
             assert await paused_for_approval(alice, continuation) == continuation
 

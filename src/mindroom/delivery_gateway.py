@@ -205,7 +205,7 @@ def _segment_transaction_id(base_transaction_id: str, index: int) -> str:
 
 
 def _answer_owed(handle: SpanHandle | None) -> bool:
-    """Return whether the span recorded its answer as its terminal row, which recovery delivers when a send did not."""
+    """Return whether the span recorded its answer as its terminal row, which the outbox owns from then on."""
     return handle is not None and handle.span.outcome is rl.SpanOutcome.COMPLETED
 
 
@@ -2284,7 +2284,7 @@ class DeliveryGateway:
         """Resolve how a finished stream ended from its transport facts, sending a final-only body as a whole answer."""
         stream_outcome = request.stream_transport_outcome
         if stream_outcome.failed and _answer_owed(current_span()):
-            # The stream's terminal update failed after it recorded the answer, which recovery sends, as whole
+            # The stream's terminal update failed after it recorded the answer, which the outbox owns, as whole
             # delivery's does.
             return FinalDeliveryOutcome(ending=Owed())
         try:
