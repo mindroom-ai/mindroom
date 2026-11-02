@@ -61,7 +61,7 @@ class DelegateTools(Toolkit):
         self._config = config
         self._execution_identity = execution_identity
         self._delegation_depth = delegation_depth
-        # Whether the agent's build lets these calls become jobs, which a nested or minimal agent's never do.
+        # Whether the agent's build lets these calls become jobs.
         self._calls_as_jobs = calls_as_jobs
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(

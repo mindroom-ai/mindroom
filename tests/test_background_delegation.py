@@ -30,7 +30,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools import delegate as delegate_toolkit
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import execution as delegation_execution
@@ -60,6 +60,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_loop.helpers import collect, spec, toolkit
+from tests.agent_tool_helpers import offered_function
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, respond
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -1474,18 +1475,12 @@ async def test_only_a_build_whose_subagent_calls_become_jobs_offers_background_w
     and an excluded toolkit's keep their native wait.
     """
     paths = _runtime_paths(tmp_path)
-    config = Config(
-        agents={
-            "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
-            "code": AgentConfig(display_name="Code"),
-        },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-        models={"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-        background_tool_jobs={"enabled": True, "exclude_toolkits": ["delegate"] if excluded else []},
-    )
+    config = delegating_config()
+    config.models["default"] = ModelConfig(provider="openai", id="gpt-4o-mini")
+    if excluded:
+        config.background_tool_jobs.exclude_toolkits.append("delegate")
     persist_entity_accounts(config, paths)
-    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    owner = _identity()
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
@@ -1502,10 +1497,10 @@ async def test_only_a_build_whose_subagent_calls_become_jobs_offers_background_w
             agent_mode=agent_mode,
         )
         # A minimal agent's CLI describes each function with its toolkit's guidance.
-        delegate = next(toolkit for toolkit in build.spec.toolkits if toolkit.name == "delegate")
-        [run_subagent] = (function for function in delegate.functions if function.name == "run_subagent")
-        instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.guidance or "")
-        assert ("background_after" in (run_subagent.description or ""), instructed) == (offered, offered)
+        [guidance] = [toolkit.guidance for toolkit in build.spec.toolkits if toolkit.name == "delegate"]
+        offered_wait = "background_after" in (offered_function(build, "run_subagent").description or "")
+        instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (guidance or "")
+        assert (offered_wait, instructed) == (offered, offered)
     finally:
         await runtime.shutdown()
 
