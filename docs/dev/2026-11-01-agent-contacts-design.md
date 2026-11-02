@@ -128,8 +128,10 @@ Reusing the authored-subagent persona was rejected, because a persona replaces t
 
 ### Contact turns stay out of memory
 
-Contact turns write no long-term memory, start no skill review, and their conversations are left out of the memory auto-flush, knowledge graph ingestion, and the tool calls exploration follows.
-The other side drives these turns, so text it wrote must not persist into the owner's normal turns, and a skill review would post notices that bypass the policy.
+MindRoom itself saves nothing from contact conversations: contact turns write no long-term memory, start no skill review, and their conversations are left out of the memory auto-flush, knowledge graph ingestion, and the tool calls exploration follows.
+The other side drives these turns, so MindRoom must not carry text it wrote into the owner's normal turns, and a skill review would post notices that bypass the policy.
+A tool the owner approves for a contact still reaches what it reaches: a live run with `file` approved let a contact turn overwrite `MEMORY.md`.
+A write guard for memory files was rejected, because the security trust model treats an approved tool as the owner's choice and in-process path filtering confines nothing for tools that run code; the user docs warn about it instead.
 Rooms that were contact rooms stay excluded after the contact ends, as long as the agent keeps `contacts` configured.
 
 ### Rules and tools per contact
@@ -245,7 +247,7 @@ Ingress classification, the response runner, answer suppression, delivery, the h
 - Rules and the judge are model judgments, not a security boundary; they reduce accidental disclosure but a determined counterparty can still extract what the agent's context and contact tools expose.
 - A contact grants no Matrix access outside its contact room.
 - In a contact room, only the counterparty and the agent's owner can start the agent's turns.
-- Contact turns write no long-term memory.
+- MindRoom itself saves nothing from contact conversations to memory, skills, the knowledge graph, or exploration, while a tool the owner approves for a contact, such as `file`, still reaches files the agent reads in every turn.
 
 ## Accepted Limitations
 

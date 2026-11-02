@@ -41,6 +41,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 > The other side of a contact can start turns of your agent that run with your authority, limited to the tools you approved for that contact.
 > Anything those tools can reach, the other side can ask for, and a code-execution tool such as `shell` reaches everything your agent's worker or process can.
 > A contact turn also sees your agent's instructions, preloaded files, and recalled memories.
+> Approving a tool that writes files, such as `file`, lets the other side's requests change files your agent reads in every turn, such as `MEMORY.md`.
 > Rules and the judge are model judgments, not a security boundary: they reduce accidental disclosure, but a determined counterparty can still extract whatever your agent's context and contact tools expose.
 > Approve only tools whose reach you are willing to share with the other side.
 
@@ -138,7 +139,7 @@ A contact turn keeps the agent's identity, instructions, preloaded files, and me
 - It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
 - `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
 - Other tools that post into rooms refuse the contact room.
-- It saves nothing to the agent's memory, starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) or the agent's [thread exports](https://docs.mindroom.chat/thread-exports/), so your agent's other conversations do not remember it.
+- MindRoom itself saves nothing from it: it writes no memory and starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/), the agent's [thread exports](https://docs.mindroom.chat/thread-exports/), or [exploration](https://docs.mindroom.chat/scheduling/#exploration); only a tool you approved for the contact, such as `file`, can carry something from it into your agent's other conversations.
 
 A contact gives the other side no access to your other rooms.
 Even your own messages in a contact room start contact turns, so use your personal room for anything that needs your agent's full tools.

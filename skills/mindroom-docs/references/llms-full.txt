@@ -7628,6 +7628,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 > The other side of a contact can start turns of your agent that run with your authority, limited to the tools you approved for that contact.
 > Anything those tools can reach, the other side can ask for, and a code-execution tool such as `shell` reaches everything your agent's worker or process can.
 > A contact turn also sees your agent's instructions, preloaded files, and recalled memories.
+> Approving a tool that writes files, such as `file`, lets the other side's requests change files your agent reads in every turn, such as `MEMORY.md`.
 > Rules and the judge are model judgments, not a security boundary: they reduce accidental disclosure, but a determined counterparty can still extract whatever your agent's context and contact tools expose.
 > Approve only tools whose reach you are willing to share with the other side.
 
@@ -7725,7 +7726,7 @@ A contact turn keeps the agent's identity, instructions, preloaded files, and me
 - It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
 - `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
 - Other tools that post into rooms refuse the contact room.
-- It saves nothing to the agent's memory, starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) or the agent's [thread exports](https://docs.mindroom.chat/thread-exports/), so your agent's other conversations do not remember it.
+- MindRoom itself saves nothing from it: it writes no memory and starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/), the agent's [thread exports](https://docs.mindroom.chat/thread-exports/), or [exploration](https://docs.mindroom.chat/scheduling/#exploration); only a tool you approved for the contact, such as `file`, can carry something from it into your agent's other conversations.
 
 A contact gives the other side no access to your other rooms.
 Even your own messages in a contact room start contact turns, so use your personal room for anything that needs your agent's full tools.
@@ -16810,7 +16811,8 @@ Do not report or "fix" these; they are deliberate.
 - A contact grants no Matrix access outside its contact room: a contact turn never offers approval-gated functions or Matrix room tools, its `matrix_message` writes only to the contact room and sends only a plain message to the owner's personal room's timeline or a new thread, and other tools that post into rooms refuse the contact room.
   Once a contact is removed, no turn of its agents writes into its room, including a turn that started before the removal, and no message there starts one.
 - In a contact room, only the counterparty and the agent's owner start the agent's turns; a message from anyone else, administrators included, starts nothing.
-- Contact turns write no long-term memory and start no skill review, and their conversations are left out of the memory flush, the knowledge graph, and exploration leads, so text the other side wrote does not persist into the owner's normal turns.
+- MindRoom itself saves nothing from contact conversations to memory, skills, the knowledge graph, or exploration: contact turns write no memory and start no skill review, and their conversations are left out of the memory flush, knowledge graph ingestion, and exploration leads.
+  A tool the owner approves for a contact still reaches what it reaches, so with `file` approved the other side's requests can change files the agent reads in every turn, such as `MEMORY.md`; MindRoom adds no write guard there, because an approved tool is the owner's choice of what the other side may drive.
 - `POST /api/slack/events` is public: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
 - A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts or to a configured `bot_accounts` entry never map.
   Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
