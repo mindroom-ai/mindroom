@@ -1,4 +1,10 @@
-"""Replay-guard checks for dispatch sequencing."""
+"""Replay-guard checks for dispatch sequencing.
+
+Each check logs the newer requester turn it finds as a candidate, because its
+caller decides whether that turn supersedes the older one; the live Matrix fuzz
+harness reads these lines as evidence that survives a restart cutting that
+decision short.
+"""
 
 from __future__ import annotations
 
@@ -67,8 +73,8 @@ async def has_newer_unresponded_in_thread(
         ):
             continue
         logger.info(
-            "Skipping older message — newer unresponded message from same sender in thread",
-            skipped_event_id=event.event_id,
+            "Newer unresponded message from same sender in thread may supersede older message",
+            older_event_id=event.event_id,
             newer_event_id=message.event_id,
         )
         return True
@@ -180,8 +186,8 @@ async def has_newer_unresponded_journal_thread_event(
             continue
         if unresponded:
             logger.info(
-                "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
-                skipped_event_id=event.event_id,
+                "Newer pending journal event from same sender may supersede older message in degraded thread replay guard",
+                older_event_id=event.event_id,
                 newer_event_id=candidate.event_id,
                 thread_id=thread_id,
             )
