@@ -314,7 +314,7 @@ class TestMatrixRegistration:
         with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            with pytest.raises(ValueError, match="Matrix account collision"):
+            with pytest.raises(ValueError, match="Matrix account collision") as excinfo:
                 await _register_user(
                     "http://localhost:8008",
                     "existing_user",
@@ -322,6 +322,12 @@ class TestMatrixRegistration:
                     "Existing User",
                     runtime_paths=runtime_paths,
                 )
+
+        message = str(excinfo.value)
+        assert "another matrix_username or mindroom_user.username" in message
+        assert "MINDROOM_NAMESPACE for generated names" in message
+        assert "matrix_state.yaml" in message
+        assert "https://docs.mindroom.chat/matrix/#use-an-existing-matrix-account" in message
 
     @pytest.mark.asyncio
     async def test_register_user_failure(self, tmp_path: Path) -> None:
@@ -1132,8 +1138,8 @@ class TestMatrixRegistration:
 
         message = str(excinfo.value)
         assert detail in message
-        assert "mindroom_<entity>_<namespace>" in message
-        assert "MINDROOM_NAMESPACE" in message
+        assert "only names of the form mindroom_<name>_<namespace>" in message
+        assert message.index("matrix_username or mindroom_user.username") < message.index("MINDROOM_NAMESPACE")
         assert "invalid or revoked" not in message
 
     @pytest.mark.asyncio
