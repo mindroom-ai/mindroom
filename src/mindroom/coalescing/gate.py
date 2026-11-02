@@ -34,7 +34,6 @@ from .batch import (
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
     pending_event_addressing,
-    pending_event_run_identity,
 )
 from .cleanup import (
     ClaimedSegmentOwner,
@@ -311,8 +310,7 @@ class CoalescingGate:
     def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
         """Return whether a queue still holds a run other than this requester's own messages for this agent."""
         return any(
-            pending_event_run_identity(pending_event) != (requester_user_id, None)
-            or pending_event.event.for_another_participant
+            pending_event.facts.run_identity != (requester_user_id, None) or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
 
@@ -1238,11 +1236,11 @@ class CoalescingGate:
 
         Uploads that mention nobody just before an addressing change stay with the message after them, their caption.
         """
-        front_identity = pending_event_run_identity(gate.queue[0].pending_event)
+        front_identity = gate.queue[0].pending_event.facts.run_identity
         addressing: bool | None = None
         uploads_start: int | None = None
         for index, queued in enumerate(islice(gate.queue, count)):
-            if pending_event_run_identity(queued.pending_event) != front_identity:
+            if queued.pending_event.facts.run_identity != front_identity:
                 return index
             event_addressing = pending_event_addressing(queued.pending_event)
             if event_addressing is None:

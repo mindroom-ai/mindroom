@@ -68,7 +68,11 @@ class IngressFacts:
 
     @property
     def run_identity(self) -> RunIdentity:
-        """Return who the turn runs as, plus its speaker when the sender wrote it for that requester."""
+        """Return who the turn runs as, plus its speaker when the sender wrote it for that requester.
+
+        A coalesced batch runs as one requester and takes its origin from its latest event, so comparing run identities
+        keeps a reply an entity wrote for a human out of a batch with that human's own messages.
+        """
         return self.run_requester_id, self.physical_sender if self.acts_for_requester else None
 
     @property
