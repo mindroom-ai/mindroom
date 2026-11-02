@@ -1283,6 +1283,8 @@ async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path
         bot = _bot(tmp_path)
         unique_room_send_responses(bot.client)
         await bot._take_over_replies()
+    # A thread's replay guard supersedes the older message by the newer one, which still waits to replay.
+    assert await bot._delivery_gateway.supersede_replay(("$event",)) is False
     runner = unwrap_extracted_collaborator(bot._response_runner)
 
     async def second_answer(*_args: object, **_kwargs: object) -> AsyncIterator[str]:

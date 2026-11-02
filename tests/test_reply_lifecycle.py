@@ -676,7 +676,7 @@ def test_a_released_resumes_sources_settle_like_any_once_its_approval_is_gone() 
     # The release deleted the continuation, so the store loads the reply unheld.
     unheld = _held(released.reply, None)
     ended = _span_after(released, "resume")
-    superseded = rl.replay_superseded(unheld, ended, durable_write_debt=False, now_ns=NOW)
+    superseded = rl.replay_superseded(unheld, ended, durable_write_debt=False, sources_pending=False, now_ns=NOW)
     assert SettleSources("resume", answered=False) in superseded.effects
     removed = rl.removed_entity(unheld, ended, now_ns=NOW)
     assert removed.effects == (SettleSources("resume", answered=False),)
@@ -1605,7 +1605,7 @@ def _interrupted() -> tuple[Reply, Span]:
 def test_a_superseded_replay_ends_the_interrupted_reply_and_settles_its_sources() -> None:
     """The replay a newer message superseded settles its sources with the reply, in one transition."""
     reply, span = _interrupted()
-    superseded = rl.replay_superseded(reply, span, durable_write_debt=False, now_ns=NOW)
+    superseded = rl.replay_superseded(reply, span, durable_write_debt=False, sources_pending=False, now_ns=NOW)
     assert superseded.outcome is Outcome.APPLIED
     assert superseded.reply is not None
     assert superseded.reply.state is ReplyState.FAILED
@@ -1614,6 +1614,7 @@ def test_a_superseded_replay_ends_the_interrupted_reply_and_settles_its_sources(
         replace(reply, placeholder_only=True),
         span,
         durable_write_debt=False,
+        sources_pending=False,
         now_ns=NOW,
     )
     assert placeholder.reply is not None
@@ -1621,15 +1622,24 @@ def test_a_superseded_replay_ends_the_interrupted_reply_and_settles_its_sources(
     assert placeholder.effects == (SettleSources(span.span_id, answered=False),)
 
 
+def test_a_superseded_replay_leaves_the_reply_to_its_turn_s_pending_messages() -> None:
+    """A coalesced turn's other message still waits to replay, so the reply waits for the replays to answer them."""
+    reply, span = _interrupted()
+    waiting = rl.replay_superseded(reply, span, durable_write_debt=False, sources_pending=True, now_ns=NOW)
+    assert waiting.outcome is Outcome.DEFERRED
+    assert waiting.effects == ()
+
+
 def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
     """The replay resolves what the reply owes Matrix, so a newer message does not supersede it."""
     reply, span = _interrupted()
     for owing in (
-        rl.replay_superseded(reply, span, durable_write_debt=True, now_ns=NOW),
+        rl.replay_superseded(reply, span, durable_write_debt=True, sources_pending=False, now_ns=NOW),
         rl.replay_superseded(
             replace(reply, owed_write=rl.OwedWrite(span.span_id, rl.NoteKind.RESTART)),
             span,
             durable_write_debt=False,
+            sources_pending=False,
             now_ns=NOW,
         ),
     ):
@@ -1639,6 +1649,7 @@ def test_a_replay_whose_reply_owes_a_write_is_never_superseded() -> None:
         replace(reply, state=ReplyState.COMPLETED),
         span,
         durable_write_debt=False,
+        sources_pending=False,
         now_ns=NOW,
     )
     assert answered.outcome is Outcome.DUPLICATE
