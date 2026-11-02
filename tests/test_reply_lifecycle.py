@@ -2217,7 +2217,7 @@ def test_an_interrupted_response_ends_its_span_by_one_table(
     [
         (FailureCause.APPROVAL_NOT_STARTED, NoteKind.APPROVAL_FAILED),
         (FailureCause.DELIVERY_FAILED, NoteKind.DELIVERY_FAILED),
-        (FailureCause.NOTHING_TO_SHOW, NoteKind.ERROR),
+        (FailureCause.NOTHING_TO_SHOW, NoteKind.NOTHING_TO_SHOW),
         (FailureCause.HOOK_FAILED, NoteKind.ERROR),
     ],
 )

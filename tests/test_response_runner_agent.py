@@ -97,7 +97,6 @@ from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_store import SourcePreparation
 from tests.bot_helpers import (
     AgentBotTestBase,
-    _handled_response_event_id,
     _hook_envelope,
     _hook_plugin,
     _make_matrix_client_mock,
@@ -125,7 +124,6 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import (
     attempt_in_place,
@@ -1446,59 +1444,6 @@ class TestAgentBot(AgentBotTestBase):
         assert outcome.final_visible_body == "chunk"
         mock_deliver_final.assert_not_awaited()
         bot.client.room_redact.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_streamed_regeneration_against_an_existing_visible_reply_preserves_linkage_when_no_new_body_lands(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A no-op streamed regeneration should keep the prior visible reply linked."""
-        config = self._config_for_storage(tmp_path)
-        config.defaults.show_stop_button = False
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = _make_matrix_client_mock()
-        runner = unwrap_extracted_collaborator(bot._response_runner)
-        request = replace(
-            _response_request(
-                room_id="!test:localhost",
-                prompt="Please reply in thread",
-                reply_to_event_id="$event456",
-                thread_id=None,
-                thread_history=[],
-                user_id="@user:localhost",
-                response_envelope=_hook_envelope(
-                    body="Please reply in thread",
-                    source_event_id="$event456",
-                ),
-                correlation_id="corr-stream-regenerate-noop",
-                existing_event_id="$existing",
-            ),
-            # A regeneration of the answer the reply shows.
-            edit_regeneration=True,
-        )
-
-        async with response_span(runner, request):
-            delivery = await runner.deps.delivery_gateway.finalize_streamed_response(
-                FinalizeStreamedResponseRequest(
-                    target=request.response_envelope.target,
-                    # The regeneration's stream ran to its end without showing a new body.
-                    stream_transport_outcome=StreamTransportOutcome(
-                        last_physical_stream_event_id="$existing",
-                        rendered_body=None,
-                        visible_body_state="none",
-                    ),
-                    initial_delivery_kind="edited",
-                    identity=runner.locked.build_lifecycle(request, response_kind="ai").identity,
-                    tool_trace=None,
-                    extra_content=None,
-                    existing_event_id="$existing",
-                ),
-            )
-
-        assert delivery.ending == Completed()
-        assert _visible_response_event_id(delivery) == "$existing"
-        assert _handled_response_event_id(delivery) == "$existing"
 
     def test_response_outcome_prefers_ending_over_delivery_kind(self) -> None:
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
