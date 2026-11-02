@@ -316,6 +316,15 @@ def test_a_created_agent_loads_from_its_creator(tmp_path: Path) -> None:
     assert config.tool_ceiling("creator") == ("calculator", "shell")
 
 
+def test_a_created_agent_does_not_take_its_creators_matrix_username(tmp_path: Path) -> None:
+    """A created agent registers its own default account, so it never requests the localpart its creator chose."""
+    data = deepcopy(BASE)
+    data["agents"]["creator"]["matrix_username"] = "jarvis"
+    config = _load(tmp_path, data, created=[_created()])
+    assert config.agents["creator"].matrix_username == "jarvis"
+    assert config.agents["creator_research"].matrix_username is None
+
+
 def test_personal_agent_edits_apply_at_load(tmp_path: Path) -> None:
     """Owner edits replace the template's values, and the template stays the ceiling."""
     edits = GeneratedAgentEdits(display_name="Scout", tools=["calculator"])
