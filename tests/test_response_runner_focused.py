@@ -450,7 +450,6 @@ async def test_response_typing_supplies_complete_attribution(monkeypatch: pytest
         client,
         request,
         response_run_id="response-run-1",
-        quiet=False,
     ):
         pass
 

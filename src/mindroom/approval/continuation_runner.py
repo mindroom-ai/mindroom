@@ -1182,7 +1182,6 @@ class ApprovalContinuationRunner:
                     self.locked.client(),
                     request,
                     response_run_id=continuation.run_id,
-                    quiet=self.locked.is_quiet(request),
                 ):
                     with tool_runtime_context(tool_context):
                         result = await continue_paused_team_run(

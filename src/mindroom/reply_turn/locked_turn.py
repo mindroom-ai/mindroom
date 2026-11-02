@@ -40,7 +40,6 @@ from mindroom.orchestration.runtime import classify_cancel_source, current_task_
 from mindroom.reply_scope import current_span, release_decision, suppress_decision
 from mindroom.reply_turn.request import (
     correlation_id_for_request,
-    is_silent_schedule_response,
     reply_authorization_entity_names,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
@@ -148,10 +147,6 @@ class LockedTurns:
         """Return the request carrying the contact whose room its room is or was, read once as the turn starts."""
         contact = contact_room(self.deps.runtime.config, self.deps.runtime_paths, request.room_id, self.deps.agent_name)
         return replace(request, contact=contact)
-
-    def is_quiet(self, request: ResponseRequest) -> bool:
-        """Return whether a turn shows no progress in its room: a silent schedule's turn, or a contact turn."""
-        return is_silent_schedule_response(request) or request.contact is not None
 
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
         """Return the runtime's knowledge refresh scheduler."""
@@ -421,7 +416,7 @@ class LockedTurns:
                 response_function=response_function,
                 existing_event_id=existing_event_id(request),
                 user_id=request.user_id,
-                show_stop_button=not self.is_quiet(request),
+                show_stop_button=not request.quiet,
             )
         except ResponsePausedForApproval as error:
             if approval_suspension_handler is None:

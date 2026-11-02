@@ -134,10 +134,10 @@ class ResponseRequest:
         """Return the canonical resolved response thread root."""
         return self.response_envelope.target.resolved_thread_id
 
-
-def is_silent_schedule_response(request: ResponseRequest) -> bool:
-    """Return whether one response answers a silent schedule, which shows only its findings."""
-    return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    @property
+    def quiet(self) -> bool:
+        """Return whether the turn shows no progress in its room: a silent schedule's or a contact turn's."""
+        return self.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND or self.contact is not None
 
 
 def correlation_id_for_request(request: ResponseRequest) -> str:
@@ -169,11 +169,10 @@ async def response_typing_indicator(
     request: ResponseRequest,
     *,
     response_run_id: str | None,
-    quiet: bool,
     participation: ParticipationGate | None = None,
 ) -> AsyncIterator[None]:
-    """Expose typing only for a response whose progress may be visible, which a ``quiet`` one's never is."""
-    if quiet:
+    """Expose typing only for a response whose progress may be visible, which a quiet one's never is."""
+    if request.quiet:
         yield
         return
 

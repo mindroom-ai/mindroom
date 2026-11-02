@@ -566,7 +566,7 @@ class ResponseRunner:
                         target=target,
                         locked_operation=locked_operation,
                     ),
-                    signal_queued_message=signal_queued_message and not self.locked.is_quiet(request),
+                    signal_queued_message=signal_queued_message and not request.quiet,
                 )
                 handle = current_span()
                 if handle is not None and not handle.exited:
@@ -842,7 +842,7 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> MatrixCompactionLifecycle | None:
         """Build the ordered foreground compaction notice adapter for one response."""
-        if self.locked.is_quiet(request) or request.participation is not None:
+        if request.quiet or request.participation is not None:
             return None
         event_id, shows_placeholder = existing_event(request)
         reply_to_event_id = event_id if shows_placeholder else request.reply_to_event_id
@@ -969,7 +969,7 @@ class ResponseRunner:
             ),
             system_enrichment_items=tuple(request.system_enrichment_items),
             # A quiet turn may end without an answer: an empty run is neither retried nor answered with a notice.
-            allow_no_report_response=self.locked.is_quiet(request),
+            allow_no_report_response=request.quiet,
             scheduled_history_budget=request.scheduled_history_budget,
             redacted_history_events=partial(self.deps.redacted_history_events, target),
             prompt=prompt,
@@ -1499,7 +1499,7 @@ class ResponseRunner:
             execution_identity=execution_identity,
             placeholder_message=(
                 None
-                if self.locked.is_quiet(request) or request.participation is not None
+                if request.quiet or request.participation is not None
                 else AGENT_PLACEHOLDER
                 if team is None
                 else TEAM_PLACEHOLDER
@@ -1706,7 +1706,7 @@ class ResponseRunner:
         request = turn.request
         # A resumed reply is a stream, and a whole answer would replace what it already showed.
         use_streaming = _resumed_reply() is not None or (
-            not self.locked.is_quiet(request)
+            not request.quiet
             and await should_use_streaming(
                 self.locked.client(),
                 request.room_id,
@@ -1884,7 +1884,6 @@ class ResponseRunner:
                 self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
-                quiet=self.locked.is_quiet(request),
                 participation=participation,
             ):
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
@@ -1978,7 +1977,6 @@ class ResponseRunner:
                 self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
-                quiet=self.locked.is_quiet(request),
                 participation=runtime.participation,
             ):
                 with tool_runtime_context(runtime.tool_context):
