@@ -449,6 +449,7 @@ class _CallAgentCache:
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
             eager_deferred_tools=True,
+            inline_tools=True,
         )
         return _refuse_text_chat_functions(_spoken(build), self.config)
 
@@ -591,6 +592,7 @@ async def build_call_tools(
                 tool_function_filter=context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,
                 eager_deferred_tools=True,
+                inline_tools=True,
                 model=turn_model,
             ),
         ),
@@ -896,7 +898,7 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
         if not _function_requires_text_chat(function, config):
             return function
         refused.add(function.name)
-        # A gate pauses the run, or asks as the call's job, before any tool-call policy can refuse the call.
+        # A gate pauses the run before any tool-call policy can refuse the call.
         return replace(function, gate=None)
 
     async def refuse(call: ToolCall, call_next: ToolNext) -> object:

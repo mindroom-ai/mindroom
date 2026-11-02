@@ -1102,6 +1102,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     eager_deferred_tools: bool,
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
+    inline_tools: bool,
     persona: SubagentPersona | None,
     plugins: ConfigPlugins,
     knowledge: AgentKnowledge | None,
@@ -1114,9 +1115,14 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     """
     config = agent_tools.config
     agent_name = agent_tools.agent_name
-    # Only a top-level agent's own calls can become jobs: a nested subagent's run inside its parent's job, and a
-    # minimal agent's return to the CLI command that made them.
-    calls_as_jobs = background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
+    # Only a top-level agent's own calls can become jobs: a nested subagent's run inside its parent's job, a minimal
+    # agent's return to the CLI command that made them, and a voice call's finish inside the call's turn.
+    calls_as_jobs = (
+        background_tool_jobs_enabled(config, runtime_paths)
+        and delegation_depth == 0
+        and not minimal_mode
+        and not inline_tools
+    )
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
     room_tools, matrix_room_tools = turn_room_flags(execution_identity)
@@ -1615,6 +1621,7 @@ def create_agent(
     required_tool_names: tuple[str, ...] = (),
     agent_mode: AgentMode = "standard",
     agent_cli_in_shell: bool = False,
+    inline_tools: bool = False,
     persona: SubagentPersona | None = None,
     provider: ModelProvider | None = None,
 ) -> AgentBuild:
@@ -1654,6 +1661,8 @@ def create_agent(
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
+        inline_tools: Whether every tool call finishes inside the turn that made it, as a voice call's do, so
+            none can become a background job.
         persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
         required_tool_names: Authored toolkits needed by a saved approval, which a minimal-mode agent
             attaches directly instead of through mindroom-agent.
@@ -1757,6 +1766,7 @@ def create_agent(
         eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
+        inline_tools=inline_tools,
         persona=persona,
         plugins=plugins,
         knowledge=enabled_knowledge,
