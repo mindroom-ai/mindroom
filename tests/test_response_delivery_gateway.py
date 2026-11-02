@@ -69,7 +69,7 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
-from mindroom.reply_scope import current_span
+from mindroom.reply_scope import current_span, initial_write
 from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -768,18 +768,25 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.final_visible_event_id == "$prior_answer"
         send.assert_not_awaited()
         gateway.deps.runtime.client.room_redact.assert_not_awaited()
+        # Keeping the answer writes nothing, so no edit failed.
+        gateway.deps.logger.error.assert_not_called()
         reply = await alice.replies.for_event("$prior_answer")
         assert reply is not None
         assert reply.state is rl.ReplyState.COMPLETED
 
-    @pytest.mark.parametrize("failed", [False, True], ids=["finished_empty", "delivery_failed"])
-    async def test_a_stream_that_showed_only_its_placeholder_ends_it_by_how_it_finished(
+    @pytest.mark.parametrize(
+        ("failed", "note"),
+        [(False, NoteKind.NOTHING_TO_SHOW), (True, NoteKind.DELIVERY_FAILED)],
+        ids=["finished_empty", "delivery_failed"],
+    )
+    async def test_a_stream_that_showed_only_its_placeholder_notes_on_it_how_it_finished(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
         failed: bool,
+        note: NoteKind,
     ) -> None:
-        """A stream that finished with no answer notes it on the placeholder; one whose delivery failed removes it."""
+        """A stream that finished with no answer, or whose final delivery failed, says so where its placeholder stood."""
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
         target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
@@ -810,18 +817,130 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 )
                 outcome = await end_span_as_locked_turn(gateway, handle, target, outcome)
 
+        gateway.deps.runtime.client.room_redact.assert_not_awaited()
+        assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED if failed else FailureCause.NOTHING_TO_SHOW)
+        assert outcome.final_visible_event_id == "$placeholder"
         reply = await alice.replies.for_sources(("$cause",))
         assert reply is not None
-        if failed:
-            assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
-            assert outcome.final_visible_event_id is None
-            assert reply.state is rl.ReplyState.GONE
-            send.assert_not_awaited()
-            return
-        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
-        assert outcome.final_visible_event_id == "$placeholder"
         assert reply.state is rl.ReplyState.FAILED
-        assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(NoteKind.NOTHING_TO_SHOW).text
+        assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(note).text
+
+    async def test_a_whole_answer_that_cannot_be_delivered_notes_it_on_the_placeholder(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """An answer refused before it was recorded leaves the delivery-failed note where the placeholder stood."""
+        gateway = _gateway(tmp_path, alice)
+        client = gateway.deps.runtime.client
+        # Without a synced room cache the answer cannot learn whether the room is encrypted, so it fails before it
+        # is recorded; the note's own lookup then finds the room unencrypted.
+        client.rooms = {}
+        client.room_get_state_event.side_effect = [
+            nio.RoomGetStateEventError("denied", "M_FORBIDDEN"),
+            nio.RoomGetStateEventError("not found", "M_NOT_FOUND"),
+        ]
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(
+                gateway,
+                alice,
+                replace(self._final_request("the answer"), existing_event_id="$placeholder"),
+                end_failed_span=True,
+            )
+
+        client.room_redact.assert_not_awaited()
+        assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
+        assert outcome.final_visible_event_id == "$placeholder"
+        send.assert_awaited_once()
+        assert send.await_args.args[2]["m.new_content"]["body"] == note_segment(NoteKind.DELIVERY_FAILED).text
+        reply = await alice.replies.for_sources(("$cause",))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.FAILED
+
+    async def test_an_empty_approval_resume_leaves_the_reply_to_its_approval_without_an_error(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A resume that wrote no answer ends without writing; its approval's settlement ends the reply."""
+        gateway = _gateway(tmp_path, alice)
+        send = AsyncMock(side_effect=delivered_matrix_side_effect("$note"))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_resume_span(
+                gateway,
+                alice,
+                replace(self._final_request(""), existing_event_id="$paused"),
+                end_failed_span=True,
+            )
+
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
+        send.assert_not_awaited()
+        gateway.deps.logger.error.assert_not_called()
+
+    @pytest.mark.parametrize("ending", ["whole_answer", "streamed_answer", "note"])
+    async def test_a_write_over_a_placeholder_matrix_acknowledged_late_names_the_placeholder(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        ending: str,
+    ) -> None:
+        """A write prepared before the placeholder's create landed goes out as an edit of it; the outcome names the placeholder.
+
+        The placeholder's first send fails, so the turn has no event to edit; the next write sends the placeholder
+        first and is aimed at the event it bound only when claimed.
+        """
+        gateway = _gateway(tmp_path, alice)
+        request = self._final_request("the answer")
+        sent: list[dict[str, object]] = []
+
+        async def send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+            sent.append(content)
+            if len(sent) == 1:
+                return _failed_delivery()
+            return DeliveredMatrixEvent("$edit" if "m.new_content" in content else "$placeholder", content)
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
+            async with reply_span(alice, source_event_id="$cause", room_id=_ROOM_ID) as handle:
+                placeholder = initial_write(handle, Presentation(), placeholder_only=True)
+                text = "Thinking..."
+                assert await gateway.send_text(SendTextRequest(request.target, text, reply_write=placeholder)) is None
+                if ending == "whole_answer":
+                    outcome = await gateway.deliver_final(request)
+                elif ending == "streamed_answer":
+                    # The stream showed nothing, and the run's final event carried the whole answer.
+                    outcome = await gateway.finalize_streamed_response(
+                        FinalizeStreamedResponseRequest(
+                            target=request.target,
+                            stream_transport_outcome=StreamTransportOutcome(
+                                last_physical_stream_event_id=None,
+                                rendered_body=None,
+                                visible_body_state="none",
+                                canonical_final_body_candidate="the answer",
+                            ),
+                            initial_delivery_kind="sent",
+                            identity=request.identity,
+                            tool_trace=None,
+                            extra_content=None,
+                        ),
+                    )
+                else:
+                    outcome = await gateway.end_interrupted_span(
+                        handle,
+                        request.target,
+                        ending=Failed(FailureCause.ERROR, "boom"),
+                        delivery_started=True,
+                    )
+                    assert outcome is not None
+
+        assert [content.get("m.relates_to") for content in sent] == [
+            None,
+            None,
+            {"rel_type": "m.replace", "event_id": "$placeholder"},
+        ]
+        assert outcome.final_visible_event_id == "$placeholder"
 
     async def test_a_regeneration_that_streamed_only_its_placeholder_ends_it_with_a_note(
         self,

@@ -971,8 +971,8 @@ class DeliveryGateway:
         and earlier rows whose outcome is unknown are flushed before it; an
         edit whose target the reply's create has not bound yet is aimed at it
         when claimed. The lifecycle rule decides the row inside its enqueue
-        transaction; a rule that refuses raises ``ReplyWriteRefusedError``
-        and nothing is written.
+        transaction; a rule that writes no row raises ``ReplyWriteRefusedError``
+        and nothing is sent. The returned event is the one the reply shows on.
         """
         requested: DeliveredMatrixEvent | None = None
         predicted: dict[str, object] = {}
@@ -1055,19 +1055,23 @@ class DeliveryGateway:
             delivery = ReplyRowDelivery(enqueue=recorded[0] if recorded else None)
         if delivery.enqueue is not None:
             await self._run_reply_effects(delivery.enqueue.applied.post_commit)
-            if not delivery.enqueue.transition.applied and delivery.enqueue.delivery_id is None:
-                # A retried write is not refused: it resolves to the row already recorded.
+            if delivery.enqueue.delivery_id is None:
+                # The rule wrote no row, refusing it or ending the span without one; a retried write is not
+                # refused: it resolves to the row already recorded.
                 raise ReplyWriteRefusedError(delivery.enqueue.transition)
         if delivery.event_id is None:
             return None
-        if write.handle is not None and write.handle.reply.event_id is None:
+        reply = None if write.handle is None else write.handle.reply
+        if reply is None or reply.event_id is None:
             # The reply's create bound its event when Matrix acknowledged it; the span reads it from here on.
             reply = await self.deps.outbox.replies.load(write.reply_id)
-            if reply is not None:
+            if reply is not None and write.handle is not None:
                 write.handle.note_reply(reply)
-        if requested is not None and requested.event_id == delivery.event_id:
+        # Every row shows on the reply's event, even one prepared as a create and aimed at that event when claimed.
+        event_id = delivery.event_id if reply is None or reply.event_id is None else reply.event_id
+        if requested is not None and requested.event_id == event_id:
             return requested
-        return DeliveredMatrixEvent(event_id=delivery.event_id, content_sent=content)
+        return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
 
     async def _run_reply_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
         """Run the work a committed reply transition left for after its commit."""
@@ -2314,12 +2318,11 @@ class DeliveryGateway:
                 )
 
             if stream_outcome.failed and stream_outcome.visible_body_state != "visible_body":
-                placeholder_only = stream_outcome.visible_body_state == "placeholder_only"
-                if placeholder_only and (handle := self._live_span()) is not None:
-                    # The final delivery failed while the stream showed only its placeholder: the placeholder goes.
-                    await self.end_reply_span(handle, suppress_decision(handle))
+                # The span's end notes the failure below what the reply showed, as a whole delivery's does.
                 shown = (
-                    not placeholder_only and request.initial_delivery_kind == "edited" and streamed_event_id is not None
+                    stream_outcome.visible_body_state == "none"
+                    and request.initial_delivery_kind == "edited"
+                    and streamed_event_id is not None
                 )
                 return FinalDeliveryOutcome(
                     ending=Failed(FailureCause.DELIVERY_FAILED),
