@@ -1035,9 +1035,7 @@ def _router_relay_event(
 def _skip_logs(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """Return each logged skip of an older message as its event ID and thread."""
     return [
-        (log["skipped_event_id"], log.get("thread_id"))
-        for log in logs
-        if str(log["event"]).startswith("Skipping older message")
+        (log["skipped_event_id"], log["thread_id"]) for log in logs if log["event"].startswith("Skipping older message")
     ]
 
 

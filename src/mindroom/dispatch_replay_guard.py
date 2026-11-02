@@ -1,4 +1,10 @@
-"""Replay-guard checks for dispatch sequencing."""
+"""Replay-guard checks for dispatch sequencing.
+
+Each check logs the newer requester turn it finds as a candidate, because its
+caller decides whether that turn supersedes the older one; the live Matrix fuzz
+harness reads these lines as evidence that survives a restart cutting that
+decision short.
+"""
 
 from __future__ import annotations
 
@@ -37,10 +43,6 @@ async def has_newer_unresponded_in_thread(
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
     """Return True when full thread history proves a newer unhandled requester turn exists.
-
-    The caller decides whether that turn supersedes the older one, so the log
-    names a candidate, not a skip; the live Matrix fuzz harness reads it as
-    evidence that survives a restart cutting that decision short.
 
     Only a message the journal still owes work can become that turn: one this
     agent already settled without answering, such as a voice note it ignored as

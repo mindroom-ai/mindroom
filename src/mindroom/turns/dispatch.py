@@ -417,7 +417,7 @@ class TurnDispatcher:
         thread_id = prepared.dispatch.target.resolved_thread_id
         if is_thread_history_degraded(thread_history):
             # Thread history degraded, so only pending journal events can prove a newer message.
-            skips_turn = await has_newer_unresponded_journal_thread_event(
+            newer_turn_found = await has_newer_unresponded_journal_thread_event(
                 room_id=room.room_id,
                 event=event,
                 requester_user_id=requester_user_id,
@@ -429,7 +429,7 @@ class TurnDispatcher:
                 for_another_participant=partial(self._for_another_participant, room),
                 logger=self.deps.logger,
             )
-            if may_be_superseded and not skips_turn:
+            if may_be_superseded and not newer_turn_found:
                 self.deps.logger.warning(
                     "Thread replay guard degraded; proceeding without negative newer-message proof",
                     event_id=event.event_id,
@@ -438,21 +438,21 @@ class TurnDispatcher:
                     thread_read_degraded=True,
                 )
         else:
-            skips_turn = await self._has_newer_unresponded_in_thread(
+            newer_turn_found = await self._has_newer_unresponded_in_thread(
                 room,
                 event,
                 requester_user_id,
                 thread_history,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
             )
-        if not skips_turn or not await visible_responses.settle_superseded_turn(prepared.handled_turn):
-            return False
-        self.deps.logger.info(
-            "Skipping older message — a newer message from same sender in thread superseded it",
-            skipped_event_id=event.event_id,
-            thread_id=thread_id,
-        )
-        return True
+        if newer_turn_found and await visible_responses.settle_superseded_turn(prepared.handled_turn):
+            self.deps.logger.info(
+                "Skipping older message — a newer message from same sender in thread superseded it",
+                skipped_event_id=event.event_id,
+                thread_id=thread_id,
+            )
+            return True
+        return False
 
     async def _apply_turn_plan(
         self,
