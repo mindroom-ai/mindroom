@@ -339,11 +339,17 @@ def _room_creator(record: ContactRecord) -> str:
 
 
 def _running_agents(context: ToolRuntimeContext, record: ContactRecord) -> dict[str, tuple[AgentBot, nio.AsyncClient]]:
-    """Return the bot and client of each agent party, refusing before anything changes when one is not running."""
+    """Return the bot and client of each agent party, refusing before anything changes when one is not running.
+
+    An agent party that lost its contacts since the request is refused too, because its contacts read as removed.
+    """
     agents: dict[str, tuple[AgentBot, nio.AsyncClient]] = {}
     for party in (record.requester, record.target):
         if party.kind != "agent":
             continue
+        if agent_party(context.current_config, party.id) is None:
+            msg = f"contacts are not enabled for {party.id}, so the contact room cannot be set up"
+            raise ValueError(msg)
         bot = _bot(context, party.id)
         client = None if bot is None or not bot.running else bot.client
         if bot is None or client is None:

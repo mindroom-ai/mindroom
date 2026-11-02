@@ -14,7 +14,7 @@ from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.parties import agent_party
-from mindroom.contacts.store import contact_room_ids
+from mindroom.contacts.store import contact_room_ids, remove_active_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
@@ -402,7 +402,15 @@ class BotRoomLifecycle:
                 self._logger().warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this bot is no longer configured for."""
+        """Leave any rooms this bot is no longer configured for.
+
+        A personal agent without contacts leaves its contact rooms, so it ends those contacts in the store first.
+        """
+        config, name = self._config(), self.deps.agent_name
+        if config.personal_agent_instance(name) is not None and agent_party(config, name) is None:
+            removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
+            if removed:
+                self._logger().info("contacts_removed_without_contacts", contact_ids=removed)
         client = self._client()
         await leave_non_dm_rooms(
             client,

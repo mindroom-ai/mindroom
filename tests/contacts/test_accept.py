@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
@@ -32,6 +33,7 @@ from tests.contacts.test_tools import (
     ORIGIN_THREAD,
     TOOLS,
     _context,
+    _data,
     _delivered,
     _pending,
     _Runtime,
@@ -40,7 +42,7 @@ from tests.contacts.test_tools import (
     _stored,
     _terms,
 )
-from tests.test_generated_agents import CO_OWNER, OWNER
+from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -585,21 +587,74 @@ async def test_room_cleanup_keeps_an_active_contact_room_for_its_agents_and_leav
 
 
 @pytest.mark.asyncio
-async def test_room_cleanup_leaves_the_contact_rooms_of_an_agent_whose_contacts_is_removed(
+async def test_removing_then_restoring_contacts_revives_none_of_the_agents_contacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without contacts, an agent keeps none of its contact rooms, though the stored contact stays active."""
+    """An agent that loses contacts leaves its contact rooms and ends those contacts for both sides.
+
+    Its contacts read as removed already before its rooms are reconciled. Once contacts are back, the other agent still
+    takes no turns in the room, the listing shows no contact, and the owners can ask for a new one.
+    """
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
     with _matrix():
         await _accept(config, paths, runtime, record.id)
     without, _ = _setup(tmp_path, contacts=False)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[CONTACT_ROOM]))
+    left: list[str] = []
 
+    async def record_left(
+        _client: object,
+        room_ids: list[str],
+        *,
+        leave_room_action: Callable[[str], Awaitable[bool]],
+    ) -> None:
+        del leave_room_action
+        left.extend(room_ids)
+
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[CONTACT_ROOM]))
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", record_left)
+    found = contact_room(without, paths, CONTACT_ROOM, "mind_alice")
+    assert found is not None
+    assert found[0].status == "removed"
     assert await _room_lifecycle(config, paths, "mind_alice")._rooms_to_leave() == []
-    assert await _room_lifecycle(without, paths, "mind_alice")._rooms_to_leave() == [CONTACT_ROOM]
+
+    await _room_lifecycle(without, paths, "mind_alice").leave_unconfigured_rooms()
+
+    assert left == [CONTACT_ROOM]
+    assert [stored.status for stored in _stored(paths)] == ["removed"]
+    # With contacts restored, nothing of the old contact comes back.
+    admission = contact_admission(config, paths, room_id=CONTACT_ROOM, agent_name="mind_bob", sender_ids=[OWNER])
+    assert admission == _ContactAdmission(None)
+    listing = yaml.safe_load(flow.list_contacts(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"))
+    assert listing["contacts"] == []
+    again = await _pending(config, paths, runtime)
+    assert again.id != record.id
+    assert [stored.status for stored in _stored(paths)] == ["removed", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_a_request_whose_agent_lost_contacts_cannot_be_accepted(tmp_path: Path) -> None:
+    """No contact room is set up for an agent party without contacts, and the request stays pending."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    data = _data()
+    data["personal_agents"]["mind"]["users"] = {OWNER: {"contacts": None}}
+    without_alices = _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER), _personal(CAROL)])
+
+    with (
+        _matrix() as matrix,
+        pytest.raises(
+            ValueError,
+            match=r"^contacts are not enabled for mind_alice, so the contact room cannot be set up$",
+        ),
+    ):
+        await _accept(without_alices, paths, runtime, record.id)
+
+    matrix.create.assert_not_awaited()
+    assert [stored.status for stored in _stored(paths)] == ["pending"]
 
 
 @pytest.mark.asyncio

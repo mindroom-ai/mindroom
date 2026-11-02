@@ -70,6 +70,8 @@ The invited-rooms store was rejected for this, because it is not persisted for a
 Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite like any other, and would otherwise rejoin a removed contact's room at its next start.
 A removed contact's room takes no more turns or messages from its agents, because a leave can fail and a running or queued turn can still try to post there.
 An agent whose `contacts` is removed treats each of its active contacts as removed and leaves their rooms, because in a room it no longer reads as a contact room its owner's and the other side's messages would start normal turns with its full tools, and its sends there would skip the policy.
+When it leaves those rooms it also marks those contacts removed in the store, and a pending request that needs it cannot be accepted while it lacks `contacts`.
+Deriving that status only when read was rejected, because restoring `contacts` would revive contacts whose rooms the agent had left: the other side would keep writing there, a new request would find the contact active, and nobody would answer.
 
 ### Contact turns run as the agent's owner
 

@@ -153,3 +153,25 @@ def contact_room_ids(runtime_paths: RuntimePaths, agent_name: str, *, include_re
         and record.room_id is not None
         and record.agent_side(agent_name) is not None
     )
+
+
+def remove_active_contacts(runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
+    """Mark every active contact this agent is a party of removed, and return their IDs.
+
+    An agent that no longer has contacts leaves their rooms, so its contacts end for both sides, and restoring its
+    contacts later revives none of them. Nothing is written while it has no active contact.
+    """
+
+    def active(record: ContactRecord) -> bool:
+        return record.status == "active" and record.agent_side(agent_name) is not None
+
+    if not any(active(record) for record in read_contacts(runtime_paths).contacts):
+        return []
+
+    def remove(book: ContactBook) -> list[str]:
+        removed = [record for record in book.contacts if active(record)]
+        for record in removed:
+            record.status = "removed"
+        return [record.id for record in removed]
+
+    return update_contacts(runtime_paths, remove)

@@ -36,7 +36,7 @@ personal_rooms:
 ```
 
 Setting `contacts` under a template's `agent:` enables contacts for every personal agent built from it, and a `users` override can change or remove it for one person.
-Removing `contacts` from an agent ends its contacts for that agent: it leaves their rooms, sends nothing more into them, and no message there starts its turns.
+Removing `contacts` from an agent ends its contacts for both sides: it leaves their rooms, neither agent sends anything more into them or answers there, and adding `contacts` back restores none of them, so the owners request a new contact instead.
 An agent with `contacts` gets the `contacts` and `matrix_message` tools automatically, so you do not list them under `tools`.
 Requests are delivered to, and accepted through, the agent of each person's [personal room](personal-rooms.md), so the template that `personal_rooms.agent` names needs `contacts` too, or nobody can send its users a request.
 Agents of other templates can be contacts as well when their template sets `contacts`.
@@ -185,6 +185,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `<agent> is not running, so it cannot post the request; ask again later` | The target owner's personal-room agent is stopped or still starting |
 | `Only <agent>, the agent of <owner>'s personal room, may accept this contact` (or `decline`) | Accept or decline by replying in the request's thread in your personal room |
 | `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
+| `contacts are not enabled for <agent>, so the contact room cannot be set up` | An agent of the request lost `contacts` after it was asked; accept again once an administrator adds `contacts` back |
 | `Error: contact rooms accept text only` | Attachments and collapsible sections cannot go into a contact room |
 | `Not sent: The conversation already has <n> agent messages in a row; wait for a person to write.` | The agents reached `defaults.max_consecutive_agent_replies`; any person writing in the conversation resets it |
 | `Not sent: A contact policy hook failed.` | A `contact:before_send` hook raised or timed out; check the plugin's logs |
