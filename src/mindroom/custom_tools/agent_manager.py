@@ -22,7 +22,7 @@ from mindroom.personal_agents import (
     update_generated_agent,
 )
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import require_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
@@ -30,15 +30,6 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
-
-
-def _require_context() -> ToolRuntimeContext:
-    """Return the live request's context, refusing a call made outside one."""
-    context = get_tool_runtime_context()
-    if context is None:
-        msg = "This tool only works while answering a request, and there is none."
-        raise ValueError(msg)
-    return context
 
 
 class AgentManagerTools(Toolkit):
@@ -63,7 +54,7 @@ class AgentManagerTools(Toolkit):
 
     async def _run(self, operation: Callable[..., Any], *, reload: bool = True, **extra: object) -> Any:  # noqa: ANN401
         """Run one operation for the requester, off the event loop if it blocks, and request a reload after a change."""
-        context = _require_context()
+        context = require_tool_runtime_context()
         call = partial(
             operation,
             context.current_config,
@@ -140,7 +131,7 @@ class AgentManagerTools(Toolkit):
         on "Tool approval needs the router in this room", call `invite_router` and retry.
         """
         try:
-            context = _require_context()
+            context = require_tool_runtime_context()
             image = await self._attached_image(context, attachment_id)
             await self._run(
                 set_generated_agent_avatar,

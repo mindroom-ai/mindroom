@@ -443,6 +443,15 @@ def get_tool_runtime_context() -> ToolRuntimeContext | None:
     return _TOOL_RUNTIME_CONTEXT.get()
 
 
+def require_tool_runtime_context() -> ToolRuntimeContext:
+    """Return the live request's context, refusing a call made outside one."""
+    context = get_tool_runtime_context()
+    if context is None:
+        msg = "This tool only works while answering a request, and there is none."
+        raise ValueError(msg)
+    return context
+
+
 def current_execution_identity() -> ToolExecutionIdentity | None:
     """Return who the running tool call acts for: its conversation's identity, else the one its runner bound.
 
