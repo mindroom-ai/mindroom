@@ -29,7 +29,7 @@ from mindroom.llm.errors import (
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File, rendered_label
 from mindroom.llm.messages import media_items
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import Retry, attempts
+from mindroom.providers.pipeline.wrapped import RequestProjection, Retry, attempts
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     type _Media = Image | Audio | Video | File
 
-__all__ = ["FALLBACK_MARKER", "media_fallback_inputs", "media_fallback_request", "media_fallback_stream"]
+__all__ = ["FALLBACK_MARKER", "media_fallback_projection", "media_fallback_stream"]
 
 logger = get_logger(__name__)
 
@@ -212,15 +212,23 @@ def _unsupported_kinds(inner: ModelProvider) -> frozenset[MediaKind]:
     return frozenset(_LEARNED_UNSUPPORTED.get(_route(inner), ())) | inner.capabilities.omitted_media
 
 
-def media_fallback_request(inner: ModelProvider, request: ModelRequest, *, fallback_prompt: str) -> ModelRequest:
+def _first_attempt(inner: ModelProvider, request: ModelRequest, *, fallback_prompt: str) -> ModelRequest:
     """Return the first attempt the media fallback sends ``inner``: unsupported media replaced by the fallback note."""
     known = _unsupported_kinds(inner) & _media_kinds(request.messages)
     return replace(request, messages=_without_media(request.messages, known, frozenset(), fallback_prompt))
 
 
-def media_fallback_inputs(inner: ModelProvider, *, fallback_prompt: str) -> object:
-    """Return what ``media_fallback_request`` reads beside the request: the unsupported kinds and the note."""
+def _first_attempt_inputs(inner: ModelProvider, *, fallback_prompt: str) -> object:
+    """Return what ``_first_attempt`` reads beside the request: the unsupported kinds and the note."""
     return [sorted(_unsupported_kinds(inner)), fallback_prompt]
+
+
+def media_fallback_projection(fallback_prompt: str) -> RequestProjection:
+    """Return how the media fallback rewrites a request's first attempt, which sizes and identifies the request."""
+    return RequestProjection(
+        partial(_first_attempt, fallback_prompt=fallback_prompt),
+        partial(_first_attempt_inputs, fallback_prompt=fallback_prompt),
+    )
 
 
 async def media_fallback_stream(
@@ -235,7 +243,7 @@ async def media_fallback_stream(
     present = _media_kinds(request.messages)
     known = _unsupported_kinds(inner) & present
     remaining = present - known
-    first = media_fallback_request(inner, request, fallback_prompt=fallback_prompt)
+    first = _first_attempt(inner, request, fallback_prompt=fallback_prompt)
     sent = {item.id: kind for message in first.messages for kind, item in media_items(message)}
     failure: ProviderError | None = None
     sent_broad = False

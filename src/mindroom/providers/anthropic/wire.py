@@ -26,6 +26,7 @@ from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
 from mindroom.providers.media_files import read_media_bytes
+from mindroom.token_counting.counts import count
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
 
 if TYPE_CHECKING:
@@ -406,7 +407,7 @@ def _thinking_parts(message: Message, parts: RequestParts, replayed: set[str]) -
         if block.get("type") not in _THINKING_BLOCK_TYPES:
             _block_parts(block, visible, set())
     text = "".join(str(block.get("thinking") or "") for block in thinking)
-    parts.cost(max(parts.measure(text), message.metrics.tokens.output_tokens - visible.counted()))
+    parts.cost(max(count(parts.counter, text), message.metrics.tokens.output_tokens - visible.counted()))
 
 
 # Claude answers a tool whose ``input_schema`` has one of these at its root with a 400 ("input_schema does not support

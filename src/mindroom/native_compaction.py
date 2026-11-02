@@ -58,7 +58,7 @@ def native_checkpoint_state(
         logger.info(
             "Native compaction checkpoint",
             threshold_tokens=settings.threshold,
-            checkpoint_chars=len(_serialized([items[last]])),
+            checkpoint_chars=len(json.dumps([items[last]], ensure_ascii=False)),
         )
     return state
 
@@ -165,7 +165,3 @@ def native_replay_messages(messages: Sequence[Message], route: str | None) -> li
     if last is None:
         return list(messages)
     return [message for index, message in enumerate(messages) if index >= last or message.role == "system"]
-
-
-def _serialized(items: Sequence[dict[str, Any]]) -> str:
-    return json.dumps(items, ensure_ascii=False)

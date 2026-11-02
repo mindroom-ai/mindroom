@@ -25,11 +25,9 @@ if TYPE_CHECKING:
 __all__ = [
     "MEDIA_ALLOWANCE_TOKENS",
     "RequestParts",
-    "media_allowance_tokens",
     "plain_request_parts",
     "route_context_key",
     "route_request_tokens",
-    "without_media",
 ]
 
 # What one media item counts while its real cost is unknown: an image, audio clip, video, or file a request sends.
@@ -66,10 +64,6 @@ class RequestParts:
         """Record a setting that changes how the route renders messages."""
         self.flags.append(value)
 
-    def measure(self, text: str) -> int:
-        """Return what ``text`` counts for this request's model, adding nothing to the parts."""
-        return count(self.counter, text)
-
     def counted(self) -> int:
         """Return the tokens these parts hold."""
         return count(self.counter, "".join(self.pieces)) + self.tokens
@@ -80,7 +74,7 @@ class RequestParts:
 type _PartsOf = Callable[["ModelRequest", int, RequestParts], None]
 
 
-def media_allowance_tokens(messages: Sequence[Message], *, keep_images: bool = False) -> int:
+def _media_allowance_tokens(messages: Sequence[Message], *, keep_images: bool = False) -> int:
     """Return the allowance of the media ``messages`` carry, images left out when the route prices them itself."""
     items = sum(len(message.files or ()) + len(message.audio or ()) + len(message.videos or ()) for message in messages)
     if not keep_images:
@@ -88,7 +82,7 @@ def media_allowance_tokens(messages: Sequence[Message], *, keep_images: bool = F
     return items * MEDIA_ALLOWANCE_TOKENS
 
 
-def without_media(messages: Sequence[Message], *, keep_images: bool = False) -> list[Message]:
+def _without_media(messages: Sequence[Message], *, keep_images: bool = False) -> list[Message]:
     """Return ``messages`` without the media the allowance prices, so a route's map renders no media bytes."""
     stripped: list[Message] = []
     for message in messages:
@@ -119,8 +113,8 @@ def route_request_tokens(
     Media are priced at their allowance; ``keep_images`` leaves the images to a route that prices them itself.
     """
     parts = RequestParts(counter)
-    parts.cost(media_allowance_tokens(request.messages[start:], keep_images=keep_images))
-    parts_of(replace(request, messages=without_media(request.messages, keep_images=keep_images)), start, parts)
+    parts.cost(_media_allowance_tokens(request.messages[start:], keep_images=keep_images))
+    parts_of(replace(request, messages=_without_media(request.messages, keep_images=keep_images)), start, parts)
     return parts.counted()
 
 
@@ -142,7 +136,6 @@ def route_context_key(identity: ModelIdentity, counter: TokenCounter, request: M
     ):
         digest.update(piece.encode("utf-8", "surrogatepass"))
         digest.update(b"\0")
-    digest.update(str(parts.tokens).encode())
     return digest.hexdigest()
 
 

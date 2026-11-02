@@ -128,10 +128,9 @@ class ResponsesAdapter:
     def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
         # Each message replays as its own items, so the answer at ``start`` and what follows it render alone.
         chained = request_replay(self.wire, request).previous_response_id is not None
-        rendered = replace(
-            request if not start else replace(request, messages=request.messages[start:], tools=(), output_schema=None),
-            portable_replay=True,
-        )
+        rendered = replace(request, portable_replay=True)
+        if start:
+            rendered = replace(rendered, messages=request.messages[start:], tools=(), output_schema=None)
         body = sdk_request_body(self._request_kwargs(rendered), SDK_OPTION_KEYS)
         responses_body_parts(
             body,

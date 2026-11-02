@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.llm.tool_search import portable_tool_search_request, portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
-from mindroom.providers.pipeline.media import media_fallback_inputs, media_fallback_request, media_fallback_stream
+from mindroom.providers.pipeline.media import media_fallback_projection, media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.remote_media import remote_media_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
@@ -43,9 +43,6 @@ def wrap_provider(
     provider = WrappedProvider(
         provider,
         partial(media_fallback_stream, fallback_prompt=media_fallback_prompt),
-        RequestProjection(
-            partial(media_fallback_request, fallback_prompt=media_fallback_prompt),
-            partial(media_fallback_inputs, fallback_prompt=media_fallback_prompt),
-        ),
+        media_fallback_projection(media_fallback_prompt),
     )
     return WrappedProvider(provider, portable_tool_search_stream, RequestProjection(portable_tool_search_request))

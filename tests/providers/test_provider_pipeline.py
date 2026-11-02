@@ -58,14 +58,13 @@ from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import (
     FALLBACK_MARKER,
-    media_fallback_inputs,
-    media_fallback_request,
+    media_fallback_projection,
     media_fallback_stream,
 )
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
-from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import Await, scripted_body
 from tests.fakes.token_counter import fake_token_counter
@@ -545,10 +544,7 @@ async def test_a_learned_media_limit_changes_the_size_and_identity_of_a_request(
     provider = WrappedProvider(
         inner,
         partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT),
-        RequestProjection(
-            partial(media_fallback_request, fallback_prompt=_FALLBACK_PROMPT),
-            partial(media_fallback_inputs, fallback_prompt=_FALLBACK_PROMPT),
-        ),
+        media_fallback_projection(_FALLBACK_PROMPT),
     )
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
     size, key = provider.request_tokens(request), provider.context_key(request)

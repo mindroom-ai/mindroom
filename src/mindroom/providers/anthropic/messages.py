@@ -207,16 +207,6 @@ class _RequestBody:
     flags: tuple[object, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedRequest:
-    """One request's SDK client and keyword arguments, built off the event loop."""
-
-    client: _AsyncClaudeClient
-    kwargs: dict[str, Any]
-    beta: bool
-    checkpoint_prefix: bool
-
-
 @dataclass(slots=True)
 class _AmbientGoogleCredentials:
     """Application Default Credentials a Vertex adapter discovers on first use and shares across its clients.
@@ -297,18 +287,18 @@ class ClaudeProvider:
         that stops early still settles what Anthropic bills.
         """
         timer = TurnTimer()
-        prepared = await asyncio.to_thread(self._prepare, request)
-        client, kwargs = prepared.client, prepared.kwargs
+        client, body = await asyncio.to_thread(self._prepare, request)
+        kwargs = body.kwargs
         try:
             await request.on_send(sdk_request_body(kwargs, _SDK_OPTION_KEYS))
-            manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
+            manager = client.beta.messages.stream(**kwargs) if body.beta else client.messages.stream(**kwargs)
             async with manager as events:
                 async for event in events:
                     if event.type in _USAGE_EVENT_TYPES:
                         # The SDK has already added the event's usage to its accumulated message.
                         yield UsageReported(parse_claude_usage(events.current_message_snapshot.usage), final=False)
                     elif isinstance(event, (ParsedMessageStopEvent, ParsedBetaMessageStopEvent)):
-                        for ending in self._finished_turn(event.message, request, prepared, timer):
+                        for ending in self._finished_turn(event.message, request, body, timer):
                             yield ending
                     elif (output := _output_event(event)) is not None:
                         yield timer.output(output)
@@ -325,7 +315,7 @@ class ClaudeProvider:
         self,
         response: AnthropicMessage | BetaMessage,
         request: ModelRequest,
-        prepared: _PreparedRequest,
+        body: _RequestBody,
         timer: TurnTimer,
     ) -> list[StreamEvent]:
         """Return the events that end a finished response, its message stamped with provenance and timings."""
@@ -334,7 +324,7 @@ class ClaudeProvider:
             record_context_management=self.settings.context_management is not None,
         )
         stamp_finished_turn(message, self.identity, timer)
-        record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
+        record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=body.checkpoint_prefix)
         raw_stop_reason = response.stop_reason
         stop_reason = stop_reason_of(raw_stop_reason)
         if stop_reason == "output_limit":
@@ -560,15 +550,10 @@ class ClaudeProvider:
             flags=(route, manual_thinking, trailing_user, earlier_thinking),
         )
 
-    def _prepare(self, request: ModelRequest) -> _PreparedRequest:
-        """Build the SDK client and the wire body of one request."""
+    def _prepare(self, request: ModelRequest) -> tuple[_AsyncClaudeClient, _RequestBody]:
+        """Build the wire body and the SDK client of one request, the body first."""
         body = self._request_body(request)
-        return _PreparedRequest(
-            client=self._client(),
-            kwargs=body.kwargs,
-            beta=body.beta,
-            checkpoint_prefix=body.checkpoint_prefix,
-        )
+        return self._client(), body
 
     def _authored_default_headers(self) -> Mapping[str, str] | None:
         """Return the client's authored default headers: ``default_headers``, else the ones in ``client_params``."""
