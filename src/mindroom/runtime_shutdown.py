@@ -1,4 +1,4 @@
-"""Typed runtime shutdown intent shared by sync, bot, and response drains."""
+"""Typed runtime shutdown intent shared by sync, bot, and response drains, and the closers orderly shutdown awaits."""
 
 from __future__ import annotations
 

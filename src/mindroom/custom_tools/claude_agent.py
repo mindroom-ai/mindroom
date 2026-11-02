@@ -46,8 +46,9 @@ _DEFAULT_PERMISSION_MODE: _PermissionMode = "default"
 _DEFAULT_SESSION_TTL_MINUTES = 60
 _DEFAULT_MAX_SESSIONS = 200
 _DEFAULT_LIMITS = (_DEFAULT_SESSION_TTL_MINUTES * 60, _DEFAULT_MAX_SESSIONS)
-# As often as the shortest TTL, so an idle session closes at most a minute after its TTL passed.
-_SWEEP_INTERVAL_SECONDS = 60
+_MIN_SESSION_TTL_SECONDS = 60
+# As often as the shortest TTL, so an idle session closes at most that long after its TTL passed.
+_SWEEP_INTERVAL_SECONDS = _MIN_SESSION_TTL_SECONDS
 _MAX_STDERR_LINES = 12
 _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
@@ -133,7 +134,7 @@ class _ClaudeSessionManager:
         max_sessions: int,
     ) -> None:
         """Update limits for one namespace (typically one agent)."""
-        ttl_seconds = max(60, ttl_minutes * 60)
+        ttl_seconds = max(_MIN_SESSION_TTL_SECONDS, ttl_minutes * 60)
         self._namespace_limits[namespace] = (ttl_seconds, max(1, max_sessions))
 
     async def get_or_create(
@@ -143,7 +144,7 @@ class _ClaudeSessionManager:
         options: ClaudeAgentOptions,
     ) -> tuple[_ClaudeSessionState, bool]:
         """Get an existing session or create a new one for the given key."""
-        stale: list[_ClaudeSessionState] = []
+        evicted: list[_ClaudeSessionState] = []
         try:
             async with self._lock:
                 existing = self._sessions.get(session_key)
@@ -152,7 +153,7 @@ class _ClaudeSessionManager:
                     existing.ttl_seconds = self._namespace_ttl_seconds(namespace)
                     return existing, False
 
-                stale.extend(self._evict_if_needed_locked(namespace))
+                evicted = self._evict_if_needed_locked(namespace)
 
                 client = ClaudeSDKClient(options=options)
                 close_requested = asyncio.Event()
@@ -177,7 +178,7 @@ class _ClaudeSessionManager:
                     )
                 return session, True
         finally:
-            await self._close_many(stale)
+            await self._close_many(evicted)
 
     async def close(self, session_key: str) -> bool:
         """Close and remove a session by key."""
@@ -207,8 +208,8 @@ class _ClaudeSessionManager:
     async def close_all(self) -> None:
         """Close every session no call is using, and wait for every close under way, so each counts its unread turns.
 
-        A session that a call shutdown leaves running, such as an API request's, still uses or still opens ends with
-        the process, so the manager's lock, which opening a session holds, is not taken.
+        Sessions that a call still uses or is still opening, such as an API request's that shutdown leaves running, end
+        with the process; the manager's lock is not taken, because opening a session holds it.
         """
         idle = [session for session in self._sessions.values() if not session.lock.locked()]
         for session in idle:
