@@ -218,6 +218,48 @@ async def _admit_pending_thread_event(
     assert admitted is AdmissionResult.ADMITTED
 
 
+async def _admit_visible_message(bot: AgentBot, message: ResolvedVisibleMessage) -> None:
+    """Admit one message the thread shows as unfinished work, as sync does before ingress resolves it."""
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(
+            event_id=message.event_id,
+            body=message.body,
+            sender=message.sender,
+            server_timestamp=int(message.timestamp or 0),
+            thread_id=message.thread_id,
+        ).source,
+    )
+
+
+async def _admitted_thread_history(
+    bot: AgentBot,
+    messages: Sequence[tuple[str, str, str, int]],
+) -> ThreadHistoryResult:
+    """Admit each ``(event_id, body, sender, timestamp)`` thread message, as sync does, and return the full history."""
+    for event_id, body, sender, timestamp in messages:
+        await _admit_pending_thread_event(
+            bot,
+            _text_event(
+                event_id=event_id,
+                body=body,
+                sender=sender,
+                server_timestamp=timestamp,
+                thread_id="$thread",
+            ).source,
+        )
+    return thread_history_result(
+        [
+            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
+            *(
+                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
+                for event_id, body, sender, timestamp in messages
+            ),
+        ],
+        is_full_history=True,
+    )
+
+
 @dataclass
 class _RecordingPendingTurns:
     """A real journal read that also records how the replay guard asked for it."""
@@ -1783,28 +1825,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
         ("$alice-last", "alice last", "@alice:localhost", 1003),
     ]
     dispatched_messages = messages[:dispatched_count]
-    # Sync admits every message the thread shows before ingress resolves it.
-    for event_id, body, sender, timestamp in messages:
-        await _admit_pending_thread_event(
-            bot,
-            _text_event(
-                event_id=event_id,
-                body=body,
-                sender=sender,
-                server_timestamp=timestamp,
-                thread_id="$thread",
-            ).source,
-        )
-    history = thread_history_result(
-        [
-            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
-            *(
-                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
-                for event_id, body, sender, timestamp in messages
-            ),
-        ],
-        is_full_history=True,
-    )
+    history = await _admitted_thread_history(bot, messages)
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
@@ -1879,28 +1900,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
         ("$research", "@test_agent please check this for alice", research, 1002),
         ("$alice-last", "alice last", "@alice:localhost", 1003),
     ]
-    # Sync admits every message the thread shows before ingress resolves it.
-    for event_id, body, sender, timestamp in messages:
-        await _admit_pending_thread_event(
-            bot,
-            _text_event(
-                event_id=event_id,
-                body=body,
-                sender=sender,
-                server_timestamp=timestamp,
-                thread_id="$thread",
-            ).source,
-        )
-    history = thread_history_result(
-        [
-            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
-            *(
-                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
-                for event_id, body, sender, timestamp in messages
-            ),
-        ],
-        is_full_history=True,
-    )
+    history = await _admitted_thread_history(bot, messages)
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
@@ -4942,7 +4942,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_msg]
-    await _admit_pending_thread_event(bot, _text_event(event_id="$m2", body="newer", server_timestamp=2000).source)
+    await _admit_visible_message(bot, newer_msg)
 
     action_mock = AsyncMock()
     with (
@@ -5040,16 +5040,7 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         dispatch.context.thread_history = degraded_history
     else:
         dispatch.context.thread_history = [newer_bob_message]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(
-            event_id="$newer-bob",
-            body="newer bob",
-            sender="@bob:localhost",
-            server_timestamp=3000,
-            thread_id="$thread",
-        ).source,
-    )
+    await _admit_visible_message(bot, newer_bob_message)
     pending_turns = _watch_pending_turns(bot)
     handled_turn = _coalesced_ownership_record(ownership)
     superseded = ownership == "single"
@@ -5134,16 +5125,7 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
             latest_event_id="$newer-bob",
         ),
     ]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(
-            event_id="$newer-bob",
-            body="newer bob",
-            sender="@bob:localhost",
-            server_timestamp=3000,
-            thread_id="$thread",
-        ).source,
-    )
+    await _admit_visible_message(bot, dispatch.context.thread_history[0])
     source_event_metadata = {
         relay_event_id: SourceEventMetadata(
             sender="@bob:localhost",
@@ -6160,10 +6142,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(event_id="$m2", body="!help", sender="@user:localhost", server_timestamp=2000).source,
-    )
+    await _admit_visible_message(bot, newer_cmd)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6214,10 +6193,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(event_id="$m2", body="  !help  ", sender="@user:localhost", server_timestamp=2000).source,
-    )
+    await _admit_visible_message(bot, newer_cmd)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6275,15 +6251,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [newer_msg]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(
-            event_id="$s2",
-            body="another scheduled output",
-            sender="@mindroom_test_agent:localhost",
-            server_timestamp=2000,
-        ).source,
-    )
+    await _admit_visible_message(bot, newer_msg)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6333,15 +6301,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$h2",
     )
     dispatch.context.thread_history = [newer_msg]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(
-            event_id="$h2",
-            body="newer message",
-            sender="@mindroom_test_agent:localhost",
-            server_timestamp=2000,
-        ).source,
-    )
+    await _admit_visible_message(bot, newer_msg)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6393,15 +6353,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [second_fire_msg]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(
-            event_id="$s2",
-            body="scheduled fire 2",
-            sender="@mindroom_test_agent:localhost",
-            server_timestamp=2000,
-        ).source,
-    )
+    await _admit_visible_message(bot, second_fire_msg)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6457,10 +6409,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_msg]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(event_id="$m2", body="newer message", server_timestamp=2000).source,
-    )
+    await _admit_visible_message(bot, newer_msg)
 
     action_mock = AsyncMock()
     with (
@@ -6503,10 +6452,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
         latest_event_id="$img2",
     )
     dispatch.context.thread_history = [newer_msg]
-    await _admit_pending_thread_event(
-        bot,
-        _text_event(event_id="$img2", body="newer message", server_timestamp=2000).source,
-    )
+    await _admit_visible_message(bot, newer_msg)
 
     action_mock = AsyncMock()
     with (

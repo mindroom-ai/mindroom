@@ -448,7 +448,7 @@ async def test_superseded_turn_releases_every_claim(
     ignored before any response takes it.
     """
     harness = _build_harness(config, tmp_path)
-    await _serve_newer_requester_message(harness, config, mentions=None, voice=False, history_degraded=False)
+    await _serve_newer_requester_message(harness, config)
     ledger = _install_claim_ledger(monkeypatch, harness.turn_store)
     room = _room_with_members(config, "general")
     event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
