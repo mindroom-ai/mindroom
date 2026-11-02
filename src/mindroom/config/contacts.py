@@ -35,7 +35,7 @@ class ContactsConfig(BaseModel):
         description="Default tools offered in contact turns when the owner chose none for that contact",
         json_schema_extra=dashboard_hint(reference="tool"),
     )
-    judge: JudgmentConfig | None = Field(
+    judgment: JudgmentConfig | None = Field(
         default=None,
         description="Judgment backend that checks each message against the rules; unset runs no judge",
     )

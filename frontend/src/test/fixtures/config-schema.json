@@ -1352,7 +1352,7 @@
             "reference": "tool"
           }
         },
-        "judge": {
+        "judgment": {
           "anyOf": [
             {
               "$ref": "#/$defs/JudgmentConfig"

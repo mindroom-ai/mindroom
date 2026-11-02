@@ -129,12 +129,12 @@ async def check_contact_message(
         if not final_text.strip():
             return ContactVerdict("deny", text, _HOOK_LEFT_IT_EMPTY)
     contacts = config.agents[sender.id].contacts
-    if contacts is not None and contacts.judge is not None:
+    if contacts is not None and contacts.judgment is not None:
         refusal = await _judge_refusal(
             context,
             record,
             side,
-            contacts.judge,
+            contacts.judgment,
             rules=rules or NO_CONTACT_RULES,
             text=final_text,
         )

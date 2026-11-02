@@ -55,14 +55,14 @@ def _config(
     tmp_path: Path,
     *,
     rules: list[str] | None = None,
-    judge: dict[str, Any] | None = None,
+    judgment: dict[str, Any] | None = None,
     process_env: dict[str, str] | None = None,
     bob_name: str = "Bob's Mind",
 ) -> tuple[Config, RuntimePaths]:
     """Alice's agent is bound by one config rule and Bob's agent by none; only Alice's agent may carry a judge."""
     contacts: dict[str, Any] = {"rules": ["Never share the budget."] if rules is None else rules}
-    if judge is not None:
-        contacts["judge"] = judge
+    if judgment is not None:
+        contacts["judgment"] = judgment
     paths = test_runtime_paths(tmp_path)
     paths = replace(paths, process_env={**paths.process_env, **(process_env or {})})
     config = Config.validate_with_runtime(
@@ -242,7 +242,7 @@ def test_the_other_sides_display_name_never_reaches_the_judges_rubric(tmp_path: 
 @pytest.mark.asyncio
 async def test_consecutive_limit_denies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The limit denies before any hook or judge runs, and one message less still sends."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": true}')
     ran: list[str] = []
 
@@ -296,7 +296,7 @@ async def test_hook_rewrite_is_judged_and_sent_with_rewritten_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The judge sees the rewritten text and not the original, and the verdict sends the rewrite and says so."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": true}')
 
     @hook(EVENT_CONTACT_BEFORE_SEND)
@@ -315,7 +315,7 @@ async def test_hook_that_empties_the_text_denies_before_the_judge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rewrite to blank text leaves nothing to send, so it denies with the agent's own text and skips the judge."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": true}')
 
     @hook(EVENT_CONTACT_BEFORE_SEND)
@@ -340,7 +340,7 @@ async def test_hook_revise_or_deny_stops_before_the_judge(
     feedback: str,
 ) -> None:
     """A hook's revise or deny reaches the agent with the text it wrote, and the judge never runs."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": true}')
 
     @hook(EVENT_CONTACT_BEFORE_SEND)
@@ -433,7 +433,7 @@ async def test_hook_context_names_a_person_by_matrix_id_and_makes_a_correlation_
 @pytest.mark.asyncio
 async def test_judge_true_sends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A text that follows the rules goes out as written, judged with the rules and nothing else."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": true}')
 
     verdict = await _check(_tool_context(config, paths))
@@ -445,7 +445,7 @@ async def test_judge_true_sends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.asyncio
 async def test_judge_false_revises_with_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A text that may break a rule goes back to the agent with its owner's name and the rules."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     _judge_model(monkeypatch, '{"decision": false}')
 
     verdict = await _check(_tool_context(config, paths), text="The budget is 500.")
@@ -463,7 +463,7 @@ async def test_judge_without_rules_asks_that_the_owner_would_expect_the_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no rule the judge still runs, and its revise names the default expectation instead of an empty list."""
-    config, paths = _config(tmp_path, rules=[], judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, rules=[], judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": false}')
 
     verdict = await _check(_tool_context(config, paths), record=_record(requester_side=ContactSide()))
@@ -479,7 +479,7 @@ async def test_judge_without_rules_asks_that_the_owner_would_expect_the_message(
 @pytest.mark.parametrize("reply", ['{"decision": null}', "not json at all"])
 async def test_judge_failure_or_abstain_denies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: str) -> None:
     """A judge that abstains or whose answer cannot be read blocks the message."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     _judge_model(monkeypatch, reply)
 
     verdict = await _check(_tool_context(config, paths))
@@ -490,7 +490,7 @@ async def test_judge_failure_or_abstain_denies(tmp_path: Path, monkeypatch: pyte
 @pytest.mark.asyncio
 async def test_judge_backend_without_credentials_denies(tmp_path: Path) -> None:
     """A probability backend that has no key cannot be bound, which blocks the message."""
-    config, paths = _config(tmp_path, judge={"provider": "typesafe"})
+    config, paths = _config(tmp_path, judgment={"provider": "typesafe"})
 
     verdict = await _check(_tool_context(config, paths))
 
@@ -508,7 +508,7 @@ async def test_probability_judge_threshold_is_applied_once(
     """A probability backend's own threshold decides, so a probability above it sends and one below it revises."""
     config, paths = _config(
         tmp_path,
-        judge={"provider": "typesafe", "threshold": 0.8},
+        judgment={"provider": "typesafe", "threshold": 0.8},
         process_env={"TYPESAFE_API_KEY": "key"},
     )
 
@@ -532,7 +532,7 @@ async def test_probability_judge_threshold_is_applied_once(
 @pytest.mark.asyncio
 async def test_secret_in_text_denies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A text with a detected secret is never sent to the judge, and the message is blocked."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": true}')
 
     verdict = await _check(_tool_context(config, paths), text=f"The key is {LEAKED_KEY}")
@@ -548,7 +548,7 @@ async def test_secret_in_text_denies(tmp_path: Path, monkeypatch: pytest.MonkeyP
 @pytest.mark.asyncio
 async def test_blank_text_denies_when_a_judge_is_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A blank message gives the judge nothing to check, which blocks it with the reason the request gives."""
-    config, paths = _config(tmp_path, judge=LLM_JUDGE)
+    config, paths = _config(tmp_path, judgment=LLM_JUDGE)
     model = _judge_model(monkeypatch, '{"decision": true}')
 
     verdict = await _check(_tool_context(config, paths), text="   ")

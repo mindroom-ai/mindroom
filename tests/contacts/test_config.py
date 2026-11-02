@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 def test_contacts_are_off_by_default() -> None:
     """An agent without a contacts object offers no contacts."""
     assert AgentConfig(display_name="A").contacts is None
-    assert ContactsConfig() == ContactsConfig(rules=[], tools=[], judge=None)
+    assert ContactsConfig() == ContactsConfig(rules=[], tools=[], judgment=None)
 
 
 @pytest.mark.parametrize("name", sorted(CONTACT_CONTROL_TOOLS))
@@ -31,14 +31,14 @@ def test_contacts_config_accepts_ordinary_tools_and_rejects_unknown_fields() -> 
 
 
 def test_judge_model_must_exist() -> None:
-    """A misspelled judge model alias fails configuration like participation.judgment does."""
+    """A misspelled contacts.judgment model alias fails configuration like participation.judgment does."""
     with pytest.raises(ValidationError, match="Unknown judgment model for agent 'helper': 'missing'"):
         Config.model_validate(
             {
                 "agents": {
                     "helper": {
                         "display_name": "Helper",
-                        "contacts": {"judge": {"provider": "llm", "model": "missing"}},
+                        "contacts": {"judgment": {"provider": "llm", "model": "missing"}},
                     },
                 },
             },
@@ -48,11 +48,11 @@ def test_judge_model_must_exist() -> None:
             "agents": {
                 "helper": {
                     "display_name": "Helper",
-                    "contacts": {"judge": {"provider": "llm", "model": "fast"}},
+                    "contacts": {"judgment": {"provider": "llm", "model": "fast"}},
                 },
             },
             "models": {"fast": {"provider": "openai", "id": "fast-model"}},
         },
     )
     assert config.agents["helper"].contacts is not None
-    assert config.agents["helper"].contacts.judge is not None
+    assert config.agents["helper"].contacts.judgment is not None
