@@ -31,6 +31,7 @@ from mindroom.custom_tools.microsoft_graph import (
 )
 from mindroom.file_access import checked_upload_source
 from mindroom.oauth.microsoft import microsoft_oauth_provider
+from mindroom.redaction import MAX_CANONICAL_JSON_INTEGER
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -299,10 +300,17 @@ def _iso_serial(value: object) -> float | None:
     return (moment - _EXCEL_EPOCH) / timedelta(days=1)
 
 
+def _shown_as_text(value: object) -> bool:
+    """Return whether an approval card carries this number as text, as Matrix events hold no floats or huge integers."""
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, float) or (isinstance(value, int) and abs(value) > MAX_CANONICAL_JSON_INTEGER)
+
+
 def _shown_alike(left: object, right: object) -> bool:
-    """Return whether an approval card shows two different cells alike, as it carries every float as text."""
+    """Return whether an approval card shows two different cells alike: a number it carries as text and that text."""
     return any(
-        isinstance(number, float) and isinstance(text, str) and str(number) == text
+        _shown_as_text(number) and isinstance(text, str) and str(number) == text
         for number, text in ((left, right), (right, left))
     )
 
@@ -426,7 +434,8 @@ class _RangeEdit:
             if value is not None and not _stored_as_written(held, value, text_cell=text_cell):
                 differences.append({"cell": self.cell(row, column), "written": value, "stored": held})
             number_format = _at(self.number_formats, row, column)
-            if number_format is not None and held_format != number_format:
+            # Excel may change a format code's case, such as general to General.
+            if isinstance(number_format, str) and str(held_format).casefold() != number_format.casefold():
                 differences.append(
                     {
                         "cell": self.cell(row, column),
@@ -792,10 +801,9 @@ class MicrosoftFilesTools(Toolkit):
         boolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD, or set
         number_formats to @ for cells that keep text. It fails with ambiguous_change for a cell that would change
         only between a number and the same text, which approval cards show alike. It fails with formula_as_text
-        for a formula in a
-        text-formatted cell unless number_formats gives that cell another format, such as General. The result
-        reports verified false and lists differences when Excel stored a cell differently from what was written;
-        tell the requester.
+        for a formula in a text-formatted cell unless number_formats gives that cell another format, such as
+        General. The result reports verified false and lists differences when Excel stored a cell differently from
+        what was written; tell the requester.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
@@ -834,7 +842,7 @@ class MicrosoftFilesTools(Toolkit):
             current = session.json("GET", path, params={"$select": _RANGE_SELECT})
             edit.check_unchanged(current)
             edit.check_conversions(current)
-            if edit.number_formats is not None:
+            if any(number_format is not None for row in edit.number_formats or [] for number_format in row):
                 # Formats go first, so a text-formatted cell keeps text such as leading zeros.
                 session.json("PATCH", path, json={"numberFormat": edit.number_formats})
             writes = edit.writes

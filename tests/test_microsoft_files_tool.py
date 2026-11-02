@@ -844,14 +844,17 @@ def test_excel_update_reports_a_formula_whose_text_excel_changed(
     assert result["differences"] == [{"cell": "A1", "written": '=A1&"x"', "stored": '=A1&"X"'}]
 
 
-@pytest.mark.parametrize(("held", "written"), [(1.5, "1.5"), ("1.5", 1.5)])
+@pytest.mark.parametrize(
+    ("held", "written"),
+    [(1.5, "1.5"), ("1.5", 1.5), ("9007199254740993", 9007199254740993), (9007199254740993, "9007199254740993")],
+)
 def test_excel_update_refuses_a_change_the_approval_card_shows_as_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     held: str | float,
     written: str | float,
 ) -> None:
-    """Approval cards carry floats as text, so a number and the same text look alike there."""
+    """Approval cards carry floats and integers past 2**53 - 1 as text, so such a number and its text look alike."""
     tools, graph = _tools(tmp_path, monkeypatch, _workbook([[held, ""]], [["@", "General"]]))
 
     result = _update(tools, [[written, "x"]], [[held, ""]])
@@ -904,6 +907,35 @@ def test_excel_update_verifies_by_reading_the_range_again(tmp_path: Path, monkey
     tools, _graph = _tools(tmp_path, monkeypatch, files)
 
     assert _update(tools, [["x", 2]], [["", ""]])["verified"] is True
+
+
+def test_excel_update_verifies_number_formats_regardless_of_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = _workbook([["", ""]])
+
+    def normalize(request: httpx.Request) -> httpx.Response | None:
+        if request.method == "PATCH" and b"numberFormat" in request.content:
+            files.formats = [["General", "General"]]
+            return httpx.Response(200, json={"address": "Budget!A1:B1"})
+        return None
+
+    files.answer_first = normalize
+    tools, _graph = _tools(tmp_path, monkeypatch, files)
+
+    assert _update(tools, [[1, None]], [["", ""]], number_formats=[["general", None]])["verified"] is True
+
+
+def test_excel_update_sends_no_format_patch_for_formats_that_are_all_null(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _workbook([["", ""]]))
+
+    _update(tools, [["x", None]], [["", ""]], number_formats=[[None, None]])
+
+    assert _patches(graph) == [{"values": [["x", None]]}]
 
 
 def test_excel_update_sets_only_formats_when_no_value_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
