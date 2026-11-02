@@ -673,6 +673,7 @@ async def test_list_contacts_shows_own_contacts_and_contactable_agents(tmp_path:
     listing = yaml.safe_load(flow.list_contacts(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"))
 
     (contact,) = listing["contacts"]
+    assert list(contact) == ["id", "status", "you", "with", "reason", "your_rules", "your_tools"]
     assert contact["id"] == record.id
     assert (contact["status"], contact["you"], contact["reason"]) == ("pending", "requester", "Plan the dinner")
     assert contact["with"] == {"kind": "agent", "id": "mind_bob", "owner": CO_OWNER}

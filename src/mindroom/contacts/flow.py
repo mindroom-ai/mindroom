@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 import yaml
+from pydantic import BaseModel, Field
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
@@ -31,6 +32,7 @@ from mindroom.contacts.store import (
     ContactParty,
     ContactRecord,
     ContactSide,
+    SideName,
     read_contacts,
     update_contacts,
 )
@@ -48,7 +50,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import SideName
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -545,6 +546,32 @@ async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_i
     return record
 
 
+class _ListedContact(BaseModel):
+    """One live contact as its owner lists it: the side they hold, the other party, and their side's rules and tools."""
+
+    id: str
+    status: str
+    you: SideName
+    other_party: ContactParty = Field(serialization_alias="with")
+    reason: str
+    your_rules: str | None
+    your_tools: list[str] | None
+
+
+class _ContactableAgent(BaseModel):
+    """A personal agent of another owner that the lister can ask for a contact."""
+
+    agent: str
+    owner: str
+
+
+class _ContactListing(BaseModel):
+    """What ``list_contacts`` shows an owner."""
+
+    contacts: list[_ListedContact]
+    contactable_agents: list[_ContactableAgent]
+
+
 def list_contacts(context: ToolRuntimeContext, agent_name: str) -> str:
     """Return the caller-owner's live contacts with their own side, and the personal agents they can ask, as YAML."""
     own = _own_party(context, agent_name)
@@ -556,19 +583,20 @@ def list_contacts(context: ToolRuntimeContext, agent_name: str) -> str:
             continue
         yours = record.side(side)
         contacts.append(
-            {
-                "id": record.id,
-                "status": record.status,
-                "you": side,
-                "with": record.party(record.other(side)).model_dump(),
-                "reason": record.reason,
-                "your_rules": yours.rules,
-                "your_tools": yours.tools,
-            },
+            _ListedContact(
+                id=record.id,
+                status=record.status,
+                you=side,
+                other_party=record.party(record.other(side)),
+                reason=record.reason,
+                your_rules=yours.rules,
+                your_tools=yours.tools,
+            ),
         )
     contactable = [
-        {"agent": name, "owner": party.owner}
+        _ContactableAgent(agent=name, owner=party.owner)
         for name in config.agents
         if (party := agent_party(config, name)) is not None and party.owner != own.owner
     ]
-    return yaml.safe_dump({"contacts": contacts, "contactable_agents": contactable}, sort_keys=False)
+    listing = _ContactListing(contacts=contacts, contactable_agents=contactable)
+    return yaml.safe_dump(listing.model_dump(mode="json", by_alias=True), sort_keys=False)
