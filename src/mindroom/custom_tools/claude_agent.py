@@ -18,8 +18,10 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ClaudeSDKError,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
@@ -29,6 +31,9 @@ from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
+
+if typing.TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = get_args(_PermissionMode)
@@ -41,6 +46,7 @@ _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 logger = get_logger(__name__)
 _SYNTHETIC_MODEL = "<synthetic>"
+_NO_TEXT = "Claude session completed without text output."
 
 
 def _parse_csv_list(raw_value: str | None) -> list[str]:
@@ -92,8 +98,9 @@ class _ClaudeSessionState:
 
 @dataclass
 class _ClaudeTurn:
-    """One Claude Code turn: the responses of its main conversation by message id, and its result."""
+    """One Claude Code turn: its text, the responses of its main conversation by message id, and its result."""
 
+    text_parts: list[str] = field(default_factory=list)
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
     result: ResultMessage | None = None
 
@@ -311,25 +318,56 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
         metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider=ROUTE_PROVIDERS["anthropic"])
     if not metrics.reported:
         return
-    await record_helper_usage(
-        HelperUsage(run_id=uuid4().hex, model=None, provider=None, metrics=metrics),
-        owner=owner,
-        kind="claude_agent",
-        requester_id=current_requester_id(),
-    )
+    try:
+        await record_helper_usage(
+            HelperUsage(run_id=uuid4().hex, model=None, provider=None, metrics=metrics),
+            owner=owner,
+            kind="claude_agent",
+            requester_id=current_requester_id(),
+        )
+    except Exception as error:
+        # Claude has already done the work, so a usage write failure must not hide its reply.
+        logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
 
 
-def _response_text(text_parts: list[str], result: ResultMessage | None) -> str:
-    """Return Claude's reply text, falling back to the result summary and marking reported errors."""
-    response_text = "\n".join(part for part in text_parts if part).strip()
-    if not response_text:
-        if result is not None and result.result:
-            response_text = str(result.result).strip()
-        else:
-            response_text = "Claude session completed without text output."
+async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str, typing.Any]]:
+    """Yield ``prompt`` as one user message whose ``uuid`` Claude Code echoes inside the turn that uses it."""
+    yield {
+        "type": "user",
+        "message": {"role": "user", "content": prompt},
+        "parent_tool_use_id": None,
+        "uuid": prompt_id,
+    }
+
+
+def _takes_up_prompt(message: UserMessage | SystemMessage, prompt_id: str, turn: _ClaudeTurn) -> bool:
+    """Return whether ``message`` shows that ``turn`` took up the prompt sent as ``prompt_id``.
+
+    That is the prompt's echo, or Claude Code's notice that it dropped a prompt without running it, such as one a
+    hook blocked, whose reason then joins the turn's text.
+    """
+    if isinstance(message, UserMessage):
+        return message.uuid == prompt_id
+    if not message.data.get("prevent_continuation"):
+        return False
+    turn.text_parts.append(message.data["content"])
+    return True
+
+
+def _self_started(result: ResultMessage) -> bool:
+    """Return whether Claude Code started the turn ``result`` ends on its own, such as after a background task."""
+    return result.origin is not None and result.origin["kind"] != "human"
+
+
+def _turn_text(turn: _ClaudeTurn) -> str:
+    """Return one turn's text, falling back to its result summary and marking an error the turn reported."""
+    text = "\n".join(part for part in turn.text_parts if part).strip()
+    result = turn.result
+    if not text and result is not None and result.result:
+        text = str(result.result).strip()
     if result is not None and result.is_error:
-        return f"Claude reported an error: {response_text}"
-    return response_text
+        return f"Claude reported an error: {text or _NO_TEXT}"
+    return text
 
 
 class ClaudeAgentTools(Toolkit):
@@ -418,6 +456,8 @@ class ClaudeAgentTools(Toolkit):
             cli_path=self.cli_path,
             env=env,
             stderr=stderr_callback,
+            # Echo each prompt inside the turn that uses it, which tells that turn apart from the ones Claude Code starts.
+            extra_args={"replay-user-messages": None},
         )
 
     @staticmethod
@@ -587,8 +627,9 @@ class ClaudeAgentTools(Toolkit):
                     # A reused session runs each turn on that reply's model, such as an over-budget fallback.
                     await session.client.set_model(resolved_model)
                     session.model = resolved_model
-                await session.client.query(trimmed_prompt)
-                response_text, tool_names, turn = await self._collect_response(session)
+                prompt_id = str(uuid4())
+                await session.client.query(_prompt_message(trimmed_prompt, prompt_id))
+                response_text, tool_names, result = await self._collect_response(session, prompt_id)
                 session.last_used_at = monotonic()
             except ClaudeSDKError as exc:
                 session_error = self._format_session_error(
@@ -604,37 +645,49 @@ class ClaudeAgentTools(Toolkit):
             await self._session_manager.close(session_key)
             return session_error
 
-        try:
-            await _record_turn_usage(turn, resolved_model)
-        except Exception as error:
-            # Claude has already done the work, so a usage write failure must not hide its reply.
-            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-        return self._format_response_output(response_text, tool_names, turn.result)
+        return self._format_response_output(response_text, tool_names, result)
 
     async def _collect_response(
         self,
         session: _ClaudeSessionState,
-    ) -> tuple[str, list[str], _ClaudeTurn]:
-        text_parts: list[str] = []
-        tool_names: list[str] = []
-        turn = _ClaudeTurn()
+        prompt_id: str,
+    ) -> tuple[str, list[str], ResultMessage | None]:
+        """Read Claude Code's turns through the one that answers the prompt sent as ``prompt_id``.
 
-        async for message in session.client.receive_response():
-            if isinstance(message, AssistantMessage):
+        Claude Code also starts turns on its own, such as when a background task finishes. Their results are read past
+        unless the prompt was echoed in their turn, which a prompt sent while such a turn runs joins, or Claude Code
+        dropped a prompt there, such as one a hook blocked, which it reports with its reason. Turns read before the
+        answer stay in the reply, and each turn counts toward this call's requester as soon as it ends. A call stopped
+        before it read its answer leaves that answer to end the next call's read, one turn late.
+        """
+        tool_names: list[str] = []
+        turns = [_ClaudeTurn()]
+        answered = False
+
+        async for message in session.client.receive_messages():
+            turn = turns[-1]
+            if isinstance(message, UserMessage | SystemMessage):
+                answered = _takes_up_prompt(message, prompt_id, turn) or answered
+            elif isinstance(message, AssistantMessage):
                 # Placeholder messages, such as a request that failed every retry, name no real model.
                 if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
                     # Parallel tool uses split one response into messages that share its id and usage.
                     turn.responses.setdefault(message.message_id, message)
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
-                        text_parts.append(block.text)
+                        turn.text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_names.append(block.name)
             elif isinstance(message, ResultMessage):
                 turn.result = message
                 session.claude_session_id = message.session_id
+                await _record_turn_usage(turn, session.model)
+                if answered or not _self_started(message):
+                    break
+                turns.append(_ClaudeTurn())
 
-        return _response_text(text_parts, turn.result), tool_names, turn
+        text = "\n".join(text for turn in turns if (text := _turn_text(turn))) or _NO_TEXT
+        return text, tool_names, turns[-1].result
 
     def _format_response_output(
         self,
