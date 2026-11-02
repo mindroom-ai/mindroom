@@ -1089,10 +1089,12 @@ async def test_idle_session_closes_on_its_own_after_its_ttl(
     for prompt in ["hello", "again"]:
         assert f"Echo: {prompt}" in await _in_call(run_context, tools.claude_send(prompt))
         [session] = fake_manager._sessions.values()
-        client = cast("_FakeClaudeSDKClient", session.client)
         session.last_used_at -= session.ttl_seconds + 1
 
-        await _until(lambda client=client: not client.connected)
+        # The sweep ends once it closed the last session, and the next session starts another.
+        assert fake_manager._sweep is not None
+        await fake_manager._sweep
+        assert not cast("_FakeClaudeSDKClient", session.client).connected
         assert fake_manager._sessions == {}
     assert len(_FakeClaudeSDKClient.instances) == 2
 
