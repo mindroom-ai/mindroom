@@ -340,20 +340,6 @@ async def _prompt_message(prompt: str, prompt_id: str) -> AsyncIterator[dict[str
     }
 
 
-def _takes_up_prompt(message: UserMessage | SystemMessage, prompt_id: str, turn: _ClaudeTurn) -> bool:
-    """Return whether ``message`` shows that ``turn`` took up the prompt sent as ``prompt_id``.
-
-    That is the prompt's echo, or Claude Code's notice that it dropped a prompt without running it, such as one a
-    hook blocked, whose reason then joins the turn's text.
-    """
-    if isinstance(message, UserMessage):
-        return message.uuid == prompt_id
-    if not message.data.get("prevent_continuation"):
-        return False
-    turn.text_parts.append(message.data["content"])
-    return True
-
-
 def _self_started(result: ResultMessage) -> bool:
     """Return whether Claude Code started the turn ``result`` ends on its own, such as after a background task."""
     return result.origin is not None and result.origin["kind"] != "human"
@@ -647,7 +633,7 @@ class ClaudeAgentTools(Toolkit):
 
         return self._format_response_output(response_text, tool_names, result)
 
-    async def _collect_response(
+    async def _collect_response(  # noqa: C901
         self,
         session: _ClaudeSessionState,
         prompt_id: str,
@@ -666,8 +652,12 @@ class ClaudeAgentTools(Toolkit):
 
         async for message in session.client.receive_messages():
             turn = turns[-1]
-            if isinstance(message, UserMessage | SystemMessage):
-                answered = _takes_up_prompt(message, prompt_id, turn) or answered
+            if isinstance(message, UserMessage):
+                answered = answered or message.uuid == prompt_id
+            elif isinstance(message, SystemMessage) and message.data.get("prevent_continuation"):
+                # Claude Code dropped a prompt without running it, such as one a hook blocked, and says why.
+                turn.text_parts.append(message.data["content"])
+                answered = True
             elif isinstance(message, AssistantMessage):
                 # Placeholder messages, such as a request that failed every retry, name no real model.
                 if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
