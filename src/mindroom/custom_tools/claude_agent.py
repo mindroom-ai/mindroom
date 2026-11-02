@@ -180,6 +180,14 @@ class _ClaudeSessionManager:
         await self._close_many([session])
         return True
 
+    async def close_session(self, session: _ClaudeSessionState) -> None:
+        """Close and remove ``session`` unless it has already left the manager, where a newer one may share its key."""
+        async with self._lock:
+            if self._sessions.get(session.key) is not session:
+                return
+            del self._sessions[session.key]
+        await self._close_many([session])
+
     async def get(self, session_key: str) -> _ClaudeSessionState | None:
         """Get a session by key, cleaning up expired sessions first."""
         stale: list[_ClaudeSessionState] = []
@@ -695,7 +703,7 @@ class ClaudeAgentTools(Toolkit):
                 )
 
         if session_error is not None:
-            await self._session_manager.close(session_key)
+            await self._session_manager.close_session(session)
             return session_error
 
         return response

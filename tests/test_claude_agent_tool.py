@@ -1359,6 +1359,48 @@ async def test_a_call_waiting_on_a_session_whose_message_stream_broke_still_retu
     assert not fake_manager._sessions
 
 
+@pytest.mark.asyncio
+async def test_a_failed_call_closes_only_the_session_it_used(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that fails after a newer session took its label leaves that newer session open."""
+    release_two = asyncio.Event()
+
+    class _BrokenFirstStreamClaudeSDKClient(_FakeClaudeSDKClient):
+        async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
+            await super().query(prompt, session_id=session_id)
+            if self.queries[-1] == "two":
+                await release_two.wait()
+
+        async def receive_messages(self) -> AsyncGenerator[Message]:
+            if self is not _FakeClaudeSDKClient.instances[0]:
+                async for message in super().receive_messages():
+                    yield message
+            yield await self.stream.get()
+            line = "{not json"
+            raise CLIJSONDecodeError(line, ValueError(line))
+
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BrokenFirstStreamClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    one = asyncio.create_task(_in_call(run_context, tools.claude_send("one")))
+    two = asyncio.create_task(_in_call(run_context, tools.claude_send("two")))
+    # "one" fails and removes the first session, while "two" holds that session waiting to send its prompt.
+    instances = _FakeClaudeSDKClient.instances
+    await _until(lambda: bool(instances) and len(instances[0].queries) == 2 and not fake_manager._sessions)
+    three = await asyncio.wait_for(_in_call(run_context, tools.claude_send("three")), timeout=1)
+    release_two.set()
+    failed = await asyncio.wait_for(asyncio.gather(one, two), timeout=1)
+
+    _first, newer = instances
+    assert all("Claude session error: Failed to decode JSON" in reply for reply in failed)
+    assert "Echo: three" in three
+    assert fake_manager._sessions["mindroom:session-1"].client is newer
+    assert newer.connected
+
+
 async def _until(condition: Callable[[], bool]) -> None:
     """Let other tasks run until ``condition`` holds."""
     while not condition():  # noqa: ASYNC110 - the queues polled here signal no event to await
