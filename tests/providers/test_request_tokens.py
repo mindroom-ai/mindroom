@@ -295,6 +295,27 @@ def test_claude_counts_replayed_thinking_by_its_answer_s_hidden_output(tmp_path:
     assert added == 3_000 - visible
 
 
+def test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks(tmp_path: Path) -> None:
+    """A tool result an older runtime stored as a list of blocks counts the text of each block it sends."""
+    route = _route("anthropic", tmp_path)
+    call = {"id": "call_list", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+
+    def request(content: object) -> ModelRequest:
+        result = Message(role="tool", tool_call_id="call_list", tool_name="lookup", content=content)
+        return ModelRequest(
+            messages=(
+                Message(role="user", content="Look it up."),
+                Message(role="assistant", tool_calls=[call]),
+                result,
+            ),
+        )
+
+    added = route.request_tokens(request([{"type": "text", "text": _REASONING}])) - route.request_tokens(request([]))
+
+    # Counted within the joined request, the block can round a token or two apart from its own count.
+    assert abs(added - count(route.token_counter, _REASONING)) <= 2
+
+
 def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:
     """From an answer on, a route counts only the messages it sends from there, neither tools nor earlier media."""
     texts: list[str] = []

@@ -309,7 +309,8 @@ def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
     # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
     # content.
     # Handling: each block is sent as stored, and any other item as a text block.
-    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks
+    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks,
+    # tests/providers/test_request_tokens.py::test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks
     if isinstance(result.content, list):
         payload = [
             block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
