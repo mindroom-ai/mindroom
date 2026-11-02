@@ -1234,8 +1234,9 @@ class DeliveryGateway:
         """Settle a superseded replay's sources with the reply they left.
 
         Returns ``None`` when no reply has those sources or it already ended
-        without them, and ``False`` when the reply still owes Matrix a write,
-        which only its replay resolves.
+        without them, and ``False`` when the reply keeps them for the replay to
+        run: it still owes Matrix a write, which only its replay resolves, or
+        another message of its turn still waits to replay.
         """
         applied = await self.deps.outbox.replies.supersede_replay(source_event_ids, now_ns=time.time_ns())
         if applied is None or applied.transition.outcome is ReplyOutcome.DUPLICATE:

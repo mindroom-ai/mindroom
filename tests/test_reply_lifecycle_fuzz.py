@@ -1043,7 +1043,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 reply,
                 last,
                 durable_write_debt=self._unresolved_rows(),
-                # Each modeled span pends one message, the one this replay supersedes.
+                # The modeled replay supersedes every message the last span pends, an edit included.
                 sources_pending=False,
                 now_ns=self._now(),
             ),
