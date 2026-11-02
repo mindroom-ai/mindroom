@@ -23,7 +23,7 @@ from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
 
@@ -47,16 +47,14 @@ def estimate_prompt_visible_history_tokens(
     session: ConversationSession,
     history_settings: ResolvedHistorySettings,
     model: ModelProvider,
-    native: NativeCompactionReplay | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history of the scope owning ``session`` for one run.
 
     The history is the selection a request under ``history_settings`` sends, estimated as ``model``'s route renders
-    it, under the provider's compaction ``native`` replays, whose checkpoint replaces what precedes it.
+    it.
     """
     history = prompt_visible_history(session, history_settings)
-    request = ModelRequest(messages=request_layout(summary=session.summary, history=history), native_compaction=native)
-    return model.request_tokens(request)
+    return model.request_tokens(ModelRequest(messages=request_layout(summary=session.summary, history=history)))
 
 
 def prompt_visible_history(session: ConversationSession, history_settings: ResolvedHistorySettings) -> list[Message]:

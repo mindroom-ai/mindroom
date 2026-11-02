@@ -609,9 +609,8 @@ def finalize_history_preparation(
         history_tokens = (
             max(0, request_size.tokens - prepared_scope_history.static_tokens)
             if request_size is not None
-            else estimate_history_tokens(
-                native=native_history.native_compaction if native_history is not None else None,
-            )
+            # Only a required compaction leaves no size, and it turned native compaction off.
+            else estimate_history_tokens()
         )
         limit = execution_plan.limit_tokens
         if limit is not None and static_tokens + history_tokens > limit:

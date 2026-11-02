@@ -27,7 +27,7 @@ from mindroom.history.replay import (
     estimate_summary_tokens,
     prompt_visible_history,
 )
-from mindroom.history.request_messages import TurnMessages
+from mindroom.history.request_messages import TurnMessages, request_layout
 from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
@@ -286,15 +286,7 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
                 },
             ],
         )
-        session = _session("session", runs=[_completed_run("recent", messages=[checkpoint, tail])])
-        estimates.append(
-            estimate_prompt_visible_history_tokens(
-                session=session,
-                history_settings=_ALL_HISTORY,
-                model=adapter,
-                native=native,
-            ),
-        )
+        estimates.append(adapter.request_tokens(ModelRequest(messages=(checkpoint, tail), native_compaction=native)))
     assert estimates[0] == estimates[1]
     # The checkpoint's ciphertext counts a quarter token per character.
     assert opaque_tokens(len(items[0]["encrypted_content"])) < estimates[0] < 2000
@@ -557,18 +549,13 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced(tmp_p
     adapter = responses_adapter(tmp_path, store=False)
     native = NativeCompactionReplay(route=route, threshold=100)
 
-    without_summary = estimate_prompt_visible_history_tokens(
-        session=_session("session", runs=runs),
-        history_settings=_ALL_HISTORY,
-        model=adapter,
-        native=native,
-    )
-    with_summary = estimate_prompt_visible_history_tokens(
-        session=_session("session", runs=runs, summary=ScopeSummary(text="S" * 400, updated_at=datetime.now(UTC))),
-        history_settings=_ALL_HISTORY,
-        model=adapter,
-        native=native,
-    )
+    def sized(summary: ScopeSummary | None) -> int:
+        history = [message for run in runs for message in run.messages]
+        messages = request_layout(summary=summary, history=history)
+        return adapter.request_tokens(ModelRequest(messages=messages, native_compaction=native))
+
+    without_summary = sized(None)
+    with_summary = sized(ScopeSummary(text="S" * 400, updated_at=datetime.now(UTC)))
 
     assert with_summary == without_summary
 

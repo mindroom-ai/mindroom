@@ -50,7 +50,7 @@ from mindroom.history.types import (
 )
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
+from mindroom.llm.provider import ModelRequest
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -101,26 +101,6 @@ class _RecordingModel(ScriptedModel):
         return super().request_tokens(request, start=start)
 
 
-_NATIVE = NativeCompactionReplay(route="native-route", threshold=None)
-
-
-def test_a_native_route_without_a_checkpoint_estimates_text_as_a_plain_request_does() -> None:
-    """One history gets one estimate: a native route rounds its canonical text the way a plain request does."""
-    session = _session(
-        "session-1",
-        runs=[_completed_run("run-1", messages=[Message(role="user", content="a") for _ in range(4)])],
-    )
-    estimate = partial(
-        estimate_prompt_visible_history_tokens,
-        session=session,
-        history_settings=replay_settings(),
-        model=ScriptedModel([]),
-    )
-
-    assert estimate(native=_NATIVE) == 1
-    assert estimate() == 1
-
-
 def test_an_empty_media_list_adds_nothing_to_a_message_estimate() -> None:
     """A message estimates by its text and tool calls; an empty media list carries neither."""
     with_empty_media = Message(role="user", content="abcdefg", images=[], files=[])
@@ -128,10 +108,7 @@ def test_an_empty_media_list_adds_nothing_to_a_message_estimate() -> None:
     assert ScriptedModel([]).request_tokens(ModelRequest(messages=[with_empty_media])) == 1
 
 
-@pytest.mark.parametrize("native", [None, _NATIVE])
-def test_history_estimate_projects_bounded_viewed_images_without_mutating_session(
-    native: NativeCompactionReplay | None,
-) -> None:
+def test_history_estimate_projects_bounded_viewed_images_without_mutating_session() -> None:
     """The planner sizes the same bounded newest-first media replay a request sends."""
     messages = [_viewed_image_message(index) for index in range(6)]
     session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
@@ -142,7 +119,6 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
         session=session,
         history_settings=replay_settings(),
         model=model,
-        native=native,
     )
 
     [request] = model.sized
@@ -152,8 +128,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     assert session == before
 
 
-@pytest.mark.parametrize("native", [None, _NATIVE])
-def test_history_estimate_charges_conservative_visual_cost(native: NativeCompactionReplay | None) -> None:
+def test_history_estimate_charges_conservative_visual_cost() -> None:
     """Planning charges each replayed image its allowance without treating image bytes as prompt text."""
     settings = replay_settings()
     without_image = _session(
@@ -171,8 +146,8 @@ def test_history_estimate_charges_conservative_visual_cost(native: NativeCompact
     )
     estimate = partial(estimate_prompt_visible_history_tokens, history_settings=settings, model=ScriptedModel([]))
 
-    text_tokens = estimate(session=without_image, native=native)
-    visual_tokens = estimate(session=with_image, native=native)
+    text_tokens = estimate(session=without_image)
+    visual_tokens = estimate(session=with_image)
 
     assert visual_tokens - text_tokens == MEDIA_ALLOWANCE_TOKENS
 
