@@ -18,6 +18,7 @@ from mindroom.contacts.policy import (
     effective_rules,
 )
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide
+from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, HookBindings, HookRegistry, hook
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
@@ -27,9 +28,12 @@ from tests.conftest import (
     install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
+    make_visible_message,
+    serve_conversation_reader,
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.identity_helpers import persist_entity_accounts
 from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
@@ -75,6 +79,7 @@ def _config(
         },
         paths,
     )
+    persist_entity_accounts(config, paths)
     return config, paths
 
 
@@ -123,6 +128,10 @@ async def _check(
     text: str = "Dinner at eight?",
     consecutive_agent_messages: int = 0,
 ) -> ContactVerdict:
+    """Check a send of ``text`` into a thread that ends with ``consecutive_agent_messages`` of Bob's agent."""
+    bob_agent = current_entity_id("mind_bob", context.runtime_paths).full_id
+    trail = [make_visible_message(sender=bob_agent) for _ in range(consecutive_agent_messages)]
+    serve_conversation_reader(context.conversation_reader, trail, room_id=ROOM, thread_id="$thread")
     return await check_contact_message(
         context,
         record or _record(),
@@ -130,7 +139,7 @@ async def _check(
         room_id=ROOM,
         thread_id="$thread",
         text=text,
-        consecutive_agent_messages=consecutive_agent_messages,
+        adds_message=True,
     )
 
 

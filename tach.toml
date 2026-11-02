@@ -683,6 +683,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.contacts.policy",
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.thread_move",
@@ -9517,7 +9518,13 @@ depends_on = ["mindroom.contacts.store", "mindroom.entity_resolution", "mindroom
 
 [[modules]]
 path = "mindroom.contacts.policy"
-depends_on = ["mindroom.contacts.parties", "mindroom.hooks", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
+depends_on = [
+    "mindroom.contacts.parties",
+    "mindroom.hooks",
+    "mindroom.judgment.evaluator",
+    "mindroom.judgment.state",
+    "mindroom.matrix.conversation_reads",
+]
 
 [[modules]]
 path = "mindroom.contacts.flow"

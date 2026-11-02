@@ -15,6 +15,7 @@ from mindroom.contacts.parties import party_name
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, emit_policy
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
+from mindroom.matrix.conversation_reads import consecutive_agent_messages
 
 if TYPE_CHECKING:
     from mindroom.config.judgment import JudgmentConfig
@@ -85,18 +86,30 @@ async def check_contact_message(
     room_id: str,
     thread_id: str | None,
     text: str,
-    consecutive_agent_messages: int,
+    adds_message: bool,
 ) -> ContactVerdict:
-    """Decide whether the agent on ``side`` of ``record`` may send ``text`` to the other side."""
+    """Decide whether the agent on ``side`` of ``record`` may send ``text`` to the other side.
+
+    Only a message that ``adds_message`` to the conversation, unlike an edit or a reaction, counts toward the limit.
+    """
     config = context.current_config
     sender = record.party(side)
     limit = config.defaults.max_consecutive_agent_replies
-    if consecutive_agent_messages >= limit:
-        return ContactVerdict(
-            "deny",
-            text,
-            f"The conversation already has {consecutive_agent_messages} agent messages in a row; wait for a person to write.",
+    if adds_message:
+        consecutive = await consecutive_agent_messages(
+            context.conversation_reader,
+            config,
+            context.runtime_paths,
+            room_id=room_id,
+            thread_id=thread_id,
+            limit=limit,
         )
+        if consecutive >= limit:
+            return ContactVerdict(
+                "deny",
+                text,
+                f"The conversation already has {consecutive} agent messages in a row; wait for a person to write.",
+            )
     rules = effective_rules(config, sender.id, record.side(side))
     final_text = text
     if context.hooks.registry.has_hooks(EVENT_CONTACT_BEFORE_SEND):

@@ -31,7 +31,7 @@ from mindroom.matrix.client_visible_messages import (
     resolve_latest_visible_messages,
     trusted_visible_sender_ids,
 )
-from mindroom.matrix.conversation_reads import complete_thread_history, consecutive_agent_messages
+from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
@@ -43,7 +43,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
-    from mindroom.contacts.store import ContactRecord
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.message_extras import MatrixMessageExtra
@@ -87,13 +86,6 @@ class _MessageSendState:
     newly_registered_attachment_ids: list[str] = field(default_factory=list)
 
 
-def _removed_error(record: ContactRecord) -> str | None:
-    """Return why nothing may be sent into the room of ``record`` once it is removed, or None while it is active."""
-    if record.status == "active":
-        return None
-    return f"Error: contact {record.id} was removed, so nothing more can be sent into its room"
-
-
 def _contact_policy_fields(verdict: ContactVerdict | None, done: str) -> dict[str, str]:
     """Return the result fields that tell the agent the contact policy changed what went out, and to what."""
     if verdict is None or not verdict.rewritten:
@@ -123,7 +115,7 @@ class MatrixMessageOperations:
     def _result(status: Literal["ok", "error"], **kwargs: object) -> MatrixMessageOperationResult:
         return MatrixMessageOperationResult(status=status, fields=kwargs)
 
-    async def _check_contact_message(
+    async def _contact_gate(
         self,
         context: ToolRuntimeContext,
         *,
@@ -138,28 +130,15 @@ class MatrixMessageOperations:
         Return None for any other room, the verdict whose text to send, or the result that stops the message.
         A removed contact's room takes nothing more, even from a turn that started before the removal.
         """
-        config = context.current_config
-        contact = contact_room(config, context.runtime_paths, room_id, context.agent_name)
+        contact = contact_room(context.current_config, context.runtime_paths, room_id, context.agent_name)
         if contact is None:
             return None
         record, side = contact
-        if (removed := _removed_error(record)) is not None:
+        if record.status != "active":
+            removed = f"Error: contact {record.id} was removed, so nothing more can be sent into its room"
             return self._result("error", action=action, room_id=room_id, message=removed)
         if text is None or not text_only:
             return self._result("error", action=action, room_id=room_id, message=_CONTACT_TEXT_ONLY_ERROR)
-        # An edit or a reaction adds no message to the conversation, so only a send counts toward the limit.
-        consecutive = (
-            await consecutive_agent_messages(
-                context.conversation_reader,
-                config,
-                context.runtime_paths,
-                room_id=room_id,
-                thread_id=thread_id,
-                limit=config.defaults.max_consecutive_agent_replies,
-            )
-            if action == "send"
-            else 0
-        )
         verdict = await check_contact_message(
             context,
             record,
@@ -167,7 +146,7 @@ class MatrixMessageOperations:
             room_id=room_id,
             thread_id=thread_id,
             text=text,
-            consecutive_agent_messages=consecutive,
+            adds_message=action == "send",
         )
         if verdict.action == "send":
             return verdict
@@ -313,7 +292,7 @@ class MatrixMessageOperations:
             text = _format_direct_text(text)
             if text is None:
                 return self._result("error", action="send", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
-        contact_verdict = await self._check_contact_message(
+        contact_verdict = await self._contact_gate(
             context,
             action="send",
             room_id=room_id,
@@ -417,8 +396,7 @@ class MatrixMessageOperations:
             return self._result("error", action="react", message="event_id is required.")
 
         reaction = (message or "").strip() or "👍"
-        # A reaction key is free text, so in a contact room it passes the policy like any message.
-        contact_verdict = await self._check_contact_message(
+        contact_verdict = await self._contact_gate(
             context,
             action="react",
             room_id=room_id,
@@ -571,7 +549,7 @@ class MatrixMessageOperations:
         formatted_text = _format_direct_text(new_text)
         if formatted_text is None:
             return self._result("error", action="edit", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
-        contact_verdict = await self._check_contact_message(
+        contact_verdict = await self._contact_gate(
             context,
             action="edit",
             room_id=room_id,
