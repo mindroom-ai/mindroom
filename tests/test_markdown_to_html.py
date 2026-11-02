@@ -381,20 +381,34 @@ def test_unsafe_raw_html_attributes_are_stripped() -> None:
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("markdown", "expected"),
     [
-        "obsidian://open?vault=notes",
-        "readdlespark://bl=QTpqb2huQGV4YW1wbGUuY29tO0lEOjxhYmNAeC5jb20+",
+        ("[open](obsidian://open?vault=notes)", '<p><a href="obsidian://open?vault=notes">open</a></p>\n'),
+        (
+            "[open](readdlespark://bl=QTpqb2huQGV4YW1wbGUuY29tO0lEOjxhYmNAeC5jb20+)",
+            '<p><a href="readdlespark://bl=QTpqb2huQGV4YW1wbGUuY29tO0lEOjxhYmNAeC5jb20+">open</a></p>\n',
+        ),
+        ("[open](OBSIDIAN://open)", '<p><a href="OBSIDIAN://open">open</a></p>\n'),
+        ('<a href="&#111;bsidian://open">open</a>', '<p><a href="obsidian://open">open</a></p>\n'),
+        ('<a href=" readdlespark://bl=abc ">open</a>', '<p><a href="readdlespark://bl=abc">open</a></p>\n'),
     ],
 )
-def test_app_links_keep_their_href(url: str) -> None:
+def test_app_links_keep_their_href(markdown: str, expected: str) -> None:
     """Links to the apps MindRoom Chat opens by default stay clickable."""
-    assert markdown_to_html(f"[open]({url})") == f'<p><a href="{url}">open</a></p>\n'
+    assert markdown_to_html(markdown) == expected
 
 
-def test_unknown_app_links_lose_their_href() -> None:
-    """Other custom schemes keep their text but not their link."""
-    assert markdown_to_html("[open](someapp://x)") == "<p><a>open</a></p>\n"
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("[open](someapp://x)", "<p><a>open</a></p>\n"),
+        ("![x](readdlespark://bl=abc)", '<p><img alt="x"></p>\n'),
+        ('<img src="obsidian://open" alt="x">', '<img alt="x">'),
+    ],
+)
+def test_other_app_urls_are_dropped(markdown: str, expected: str) -> None:
+    """Unknown schemes lose their link, and app schemes never become image sources."""
+    assert markdown_to_html(markdown) == expected
 
 
 def test_data_uri_attributes_are_stripped() -> None:
