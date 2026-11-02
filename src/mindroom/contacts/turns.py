@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.resolution import authored_tool_entries
-from mindroom.contacts.parties import agent_party, party_label, party_matrix_ids, personal_room_of
+from mindroom.contacts.parties import agent_party, party_matrix_ids, party_reference, personal_room_of
 from mindroom.contacts.policy import NO_CONTACT_RULES, effective_rules
 from mindroom.contacts.store import agent_contacts, contact_room_ids
 from mindroom.hooks import EnrichmentItem
@@ -139,7 +139,7 @@ def contact_turn_instructions(
     if other.kind == "agent":
         answer += f", with recipient {other.id} when that agent should respond"
     lines = [
-        f"This room is contact {record.id} between you, acting for {owner}, and {party_label(config, other)}.",
+        f"This room is contact {record.id} between you, acting for {owner}, and {party_reference(other)}.",
         f"Everyone here other than {owner} speaks for the other side.",
         f"You speak as {owner}'s agent, never as {owner}, so refer to {owner} in the third person.",
         f"Rules for this contact:\n{effective_rules(config, party.id, record.side(side)) or NO_CONTACT_RULES}",

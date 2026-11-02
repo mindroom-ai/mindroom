@@ -290,7 +290,7 @@ _ANSWER = "Answer the other side only by calling matrix_message to send into thi
     [
         (
             ALICE_AGENT,
-            f"Alice's Mind (mind_alice), the agent of {OWNER}",
+            f"mind_alice, the agent of {OWNER}",
             f"{_ANSWER}, with recipient mind_alice when that agent should respond.",
         ),
         (DAVE_PERSON, DAVE, f"{_ANSWER}."),
@@ -311,6 +311,8 @@ def test_contact_turn_instructions_name_both_sides_the_rules_and_how_to_answer(
     assert (item.key, item.persist, item.minimal_required) == ("contact_turn", False, True)
     lines = item.text.splitlines()
     assert f"This room is contact c1 between you, acting for {CO_OWNER}, and {other_label}." in lines
+    # The other side chooses its agent's display name, so the prompt names that agent by ID only.
+    assert "Alice's Mind" not in item.text
     assert f"Everyone here other than {CO_OWNER} speaks for the other side." in lines
     assert f"You speak as {CO_OWNER}'s agent, never as {CO_OWNER}, so refer to {CO_OWNER} in the third person." in lines
     assert f"- {CONFIG_RULE}\n- {OWNER_RULE}" in item.text
@@ -323,14 +325,13 @@ def test_contact_turn_instructions_name_both_sides_the_rules_and_how_to_answer(
 
 
 def test_contact_turn_instructions_reach_the_model_with_apostrophes_unescaped(tmp_path: Path) -> None:
-    """The prompt block keeps the owner's and the other agent's possessives plain instead of HTML entities."""
+    """The prompt block keeps the owner's possessive plain instead of an HTML entity."""
     config, paths = _setup(tmp_path)
     record = _contact(paths, _record(requester=ALICE_AGENT))
 
     rendered = render_system_enrichment_block([contact_turn_instructions(config, paths, record, "target")])
 
     assert f"You speak as {CO_OWNER}'s agent, never as {CO_OWNER}" in rendered
-    assert "Alice's Mind (mind_alice)" in rendered
     assert "&#x27;" not in rendered
     assert "&amp;" not in rendered
 

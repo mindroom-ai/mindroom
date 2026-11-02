@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from mindroom.contacts.parties import party_name
+from mindroom.contacts.parties import party_name, party_reference
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, emit_policy
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
@@ -64,8 +64,7 @@ def _contact_rules_question(config: Config, record: ContactRecord, side: SideNam
     """
     sender = record.party(side)
     owner = sender.owner
-    other = record.counterparty(side)
-    recipient = other.id if other.kind == "person" else f"{other.id}, the agent of {other.owner}"
+    recipient = party_reference(record.counterparty(side))
     return JudgmentQuestion(
         id=_CONTACT_RULES_QUESTION_ID,
         instructions=(

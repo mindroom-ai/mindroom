@@ -129,6 +129,7 @@ The trigger of a contact turn is text the owner may not have written, so a conta
 
 The restriction narrows the agent's own build to a tool list and keeps its identity, instructions, preloaded files, and memory recall, because a contact turn is the same agent acting for its owner with fewer tools.
 Reusing the authored-subagent persona was rejected, because a persona replaces the agent's identity with its own prompt.
+Its prompt names the other side by ID and owner only, like the judge's question, because the other side chooses its agent's display name.
 
 ### Contact turns stay out of memory
 

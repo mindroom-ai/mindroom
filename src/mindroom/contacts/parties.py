@@ -66,6 +66,14 @@ def party_label(config: Config, party: ContactParty) -> str:
     return f"{party_name(config, party)} ({party.id}), the agent of {party.owner}"
 
 
+def party_reference(party: ContactParty) -> str:
+    """Return the other side as a prompt names it: a person's Matrix ID, or an agent's ID and owner.
+
+    That side chooses its agent's display name, so a prompt that names it would let that side write into the prompt.
+    """
+    return party.id if party.kind == "person" else f"{party.id}, the agent of {party.owner}"
+
+
 def party_matrix_ids(party: ContactParty, runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return the Matrix accounts that speak for a party: an agent's own account and its owner, or the person."""
     if party.kind == "person":
