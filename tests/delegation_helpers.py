@@ -23,6 +23,7 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.ai import ai_response
 from mindroom.approval.execution import AgentApprovalExecution
 from mindroom.approval.resume import ResumeRunner
+from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import create_scope_session_storage
@@ -62,7 +63,7 @@ if TYPE_CHECKING:
 
     import pytest
 
-    from mindroom.config.main import Config
+    from mindroom.config.agent import AgentConfig
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationState
     from mindroom.hooks import HookRegistry
@@ -82,6 +83,20 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
         config_path=storage_path / "config.yaml",
         storage_path=storage_path,
         process_env={},
+    )
+
+
+def native_delegation_config(agents: Mapping[str, AgentConfig], **fields: object) -> Config:
+    """Return a config of these agents, without default tools or memory, plus ``fields``.
+
+    Background tool jobs are off: a delegating parent then pauses for the native delegation driver.
+    """
+    return Config(
+        agents=dict(agents),
+        background_tool_jobs={"enabled": False},
+        defaults={"tools": []},
+        memory={"backend": "none"},
+        **fields,
     )
 
 

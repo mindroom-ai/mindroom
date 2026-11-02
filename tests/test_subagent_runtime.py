@@ -53,7 +53,6 @@ from tests.tool_job_helpers import (
     awaiting_approval,
     completed_delegation_job,
     job_card_decision,
-    keep_child,
     lookup,
     managed_team_config,
     pending_outcomes,
@@ -350,7 +349,6 @@ async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> 
             delegation_child(fixture),
             owner=fixture.owner,
             operation=operation,
-            cancel=keep_child,
         )
         await done.wait()
         assert pending_outcomes(coordinator.runtime) == []

@@ -10,8 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.records import DelegationRecordOwner
@@ -29,6 +28,7 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
     approval_executor,
+    native_delegation_config,
     pause_parent,
     respond,
     resume,
@@ -42,6 +42,7 @@ from tests.test_delegation_direct_audit import _identity, _only_run
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.records import DelegationMetadata, DelegationRecordHandle
     from mindroom.delegation.state import DelegationChild
@@ -51,15 +52,11 @@ if TYPE_CHECKING:
 
 
 def _leader_and_child() -> Config:
-    return Config(
-        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    return native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
     )
 
 
@@ -266,8 +263,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
     approval: bool,
 ) -> None:
     """Native children settle real failures and preserve tool results across continuation."""
-    config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(
@@ -276,8 +272,6 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
                 delegate_to=["child"],
             ),
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         prompts={"INTERACTIVE_QUESTION_PROMPT": "UNSUPPORTED_INTERACTIVE_MARKER"},
         models={
@@ -370,8 +364,7 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A switch the child's call limit refused never ran, so the child's answer after it settles the delegation."""
-    config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(
@@ -380,8 +373,6 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
                 max_tool_calls_per_turn=1,
             ),
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
         models={
             "default": ModelConfig(provider="openai", id="default-model"),

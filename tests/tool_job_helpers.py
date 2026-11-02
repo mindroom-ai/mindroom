@@ -23,11 +23,12 @@ from mindroom.approval.resume import ResumeRunner
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.custom_tools import delegate as delegate_toolkit
-from mindroom.delegation.background import delegation_child, delegation_job
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
+from mindroom.delegation.background import delegation_child, delegation_job, reconcile_delegation
 from mindroom.delegation.execution import _drive_delegations
+from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import (
     ApprovalCall,
@@ -44,7 +45,6 @@ from mindroom.history.request_messages import build_resume_request
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
@@ -63,6 +63,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobClaim,
     JobGrant,
+    JobSpec,
     ToolJobRuntime,
     _parse_saved_job,
 )
@@ -71,7 +72,8 @@ from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.access_schema_support import with_responder_access
+from tests.conftest import FakeApprovalTransport, bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import entity_ids
@@ -86,9 +88,11 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.run import Persist
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import ChildResponseRunner
     from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.runs import RunRecord
     from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution_authority import JobTool
@@ -101,6 +105,8 @@ if TYPE_CHECKING:
 # One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
 JOB_TEST_TIMEOUT = 30
 _LEADER_SCOPE = HistoryScope(kind="agent", scope_id="leader")
+# The requester every delegating conversation's replies answer.
+DELEGATING_REQUESTER = "@alice:example.org"
 
 
 def _grant_all(_job: BackgroundJob) -> JobGrant:
@@ -191,6 +197,34 @@ async def reserve_job_card(journal: EventJournalStore, run_id: str, call_id: str
 async def job_card_decision(journal: EventJournalStore, run_id: str, call_id: str) -> BackgroundApprovalDecision | None:
     """Return the journal's decision of one job card's call, or None while the card stays answerable."""
     return await journal.principal(_JOB_CARD_PRINCIPAL).approvals.detached_decision(CallKey.detached(run_id, call_id))
+
+
+@dataclass
+class JobApprovalCards:
+    """Stand in for the approval store: record each card a job posts and answer it when the test decides.
+
+    Given the job journal, each card's call is reserved there, as the router reserves it, so the job's end denies it.
+    """
+
+    decision: asyncio.Future[BackgroundApprovalDecision]
+    journal: EventJournalStore | None = None
+    posted: asyncio.Event = field(default_factory=asyncio.Event)
+    requested: list[tuple[str, str, str]] = field(default_factory=list)
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
+
+    async def request_background_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        tool_name: str,
+        **_kwargs: object,
+    ) -> BackgroundApprovalDecision:
+        """Post one job's card and wait for the test's decision."""
+        if self.journal is not None:
+            await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
+        self.requested.append((origin.run_id, origin.call_id, tool_name))
+        self.posted.set()
+        return await asyncio.shield(self.decision)
 
 
 async def tool_job_runtime(
@@ -583,6 +617,26 @@ async def keep_child(_child: DelegationChild) -> None:
     """A cancellation cleanup that leaves the child as its operation settled it."""
 
 
+async def admit_delegation_spec(
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    spec: JobSpec,
+    *,
+    owner: ToolExecutionIdentity,
+) -> tuple[BackgroundJob, JobClaim | None]:
+    """Accept ``spec`` as ``child``'s subagent job under the child's own ID, claiming its outcome."""
+    return await runtime.start(
+        child.delegation_id,
+        tool_name=spec.tool_name,
+        depth=child.depth - 1,
+        kind=spec.kind,
+        adapter=spec.adapter,
+        owner=owner,
+        operation=spec.operation,
+        cancel=spec.cancel,
+    )
+
+
 async def admit_delegation_job(
     runtime: ToolJobRuntime,
     child: DelegationChild,
@@ -590,21 +644,9 @@ async def admit_delegation_job(
     owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
     cancel: Callable[[DelegationChild], Awaitable[None]] = keep_child,
-    source_event_id: str | None = None,
 ) -> tuple[BackgroundJob, JobClaim | None]:
     """Accept ``operation`` as ``child``'s subagent job under the child's own ID, claiming its outcome."""
-    spec = delegation_job(child, operation, cleanup=cancel)
-    return await runtime.start(
-        child.delegation_id,
-        tool_name=spec.tool_name,
-        depth=child.depth - 1,
-        kind=spec.kind,
-        source_event_id=source_event_id,
-        adapter=spec.adapter,
-        owner=owner,
-        operation=spec.operation,
-        cancel=spec.cancel,
-    )
+    return await admit_delegation_spec(runtime, child, delegation_job(child, operation, cleanup=cancel), owner=owner)
 
 
 async def start_delegation_job(
@@ -614,29 +656,29 @@ async def start_delegation_job(
     owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
     cancel: Callable[[DelegationChild], Awaitable[None]] = keep_child,
-    source_event_id: str | None = None,
 ) -> BackgroundJob:
     """Accept ``operation`` as ``child``'s subagent job, then drop the claim its start minted, as `start_job` does."""
-    job, claim = await admit_delegation_job(
-        runtime,
-        child,
-        owner=owner,
-        operation=operation,
-        cancel=cancel,
-        source_event_id=source_event_id,
-    )
+    job, claim = await admit_delegation_job(runtime, child, owner=owner, operation=operation, cancel=cancel)
     await runtime.release_wait(job.job_id, claim)
     return job
 
 
-def answer_of(record: RunRecord, call_id: str) -> str:
-    """Return what one call of a run answered, as the run stores it."""
-    return next(str(message.content) for message in record.messages or [] if message.tool_call_id == call_id)
+def answer_of(record: RunRecord, call_id: str) -> Message:
+    """Return the one message that answered one call of a run, as the run stores it."""
+    [message] = [message for message in record.messages or () if message.tool_call_id == call_id]
+    return message
 
 
-def install_child_runner(monkeypatch: pytest.MonkeyPatch, run_child: ChildResponseRunner) -> None:
-    """Run every subagent job's child turns with ``run_child``, the seam a subagent call's job runs its child through."""
-    monkeypatch.setattr(delegate_toolkit, "run_delegated_child_response", run_child)
+def settle_stopped_subagent(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]:
+    """Return the cancel cleanup that settles a stopped subagent job's child as the job coordinator does."""
+    return partial(
+        reconcile_delegation,
+        cleanup=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
+        runtime_paths=runtime_paths,
+    )
 
 
 def subagent_job_id(runtime: ToolJobRuntime, child: DelegationChild) -> str:
@@ -831,6 +873,30 @@ async def cancel_settled(
     return requested if drain is None else await asyncio.shield(drain)
 
 
+def delegating_config(
+    *,
+    child_tools: Sequence[str] = (),
+    rules: Sequence[ApprovalRuleConfig] = (),
+    jobs: bool = True,
+) -> Config:
+    """Return the leader that delegates to ``code``, which the requester may reach; ``jobs`` turns tool jobs on."""
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code", tools=list(child_tools)),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            tool_approval=ToolApprovalConfig(rules=list(rules)),
+        ),
+        "code",
+        users=[DELEGATING_REQUESTER],
+    )
+    config.background_tool_jobs.enabled = jobs
+    return config
+
+
 @dataclass
 class DelegatingLeader:
     """The leader as a reply builds it: its subagent calls run as jobs, or pause for the native driver without jobs.
@@ -860,7 +926,7 @@ class DelegatingLeader:
         """The leader's provider for its current turn."""
         return self.agents.models["leader"]
 
-    @owned_tool_execution(enabled=lambda *_args, **_kwargs: True)
+    @owned_tool_execution(enabled=always_owned)
     async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
         """Run the leader on ``turns`` until it completes or pauses on its delegations.
 
@@ -905,9 +971,7 @@ class DelegatingLeader:
             request_template=build.request_template,
         )
         finished = [event.record async for event in events if isinstance(event, RunFinished)]
-        record = finished[-1]
-        assert isinstance(record, RunRecord)
-        return record
+        return finished[-1]
 
     async def drive(self, record: RunRecord, run_child: ChildResponseRunner) -> RunRecord:
         """Advance ``record``'s delegations with ``run_child`` and continue the leader with their results."""

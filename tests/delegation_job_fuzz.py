@@ -13,18 +13,14 @@ import re
 from collections import Counter
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field, replace
-from functools import partial
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 from mindroom import pre_model_preparation
 from mindroom.approval import manager as approval_manager
-from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.background import delegation_child, reconcile_delegation
-from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
+from mindroom.delegation.background import delegation_child
+from mindroom.delegation.recovery import read_child_run
 from mindroom.event_journal import BackgroundApprovalDecision, EventJournalStore, tool_job_run_id
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage import lanes
@@ -35,16 +31,18 @@ from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.access_schema_support import with_responder_access
 from tests.conftest import FakeApprovalTransport, restore_builtin_tools, snapshot_builtin_tools
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.tool_job_helpers import (
+    DELEGATING_REQUESTER,
     DelegatingLeader,
+    delegating_config,
     job_card_decision,
     lookup,
     reserve_job_card,
     run_journal_statements_inline,
+    settle_stopped_subagent,
     tool_job_journal,
     tool_job_runtime,
 )
@@ -57,10 +55,9 @@ if TYPE_CHECKING:
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.llm.provider import ModelRequest, StreamEvent
-    from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
+    from mindroom.tool_jobs.runtime import BackgroundJob
     from tests.tool_job_helpers import ProcessRuntime
 
-_REQUESTER = "@alice:example.org"
 _WRITTEN = "Report written"
 # Loop iterations, and timer waits shorter than this many seconds, one step may take before it counts as stuck.
 _IDLE_ROUNDS = 20_000
@@ -143,16 +140,15 @@ class _Child:
     requests: int = 0
 
 
-@dataclass
+@dataclass(kw_only=True)
 class _ChildModels(ScriptedModel):
     """The model every child runs on: each request plays the script of the child its task names."""
 
-    runner: DelegationFuzzRunner | None = None
+    runner: DelegationFuzzRunner
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Play the next turn of the child whose task the request carries, after its held start."""
         runner = self.runner
-        assert runner is not None
         [index] = {int(found) for message in request.messages for found in _TASK.findall(str(message.content))}
         record = runner.children[index]
         record.requests += 1
@@ -201,23 +197,19 @@ class DelegationFuzzRunner:
 
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.paths = _runtime_paths(root)
-        self.config = with_responder_access(
-            Config(
-                agents={
-                    "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
-                    "code": AgentConfig(display_name="Code", tools=["notes"]),
-                },
-                defaults=DefaultsConfig(tools=[]),
-                memory={"backend": "none"},
-                tool_approval=ToolApprovalConfig(
-                    rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
-                ),
-            ),
-            "code",
-            users=[_REQUESTER],
+        self.config = delegating_config(
+            child_tools=["notes"],
+            rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
         )
-        self.config.background_tool_jobs.enabled = True
-        self.identity = ToolExecutionIdentity("matrix", "leader", _REQUESTER, "!room:example.org", None, None, "parent")
+        self.identity = ToolExecutionIdentity(
+            "matrix",
+            "leader",
+            DELEGATING_REQUESTER,
+            "!room:example.org",
+            None,
+            None,
+            "parent",
+        )
         self._baseline = asyncio.all_tasks()
         self._turn_count = 0
         self.gate = asyncio.Event()
@@ -249,17 +241,13 @@ class DelegationFuzzRunner:
         self.runtime = await self._open()
 
     async def _open(self) -> ProcessRuntime:
-        runtime = await tool_job_runtime(self.paths.storage_root, cancel=self._interrupt_child)
+        # A restart interrupts a recovered child, and its end denies its cards.
+        runtime = await tool_job_runtime(
+            self.paths.storage_root,
+            cancel=settle_stopped_subagent(self.config, self.paths),
+        )
         register_background_runtime(self.paths, runtime)
         return runtime
-
-    async def _interrupt_child(self, job: BackgroundJob) -> BackgroundOutcome | None:
-        """Settle a recovered child as the job coordinator does: a restart interrupts it, and its end denies its cards."""
-        return await reconcile_delegation(
-            job,
-            cleanup=partial(interrupt_stopped_child, config=self.config, runtime_paths=self.paths),
-            runtime_paths=self.paths,
-        )
 
     async def run(self, steps: list[Step]) -> None:
         """Apply each step, then release everything and check the settled state."""
@@ -384,12 +372,16 @@ class DelegationFuzzRunner:
         await self._idle()
         self.gate = asyncio.Event()
 
-    async def _restart(self, _step: Step) -> None:
-        """Stop the process in order: replies are cancelled, then the job runtime drains and closes."""
+    def _mark_restart(self) -> None:
+        """Note a restart as the first cause that stops each known child's job still running."""
         self._find_jobs()
         for child in self.children:
             if child.job_id is not None:
                 self._cause(child.job_id, "restart")
+
+    async def _restart(self, _step: Step) -> None:
+        """Stop the process in order: replies are cancelled, then the job runtime drains and closes."""
+        self._mark_restart()
         await self._end_turns()
         shutdown = asyncio.create_task(self.runtime.shutdown())
         await self._idle()
@@ -402,10 +394,7 @@ class DelegationFuzzRunner:
 
     async def _crash(self, _step: Step) -> None:
         """Tear down the event loop between two awaits: work unwinds unasked, and only saved state survives."""
-        self._find_jobs()
-        for child in self.children:
-            if child.job_id is not None:
-                self._cause(child.job_id, "restart")
+        self._mark_restart()
         await self._end_tasks()
         self.turns.clear()
         await self._reopen()
@@ -473,9 +462,9 @@ class DelegationFuzzRunner:
     async def _jobs(self) -> list[BackgroundJob]:
         self._find_jobs()
         return [
-            await lookup(self.runtime, child.job_id, owner=self.identity, depth=0)
-            for child in self.children
-            if child.job_id is not None and child.job_id in {job.job_id for job in self.runtime.retained_jobs()}
+            await lookup(self.runtime, job.job_id, owner=self.identity, depth=0)
+            for job in self.runtime.retained_jobs()
+            if job.kind == "delegation"
         ]
 
     async def _check_settled(self) -> None:
@@ -487,7 +476,7 @@ class DelegationFuzzRunner:
             if job.status == "completed":
                 assert run is not None
                 assert run.status is RunStatus.completed, (job.job_id, run.status)
-            elif job.status in TERMINAL_STATUSES and run is not None:
+            elif run is not None:
                 assert run.status not in {RunStatus.running, RunStatus.paused}, (job.job_id, job.status, run.status)
             if job.status in {"completed", "cancelled"}:
                 assert job.adapter["child"]["status"] == job.status, (job.job_id, job.adapter["child"]["status"])

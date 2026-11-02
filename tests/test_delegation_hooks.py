@@ -11,7 +11,6 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.delegation.execution import _ChildOutcome
 from mindroom.delegation.hooks import before_delegation
 from mindroom.delegation.recovery import _cancel_delegations
@@ -37,6 +36,7 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
     approval_executor,
+    native_delegation_config,
     respond,
     resume,
     stored_run,
@@ -53,15 +53,11 @@ if TYPE_CHECKING:
 
 
 def _leader_and_child(**config: object) -> Config:
-    return Config(
-        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    return native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child", tools=["calculator"]),
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
         **config,
     )
 

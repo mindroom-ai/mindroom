@@ -1,4 +1,4 @@
-"""Startup opt-in and passive recovery for generic tool jobs."""
+"""Startup settings and passive recovery for generic tool jobs."""
 
 from __future__ import annotations
 
@@ -159,7 +159,7 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
     assert "background_after" not in instructions + description
     assert "job(action=" not in instructions + description
     assert "continue_subagent" in instructions + description
-    # Background semantics live only in the opt-in addendum; the function description says the caller waits.
+    # Background semantics live only in the background-job addendum; the function description says the caller waits.
     assert "The caller waits; this does not create a Matrix thread." in description
     assert "child tools that require approval pause both runs" in instructions
 

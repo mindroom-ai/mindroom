@@ -15,8 +15,6 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agents import create_agent
 from mindroom.approval.resume import ResumeRunner
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation import execution
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.storage import new_scope_session
@@ -31,7 +29,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_loop.helpers import collect
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, native_delegation_config
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
@@ -282,15 +280,11 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
     The continuation's events reach the consumer as they happen; when the consumer fails on one, the resume is
     closed where it stands and its terminal record lands before the failure propagates.
     """
-    config = Config(
-        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["helper"]),
             "helper": AgentConfig(display_name="Helper"),
         },
-        defaults={"tools": []},
-        memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)

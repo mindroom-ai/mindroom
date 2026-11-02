@@ -2318,7 +2318,7 @@ async def test_an_adapter_save_keeps_the_jobs_status_and_leaves_an_ended_job_alo
     )
     try:
         await runtime.request_cancel("saved")
-        await asyncio.wait_for(cleaning.wait(), 5)
+        await asyncio.wait_for(cleaning.wait(), JOB_TEST_TIMEOUT)
         await runtime.save_adapter("saved", step="started")
         saved = (await saved_jobs(tmp_path))["saved"]
         assert (saved.status, saved.adapter) == ("cancel_requested", {"step": "started"})

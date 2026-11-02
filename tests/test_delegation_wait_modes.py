@@ -131,8 +131,6 @@ async def test_an_approved_subagent_call_resumes_on_the_path_it_paused_on(
             # The finished reply shows every call it made as finished.
             assert "⏳" not in result.response_text
             assert await saved_jobs(paths.storage_root) == {}
-            # The driver that gated the call runs its child in the reply, as it would have before the restart; a call
-            # the reply paused on now runs natively, where its wait budget is rejected before the child starts.
             assert len(code.requests) == (1 if initially_excluded else 0)
     finally:
         await runtime.shutdown()

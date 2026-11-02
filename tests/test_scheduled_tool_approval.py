@@ -2794,44 +2794,36 @@ async def test_scheduler_functions_are_never_scheduled_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_model_switch_is_never_a_scheduled_call() -> None:
-    """A switch may stop the run that makes it, so it is conversation control, which a stored call cannot exercise."""
-    context = _tool_context(_gated_config())
+@pytest.mark.parametrize(
+    ("tool_name", "arguments_json"),
+    [("switch_thread_model", '{"model_name": "default"}'), ("run_subagent", '{"task": "Research"}')],
+)
+async def test_a_model_switch_or_subagent_call_is_never_a_scheduled_call(tool_name: str, arguments_json: str) -> None:
+    """A stored call can neither exercise conversation control nor run a child turn in its conversation later.
 
-    with (
-        tool_runtime_context(context),
-        _responders(context.config, "general"),
-        pytest.raises(SchedulingError, match="needs live input or conversation control"),
-    ):
-        await _LiveRun(((ThreadModelTools(), "thread_model"),)).call(
-            "schedule_tool_call",
-            tool_name="switch_thread_model",
-            arguments_json='{"model_name": "default"}',
-            execute_at="2030-01-02T09:00:00-05:00",
-            description="Switch later",
-        )
-
-
-@pytest.mark.asyncio
-async def test_a_subagent_call_is_never_a_scheduled_call() -> None:
-    """A subagent call runs a child turn in its conversation, which a stored call cannot run later."""
+    A switch may stop the run that makes it, so it is conversation control; a subagent call runs a child turn.
+    """
     context = _tool_context(_gated_config())
 
     def run_subagent(task: str) -> str:
         """Run a subagent."""
         return task
 
+    toolkit = {
+        "switch_thread_model": (ThreadModelTools(), "thread_model"),
+        "run_subagent": (Toolkit(name="delegate", tools=[run_subagent]), "delegate"),
+    }[tool_name]
     with (
         tool_runtime_context(context),
         _responders(context.config, "general"),
         pytest.raises(SchedulingError, match="needs live input or conversation control"),
     ):
-        await _LiveRun(((Toolkit(name="delegate", tools=[run_subagent]), "delegate"),)).call(
+        await _LiveRun((toolkit,)).call(
             "schedule_tool_call",
-            tool_name="run_subagent",
-            arguments_json='{"task": "Research"}',
+            tool_name=tool_name,
+            arguments_json=arguments_json,
             execute_at="2030-01-02T09:00:00-05:00",
-            description="Delegate later",
+            description="Run later",
         )
 
 

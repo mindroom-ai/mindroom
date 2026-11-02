@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.delegation.execution import answered_delegation_calls
 from mindroom.delegation.recovery import read_child_run
@@ -26,6 +24,7 @@ from tests.delegation_helpers import (
     _delegate_runtime_context,
     _runtime_paths,
     approval_executor,
+    native_delegation_config,
     respond,
     resume,
 )
@@ -36,6 +35,7 @@ from tests.test_delegation_direct_audit import _identity
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -80,7 +80,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
     child_name = "leader" if parent_kind == "self" else "child"
     gate = decision.endswith("gate")
     paths = _runtime_paths(tmp_path)
-    config = Config(
+    config = native_delegation_config(
         agents={
             name: AgentConfig(
                 display_name=name.title(),
@@ -89,9 +89,6 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
             )
             for name in {"leader", child_name}
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         tool_approval={"rules": [{"match": "run_subagent" if gate else "add", "action": "require_approval"}]},
     )
     entity_ids(config, paths)
@@ -231,14 +228,11 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
     """The delegation's card comes first, so the parent's own card is approved in the continuation that runs it."""
     child_pauses = delegation_pause == "child"
     paths = _runtime_paths(tmp_path)
-    config = Config(
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", tools=["calculator"], delegate_to=["child"]),
             "child": AgentConfig(display_name="Child", tools=["calculator"] if child_pauses else []),
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         tool_approval={
             "rules": [
                 {"match": "add", "action": "require_approval"},
@@ -329,14 +323,11 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
 ) -> None:
     """The resumed reply shows the child's approved call with its own result, and the delegation with the child's."""
     paths = _runtime_paths(tmp_path)
-    config = Config(
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", tools=[], delegate_to=["child"]),
             "child": AgentConfig(display_name="Child", tools=[{"calculator": {"defer": True}}]),
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
     )
     entity_ids(config, paths)

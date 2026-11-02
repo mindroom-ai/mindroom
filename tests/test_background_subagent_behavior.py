@@ -8,120 +8,59 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.approval import manager as approval_manager
-from mindroom.config.agent import AgentConfig
-from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.delegation import execution as delegation_execution
-from mindroom.delegation.background import delegation_child, reconcile_delegation
-from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
+from mindroom.delegation.background import delegation_child
+from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import SUBAGENT_BUSY
 from mindroom.event_journal import BackgroundApprovalDecision, tool_job_run_id
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import pending_approval_requirements
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, describe_job, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_jobs.runtime import describe_job, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.access_schema_support import with_responder_access
-from tests.conftest import FakeApprovalTransport
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
-from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import (
+    DELEGATING_REQUESTER,
     JOB_TEST_TIMEOUT,
     DelegatingLeader,
+    JobApprovalCards,
     answer_of,
+    delegating_config,
     lookup,
-    reserve_job_card,
     saved_jobs,
+    settle_stopped_subagent,
     tool_job_runtime,
     wait_for_status,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
-    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import EventJournalStore
-    from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
+    from mindroom.tool_jobs.runtime import BackgroundJob
     from tests.tool_job_helpers import ProcessRuntime
 
-_REQUESTER = "@alice:example.org"
-_IDENTITY = ToolExecutionIdentity("matrix", "leader", _REQUESTER, "!room:example.org", None, None, "parent")
+_IDENTITY = ToolExecutionIdentity("matrix", "leader", DELEGATING_REQUESTER, "!room:example.org", None, None, "parent")
 _HANDLE_KEYS = {"job_id", "subagent_id", "status", "tool", "summary", "summary_truncated"}
 
 
 def _config() -> Config:
     """The leader delegates to ``code``, whose ``write_report`` asks for approval, with background tool jobs on."""
-    config = with_responder_access(
-        Config(
-            agents={
-                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
-                "code": AgentConfig(display_name="Code", tools=["reports"]),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            memory={"backend": "none"},
-            tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
-            ),
-        ),
-        "code",
-        users=[_REQUESTER],
+    return delegating_config(
+        child_tools=["report"],
+        rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
     )
-    config.background_tool_jobs.enabled = True
-    return config
-
-
-class _Reports(Toolkit):
-    """The child's approval-gated tool; each run is an effect the test reads."""
-
-    effects: list[str] = []  # noqa: RUF012 - one registration per test, cleared when registered
-
-    def __init__(self) -> None:
-        super().__init__(name="reports", tools=[self.write_report])
-
-    async def write_report(self) -> str:
-        """Write the report."""
-        type(self).effects.append("written")
-        return "Report written"
-
-
-@dataclass
-class _Cards:
-    """The approval store a job posts its child's cards to; each card waits for the test's decision."""
-
-    journal: EventJournalStore
-    decision: asyncio.Future[BackgroundApprovalDecision] = field(
-        default_factory=lambda: asyncio.get_running_loop().create_future(),
-    )
-    posted: list[str] = field(default_factory=list)
-    asked: asyncio.Event = field(default_factory=asyncio.Event)
-    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
-
-    async def request_background_approval(
-        self,
-        *,
-        origin: BackgroundScriptToolOrigin,
-        tool_name: str,
-        **_kwargs: object,
-    ) -> BackgroundApprovalDecision:
-        await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
-        self.posted.append(origin.run_id)
-        self.asked.set()
-        return await asyncio.shield(self.decision)
 
 
 @dataclass
@@ -149,17 +88,9 @@ class _Conversation:
         self.runtime = await tool_job_runtime(
             self.tmp_path,
             grant=lambda _job: "allowed" if self.allowed else "denied",
-            cancel=self._interrupt,
+            cancel=settle_stopped_subagent(self.config, self.paths),
         )
         register_background_runtime(self.paths, self.runtime)
-
-    async def _interrupt(self, job: BackgroundJob) -> BackgroundOutcome | None:
-        """Settle a stopped subagent's child as the job coordinator does."""
-        return await reconcile_delegation(
-            job,
-            cleanup=partial(interrupt_stopped_child, config=self.config, runtime_paths=self.paths),
-            runtime_paths=self.paths,
-        )
 
     async def restart(self, *, crash: bool = False) -> None:
         """Stop this process, in order or by a crash that runs none of its code, and recover in the next one.
@@ -201,11 +132,15 @@ class _Conversation:
         return await lookup(self.runtime, job_id, owner=_IDENTITY, depth=0)
 
 
-@contextmanager
-def _reports() -> Iterator[type[_Reports]]:
-    _Reports.effects = []
-    with registered_toolkit("reports", _Reports):
-        yield _Reports
+def _held_child() -> tuple[asyncio.Event, list]:
+    """Return a child turn that starts and then never finishes, with the event its start sets."""
+    started = asyncio.Event()
+
+    async def hold() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    return started, [Await(hold), *answer("Never")]
 
 
 def _delegate(call_id: str, **budget: float) -> list:
@@ -224,7 +159,7 @@ async def test_a_released_wait_answers_with_a_handle_that_names_the_subagent(
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
         assert record.status is RunStatus.completed
-        handle = json.loads(answer_of(record, "first"))
+        handle = json.loads(str(answer_of(record, "first").content))
         assert set(handle) == _HANDLE_KEYS
         assert (handle["tool"], handle["status"]) == ("code", "running")
         job = await conversation.job(handle["job_id"])
@@ -236,7 +171,7 @@ async def test_a_released_wait_answers_with_a_handle_that_names_the_subagent(
             calls(tool_call("job", "wait", action="wait", job_id=handle["job_id"])),
             answer("Read"),
         )
-        result = answer_of(read, "wait")
+        result = str(answer_of(read, "wait").content)
         assert "Exact child result" in result
         assert f"Subagent ID: {handle['subagent_id']}" in result
     finally:
@@ -253,11 +188,11 @@ async def test_a_waiting_parent_reads_the_childs_answer_and_a_follow_up_continue
     conversation = _Conversation(tmp_path, monkeypatch)
     await conversation.open(answer("First answer"), answer("Second answer"))
     try:
-        first = answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first")
+        first = str(answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first").content)
         assert first.startswith("First answer")
         subagent_id = first.rsplit("Subagent ID: ", 1)[1].strip()
         follow_up = calls(tool_call("continue_subagent", "again", subagent_id=subagent_id, message="And now?"))
-        second = answer_of(await conversation.reply(follow_up, answer("Done")), "again")
+        second = str(answer_of(await conversation.reply(follow_up, answer("Done")), "again").content)
         assert second.startswith("Second answer")
         assert second.endswith(f"Subagent ID: {subagent_id}")
         (_, resumed) = conversation.agents.models["code"].requests
@@ -277,25 +212,25 @@ async def test_a_childs_gated_call_asks_as_a_phase_of_its_subagents_job(
 ) -> None:
     """The job posts the card and waits for it; the parent's reply is never paused by the child's approval."""
     conversation = _Conversation(tmp_path, monkeypatch)
-    with _reports() as reports:
+    with registered_report_tool() as reports:
         await conversation.open(calls(tool_call("write_report", "write-once")), answer("Child done"))
-        cards = _Cards(conversation.runtime.journal)
+        cards = JobApprovalCards(asyncio.get_running_loop().create_future(), conversation.runtime.journal)
         monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
         try:
             record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
             assert record.status is RunStatus.completed
-            job_id = json.loads(answer_of(record, "first"))["job_id"]
-            await asyncio.wait_for(cards.asked.wait(), JOB_TEST_TIMEOUT)
+            job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
+            await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
             assert (await conversation.job(job_id)).status == "awaiting_approval"
-            assert cards.posted == [tool_job_run_id(job_id)]
-            assert reports.effects == []
+            assert [run_id for run_id, _call_id, _tool in cards.requested] == [tool_job_run_id(job_id)]
+            assert reports.written == []
             if decision == "cancelled":
                 await conversation.runtime.request_cancel(job_id)
             else:
                 cards.decision.set_result(BackgroundApprovalDecision(decision, "Not now"))
             status = {"approved": "completed", "denied": "completed", "cancelled": "cancelled"}[decision]
             await wait_for_status(conversation.runtime, job_id, status)
-            assert reports.effects == (["written"] if decision == "approved" else [])
+            assert reports.written == (["written"] if decision == "approved" else [])
             child_run = await read_child_run(
                 delegation_child(await conversation.job(job_id)),
                 conversation.config,
@@ -315,21 +250,15 @@ async def test_a_restart_interrupts_a_running_subagent_and_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A restart never runs the child again; its job ends with the interruption the child records."""
-    started = asyncio.Event()
-
-    async def hold() -> None:
-        started.set()
-        await asyncio.Event().wait()
-
+    started, held = _held_child()
     conversation = _Conversation(tmp_path, monkeypatch)
-    await conversation.open([Await(hold), *answer("Never")])
+    await conversation.open(held)
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
-        job_id = json.loads(answer_of(record, "first"))["job_id"]
+        job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
         await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         await conversation.restart()
         job = await conversation.job(job_id)
-        assert job.status in TERMINAL_STATUSES
         assert (job.status, job.result) == (
             "failed",
             "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.",
@@ -346,14 +275,9 @@ async def test_losing_access_while_the_parent_waits_fails_its_call_not_its_reply
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Revoked access ends the parent's wait with a failed call; the reply itself completes."""
-    started = asyncio.Event()
-
-    async def hold() -> None:
-        started.set()
-        await asyncio.Event().wait()
-
+    started, held = _held_child()
     conversation = _Conversation(tmp_path, monkeypatch)
-    await conversation.open([Await(hold), *answer("Never")])
+    await conversation.open(held)
     try:
         replying = asyncio.create_task(conversation.reply(_delegate("waiting"), answer("Parent done")))
         await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
@@ -361,7 +285,7 @@ async def test_losing_access_while_the_parent_waits_fails_its_call_not_its_reply
         await conversation.runtime.cancel_revoked()
         record = await replying
         assert record.status is RunStatus.completed
-        [answered] = [message for message in record.messages or () if message.tool_call_id == "waiting"]
+        answered = answer_of(record, "waiting")
         assert (answered.content, answered.tool_call_error) == ("Tool job is not available in this conversation.", True)
     finally:
         await conversation.runtime.shutdown()
@@ -413,7 +337,7 @@ async def test_a_job_stopped_before_its_child_started_ends_interrupted_without_r
     await conversation.open(answer("Never"))
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
-        job_id = json.loads(answer_of(record, "first"))["job_id"]
+        job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
         await asyncio.wait_for(held.wait(), JOB_TEST_TIMEOUT)
         await conversation.restart(crash=crash)
         job = await conversation.job(job_id)
@@ -447,7 +371,7 @@ async def test_subagent_calls_of_one_step_run_together(
             ),
             answer("Both done"),
         )
-        assert {answer_of(record, "first").split("\n")[0], answer_of(record, "second").split("\n")[0]} == {
+        assert {str(answer_of(record, call_id).content).split("\n")[0] for call_id in ("first", "second")} == {
             "One",
             "Two",
         }
@@ -465,7 +389,7 @@ async def test_two_follow_ups_to_one_subagent_in_one_step_run_once(
     conversation = _Conversation(tmp_path, monkeypatch)
     await conversation.open(answer("First answer"), answer("Follow-up answer"), answer("Never"))
     try:
-        first = answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first")
+        first = str(answer_of(await conversation.reply(_delegate("first"), answer("Done")), "first").content)
         subagent_id = first.rsplit("Subagent ID: ", 1)[1].strip()
         record = await conversation.reply(
             calls(
@@ -474,7 +398,7 @@ async def test_two_follow_ups_to_one_subagent_in_one_step_run_once(
             ),
             answer("Done"),
         )
-        answers = [answer_of(record, "again"), answer_of(record, "twice")]
+        answers = [str(answer_of(record, "again").content), str(answer_of(record, "twice").content)]
         assert sum(answer.startswith("Follow-up answer") for answer in answers) == 1
         assert sum(answer.startswith(f"Delegation to 'code' failed: {SUBAGENT_BUSY}") for answer in answers) == 1
         assert len(conversation.agents.models["code"].requests) == 2
@@ -507,17 +431,12 @@ async def test_a_running_subagent_job_saves_the_child_it_started_with_its_audit_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Once its child started, the saved job names the child's audit record, so recovery after a crash can finish it."""
-    started = asyncio.Event()
-
-    async def hold() -> None:
-        started.set()
-        await asyncio.Event().wait()
-
+    started, held = _held_child()
     conversation = _Conversation(tmp_path, monkeypatch)
-    await conversation.open([Await(hold), *answer("Never")])
+    await conversation.open(held)
     try:
         record = await conversation.reply(_delegate("first", background_after=0), answer("Parent free"))
-        job_id = json.loads(answer_of(record, "first"))["job_id"]
+        job_id = json.loads(str(answer_of(record, "first").content))["job_id"]
         await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
         saved = delegation_child((await saved_jobs(tmp_path))[job_id])
         assert saved.status == "running"

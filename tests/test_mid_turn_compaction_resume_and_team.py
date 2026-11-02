@@ -691,7 +691,6 @@ async def test_team_approval_resume_after_mid_turn_compaction(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
         context_window=4000,
     )
-    team.config.background_tool_jobs.enabled = False
     _seed_team_history(team)
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -761,7 +760,6 @@ async def test_a_member_run_after_a_team_resume_reports_only_its_own_requests(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
         context_window=4000,
     )
-    team.config.background_tool_jobs.enabled = False
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
     assert summary_calls.inputs

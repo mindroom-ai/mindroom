@@ -348,7 +348,6 @@ async def test_a_saved_team_approval_resumes_under_the_history_settings_its_conf
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    team.config.background_tool_jobs.enabled = False
     _store_two_past_runs_under_a_one_run_limit(team)
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)

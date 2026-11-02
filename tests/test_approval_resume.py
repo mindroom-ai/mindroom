@@ -54,7 +54,10 @@ def _answered(script: Sequence[ScriptStep]) -> tuple[str, MessageMetrics]:
 
 
 async def _setup_case(case: AgentResume, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CodeResume:
-    """Load the captured pause of ``case`` under a config without background tool jobs, which pause for approval."""
+    """Load the captured pause of ``case``.
+
+    The captured cases resume a reply paused for approval, which needs background tool jobs off.
+    """
     run = await setup_case(case, tmp_path, monkeypatch)
     run.config.background_tool_jobs.enabled = False
     return run

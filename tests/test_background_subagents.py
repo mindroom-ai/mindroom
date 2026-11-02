@@ -42,7 +42,6 @@ from tests.tool_job_helpers import (
     intercept_job_saves,
     job_child,
     job_owner,
-    keep_child,
     lookup,
     pending_outcome,
     pending_outcomes,
@@ -519,7 +518,7 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
         return BackgroundOutcome("completed", "survived admission cancellation")
 
     admission = asyncio.create_task(
-        admit_delegation_job(runtime, child, owner=job_owner(), operation=operation, cancel=keep_child),
+        admit_delegation_job(runtime, child, owner=job_owner(), operation=operation),
     )
     try:
         await written.wait()

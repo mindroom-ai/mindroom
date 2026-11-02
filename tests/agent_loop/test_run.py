@@ -657,14 +657,13 @@ def _golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
     return run
 
 
-def _gated_calculator() -> AdaptedToolkit:
-    """MindRoom's calculator with ``multiply`` under the approval policy, as the capture's config gated it."""
+def _gated_calculator(gate: ToolGate = ToolGate.POLICY) -> AdaptedToolkit:
+    """MindRoom's calculator with ``multiply`` under ``gate``, by default the approval policy the capture's config set."""
     adapted = adapt_toolkit(CalculatorTools())
     return replace(
         adapted,
         functions=tuple(
-            replace(function, gate=ToolGate.POLICY) if function.name == "multiply" else function
-            for function in adapted.functions
+            replace(function, gate=gate) if function.name == "multiply" else function for function in adapted.functions
         ),
     )
 
@@ -781,13 +780,6 @@ async def test_an_approved_call_runs_with_the_decision_it_resumes_with_whatever_
     function as a job's first phase; the decision the resume carries already covers the call.
     """
     paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
-    gated_as_job = replace(
-        _gated_calculator(),
-        functions=tuple(
-            replace(function, gate=ToolGate.JOB) if function.gate is ToolGate.POLICY else function
-            for function in _gated_calculator().functions
-        ),
-    )
     gates: list[ToolGate | None] = []
 
     async def observe(call: ToolCall, call_next: ToolNext) -> object:
@@ -795,7 +787,7 @@ async def test_an_approved_call_runs_with_the_decision_it_resumes_with_whatever_
         return await call_next(call.arguments)
 
     _, record, _ = await _resume(
-        _agent(_model("code-model", answer("6 x 7 = 42.")), [gated_as_job]),
+        _agent(_model("code-model", answer("6 x 7 = 42.")), [_gated_calculator(ToolGate.JOB)]),
         paused,
         approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
         hooks=replace(NO_HOOKS, tool_middleware=(observe,)),

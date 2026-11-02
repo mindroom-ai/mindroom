@@ -223,15 +223,13 @@ _PAST = ["past-1 team question", "past-1 team answer", "past-2 team question", "
 
 def _checker_pauses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TeamTurn:
     """Return the squad whose leader hands the checker a ``touch`` call that pauses the turn for approval."""
-    team = squad_turn(
+    return squad_turn(
         tmp_path,
         monkeypatch,
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    team.config.background_tool_jobs.enabled = False
-    return team
 
 
 @pytest.mark.asyncio
