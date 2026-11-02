@@ -6,9 +6,16 @@ import asyncio
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.delegation.background import delegation_child
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import finish_child_turn, settle_child_response
-from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
+from mindroom.delegation.sessions import (
+    SUBAGENT_BUSY,
+    SubagentSessionError,
+    load_retained_subagent_turn,
+    load_subagent,
+    subagent_recovery_lock,
+)
 from mindroom.delegation.state import (
     DELEGATION_STATE_KEY,
     TERMINAL_CHILD_STATUSES,
@@ -24,7 +31,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -54,7 +61,21 @@ async def load_settled_subagent(
                 child = await load()
                 if child.status == "running":
                     await _recover_subagent_turn(child, config=config, runtime_paths=runtime_paths)
+    if _job_still_runs(child, runtime_paths):
+        # A settled child's job still delivers its answer; until that job ends, the handle keeps naming its turn.
+        raise SubagentSessionError(SUBAGENT_BUSY)
     return child
+
+
+def _job_still_runs(child: DelegationChild, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a subagent job this process runs for the child's turn has not ended yet."""
+    runtime = get_background_runtime(runtime_paths)
+    return runtime is not None and any(
+        job.kind == "delegation"
+        and job.status not in TERMINAL_STATUSES
+        and delegation_child(job).delegation_id == child.delegation_id
+        for job in runtime.retained_jobs()
+    )
 
 
 def _child_storage(child: DelegationChild, config: Config, paths: RuntimePaths) -> ConversationStore:
@@ -177,12 +198,8 @@ async def _cancel_delegations(
 ) -> None:
     """Cancel retained descendants without running any of their pending tools."""
     state = DelegationState.from_metadata(response.metadata)
-    background = get_background_runtime(runtime_paths)
     for child in state.children:
         if child.status not in TERMINAL_CHILD_STATUSES:
-            if background is not None and background.has_job(child.delegation_id):
-                # The job runtime owns this child and its approvals; its own cancellation settles it.
-                continue
             await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
     for pause_id, hook_state in state.hooks.items():
         child = next((item for item in state.children if item.parent_requirement_id == pause_id), None)

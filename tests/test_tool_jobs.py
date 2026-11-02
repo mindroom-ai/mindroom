@@ -2284,3 +2284,49 @@ async def test_a_job_whose_access_still_resolves_is_neither_started_nor_shown(tm
         assert await runtime.ended_jobs(key) == ()
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_adapter_save_keeps_the_jobs_status_and_leaves_an_ended_job_alone(tmp_path: Path) -> None:
+    """A running job saves its adapter as the job stands, so a saved cancel request stays one; an ended job keeps its own.
+
+    Recovery reads the saved status, so a save that wrote an earlier ``running`` over a cancel request would interrupt
+    a job its requester cancelled.
+    """
+    runtime = await tool_job_runtime(tmp_path)
+    cleaning, release = asyncio.Event(), asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def cleanup(_job: object) -> BackgroundOutcome | None:
+        cleaning.set()
+        await release.wait()
+        return None
+
+    adapter: dict[str, object] = {"step": "admitted"}
+    await start_job(
+        runtime,
+        "saved",
+        tool_name="tool",
+        depth=0,
+        adapter=adapter,
+        owner=job_owner(),
+        operation=operation,
+        cancel=cleanup,
+    )
+    try:
+        await runtime.request_cancel("saved")
+        await asyncio.wait_for(cleaning.wait(), 5)
+        await runtime.save_adapter("saved", step="started")
+        saved = (await saved_jobs(tmp_path))["saved"]
+        assert (saved.status, saved.adapter) == ("cancel_requested", {"step": "started"})
+        release.set()
+        await wait_for_status(runtime, "saved", "cancelled")
+        await runtime.save_adapter("saved", step="after the end")
+        saved = (await saved_jobs(tmp_path))["saved"]
+        assert (saved.status, saved.adapter) == ("cancelled", {"step": "started"})
+    finally:
+        release.set()
+        await runtime.shutdown()

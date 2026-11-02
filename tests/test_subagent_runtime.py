@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import subagent_sessions_dir
 from mindroom.delegation import recovery as delegation_recovery
-from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.matrix import state as matrix_state
@@ -50,6 +50,7 @@ from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    admit_delegation_job,
     awaiting_approval,
     completed_delegation_job,
     job_card_decision,
@@ -347,7 +348,7 @@ async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> 
         return BackgroundOutcome("completed", "answer")
 
     try:
-        job, claim = await start_delegation(
+        job, claim = await admit_delegation_job(
             coordinator.runtime,
             delegation_child(fixture),
             owner=fixture.owner,

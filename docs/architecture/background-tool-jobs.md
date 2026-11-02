@@ -27,6 +27,11 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - The response's `mindroom-agent` owner closes through the response's execution resources, so a shell job that outlives its reply keeps the CLI until the last job settles; cancelling one shell window stops only that window's calls.
 - A saved job result decodes only to text, media, session-state changes, and an error under fixed wire tags, so saved data never chooses the code that runs; a streamed call's job saves the joined text the model read, not its events.
 - Recovery fails on a saved job it cannot read and names that job, instead of dropping it silently.
+- A subagent call that can become a job is an ordinary managed call: the reply resolves, authorizes, and prepares its child without writing anything, so its job is known as that child from its start, in the jobs bar, listings, and handles, and is granted by the caller's delegation to that child; the job then starts, runs, and settles the child and asks for the child's approvals as its phases.
+  The native driver, which pauses the parent run for each child approval, remains only where calls cannot become jobs: background jobs off, minimal mode, nested children, and an excluded `delegate` toolkit.
+  A driver that started its own job and continued the paused parent with the result duplicated the generic start, wait, detach, claim, and record steps, and kept a parent pause and continuation per background subagent.
+- A subagent call an approval rule gates still pauses the reply for its own approval and becomes a job once approved, so a subagent job's `awaiting_approval` is always its child's and a restart never reads one as the other.
+- A follow-up waits until the job of the turn it continues has ended, not only until that child settled, because a child's turn settles before its job delivers the answer; a follow-up that took the handle in between would leave the earlier job's recovery without the turn it ran.
 - A job whose own call returned its result inline is kept one day instead of 30, because once it ended no listing, notice, or follow-up names it, so after its turn only a reread by its exact ID reads it; the day is a margin for such a reread, as by an ID a person saw in the jobs bar while the call ran.
   On a busy deployment about 99% of the stored result bytes belonged to such jobs, mostly images and shell output.
   Clearing the payload when the result is acknowledged was rejected: the job would stay in memory and in the table, and a reread by ID would find no result.
@@ -62,6 +67,8 @@ Cancellation cannot undo remote side effects or forcibly stop arbitrary Python t
 Excluded tools retain native behavior.
 Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
+Subagent calls of one model step run at the same time, as any managed calls do; of two follow-ups to one subagent in that step, the one that finds the other's turn running fails as busy.
+An earlier subagent job whose outcome save failed, or that waited while background jobs were turned off, can report the attempt its saved child names, or an interruption, instead of its final answer, when a follow-up advanced its handle before a crash or a later start recovered it; its child never runs twice.
 A notice reaches only a model step after a tool batch; a reply that ends without another tool call leaves the job to its follow-up.
 A follow-up in a session switched to minimal mode runs and reports results it cannot acknowledge, so a later standard reply may report them again.
 A follow-up whose turn ends without collecting its jobs is not admitted again in the same process; they wait for the next reply's note.

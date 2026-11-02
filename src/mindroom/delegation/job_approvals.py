@@ -28,11 +28,12 @@ async def request_child_approvals(
     response: RunRecord,
     toolkit_owners: Mapping[tuple[str, str], str],
     *,
+    job_id: str,
     owner: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[ApprovalCall, ...]:
-    """Ask the requester about each gated call of a paused child through cards its job owns, and wait for them.
+    """Ask the requester about each gated call of a paused child through cards its job ``job_id`` owns, and wait.
 
     Returns the planned calls the child resumes with, each approved, or denied with its reason.
     """
@@ -61,7 +62,7 @@ async def request_child_approvals(
         raise RuntimeError(msg)
     decided = await ask_job_approvals(
         runtime,
-        child.delegation_id,
+        job_id,
         plan.tools,
         plan.calls,
         owner=owner,

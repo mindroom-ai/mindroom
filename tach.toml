@@ -1613,7 +1613,9 @@ path = "mindroom.custom_tools.delegate"
 depends_on = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.agent_descriptions",
+    "mindroom.ai",
     "mindroom.delegation.direct",
+    "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
     "mindroom.delegation.sessions",
@@ -5452,7 +5454,6 @@ visibility = [
 path = "mindroom.tool_system.call_record"
 depends_on = []
 visibility = [
-    "mindroom.delegation.execution",
     "mindroom.reply_scope",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.runtime",
@@ -7542,8 +7543,6 @@ depends_on = [
     "mindroom.agent_loop.build",
     "mindroom.ai_run_metadata",
     "mindroom.delegation.job_approvals",
-    "mindroom.tool_jobs.consumption",
-    "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
     "mindroom.approval.receipt_readers",
@@ -7569,11 +7568,8 @@ depends_on = [
     "mindroom.run_storage",
     "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.control",
-    "mindroom.tool_jobs.conversation",
-    "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_jobs.background_after",
-    "mindroom.tool_jobs.results",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
@@ -7929,6 +7925,7 @@ path = "mindroom.delegation.recovery"
 depends_on = [
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
+    "mindroom.delegation.background",
     "mindroom.delegation.hooks",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.sessions",
@@ -8315,10 +8312,10 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.tool_jobs.results",
     "mindroom.tool_jobs.runtime",
-    "mindroom.tool_system.runtime_context",
 ]
 visibility = [
     "mindroom.delegation.execution",
+    "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
 ]
 
@@ -8345,7 +8342,6 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",
-    "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
@@ -8422,6 +8418,7 @@ depends_on = [
 path = "mindroom.tool_jobs.execution"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
     "mindroom.failure_text",
     "mindroom.llm",
@@ -8468,7 +8465,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.approval.execution",
-    "mindroom.delegation.execution",
     "mindroom.response_turn",
     "mindroom.teams",
     "mindroom.tool_jobs.execution",
@@ -8518,7 +8514,6 @@ path = "mindroom.tool_jobs.results"
 depends_on = ["mindroom.llm", "mindroom.tool_jobs.legacy_results", "mindroom.tool_system.tool_function"]
 visibility = [
     "mindroom.delegation.background",
-    "mindroom.delegation.execution",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.consumption",
 ]
@@ -8614,6 +8609,7 @@ depends_on = [
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.shell_contract",
     "mindroom.custom_tools.job",
+    "mindroom.delegation.state",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
@@ -8786,7 +8782,6 @@ depends_on = [
 
 visibility = [
     "mindroom.custom_tools.job",
-    "mindroom.delegation.execution",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.follow_ups",

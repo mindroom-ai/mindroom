@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _UNAVAILABLE = "Subagent ID is not available in this conversation."
+SUBAGENT_BUSY = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
 
 
 class SubagentSessionError(ValueError):
@@ -102,6 +103,8 @@ async def load_retained_subagent_turn(child: DelegationChild, runtime_paths: Run
 def subagent_recovery_lock(subagent_id: str, runtime_paths: RuntimePaths) -> Iterator[bool]:
     """Recover only while no process is executing or claiming a turn on this handle."""
     path = _path(subagent_id, runtime_paths)
+    # A job stopped before its child first claimed liveness may recover a handle no turn has created yet.
+    create_directory_durable(path.parent, mode=0o700)
     with path.with_suffix(".active.lock").open("a") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -149,8 +152,7 @@ async def reserve_subagent_turn(
                 if previous.delegation_id == child.delegation_id:
                     return previous
                 if previous.status not in TERMINAL_CHILD_STATUSES:
-                    msg = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
-                    raise SubagentSessionError(msg)
+                    raise SubagentSessionError(SUBAGENT_BUSY)
                 if child.previous_delegation_id != previous.delegation_id:
                     msg = "Subagent changed since this follow-up was prepared; retry the follow-up."
                     raise SubagentSessionError(msg)

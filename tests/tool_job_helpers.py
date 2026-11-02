@@ -18,13 +18,15 @@ from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
+from mindroom.ai import run_delegated_child_response
 from mindroom.approval.resume import ResumeRunner
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.delegation.background import start_delegation
+from mindroom.custom_tools import delegate as delegate_toolkit
+from mindroom.delegation.background import delegation_child, delegation_job
 from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import (
@@ -51,12 +53,15 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution import JobActor, assembled_job_tools, job_definitions_hook, with_job_admission
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.notices import job_notice_hook
 from mindroom.tool_jobs.runtime import (
     TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
+    JobClaim,
     JobGrant,
     ToolJobRuntime,
     _parse_saved_job,
@@ -578,12 +583,65 @@ async def keep_child(_child: DelegationChild) -> None:
     """A cancellation cleanup that leaves the child as its operation settled it."""
 
 
-async def start_delegation_job(runtime: ToolJobRuntime, child: DelegationChild, **options: Any) -> BackgroundJob:  # noqa: ANN401
-    """Accept a native child, then drop the claim its start minted, as `start_job` does."""
-    options.setdefault("cancel", keep_child)
-    job, claim = await start_delegation(runtime, child, **options)
+async def admit_delegation_job(
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    *,
+    owner: ToolExecutionIdentity,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    cancel: Callable[[DelegationChild], Awaitable[None]] = keep_child,
+    source_event_id: str | None = None,
+) -> tuple[BackgroundJob, JobClaim | None]:
+    """Accept ``operation`` as ``child``'s subagent job under the child's own ID, claiming its outcome."""
+    spec = delegation_job(child, operation, cleanup=cancel)
+    return await runtime.start(
+        child.delegation_id,
+        tool_name=spec.tool_name,
+        depth=child.depth - 1,
+        kind=spec.kind,
+        source_event_id=source_event_id,
+        adapter=spec.adapter,
+        owner=owner,
+        operation=spec.operation,
+        cancel=spec.cancel,
+    )
+
+
+async def start_delegation_job(
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    *,
+    owner: ToolExecutionIdentity,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    cancel: Callable[[DelegationChild], Awaitable[None]] = keep_child,
+    source_event_id: str | None = None,
+) -> BackgroundJob:
+    """Accept ``operation`` as ``child``'s subagent job, then drop the claim its start minted, as `start_job` does."""
+    job, claim = await admit_delegation_job(
+        runtime,
+        child,
+        owner=owner,
+        operation=operation,
+        cancel=cancel,
+        source_event_id=source_event_id,
+    )
     await runtime.release_wait(job.job_id, claim)
     return job
+
+
+def install_child_runner(monkeypatch: pytest.MonkeyPatch, run_child: ChildResponseRunner) -> None:
+    """Run every subagent job's child turns with ``run_child``, the seam a subagent call's job runs its child through."""
+    monkeypatch.setattr(delegate_toolkit, "run_delegated_child_response", run_child)
+
+
+def subagent_job_id(runtime: ToolJobRuntime, child: DelegationChild) -> str:
+    """Return the ID of the subagent job that runs ``child``'s turn."""
+    [job_id] = [
+        job.job_id
+        for job in runtime.retained_jobs()
+        if job.kind == "delegation" and delegation_child(job).delegation_id == child.delegation_id
+    ]
+    return job_id
 
 
 async def wait_for_status(runtime: ToolJobRuntime, job_id: str, status: str) -> None:
@@ -768,6 +826,10 @@ async def cancel_settled(
     return requested if drain is None else await asyncio.shield(drain)
 
 
+# A reply owns its tool execution while background tool jobs run: its resources, result claims, and job notices.
+_owned_turn = owned_tool_execution(enabled=lambda *_args, **_kwargs: True)
+
+
 @dataclass
 class DelegatingLeader:
     """The leader as a reply builds it, whose turns the native driver advances with a test's child runner.
@@ -800,7 +862,15 @@ class DelegatingLeader:
         await persist_to(self.store, self.session)(record)
 
     async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
-        """Run the leader on ``turns`` until it completes or pauses on its delegations."""
+        """Run the leader on ``turns`` until it completes or pauses on its delegations.
+
+        The turn owns its tool execution as a reply does: its managed calls become jobs whose results the leader's saved
+        run acknowledges.
+        """
+        return await _owned_turn(self._turn)(*turns, run_id=run_id)
+
+    async def _turn(self, *turns: Sequence[ScriptStep], run_id: str) -> RunRecord:
+        set_consumption_storage(lambda: self.store)
         self.agents.models["leader"] = ScriptedModel(list(turns))
         self.build = build = create_agent(
             "leader",
@@ -867,8 +937,8 @@ class DelegatingLeader:
     async def reply(
         self,
         *turns: Sequence[ScriptStep],
-        run_child: ChildResponseRunner,
+        run_child: ChildResponseRunner = run_delegated_child_response,
         run_id: str = "parent-run",
     ) -> RunRecord:
-        """Run one leader reply whose delegations ``run_child`` runs."""
+        """Run one leader reply; the native driver runs the delegations it pauses on with ``run_child``."""
         return await self.drive(await self.turn(*turns, run_id=run_id), run_child)

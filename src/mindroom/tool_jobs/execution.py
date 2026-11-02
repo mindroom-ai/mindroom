@@ -15,6 +15,7 @@ import json
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.model_loop import SendRequest
@@ -46,7 +47,7 @@ from mindroom.tool_jobs.execution_authority import (
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result
-from mindroom.tool_jobs.runtime import BackgroundOutcome, format_job_handle, get_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.agno_toolkits import requires_connect
@@ -264,7 +265,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
     with authorized_tool_call(owner, job_call):
         # Access may change after the call was offered, as a reload that removed its toolkit does: the call fails.
         check_current_execution_authority()
-        if mode != "managed" or call.function.gate is ToolGate.DELEGATION:
+        if mode != "managed":
             # A native call keeps its arguments, so a stray wait budget fails instead of running silently.
             arguments = call.arguments if mode == "native" else application_arguments(call.arguments)
             return await _run_here(call_next, arguments, unassembled=False)
@@ -325,8 +326,65 @@ def _detached(call: JobCall) -> JobCall:
     return replace(call, arguments=application_arguments(deepcopy(dict(call.arguments))), context=context)
 
 
-# The approval a gated call asks for as the first phase of its job: whether it was approved, and why not.
-type _AskApproval = Callable[[], Awaitable[tuple[bool, str | None]]]
+async def _call_job(
+    inner: Sequence[ToolMiddleware],
+    function: ToolFunction,
+    job_call: JobCall,
+    detached: JobCall,
+    scope: _JobScope,
+    owner: ToolExecutionIdentity,
+    *,
+    job_id: str,
+    job_approval: bool,
+) -> JobSpec:
+    """Return the job one managed call runs as; a call refused before it runs fails with why.
+
+    ``detached`` is the call the job runs. A subagent call's toolkit prepares its child in the reply, so the job is
+    known as that child from its start.
+    """
+    # The delegate toolkit imports the agent runtime, which imports this module.
+    from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
+
+    if isinstance(job_call.tool.toolkit, DelegateTools):
+        job = await job_call.tool.toolkit.managed_job(
+            function.name,
+            dict(detached.arguments),
+            job_id=job_id,
+            runtime=scope.runtime,
+        )
+        if isinstance(job, str):
+            raise _JobCallError(job)
+        return job
+    context, runtime = scope.context, scope.runtime
+    # The job's state changes are read against the copy it starts from, so a key a sibling adds to the live state
+    # after that copy never reads as deleted by this job.
+    baseline = deepcopy(detached.context.session_state)
+
+    async def ask_approval() -> tuple[bool, str | None]:
+        # The policy and approver current when the job asks decide, as for a paused reply.
+        return await ask_tool_call_approval(
+            runtime,
+            job_id,
+            detached,
+            owner=owner,
+            config=context.current_config,
+            runtime_paths=context.runtime_paths,
+        )
+
+    approval = ask_approval if job_approval else None
+    run_id, call_id = job_call.context.run_id, job_call.context.call_id
+    return JobSpec(
+        tool_name=function.name,
+        toolkit_name=job_call.tool.toolkit_name,
+        adapter={
+            "run_id": run_id,
+            "tool_call_id": call_id,
+            "arguments": encode_tool_result(job_call.arguments),
+            "origin": function_provenance(job_call.tool, job_call.arguments),
+            "authority": dict(job_call.tool.authority),
+        },
+        operation=lambda: _run_operation(inner, function, detached, owner, baseline, approval),
+    )
 
 
 async def _run_managed_call(
@@ -351,47 +409,37 @@ async def _run_managed_call(
         raise ValueError(msg)
     identity = {"owner": asdict(owner), "run_id": run_id, "tool_call_id": call_id}
     job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    adapter = {
-        "run_id": run_id,
-        "tool_call_id": call_id,
-        "arguments": encode_tool_result(job_call.arguments),
-        "origin": function_provenance(job_call.tool, job_call.arguments),
-        "authority": dict(job_call.tool.authority),
-    }
     detached = _detached(job_call)
-    # The job's state changes are read against the copy it starts from, so a key a sibling adds to the live state
-    # after that copy never reads as deleted by this job.
-    baseline = deepcopy(detached.context.session_state)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(function.name, dict(detached.arguments))
-
-    async def ask_approval() -> tuple[bool, str | None]:
-        # The policy and approver current when the job asks decide, as for a paused reply.
-        return await ask_tool_call_approval(
-            runtime,
-            job_id,
-            detached,
-            owner=owner,
-            config=context.current_config,
-            runtime_paths=context.runtime_paths,
-        )
-
-    approval = ask_approval if job_approval else None
     claim = None
     retained = False
+    job: JobSpec | None = None
     reference: ExecutionResourceReference | None = None
     try:
+        job = await _call_job(
+            inner,
+            function,
+            job_call,
+            detached,
+            scope,
+            owner,
+            job_id=job_id,
+            job_approval=job_approval,
+        )
         reference = scope.resources.acquire()
         _, claim = await runtime.start(
             job_id,
-            tool_name=function.name,
+            tool_name=job.tool_name,
             depth=depth,
-            toolkit_name=job_call.tool.toolkit_name,
+            kind=job.kind,
+            toolkit_name=job.toolkit_name,
             source_event_id=context.membership_turn_id,
             source_kind=context.source_kind,
-            adapter=adapter,
+            adapter=job.adapter,
             owner=owner,
-            operation=lambda: _run_operation(inner, function, detached, owner, baseline, reference, approval),
+            operation=partial(_releasing, reference, job.operation, function.name),
+            cancel=job.cancel,
             reattach=True,
         )
         waited = await runtime.wait(
@@ -400,8 +448,9 @@ async def _run_managed_call(
             depth=depth,
             timeout=background_after,
             claim=claim,
-            # The reply waits this long for a human decision, then goes on while the job waits for it.
-            approval_timeout=current_approval_wait_timeout() if job_approval else None,
+            # The reply waits this long for a human decision its job, or a subagent's child, awaits, then goes on
+            # while the job waits for it.
+            approval_timeout=current_approval_wait_timeout(),
         )
         if waited.claim is None:
             value, error = format_job_handle(waited.job), None
@@ -427,11 +476,34 @@ async def _run_managed_call(
     finally:
         if not retained:
             await runtime.release_wait(job_id, claim)
-        if reference is not None and not runtime.owns_execution(job_id, adapter):
+        if reference is not None and job is not None and not runtime.owns_execution(job_id, job.adapter):
             await reference.release()
     if error is not None:
         raise _JobCallError(error)
     return value
+
+
+async def _releasing(
+    reference: ExecutionResourceReference,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    tool_name: str,
+) -> BackgroundOutcome:
+    """Run a job's operation, then release the caller's resources it held, whatever the operation returned."""
+    try:
+        return await operation()
+    finally:
+        try:
+            await reference.release()
+        except asyncio.CancelledError:
+            # Resource release drains before propagating cancellation. Preserve
+            # the operation's outcome (or its original exception) after that drain.
+            pass
+        except Exception:
+            logger.exception("Tool execution resource cleanup failed", tool_name=tool_name)
+
+
+# The approval a gated call asks for as the first phase of its job: whether it was approved, and why not.
+type _AskApproval = Callable[[], Awaitable[tuple[bool, str | None]]]
 
 
 async def _run_operation(
@@ -440,37 +512,26 @@ async def _run_operation(
     call: JobCall,
     owner: ToolExecutionIdentity,
     baseline: dict[str, Any],
-    reference: ExecutionResourceReference,
     approval: _AskApproval | None,
 ) -> BackgroundOutcome:
     """Run a managed call as its job: its approval first when it asks for one, then the call, then its saved outcome."""
-    try:
-        if approval is not None:
-            approved, reason = await approval()
-            if not approved:
-                return BackgroundOutcome("denied", denial_note_for(reason))
-        with authorized_tool_call(owner, call):
-            job_checkpoint()
-            check_current_execution_authority()
-            async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
-                result = await run_tool_call(function, call.arguments, call.context, middleware=inner)
-            encoding = asyncio.create_task(
-                asyncio.to_thread(_saved_outcome, result, baseline, call.context.session_state),
-            )
-            try:
-                return await wait_for_future_until_complete(encoding)
-            except asyncio.CancelledError:
-                # The tool already returned; stopping its serializer must not erase that outcome.
-                return encoding.result()
-    finally:
+    if approval is not None:
+        approved, reason = await approval()
+        if not approved:
+            return BackgroundOutcome("denied", denial_note_for(reason))
+    with authorized_tool_call(owner, call):
+        job_checkpoint()
+        check_current_execution_authority()
+        async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+            result = await run_tool_call(function, call.arguments, call.context, middleware=inner)
+        encoding = asyncio.create_task(
+            asyncio.to_thread(_saved_outcome, result, baseline, call.context.session_state),
+        )
         try:
-            await reference.release()
+            return await wait_for_future_until_complete(encoding)
         except asyncio.CancelledError:
-            # Resource release drains before propagating cancellation. Preserve
-            # the tool's outcome (or its original exception) after that drain.
-            pass
-        except Exception:
-            logger.exception("Tool execution resource cleanup failed", tool_name=function.name)
+            # The tool already returned; stopping its serializer must not erase that outcome.
+            return encoding.result()
 
 
 def _saved_outcome(result: CallResult, baseline: dict[str, Any], state: dict[str, Any]) -> BackgroundOutcome:

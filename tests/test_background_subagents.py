@@ -18,7 +18,6 @@ from mindroom.delegation.background import (
     delegation_child,
     delegation_outcome,
     reconcile_delegation,
-    start_delegation,
 )
 from mindroom.delegation.sessions import subagent_liveness
 from mindroom.hooks import HookRegistry
@@ -37,6 +36,7 @@ from tests.agent_tool_helpers import detached_policy, toolkit_offers
 from tests.conftest import test_runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    admit_delegation_job,
     awaiting_approval,
     cancel_settled,
     intercept_job_saves,
@@ -519,7 +519,7 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
         return BackgroundOutcome("completed", "survived admission cancellation")
 
     admission = asyncio.create_task(
-        start_delegation(runtime, child, owner=job_owner(), operation=operation, cancel=keep_child),
+        admit_delegation_job(runtime, child, owner=job_owner(), operation=operation, cancel=keep_child),
     )
     try:
         await written.wait()

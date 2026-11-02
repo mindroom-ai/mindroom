@@ -2492,21 +2492,15 @@ class _MediaSlackTools(_SlackTools):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("needs", ["delegation", "stop-after-tool-call"])
 async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
-    needs: str,
 ) -> None:
-    """A stored call whose function runs elsewhere or ends the turn runs nothing, unspent."""
+    """A stored call whose function now ends the turn runs nothing, unspent."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
-    agent = _live_agent(
-        runs,
-        stop_after_tool_call=needs == "stop-after-tool-call",
-        gate=ToolGate.DELEGATION if needs == "delegation" else None,
-    )
+    agent = _live_agent(runs, stop_after_tool_call=True)
     try:
         await _armed(manager)
 
@@ -2813,6 +2807,41 @@ async def test_a_model_switch_is_never_a_scheduled_call() -> None:
             arguments_json='{"model_name": "default"}',
             execute_at="2030-01-02T09:00:00-05:00",
             description="Switch later",
+        )
+
+
+class _SubagentTools(Toolkit):
+    """A ``delegate`` toolkit's subagent function, as agent assembly offers it."""
+
+    def __init__(self) -> None:
+        super().__init__(name="delegate", tools=[self.run_subagent])
+
+    def run_subagent(self, task: str) -> str:
+        """Run a subagent.
+
+        Args:
+            task: The subagent's task.
+
+        """
+        return task
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_call_is_never_a_scheduled_call() -> None:
+    """A subagent call runs a child turn in its conversation, which a stored call cannot run later."""
+    context = _tool_context(_gated_config())
+
+    with (
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(SchedulingError, match="needs live input or conversation control"),
+    ):
+        await _LiveRun(((_SubagentTools(), "delegate"),)).call(
+            "schedule_tool_call",
+            tool_name="run_subagent",
+            arguments_json='{"task": "Research"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Delegate later",
         )
 
 

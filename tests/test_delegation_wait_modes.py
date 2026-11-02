@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,6 +21,7 @@ from tests.delegation_helpers import (
     ScriptedAgents,
     _runtime_paths,
     _saved_approval_calls,
+    approval_calls_for,
     approval_executor,
     respond,
     respond_team,
@@ -31,7 +31,7 @@ from tests.delegation_helpers import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, saved_jobs, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -46,7 +46,12 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
     initially_excluded: bool,
     team: bool,
 ) -> None:
-    """An approval before child admission follows the waiting policy of the instance that resumes it."""
+    """An approved subagent call keeps the path it paused on, whatever the instance that resumes it excludes.
+
+    A call the native driver gated, under an excluded ``delegate``, runs its child in the driver; a call the reply
+    paused on as an ordinary call runs as the instance now runs it, natively once excluded, where its wait budget is
+    rejected before any child starts.
+    """
     paths = _runtime_paths(tmp_path)
     config = with_responder_access(
         Config(
@@ -94,6 +99,7 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
             assert stored.status is RunStatus.paused
             state = DelegationState.from_metadata(stored.metadata)
             assert not state.children
+            assert bool(state.pending_tools) is initially_excluded
             assert code.requests == []
             await runtime.shutdown()
             release_background_tool_jobs(paths, instance)
@@ -102,7 +108,11 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
             runtime = await tool_job_runtime(tmp_path)
             await runtime.recover()
             register_background_runtime(paths, runtime)
-            approvals = _saved_approval_calls(state)
+            approvals = (
+                _saved_approval_calls(state)
+                if initially_excluded
+                else approval_calls_for(paused, default_agent="leader", toolkit_names={"run_subagent": "delegate"})
+            )
             decisions = {call.tool_call_id: True for call in approvals}
             result = (
                 await resume_team("squad", paused, approvals, **options, decisions=decisions)
@@ -122,10 +132,8 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
             assert "⏳" not in result.response_text
             jobs = await saved_jobs(paths.storage_root)
             if initially_excluded:
-                # Now managed: the approved child runs as a job.
-                [job] = jobs.values()
-                assert job.kind == "delegation"
-                await asyncio.wait_for(wait_for_status(runtime, job.job_id, "completed"), JOB_TEST_TIMEOUT)
+                # The driver that gated the call runs its child in the reply, as it would have before the restart.
+                assert jobs == {}
                 assert len(code.requests) == 1
             else:
                 # Now excluded: the approved call's wait budget is rejected, so the child never starts.

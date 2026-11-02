@@ -86,7 +86,7 @@ Set `minimal=True` to run the child in [minimal mode](agent-cli.md#minimal-subag
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
 Delegated runs do not create a Matrix thread and cannot ask the user interactive questions.
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
-In Matrix conversations, a parent runs its subagents one at a time.
+With [background jobs](#background-jobs) on, the subagent calls a parent makes in one step run at the same time; otherwise a parent in a Matrix conversation runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](../openai-api.md).
 Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](execution-and-coding.md#workspace-and-tool-output-files).
 
@@ -94,7 +94,7 @@ Use `continue_subagent` with the returned ID to send a follow-up into the same c
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
 Follow-ups keep the child's history, model, and mode, and recheck current permissions.
 A follow-up sent while the child is still running or awaiting approval is refused; finish that turn first.
-If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun, and a pending approval stays pending.
+If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.
 
 ```python
 run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")

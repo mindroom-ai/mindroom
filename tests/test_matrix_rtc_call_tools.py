@@ -360,8 +360,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     assert chat_functions["add"].gate is (ToolGate.JOB if jobs else ToolGate.POLICY)
     add = call_functions["add"]
     assert add.gate is None
-    # Delegation runs the child turn directly in calls instead of pausing for chat's driver.
-    assert chat_functions["run_subagent"].gate is ToolGate.DELEGATION
+    # Chat runs a subagent call as its job with jobs on, else pauses for the native driver; a call runs it directly.
+    assert chat_functions["run_subagent"].gate is (None if jobs else ToolGate.DELEGATION)
     assert call_functions["run_subagent"].gate is None
 
     started: list[str] = []
