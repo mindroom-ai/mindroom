@@ -2545,6 +2545,7 @@ depends_on = [
 path = "mindroom.custom_tools.matrix_agent_discovery"
 depends_on = [
     "mindroom.agent_descriptions",
+    "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.responder_availability",
     "mindroom.teams",

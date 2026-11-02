@@ -15,6 +15,7 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_api import MatrixApiTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.custom_tools.matrix_message_idempotency import claim_matrix_message_send
+from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks import EVENT_CONTACT_BEFORE_SEND, ContactBeforeSendContext, HookBindings, HookRegistry, hook
 from mindroom.matrix.message_extras import MatrixMessageExtra
@@ -31,6 +32,7 @@ from tests.conftest import (
     serve_conversation_reader,
     test_runtime_paths,
 )
+from tests.contacts.test_admission import _validator
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import BASE, CO_OWNER, OWNER, _load, _personal
 from tests.test_tool_hooks import _plugin
@@ -63,6 +65,7 @@ MENU = MatrixMessageExtra(title="Menu", content="Soup")
 @pytest.fixture(autouse=True)
 def _reset_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
+    MatrixRoomTools._recent_actions.clear()
 
 
 def _setup(tmp_path: Path, *, administrators: tuple[str, ...] = ()) -> tuple[Config, RuntimePaths]:
@@ -130,9 +133,10 @@ def _context(
     *callbacks: object,
     room_id: str = CONTACT_ROOM,
     requester_id: str = OWNER,
+    agent_name: str = "mind_alice",
 ) -> ToolRuntimeContext:
     """Alice's agent in a turn in ``room_id``, a contact turn by default; Alice was only invited to the contact room."""
-    client = make_matrix_client_mock(user_id=_agent(paths, "mind_alice"))
+    client = make_matrix_client_mock(user_id=_agent(paths, agent_name))
     client.room_send = AsyncMock(side_effect=_room_send)
     client.joined_members = AsyncMock(
         return_value=nio.JoinedMembersResponse(
@@ -147,7 +151,7 @@ def _context(
     reader.latest_thread_event_id = make_latest_thread_event_id_mock()
     bindings = HookBindings(registry=HookRegistry.from_plugins([_plugin("contact-policy", list(callbacks))]))
     return make_test_tool_runtime_context(
-        agent_name="mind_alice",
+        agent_name=agent_name,
         target=MessageTarget.resolve(room_id=room_id, thread_id=THREAD_ID, reply_to_event_id=EVENT_ID),
         requester_id=requester_id,
         client=client,
@@ -631,3 +635,99 @@ async def test_keyed_send_the_policy_stopped_stores_nothing_to_replay(tmp_path: 
     assert replayed == revised
     assert seen == ["The budget is 500.", "Dinner at eight?"]
     assert [content["body"] for content in _sent(context)] == ["Dinner at eight?"]
+
+
+def _received(paths: RuntimePaths, sender: str, content: dict[str, Any]) -> nio.RoomMessageText:
+    """Return what the other agent receives when ``sender`` sends ``content`` into the contact room."""
+    return nio.RoomMessageText.from_dict(
+        {"event_id": f"$from-{sender}", "sender": _agent(paths, sender), "origin_server_ts": 1, "content": content},
+    )
+
+
+async def _admitted_as(paths: RuntimePaths, config: Config, recipient: str, event: nio.RoomMessageText) -> str | None:
+    """Return the requester the recipient's ingress runs ``event`` as, or None when it starts no turn."""
+    validator = _validator(config, paths, recipient)
+    facts = validator.classify(event, room_id=CONTACT_ROOM)
+    room = nio.MatrixRoom(CONTACT_ROOM, validator.deps.matrix_id.full_id)
+    return facts.run_requester_id if await validator.precheck_event(room, event, facts) else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("room_id", [CONTACT_ROOM, PERSONAL_ROOM])
+async def test_the_other_agent_is_a_recipient_in_the_contact_room_and_runs_the_relay_as_its_own_owner(
+    tmp_path: Path,
+    room_id: str,
+) -> None:
+    """Bob's agent never admits Alice by access, yet her agent can wake it there, from a contact turn or her own turn.
+
+    The relay names Alice as the original sender, and Bob's agent runs it as Bob's contact turn.
+    """
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    context = _context(config, paths, room_id=room_id)
+    bob_agent = _agent(paths, "mind_bob")
+
+    with tool_runtime_context(context):
+        listed = json.loads(await MatrixRoomTools().matrix_room(action="agents", room_id=CONTACT_ROOM))
+    payload = await _call(context, message="Is Bob free on Friday?", room_id=CONTACT_ROOM, recipient="mind_bob")
+
+    assert listed["status"] == "ok"
+    assert "mind_bob" in [agent["name"] for agent in listed["agents"]]
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == CONTACT_ROOM
+    (content,) = _sent(context)
+    assert content["m.mentions"] == {"user_ids": [bob_agent]}
+    assert content[ORIGINAL_SENDER_KEY] == OWNER
+    assert await _admitted_as(paths, config, "mind_bob", _received(paths, "mind_alice", content)) == CO_OWNER
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_removed_contacts_other_agent_is_no_recipient(tmp_path: Path) -> None:
+    """Only an active contact makes the other agent a recipient; once it is removed, that agent's access decides again."""
+    config, paths = _setup(tmp_path)
+    _contact(paths, status="removed")
+    context = _context(config, paths, room_id=PERSONAL_ROOM)
+
+    payload = await _call(context, message="Is Bob free?", room_id=CONTACT_ROOM, recipient="mind_bob")
+
+    assert payload["status"] == "error"
+    assert payload["message"] == (
+        "Recipient 'mind_bob' is not available in this room. Available recipients: mind_alice."
+    )
+    assert _sent(context) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_the_agent_message_limit_ends_an_exchange_between_the_two_agents(tmp_path: Path) -> None:
+    """Each agent wakes the other through recipient until the conversation holds the limit of agent messages in a row.
+
+    Every relay runs as the receiving agent's owner, and the send past the limit is refused until a person writes.
+    """
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    turns = {
+        "mind_alice": _context(config, paths),
+        "mind_bob": _context(config, paths, agent_name="mind_bob", requester_id=CO_OWNER),
+    }
+    owners = {"mind_alice": OWNER, "mind_bob": CO_OWNER}
+    conversation = [make_visible_message(sender=CO_OWNER, body="Can our agents find a dinner date?")]
+    outcomes = []
+    for sender, recipient in [("mind_alice", "mind_bob"), ("mind_bob", "mind_alice")] * 2:
+        context = turns[sender]
+        serve_conversation_reader(context.conversation_reader, conversation, room_id=CONTACT_ROOM, thread_id=THREAD_ID)
+        payload = await _call(context, message="How about Friday?", recipient=recipient)
+        outcomes.append(payload["status"] if payload["status"] == "ok" else payload["message"])
+        if payload["status"] == "ok":
+            event = _received(paths, sender, _sent(context)[-1])
+            assert await _admitted_as(paths, config, recipient, event) == owners[recipient]
+            conversation.append(make_visible_message(sender=_agent(paths, sender), body="How about Friday?"))
+
+    assert outcomes == [
+        "ok",
+        "ok",
+        "ok",
+        "Not sent: The conversation already has 3 agent messages in a row; wait for a person to write.",
+    ]

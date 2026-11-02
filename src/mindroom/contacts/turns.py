@@ -127,6 +127,28 @@ def answers_alone(config: Config, runtime_paths: RuntimePaths, *, room_id: str, 
     return contact_room(config, runtime_paths, room_id, agent_name) is not None
 
 
+def contact_counterparty_agent(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    room_id: str,
+    agent_name: str,
+) -> str | None:
+    """Return the other agent of the active contact whose room ``room_id`` is, or None for any other room.
+
+    That agent's access never admits this agent's owner, yet it runs a message this agent sends it for its owner as its
+    own owner's contact turn, so it is always a recipient there.
+    """
+    found = contact_room(config, runtime_paths, room_id, agent_name)
+    if found is None:
+        return None
+    record, side = found
+    other = record.party(record.other(side))
+    if record.status != "active" or other.kind != "agent" or other.id not in config.agents:
+        return None
+    return other.id
+
+
 def leaves_to_other_agent(
     config: Config,
     runtime_paths: RuntimePaths,

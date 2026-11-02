@@ -9,6 +9,7 @@ import nio
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.authorization import responder_candidate_entities_with_membership_refresh
+from mindroom.contacts.turns import contact_counterparty_agent
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.responder_availability import filter_materializable_responders
 from mindroom.teams.formation import resolve_live_shared_agent_names
@@ -29,7 +30,10 @@ class _MatrixRoomAgent:
 
 
 async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> list[_MatrixRoomAgent]:
-    """Apply current ingress authorization, room scope, and runtime availability."""
+    """Apply current ingress authorization, room scope, and runtime availability.
+
+    In the agent's own active contact room, the contact's other agent is a candidate whatever its access says.
+    """
     context = replace(context, config=context.current_config, config_provider=None)
     target_room = context.room if room_id == context.room_id else None
     room = target_room or context.client.rooms.get(room_id) or nio.MatrixRoom(room_id, own_user_id="")
@@ -44,6 +48,15 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
             context.runtime_paths,
             context.require_agent_reply_memberships(),
         )
+    registry = entity_identity_registry(context.config, context.runtime_paths)
+    counterparty = contact_counterparty_agent(
+        context.config,
+        context.runtime_paths,
+        room_id=room_id,
+        agent_name=context.agent_name,
+    )
+    if counterparty is not None and (counterparty_id := registry.current_id(counterparty)) not in candidates:
+        candidates = [*candidates, counterparty_id]
     if context.orchestrator is not None:
         candidates = filter_materializable_responders(
             candidates,
@@ -52,7 +65,6 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
             materializable_agent_names=resolve_live_shared_agent_names(context.orchestrator, config=context.config),
             live_entity_names=context.orchestrator.running_entity_names(),
         )
-    registry = entity_identity_registry(context.config, context.runtime_paths)
     agents: dict[str, _MatrixRoomAgent] = {}
     tools = config_plugins(context.config, context.runtime_paths).tools
     for candidate in candidates:
