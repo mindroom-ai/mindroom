@@ -967,7 +967,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     assert persisted is not None
     if native_model and allow_native_compaction:
         assert prepared.compaction_decision.mode == "none"
-        assert prepared.compaction_decision.reason == "within_hard_budget"
+        assert prepared.compaction_decision.reason == "within_limit"
         assert prepared.compaction_reply_outcome == "none"
         summary_mock.assert_not_awaited()
         assert len(persisted.runs) == 3
@@ -1061,7 +1061,7 @@ async def test_compaction_stores_no_summary_the_reply_cannot_replay(
         assert persisted.summary is not None
         assert persisted.summary.text == summary
         return
-    assert decision.reason == "history_exceeds_hard_budget"
+    assert decision.reason == "request_exceeds_limit"
     assert summary_request_tokens > decision.limit_tokens
     assert prepared.compaction_reply_outcome == "failed"
     [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
@@ -1733,7 +1733,7 @@ async def test_prepare_history_for_run_replays_history_between_trigger_and_hard_
     )
 
     # The three 200-token runs exceed the 400-token trigger but fit the hard budget, about half the 20,000-token window.
-    assert prepared.compaction_decision.reason == "within_hard_budget"
+    assert prepared.compaction_decision.reason == "within_limit"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.estimated_tokens == 600
     assert prepared.replay_plan.num_history_runs is None
@@ -2228,7 +2228,7 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     # That request held the system prompt and all history but its own answer, which this request adds with its turn.
     assert prepared.compaction_decision.request_tokens == 8_000 + _TAIL_TOKENS
     assert prepared.compaction_decision.mode == "required"
-    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
+    assert prepared.compaction_decision.reason == "request_exceeds_limit"
     assert prepared.compaction_reply_outcome == "success"
     outcome = completed_outcome(lifecycle)
     # Notices show the history's share of the request, beside the 403-token system prompt and turn.

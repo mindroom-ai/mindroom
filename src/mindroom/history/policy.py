@@ -130,14 +130,14 @@ def classify_compaction_decision(  # noqa: PLR0911
     if request_tokens <= trigger:
         return decision(mode="none", reason="under_trigger")
     if limit is not None and request_tokens > limit:
-        return decision(mode="required", reason="history_exceeds_hard_budget")
+        return decision(mode="required", reason="request_exceeds_limit")
     if not allow_native_compaction:
         # Compaction leaves the summary, so a trigger the request reaches with the summary alone (or one the static
         # prompt reaches) cannot be met and would rewrite the summary every reply.
         if summary_request_tokens >= trigger:
             return decision(mode="none", reason="trigger_unreachable")
         return decision(mode="required", reason="over_trigger_native_disabled")
-    return decision(mode="none", reason="within_hard_budget")
+    return decision(mode="none", reason="within_limit")
 
 
 def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> str | None:

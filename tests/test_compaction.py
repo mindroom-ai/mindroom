@@ -108,11 +108,11 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         ({"text_compaction_available": False}, False, 60_000, 0, True, ("none", "compaction_unavailable")),
         ({"trigger_tokens": None}, False, 60_000, 0, True, ("none", "missing_budget")),
         ({}, False, 10_000, 0, True, ("none", "under_trigger")),
-        ({}, False, 60_000, 0, True, ("required", "history_exceeds_hard_budget")),
+        ({}, False, 60_000, 0, True, ("required", "request_exceeds_limit")),
         ({}, False, 12_001, 9_999, False, ("required", "over_trigger_native_disabled")),
         # The request would still reach the trigger with the summary as its only history.
         ({}, False, 12_001, 10_000, False, ("none", "trigger_unreachable")),
-        ({}, False, 12_001, 0, True, ("none", "within_hard_budget")),
+        ({}, False, 12_001, 0, True, ("none", "within_limit")),
     ],
 )
 def test_compaction_policy_classifies_every_branch(
@@ -222,7 +222,7 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
     assert payload["compaction"] == {
         "decision": "none",
         "outcome": "none",
-        "reason": "within_hard_budget",
+        "reason": "within_limit",
         "request_tokens": 12_001,
         "trigger_tokens": 10_000,
         "limit_tokens": 59_904,

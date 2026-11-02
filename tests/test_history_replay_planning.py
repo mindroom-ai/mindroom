@@ -884,7 +884,7 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
         allow_native_compaction=True,
     )
     assert decision.mode == "required"
-    assert decision.reason == "history_exceeds_hard_budget"
+    assert decision.reason == "request_exceeds_limit"
 
 
 def test_resolve_turn_model_uses_room_override_for_team(
@@ -1087,7 +1087,7 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
         allow_native_compaction=True,
     )
     assert decision.mode == "required"
-    assert decision.reason == "history_exceeds_hard_budget"
+    assert decision.reason == "request_exceeds_limit"
 
 
 def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
@@ -1122,10 +1122,10 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
     [
         (12_000, True, "none", "under_trigger"),
         (12_000, False, "none", "under_trigger"),
-        (12_001, True, "none", "within_hard_budget"),
+        (12_001, True, "none", "within_limit"),
         (12_001, False, "required", "over_trigger_native_disabled"),
-        (22_001, True, "required", "history_exceeds_hard_budget"),
-        (22_001, False, "required", "history_exceeds_hard_budget"),
+        (22_001, True, "required", "request_exceeds_limit"),
+        (22_001, False, "required", "request_exceeds_limit"),
     ],
 )
 def test_classify_compaction_decision_compacts_at_trigger_only_without_native_compaction(
