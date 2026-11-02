@@ -439,6 +439,26 @@ def platform_administrator_error(config: Config, message: str) -> str | None:
     return message
 
 
+def _personal_agent_template(config: Config, tokens: list[str]) -> tuple[str, str] | None:
+    """Return the template pointer and a note when ``tokens`` address an agent generated from personal_agents."""
+    if len(tokens) < 2 or tokens[0] != "agents" or (instance := config.personal_agent_instance(tokens[1])) is None:
+        return None
+    return (
+        f"/personal_agents/{instance.template}",
+        f"Agent '{tokens[1]}' has no `agents` entry: it is generated from the template "
+        f"`personal_agents.{instance.template}` for {instance.user_id}. Its configuration is that template, "
+        "plus the template's `users` overrides for its owner and any edits its owner made with update_agent.",
+    )
+
+
+def _reject_personal_agent_paths(config: Config, changes: list[_ConfigPatchChange]) -> None:
+    """Point a change to a personal agent at its template, which an agents entry would collide with."""
+    for change in changes:
+        if (template := _personal_agent_template(config, _decode_json_pointer(change.path))) is not None:
+            msg = f"{change.path!r} is not editable here. {template[1]} Patch `{template[0]}` instead."
+            raise _ConfigPatchError(msg)
+
+
 class _InfoType(str, Enum):
     """Types of information that can be retrieved."""
 
@@ -553,7 +573,10 @@ class ConfigManagerTools(Toolkit):
         if authorization_error is not None:
             return authorization_error
 
+        template_note = ""
         try:
+            if (template := _personal_agent_template(config, _decode_json_pointer(path))) is not None:
+                path, template_note = template[0], f"\n\n⚠️ {template[1]}"
             value = _resolve_json_pointer(config.redacted_authored_model_dump(), path)
             rendered = safe_dump(
                 value,
@@ -585,6 +608,7 @@ class ConfigManagerTools(Toolkit):
             f"- JSON Pointer: `{path}`\n"
             "- View: authored values only; unset defaults and runtime overlays are excluded\n\n"
             f"```yaml\n{rendered}\n```"
+            f"{template_note}"
             f"{include_note}"
         )
 
@@ -617,6 +641,7 @@ class ConfigManagerTools(Toolkit):
             )
 
         try:
+            _reject_personal_agent_paths(config, changes)
             authored = config.authored_model_dump()
             _reject_redaction_markers(changes)
             candidate, changed_paths = _apply_config_patch(authored, changes)
@@ -1384,12 +1409,17 @@ class ConfigManagerTools(Toolkit):
         if authorization_error is not None:
             return authorization_error
 
-        agent_dict = config.redacted_authored_model_dump().get("agents", {}).get(agent_name)
+        authored = config.redacted_authored_model_dump()
+        heading = f"## Configuration for '{agent_name}':"
+        agent_dict = authored.get("agents", {}).get(agent_name)
+        if agent_dict is None and (template := _personal_agent_template(config, ["agents", agent_name])) is not None:
+            heading = f"⚠️ {template[1]}\n\n## Template configuration at `{template[0]}`:"
+            agent_dict = _resolve_json_pointer(authored, template[0])
         if agent_dict is None:
             return f"Error: Agent '{agent_name}' not found."
 
         yaml_str = yaml.dump(agent_dict, default_flow_style=False, sort_keys=False)
-        return f"## Configuration for '{agent_name}':\n\n```yaml\n{yaml_str}```"
+        return f"{heading}\n\n```yaml\n{yaml_str}```"
 
     def _generate_agent_template(self, agent_type: str) -> str:
         """Generate a template configuration for common agent types."""

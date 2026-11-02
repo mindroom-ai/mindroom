@@ -541,6 +541,7 @@ The tool exposes four functions:
   `dry_run=True` validates a patch without saving it.
   The receipt lists the changed paths without echoing their values.
   When `config.yaml` uses `!include`, inspection works but patching is refused; edit the source files instead.
+  An agent generated from a `personal_agents` template has no `agents` entry, so `get_info("agent_config")` and inspecting `/agents/<name>` return its template at `/personal_agents/<template>`, naming the template and the agent's owner, and patches under `/agents/<name>` are refused with a pointer to that template.
 - **`manage_agent(operation, agent_name, ...)`**: `operation` is `create`, `update`, or `validate`, and the optional fields are `display_name`, `role`, `tools`, `instructions`, `model`, `rooms`, `knowledge_bases`, `include_default_tools`, and `markdown`.
   Creating requires `display_name`, takes a lowercase name of letters, digits, and underscores, defaults `model` to `default`, and defaults `include_default_tools` to `true`.
   Tool names and knowledge base IDs must exist.
