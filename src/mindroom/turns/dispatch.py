@@ -21,9 +21,8 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.dispatch_replay_guard import (
-    log_superseded_turn,
-    newer_unresponded_in_thread,
-    newer_unresponded_journal_thread_event,
+    has_newer_unresponded_in_thread,
+    has_newer_unresponded_journal_thread_event,
 )
 from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
@@ -418,7 +417,7 @@ class TurnDispatcher:
         thread_id = prepared.dispatch.target.resolved_thread_id
         if is_thread_history_degraded(thread_history):
             # Thread history degraded, so only pending journal events can prove a newer message.
-            newer_event_id = await newer_unresponded_journal_thread_event(
+            skips_turn = await has_newer_unresponded_journal_thread_event(
                 room_id=room.room_id,
                 event=event,
                 requester_user_id=requester_user_id,
@@ -430,7 +429,7 @@ class TurnDispatcher:
                 for_another_participant=partial(self._for_another_participant, room),
                 logger=self.deps.logger,
             )
-            if may_be_superseded and newer_event_id is None:
+            if may_be_superseded and not skips_turn:
                 self.deps.logger.warning(
                     "Thread replay guard degraded; proceeding without negative newer-message proof",
                     event_id=event.event_id,
@@ -439,19 +438,18 @@ class TurnDispatcher:
                     thread_read_degraded=True,
                 )
         else:
-            newer_event_id = await self._newer_unresponded_in_thread(
+            skips_turn = await self._has_newer_unresponded_in_thread(
                 room,
                 event,
                 requester_user_id,
                 thread_history,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
             )
-        if newer_event_id is None or not await visible_responses.settle_superseded_turn(prepared.handled_turn):
+        if not skips_turn or not await visible_responses.settle_superseded_turn(prepared.handled_turn):
             return False
-        log_superseded_turn(
-            self.deps.logger,
+        self.deps.logger.info(
+            "Skipping older message — a newer message from same sender in thread superseded it",
             skipped_event_id=event.event_id,
-            newer_event_id=newer_event_id,
             thread_id=thread_id,
         )
         return True
@@ -594,7 +592,7 @@ class TurnDispatcher:
                 scheduled_prompt=turn.event.body if prepared.dispatch.scheduled_history_budget is not None else None,
             )
 
-    async def _newer_unresponded_in_thread(
+    async def _has_newer_unresponded_in_thread(
         self,
         room: nio.MatrixRoom,
         event: PreparedIngress,
@@ -602,9 +600,9 @@ class TurnDispatcher:
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
         may_be_superseded_by_newer_requester_turn: bool,
-    ) -> str | None:
-        """Return the event ID of a newer unresponded message from the same requester, or None."""
-        return await newer_unresponded_in_thread(
+    ) -> bool:
+        """Return True when a newer unresponded message from the same requester exists."""
+        return await has_newer_unresponded_in_thread(
             event,
             requester_user_id,
             thread_history,
@@ -613,6 +611,7 @@ class TurnDispatcher:
             classify=self.deps.ingress.classify_source,
             is_handled=partial(self.deps.turn_store.handled_among, room.room_id),
             for_another_participant=partial(self._for_another_participant, room),
+            logger=self.deps.logger,
         )
 
     async def _for_another_participant(self, room: nio.MatrixRoom, event_id: str, source: Mapping[str, object]) -> bool:

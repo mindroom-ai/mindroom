@@ -960,7 +960,7 @@ class TestAgentBot(AgentBotTestBase):
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=dispatch),
             ),
-            patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value=None),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -1084,7 +1084,7 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.turns.dispatch.execute_router_relay",
                 new=AsyncMock(side_effect=fake_execute_router_relay),
             ),
-            patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value=None),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,

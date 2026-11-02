@@ -30,7 +30,7 @@ import structlog
 
 from mindroom.constants import SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_replay_guard import newer_unresponded_in_thread, newer_unresponded_journal_thread_event
+from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread, has_newer_unresponded_journal_thread_event
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, source_kind_from_content
 from mindroom.event_journal import EventKind, JournalEvent
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -155,11 +155,11 @@ async def _guard(
     may_be_superseded_by_newer_requester_turn: bool = True,
     thread_id: str | None = THREAD,
     requester_for: Mapping[str, str] | None = None,
-) -> str | None:
-    """Run the guard with the smallest collaborators that answer honestly; return the newer turn it proves."""
+) -> bool:
+    """Run the guard with the smallest collaborators that answer honestly."""
     resolved_event = event if event is not None else _older_turn()
 
-    return await newer_unresponded_journal_thread_event(
+    return await has_newer_unresponded_journal_thread_event(
         room_id=ROOM,
         event=resolved_event,
         requester_user_id=ALICE,
@@ -209,7 +209,7 @@ async def test_history_and_journal_share_requester_turn_eligibility(
         thread_id=THREAD,
         latest_event_id=NEWER,
     )
-    from_history = await newer_unresponded_in_thread(
+    from_history = await has_newer_unresponded_in_thread(
         _older_turn(),
         ALICE,
         [visible],
@@ -218,13 +218,14 @@ async def test_history_and_journal_share_requester_turn_eligibility(
         classify=_classify,
         is_handled=AsyncMock(side_effect=lambda event_ids: frozenset(event_ids) if handled else frozenset()),
         for_another_participant=_for_bob,
+        logger=structlog.get_logger("test"),
     )
     from_journal = await _guard(
         pending_turns,
         handled_event_ids={NEWER} if handled else (),
     )
-    assert from_history == (NEWER if expected else None)
-    assert from_journal == (NEWER if expected else None)
+    assert from_history is expected
+    assert from_journal is expected
 
 
 class TestTheTwoRecordsAreBothConsulted:
@@ -244,7 +245,7 @@ class TestTheTwoRecordsAreBothConsulted:
 
         suppressed = await _guard(pending_turns, handled_event_ids={NEWER})
 
-        assert suppressed is None
+        assert suppressed is False
 
     async def test_a_pending_event_absent_from_the_ledger_does_suppress(self) -> None:
         """The mirror, so the test above cannot pass by never suppressing.
@@ -257,7 +258,7 @@ class TestTheTwoRecordsAreBothConsulted:
 
         suppressed = await _guard(pending_turns, handled_event_ids=set())
 
-        assert suppressed == NEWER
+        assert suppressed is True
 
 
 class TestOnlyTheRequestersOwnNewerTurnCounts:
@@ -267,7 +268,7 @@ class TestOnlyTheRequestersOwnNewerTurnCounts:
         """Another participant talking is not this requester superseding themselves."""
         pending_turns = _PendingTurns(events=(_pending(sender=BOB),))
 
-        assert await _guard(pending_turns) is None
+        assert await _guard(pending_turns) is False
 
     async def test_a_relayed_turn_is_attributed_to_the_person_behind_it(self) -> None:
         """A relay's own Matrix ID is not the requester; the metadata says who is.
@@ -277,19 +278,19 @@ class TestOnlyTheRequestersOwnNewerTurnCounts:
         """
         pending_turns = _PendingTurns(events=(_pending(sender=BOB),))
 
-        assert await _guard(pending_turns, requester_for={BOB: ALICE}) == NEWER
+        assert await _guard(pending_turns, requester_for={BOB: ALICE}) is True
 
     async def test_a_router_voice_echo_is_not_a_turn(self) -> None:
         """The echo is a display artifact of the turn, not a second question."""
         pending_turns = _PendingTurns(events=(_pending(voice_echo=True),))
 
-        assert await _guard(pending_turns) is None
+        assert await _guard(pending_turns) is False
 
     async def test_a_newer_command_is_not_a_turn_that_owes_an_answer(self) -> None:
         """A command leaves dispatch long before a response would be owed."""
         pending_turns = _PendingTurns(events=(_pending(body="!help"),))
 
-        assert await _guard(pending_turns) is None
+        assert await _guard(pending_turns) is False
 
 
 class TestEveryWayOfNotKnowingLetsTheOlderTurnRun:
@@ -299,31 +300,31 @@ class TestEveryWayOfNotKnowingLetsTheOlderTurnRun:
         """A guard that suppressed on error would drop turns whenever it broke."""
         pending_turns = _PendingTurns(error=RuntimeError("journal unavailable"))
 
-        assert await _guard(pending_turns) is None
+        assert await _guard(pending_turns) is False
 
     async def test_an_empty_pending_set_does_not_suppress(self) -> None:
         """Nothing newer is pending, so there is nothing to stand aside for."""
-        assert await _guard(_PendingTurns()) is None
+        assert await _guard(_PendingTurns()) is False
 
     async def test_a_turn_outside_a_thread_is_never_suppressed(self) -> None:
         """The query is thread-scoped, so a roomwide turn has nothing to ask."""
         pending_turns = _PendingTurns(events=(_pending(),))
 
-        assert await _guard(pending_turns, thread_id=None) is None
+        assert await _guard(pending_turns, thread_id=None) is False
         assert pending_turns.calls == 0, "the journal was queried without a thread to query"
 
     async def test_a_turn_with_no_timestamp_is_never_suppressed(self) -> None:
         """Being newer is meaningless without one, and guessing would be worse."""
         pending_turns = _PendingTurns(events=(_pending(),))
 
-        assert await _guard(pending_turns, event=_older_turn(timestamp=None)) is None
+        assert await _guard(pending_turns, event=_older_turn(timestamp=None)) is False
         assert pending_turns.calls == 0
 
     async def test_a_turn_that_cannot_be_superseded_is_never_suppressed(self) -> None:
         """The caller has already decided this turn stands on its own."""
         pending_turns = _PendingTurns(events=(_pending(),))
 
-        assert await _guard(pending_turns, may_be_superseded_by_newer_requester_turn=False) is None
+        assert await _guard(pending_turns, may_be_superseded_by_newer_requester_turn=False) is False
         assert pending_turns.calls == 0
 
 
@@ -335,10 +336,10 @@ class TestTheQueryIsAskedForTheRightWindow:
         own_row: Any = _pending(event_id=OLDER, origin_server_ts=2_000)
         pending_turns = _PendingTurns(events=(own_row,))
 
-        assert await _guard(pending_turns) is None
+        assert await _guard(pending_turns) is False
 
     async def test_an_older_pending_event_is_not_newer(self) -> None:
         """Ordering is by origin timestamp, and the query is asked for one side."""
         pending_turns = _PendingTurns(events=(_pending(origin_server_ts=500),))
 
-        assert await _guard(pending_turns) is None
+        assert await _guard(pending_turns) is False

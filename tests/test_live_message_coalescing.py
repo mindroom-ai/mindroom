@@ -52,7 +52,7 @@ from mindroom.dispatch_handoff import (
     PreparedIngress,
     prepare_media_ingress,
 )
-from mindroom.dispatch_replay_guard import newer_unresponded_in_thread
+from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -2216,7 +2216,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
                 "build_dispatch_payload_with_attachments",
                 new=fake_build_payload,
             ),
-            patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value=None),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
                 "mindroom.response_runner.ResponseRunner._run_locked_turn",
@@ -5204,14 +5204,14 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock()
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
@@ -5264,14 +5264,14 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_pe
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
@@ -5357,7 +5357,7 @@ async def test_replay_guard_does_not_supersede_non_interactive_origin_turns() ->
         latest_event_id="$managed-newer",
     )
 
-    newer_event_id = await newer_unresponded_in_thread(
+    should_skip = await has_newer_unresponded_in_thread(
         older_event,
         "@mindroom_general:localhost",
         [newer_msg],
@@ -5366,9 +5366,10 @@ async def test_replay_guard_does_not_supersede_non_interactive_origin_turns() ->
         classify=lambda sender, _source: make_ingress_facts(sender, sender_entity_name="general"),
         is_handled=AsyncMock(return_value=frozenset()),
         for_another_participant=AsyncMock(return_value=False),
+        logger=MagicMock(),
     )
 
-    assert newer_event_id is None
+    assert not should_skip
 
 
 @pytest.mark.asyncio
@@ -5397,7 +5398,7 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
         latest_event_id="$visible_echo",
     )
 
-    newer_event_id = await newer_unresponded_in_thread(
+    should_skip = await has_newer_unresponded_in_thread(
         older_event,
         "@user:localhost",
         [visible_echo],
@@ -5413,9 +5414,10 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
         ),
         is_handled=AsyncMock(return_value=frozenset()),
         for_another_participant=AsyncMock(return_value=False),
+        logger=MagicMock(),
     )
 
-    assert newer_event_id is None
+    assert not should_skip
 
 
 @pytest.mark.asyncio
@@ -5444,7 +5446,7 @@ async def test_full_history_replay_guard_counts_non_router_visible_echo_marker()
         latest_event_id="$helper_relay",
     )
 
-    newer_event_id = await newer_unresponded_in_thread(
+    should_skip = await has_newer_unresponded_in_thread(
         older_event,
         "@user:localhost",
         [marked_helper_relay],
@@ -5460,9 +5462,10 @@ async def test_full_history_replay_guard_counts_non_router_visible_echo_marker()
         ),
         is_handled=AsyncMock(return_value=frozenset()),
         for_another_participant=AsyncMock(return_value=False),
+        logger=MagicMock(),
     )
 
-    assert newer_event_id == "$helper_relay"
+    assert should_skip
 
 
 @pytest.mark.asyncio
@@ -5508,14 +5511,14 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
@@ -5569,14 +5572,14 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock()
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
@@ -5634,14 +5637,14 @@ async def test_backlog_replay_degraded_thread_history_ignores_plain_reply_outsid
     await _admit_pending_thread_event(bot, newer_event_source)
     pending_turns = _watch_pending_turns(bot)
     action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
@@ -5696,14 +5699,14 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
     await _admit_pending_thread_event(bot, edit_event_source)
 
     action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
@@ -5742,7 +5745,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     pending_turns = _watch_pending_turns(bot)
 
     action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._newer_unresponded_in_thread)
+    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
     with (
         capture_logs() as captured_logs,
         patch.object(
@@ -5750,7 +5753,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", new=history_guard),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
         await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")

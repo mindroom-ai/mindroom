@@ -1961,7 +1961,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
                 "_prepare_dispatch",
                 new=AsyncMock(return_value=case.dispatch),
             ),
-            patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value="$newer:localhost"),
+            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
             await dispatch_test_turn(
@@ -2565,7 +2565,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
             "_prepare_dispatch",
             new=AsyncMock(return_value=dispatch),
         ),
-        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value="$newer:localhost"),
+        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(
             bot._turn_policy,
             "plan_turn",

@@ -1033,9 +1033,9 @@ def _router_relay_event(
 
 
 def _skip_logs(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Return each logged skip of an older message as its skipped and newer event IDs."""
+    """Return each logged skip of an older message as its event ID and thread."""
     return [
-        (log["skipped_event_id"], log["newer_event_id"])
+        (log["skipped_event_id"], log.get("thread_id"))
         for log in logs
         if str(log["event"]).startswith("Skipping older message")
     ]
@@ -1051,11 +1051,11 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(
     """A turn superseded by a newer unresponded requester message never reaches policy.
 
     The dispatch replay guard must consume the exact callback obligation without
-    recording a turn, evaluating policy, or sending anything, and the log names
-    both messages.
+    recording a turn, evaluating policy, or sending anything, and the log says
+    which message it skipped.
     """
     harness = _build_harness(config, tmp_path)
-    newer = await _serve_newer_requester_message(harness, config, history_degraded=history_degraded)
+    await _serve_newer_requester_message(harness, config, history_degraded=history_degraded)
     room = _room_with_members(config, "general")
     event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
 
@@ -1067,7 +1067,7 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(
     assert harness.gateway.sent == []
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
-    assert _skip_logs(logs) == [(event.event_id, newer.event_id)]
+    assert _skip_logs(logs) == [(event.event_id, _THREAD_ROOT)]
 
 
 @pytest.mark.asyncio
