@@ -1491,7 +1491,7 @@ class DeliveryGateway:
             and current is not None
             and current.owed_write == owed
             and not await self.deps.outbox.turn_membership_is_current(
-                turn_id=sent.row.write.span.delivery_id,
+                turn_id=sent.row.write.span.sources.pending_event_ids[0],
                 room_id=current.room_id,
             )
         ):

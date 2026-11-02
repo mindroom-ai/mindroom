@@ -39,7 +39,7 @@ from mindroom.reply_presentation import (
     note_segment,
     render_body,
 )
-from mindroom.response_sources import Unclaimed, UnclaimedReason
+from mindroom.response_sources import ResponseSources, Unclaimed, UnclaimedReason
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import MatrixDelivery
     from mindroom.message_target import MessageTarget
+    from mindroom.reply_turn.request import ResponseRequest
     from tests.runtime_fakes import ReadyRuntime
 
 pytestmark = pytest.mark.asyncio
@@ -155,6 +156,7 @@ async def _respond(
     *,
     resume: AsyncMock | None = None,
     target: MessageTarget | None = None,
+    request: ResponseRequest | None = None,
 ) -> None:
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = target or _target()
@@ -166,7 +168,7 @@ async def _respond(
         ),
         patch.object(type(runner.approvals), "_continue_entity_call", resume or AsyncMock()),
     ):
-        await runner.generate_response(_plain_request(target))
+        await runner.generate_response(request or _plain_request(target))
 
 
 def _resume_until_cancelled(resuming: asyncio.Event) -> AsyncMock:
@@ -218,6 +220,47 @@ async def test_an_approved_resume_completes_the_reply_it_paused(tmp_path: Path) 
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
         assert _sent_bodies(bot) == ["Thinking...", "Reading document", "Approved answer."]
+
+
+@pytest.mark.parametrize("ending", ["approved", "failed"])
+async def test_a_coalesced_turn_s_approval_ends_the_reply_it_paused(tmp_path: Path, ending: str) -> None:
+    """A coalesced turn's approval finds the answer or the note its reply ends with, as a single message's does."""
+    async with _approval_bot(tmp_path, requires_human=ending == "failed") as bot:
+        await bot.journal_principal().admit(
+            InboundEvent(
+                event_id="$event2",
+                room_id=_target().room_id,
+                thread_id=None,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=2,
+                source={},
+            ),
+        )
+        coalesced = replace(
+            _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2"),
+            sources=ResponseSources(("$event2", "$event"), ("$event", "$event2")),
+        )
+        if ending == "approved":
+            resume = AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {}))
+            await _respond(bot, resume=resume, request=coalesced)
+        else:
+            await _respond(bot, request=coalesced)
+            runner = unwrap_extracted_collaborator(bot._response_runner)
+            continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event2")
+            assert continuation is not None
+            failing = await runner.approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
+            assert failing is not None
+            assert await runner.approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+
+        reply = await _reply(bot)
+        assert reply.state is (rl.ReplyState.COMPLETED if ending == "approved" else rl.ReplyState.FAILED)
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event2") is None
+        assert not await bot._reply_runtime.store.is_pending("$event2")
+        assert _sent_bodies(bot)[-1] == (
+            "Approved answer." if ending == "approved" else "Reading document\n\nCard publication failed"
+        )
 
 
 async def test_a_finished_approval_records_its_turn_answered(tmp_path: Path) -> None:

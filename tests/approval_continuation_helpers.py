@@ -112,7 +112,9 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
         "calls": (),
         "state": "ready",
     }
-    return ApprovalContinuation(**(defaults | changes))
+    merged = defaults | changes
+    # A paused reply's span delivers the run's final answer under its first pending source.
+    return ApprovalContinuation(**({"final_delivery_id": merged["sources"].pending_event_ids[0]} | merged))
 
 
 def decided_calls(
