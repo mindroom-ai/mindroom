@@ -462,3 +462,16 @@ async def test_preview_ignores_a_retired_oauth_json_file(tmp_path: Path) -> None
     await tools_api._update_tools_statuses([tool], _preview_context(provider, runtime_paths, manager, None, None))
 
     assert tool["status"] == "requires_config"
+
+
+@pytest.mark.asyncio
+async def test_tool_status_creates_no_oauth_store(tmp_path: Path) -> None:
+    provider = google_oauth_provider("google_tasks")
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    tool = _google_tool("google_tasks")
+
+    await tools_api._update_tools_statuses([tool], _preview_context(provider, runtime_paths, manager, "shared", "code"))
+
+    assert tool["status"] == "requires_config"
+    assert not list(runtime_paths.storage_root.rglob("*.sqlite3"))

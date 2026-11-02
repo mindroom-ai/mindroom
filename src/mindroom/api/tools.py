@@ -23,7 +23,7 @@ from mindroom.credentials.manager import (
 from mindroom.mcp.registry import with_catalog_function_names
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
-    load_oauth_credentials_snapshot,
+    load_oauth_credentials_status,
     oauth_credentials_usable,
     resolve_oauth_credential_context,
 )
@@ -261,7 +261,7 @@ async def _load_oauth_provider_credentials(
     )
     if cache_key not in cache:
         try:
-            cache[cache_key] = (await load_oauth_credentials_snapshot(credential_context)).credentials
+            cache[cache_key] = (await load_oauth_credentials_status(credential_context, create_store=False)).credentials
         except (OAuthProviderError, ValueError):
             # A ValueError means a preview target lacks the requester or agent its store needs.
             cache[cache_key] = None
