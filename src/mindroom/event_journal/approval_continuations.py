@@ -191,8 +191,9 @@ class ApprovalContinuation:
     show_tool_calls: bool = True
     # The identity the paused run executed under; the resumed run and its tools execute under it again.
     execution_identity: ToolExecutionIdentity = field(kw_only=True)
-    # The delivery of the run's final answer, which its resume or its settlement writes: its paused span's.
-    final_delivery_id: str = field(kw_only=True)
+    # The delivery of the run's final answer, which its resume or its settlement writes: its paused span's. Read
+    # from that span like ``span_id`` below, so it takes no part in comparing two continuations.
+    final_delivery_id: str = field(kw_only=True, compare=False)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
     team_member_model_names: tuple[tuple[str, str], ...] = ()
