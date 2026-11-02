@@ -14,19 +14,17 @@ import pytest
 
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.checkpoint import BatchCheckpoint
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
-from mindroom.agent_loop.tools import PlannedCall, PreparedTools
+from mindroom.agent_loop.tools import PlannedCall
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
-from mindroom.llm.request_identity import RequestDigests
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.tool_function import ToolOutcome
 from tests.conftest import seed_session_state, stored_session_state
-from tests.fakes.scripted_model import ScriptedModel
+from tests.minimal_agent_fixtures import checkpoint_loop_state
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
@@ -57,16 +55,7 @@ async def _capture(checkpoint: BatchCheckpoint, record: RunRecord, messages: lis
         )
         for call in messages[-1].tool_calls or ()
     ]
-    state = LoopState(
-        messages=messages,
-        offered=PreparedTools(functions={}),
-        tools=(),
-        run=checkpoint.catalog.run,
-        record=record,
-        request_index=1,
-        request_template=EMPTY_REQUEST,
-        digests=RequestDigests(ScriptedModel([])),
-    )
+    state = checkpoint_loop_state(messages, checkpoint.catalog.run, record)
     await checkpoint.capture(state, planned)
 
 

@@ -8,6 +8,7 @@ the one encoding of a request or reply message that the provider and prompt gold
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
@@ -32,14 +33,9 @@ def turn_message(message: Message) -> dict[str, Any]:
     the request an answer answered is storage-only too: it digests that whole request, so it would change with any
     edit to it.
     """
-    stored = message.to_dict()
-    turn = {key: stored[key] for key in sorted(stored) if key not in STORAGE_ONLY_MESSAGE_KEYS}
-    provider_data = {key: value for key, value in turn.get("provider_data", {}).items() if key != REQUEST_IDENTITY_KEY}
-    if provider_data:
-        turn["provider_data"] = provider_data
-    else:
-        turn.pop("provider_data", None)
-    return turn
+    provider_data = {key: value for key, value in (message.provider_data or {}).items() if key != REQUEST_IDENTITY_KEY}
+    stored = replace(message, provider_data=provider_data).to_dict()
+    return {key: stored[key] for key in sorted(stored) if key not in STORAGE_ONLY_MESSAGE_KEYS}
 
 
 def render(value: object) -> str:

@@ -138,10 +138,8 @@ def settled[RecordT: AnyRunRecord](record: RecordT) -> RecordT:
     copy.created_at = 0
     for message in copy.messages:
         message.id, message.created_at = "", 0
-        if message.provider_data is not None and REQUEST_IDENTITY_KEY in message.provider_data:
-            message.provider_data = {
-                key: value for key, value in message.provider_data.items() if key != REQUEST_IDENTITY_KEY
-            }
+        if message.provider_data is not None:
+            message.provider_data.pop(REQUEST_IDENTITY_KEY, None)
     if copy.metrics is not None:
         copy.metrics.duration = copy.metrics.time_to_first_token = None
     if isinstance(copy, TeamRunRecord):

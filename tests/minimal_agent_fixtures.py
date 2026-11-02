@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.agent_cli.session import TurnToolRegistry
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.provider import ModelIdentity, NativeHistoryRoute, StreamEvent, TokenCounter
 
 
@@ -126,6 +127,20 @@ def parity():
 """
 
 
+def checkpoint_loop_state(messages: list[Message], run: RunContext, record: RunRecord) -> LoopState:
+    """Return the loop state of a run whose last message requests a tool batch, as a batch checkpoint captures it."""
+    return LoopState(
+        messages=messages,
+        offered=PreparedTools(functions={}),
+        tools=(),
+        run=run,
+        record=record,
+        request_index=1,
+        request_template=EMPTY_REQUEST,
+        digests=RequestDigests(ScriptedModel([])),
+    )
+
+
 async def capture_bash_batch(
     owner: LiveTurnTools,
     *bash_calls: tuple[str, dict[str, object]],
@@ -153,16 +168,7 @@ async def capture_bash_batch(
         )
         for call_id, arguments in bash_calls
     ]
-    state = LoopState(
-        messages=[*history, assistant],
-        offered=PreparedTools(functions={}),
-        tools=(),
-        run=catalog.run,
-        record=record,
-        request_index=1,
-        request_template=EMPTY_REQUEST,
-        digests=RequestDigests(ScriptedModel([])),
-    )
+    state = checkpoint_loop_state([*history, assistant], catalog.run, record)
     await owner.checkpoint.capture(state, planned)
 
 

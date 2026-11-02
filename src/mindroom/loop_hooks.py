@@ -2,7 +2,7 @@
 
 An agent turn, an approval resume, a delegated child's resume, a team member's run or resume, and a team leader's
 turn or resume install the hooks ``_loop_hooks`` composes once: the wait budget of managed tool-job calls, the
-participation gate, mid-turn compaction, the approval receipt, the output-limit answer, portable tool search, the
+participation gate, the approval receipt, mid-turn compaction, the output-limit answer, portable tool search, the
 tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the hook adds
@@ -147,8 +147,8 @@ def _loop_hooks(
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
     it, before its first request as a reader; mid-turn compaction last sizes the request that is sent, rewrites the
-    live messages, keeping the receipt, and folds into the scope only when the run replays it. Queued-message notices follow every tool batch and a resume's entry when
-    ``queued_notices`` is on; the run hears of the ended jobs of ``job_notices_for`` after each batch;
+    live messages, keeping the receipt, and folds into the scope only when the run replays it. Queued-message notices
+    follow every tool batch and a resume's entry when ``queued_notices`` is on; the run hears of the ended jobs of ``job_notices_for`` after each batch;
     ``skill_review_capture`` records the run's final request.
     """
     before_request: list[BeforeRequestHook] = []

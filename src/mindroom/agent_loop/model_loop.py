@@ -68,8 +68,9 @@ class LoopState:
     functions that answer the run's calls; ``tools`` are the definitions this request offers, which start as the
     offered functions' own and which a hook may extend (the wait budget job admission accepts) or replace (a skill
     review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions,
-    paused ones included, the loop fills as it goes; ``request_template`` carries the per-run request settings, which a hook may replace for the rest of the run
-    (mid-turn compaction turning the provider's compaction off after it compacted as text); ``digests`` identifies
+    paused ones included, the loop fills as it goes; ``request_template`` carries the per-run request settings, which a
+    hook may replace for the rest of the run (mid-turn compaction turning the provider's compaction off after it
+    compacted as text); ``digests`` identifies
     the loop's requests, so each answer records which request it answered (``llm.request_identity``).
     """
 
