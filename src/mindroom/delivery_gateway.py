@@ -2288,7 +2288,7 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
             return await self._finalize_streamed_response(request)
 
-    async def _finalize_streamed_response(  # noqa: PLR0911
+    async def _finalize_streamed_response(
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
@@ -2317,22 +2317,12 @@ class DeliveryGateway:
                     ),
                 )
 
-            if stream_outcome.failed and stream_outcome.visible_body_state != "visible_body":
-                # The span's end notes the failure below what the reply showed, as a whole delivery's does.
-                shown = request.initial_delivery_kind == "edited" and streamed_event_id is not None
-                return FinalDeliveryOutcome(
-                    ending=Failed(FailureCause.DELIVERY_FAILED),
-                    event_id=streamed_event_id if shown else None,
-                    is_visible_response=shown,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-
             if stream_outcome.visible_body_state != "visible_body":
-                # The span's end notes that the turn ended, or keeps the answer a regeneration that wrote nothing
-                # was replacing, as a whole delivery's does.
+                # The span's end notes that the final delivery failed or the turn ended without an answer, or keeps
+                # the answer a regeneration that wrote nothing was replacing, as a whole delivery's does.
+                cause = FailureCause.DELIVERY_FAILED if stream_outcome.failed else FailureCause.NOTHING_TO_SHOW
                 return FinalDeliveryOutcome(
-                    ending=Failed(FailureCause.NOTHING_TO_SHOW),
+                    ending=Failed(cause),
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
