@@ -134,6 +134,7 @@ A contact turn keeps the agent's identity, instructions, preloaded files, and me
 
 - It offers only the contact's tools plus `matrix_message`, and no skills, knowledge bases, or interactive questions.
 - It leaves out every function that would ask for approval, so a `tool_approval` rule that gates `matrix_message` leaves the agent unable to answer.
+- Its tool calls finish inside the turn and never become [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
 - `matrix_message` can read and write the contact room, and send a plain message to the owner in their personal room, in its timeline or a new thread, when the agent serves that room; it cannot send attachments or collapsible sections into a contact room.
 - Other tools that post into rooms refuse the contact room.
 - MindRoom itself saves nothing from it: it writes no memory and starts no skill review, and its conversations are neither summarized into file memory nor added to the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/), the agent's [thread exports](https://docs.mindroom.chat/thread-exports/), or [exploration](https://docs.mindroom.chat/scheduling/#exploration).

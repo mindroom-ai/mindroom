@@ -44,6 +44,8 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import answer_suppression
 from mindroom.response_sources import ResponseSources
 from mindroom.skill_learning.runner import SkillReviewRunner
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
@@ -64,6 +66,7 @@ from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import streamed_answer
 from tests.runtime_fakes import ready_runtime
 from tests.test_generated_agents import BASE, CO_OWNER, OWNER, _load, _personal
+from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -643,6 +646,39 @@ async def test_a_contact_turn_shows_nothing_and_offers_only_its_contacts_tools(
     assert "Sign every message with a haiku." in system_prompt
     assert CONFIG_RULE in system_prompt
     assert OWNER_RULE in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_a_contact_turn_runs_its_tools_inline_while_the_instance_runs_background_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every running job is published in its room's state, which the other side reads, so no contact call becomes one.
+
+    The turn offers no job controls either, since it has no jobs to manage.
+    """
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    model = ScriptedModel([calls(tool_call("add", "call-1", a=1, b=2)), answer("Told Alice's agent the sum.")])
+    install_model_providers(monkeypatch, {"default": model})
+    bot = _bot(config, paths)
+    instance = pin_background_tool_jobs(config, paths)
+    runtime = await tool_job_runtime(tmp_path / "jobs")
+    register_background_runtime(paths, runtime)
+
+    try:
+        [delivery] = (await _run(bot, CONTACT_ROOM)).ended
+        assert runtime.retained_jobs() == ()
+    finally:
+        await runtime.shutdown()
+        release_background_tool_jobs(paths, instance)
+
+    assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
+    first, second = model.requests
+    [add] = [tool for tool in first.tools if tool.name == "add"]
+    assert "background_after" not in json.dumps(add.parameters)
+    assert "job" not in {tool.name for tool in first.tools}
+    assert "3" in str(second.messages[-1].content)
 
 
 @pytest.mark.asyncio

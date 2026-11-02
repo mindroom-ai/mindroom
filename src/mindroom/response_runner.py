@@ -1003,7 +1003,8 @@ class ResponseRunner:
         """Build every input of one agent response turn.
 
         A contact turn offers only its contact's tools, none that would show an approval card to the other side, and
-        no interactive questions, since its reply never shows.
+        no interactive questions, since its reply never shows. Its calls run inline, because a background job is
+        published in its room's state, which the other side reads.
         """
         tool_names = (
             None
@@ -1050,6 +1051,7 @@ class ResponseRunner:
             knowledge=knowledge,
             include_interactive_questions=request.contact is None,
             supports_native_tool_approval=request.contact is None,
+            inline_tools=request.contact is not None,
             tool_names=tool_names,
         )
 

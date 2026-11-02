@@ -111,6 +111,7 @@ A gate on the final reply was rejected because the model loop yields text deltas
 A contact turn's room refuses every other send from that turn, its tools and their middleware included, in the delivery layer every Matrix send passes, and `matrix_message` lifts that refusal only around a send its policy approved.
 Blocking each path separately was rejected, because three review rounds each found another path that posted into the contact room without the policy, the last one the browser's notice of the worker computer.
 Contact turns keep their quiet delivery, so their replies never try a placeholder, stream, or error notice that the room would refuse.
+Their tools also run inline, never as background jobs, because every running job is published as a state event in its room, which the room does not refuse and the other owner's client shows with its tool name.
 
 ### Contact turns get a restricted surface
 

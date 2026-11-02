@@ -1325,12 +1325,15 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
             )
             target_names.append(tool_name)
+    # A build narrowed to an explicit tool list offers no job controls, which that list never names.
     controls = JobTools.build(
         {function.name for entry in entries for function in entry.adapted.functions},
         runtime_paths,
         execution_identity,
         depth=delegation_depth,
-        enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
+        enabled=not disable_runtime_capabilities
+        and narrowed_tools is None
+        and background_tool_jobs_enabled(config, runtime_paths),
         output_file_policy=_agent_tool_output_file_policy(
             agent_runtime,
             runtime_paths,
@@ -1673,8 +1676,8 @@ def create_agent(
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
-        inline_tools: Whether every tool call finishes inside the turn that made it, as a voice call's do, so
-            none can become a background job.
+        inline_tools: Whether every tool call finishes inside the turn that made it, as a voice call's and a
+            contact turn's do, so none can become a background job.
         persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
         tool_names: The agent's own toolkits or ``toolkit.function`` entries the build may offer, as a contact turn
             narrows them; unlike a persona it keeps the agent's identity, instructions, and memory, but loads no
