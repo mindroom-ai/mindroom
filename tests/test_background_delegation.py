@@ -1476,7 +1476,7 @@ async def test_only_a_build_whose_subagent_calls_become_jobs_offers_background_w
     """
     paths = _runtime_paths(tmp_path)
     config = delegating_config()
-    config.models["default"] = ModelConfig(provider="openai", id="gpt-4o-mini")
+    config.models["default"] = ModelConfig(provider="openai", id="gpt-6-astra")
     if excluded:
         config.background_tool_jobs.exclude_toolkits.append("delegate")
     persist_entity_accounts(config, paths)
