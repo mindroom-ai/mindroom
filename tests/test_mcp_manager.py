@@ -3453,19 +3453,13 @@ async def test_mcp_call_timings_classify_unavailable_tools_as_protocol_errors(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("dispatch_error", "reason"),
+    "dispatch_error",
     [
-        (BrokenPipeError("transport closed"), "MCP operation failed: transport closed"),
+        BrokenPipeError("transport closed"),
         # The SDK raises these codes for transport failures too, so they stay ambiguous.
-        (SdkMCPError(mcp_types.CONNECTION_CLOSED, "Connection closed"), "MCP operation failed: Connection closed"),
-        (
-            SdkMCPError(mcp_types.INTERNAL_ERROR, "Server returned an error response"),
-            "MCP operation failed: Server returned an error response",
-        ),
-        (
-            SdkMCPError(mcp_types.REQUEST_TIMEOUT, "Request 'tools/call' timed out"),
-            "MCP operation failed: Request 'tools/call' timed out",
-        ),
+        SdkMCPError(mcp_types.CONNECTION_CLOSED, "Connection closed"),
+        SdkMCPError(mcp_types.INTERNAL_ERROR, "Server returned an error response"),
+        SdkMCPError(mcp_types.REQUEST_TIMEOUT, "Request 'tools/call' timed out"),
     ],
     ids=["transport", "connection-closed", "internal-error", "request-timeout"],
 )
@@ -3473,7 +3467,6 @@ async def test_mcp_manager_reconnects_for_future_calls_without_replaying_ambiguo
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     dispatch_error: Exception,
-    reason: str,
 ) -> None:
     """Reconnect the transport but require an explicit retry after ambiguous dispatch, saying what failed."""
     _patch_manager(monkeypatch)
@@ -3487,6 +3480,7 @@ async def test_mcp_manager_reconnects_for_future_calls_without_replaying_ambiguo
     await manager.sync_servers(config)
     with pytest.raises(MCPConnectionError) as raised:
         await manager.call_tool("demo", "echo", {"value": "ping"})
+    reason = f"MCP operation failed: {dispatch_error}"
     assert str(raised.value) == f"MCP server 'demo' remote call outcome is unknown; retry manually ({reason})"
     assert _FakeClientSession.call_tool_invocation_count == 1
     assert len(_FakeClientSession.sessions) == 2
