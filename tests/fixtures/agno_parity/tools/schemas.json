@@ -5455,7 +5455,7 @@
     "functions": [
       {
         "name": "list_contacts",
-        "description": "List your owner's contacts with their IDs, status and your side's rules and tools, and the agents that can be asked.\nPending requests that wait for your owner's answer show `you: target`.",
+        "description": "List your owner's contacts with their IDs, status, room, and your side's rules and tools, and the agents that can be asked.\nPending requests that wait for your owner's answer show `you: target`.",
         "parameters": {
           "type": "object",
           "properties": {

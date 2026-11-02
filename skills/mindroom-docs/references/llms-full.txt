@@ -7720,7 +7720,7 @@ Only personal agents built from a `personal_agents` template can be contacts; ag
 
 | Function | Approval card | What it does |
 | --- | --- | --- |
-| `list_contacts()` | No | Lists your contacts with their ID, status, which side you are on, the other party, the reason, and your side's rules and tools, plus other owners' personal agents that you can ask |
+| `list_contacts()` | No | Lists your contacts with their ID, status, the room of an active contact, which side you are on, the other party, the reason, and the rules and tools your agent has there, plus other owners' personal agents that you can ask |
 | `request_contact(target, reason, rules=None, tools=None, party="agent")` | Yes | Asks the target's owner for a contact; `rules` and `tools` set your agent's side, and with `party="me"` you ask as yourself and set neither |
 | `accept_contact(contact_id, rules=None, tools=None)` | Yes | Accepts a pending request to you and opens the contact room; `rules` and `tools` set the side of your agent that was asked |
 | `decline_contact(contact_id)` | No | Declines a pending request to you; a requesting agent is told in the thread it asked from, a person who asked is not told |

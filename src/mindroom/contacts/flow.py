@@ -587,21 +587,33 @@ async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_i
     return record
 
 
+def _listed(config: Config, runtime_paths: RuntimePaths, record: ContactRecord, side: SideName) -> dict[str, object]:
+    """Return one contact as its owner's listing shows it, with an active contact's room and their side's terms.
+
+    A person's side has no rules or tools, and neither has an agent no longer configured.
+    """
+    party = record.party(side)
+    configured = party.kind == "agent" and party.id in config.agents
+    rules, tools = _side_terms(config, runtime_paths, record, side) if configured else (None, None)
+    return {
+        "id": record.id,
+        "status": record.status,
+        "room_id": record.room_id if record.status == "active" else None,
+        "you": side,
+        "with": record.counterparty(side).model_dump(mode="json"),
+        "reason": record.reason,
+        "your_rules": rules,
+        "your_tools": tools,
+    }
+
+
 def list_contacts(context: ToolRuntimeContext, agent_name: str) -> str:
     """Return the caller-owner's live contacts with their own side, and the personal agents they can ask, as YAML."""
     own = _own_party(context, agent_name)
-    config = context.current_config
+    config, paths = context.current_config, context.runtime_paths
     contacts = [
-        {
-            "id": record.id,
-            "status": record.status,
-            "you": side,
-            "with": record.counterparty(side).model_dump(mode="json"),
-            "reason": record.reason,
-            "your_rules": record.side(side).rules,
-            "your_tools": record.side(side).tools,
-        }
-        for record in read_contacts(context.runtime_paths).contacts
+        _listed(config, paths, record, side)
+        for record in read_contacts(paths).contacts
         if (side := record.owner_side(own.owner)) is not None and record.status != "removed"
     ]
     contactable = [

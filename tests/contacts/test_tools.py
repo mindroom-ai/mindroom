@@ -432,6 +432,14 @@ async def test_asking_again_says_the_existing_contact_is_unchanged(tmp_path: Pat
     )
     assert (record.reason, record.requester_side.rules) == ("Plan the dinner", None)
 
+    _activate(paths, record.id)
+    with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)):
+        active = await tool.request_contact("mind_bob", "Another reason")
+    assert active.startswith(
+        f"Contact {record.id} with mind_bob already exists and is active in the contact room {CONTACT_ROOM}; "
+        "it is returned unchanged.",
+    )
+
 
 @pytest.mark.asyncio
 async def test_declined_pair_refused(tmp_path: Path) -> None:
@@ -684,7 +692,10 @@ async def test_the_requesting_owner_removes_a_pending_contact_without_leaving_an
 
 @pytest.mark.asyncio
 async def test_list_contacts_shows_own_contacts_and_contactable_agents(tmp_path: Path) -> None:
-    """The owner sees their own contacts with their side, and the personal agents of others they can ask."""
+    """The owner sees their own contacts with their side's effective terms and an active contact's room, and the agents to ask.
+
+    A new conversation finds a contact's room only here, and the terms include the configured rules and default tools.
+    """
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime, rules="Be brief", tools=["calculator"])
@@ -693,19 +704,27 @@ async def test_list_contacts_shows_own_contacts_and_contactable_agents(tmp_path:
     listing = yaml.safe_load(flow.list_contacts(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"))
 
     (contact,) = listing["contacts"]
-    assert list(contact) == ["id", "status", "you", "with", "reason", "your_rules", "your_tools"]
+    assert list(contact) == ["id", "status", "room_id", "you", "with", "reason", "your_rules", "your_tools"]
     assert contact["id"] == record.id
     assert (contact["status"], contact["you"], contact["reason"]) == ("pending", "requester", "Plan the dinner")
+    assert contact["room_id"] is None
     assert contact["with"] == {"kind": "agent", "id": "mind_bob", "owner": CO_OWNER}
-    assert contact["your_rules"] == "Be brief"
-    assert contact["your_tools"] == ["calculator"]
+    assert contact["your_rules"] == "- Never share keys.\n- Be brief"
+    assert contact["your_tools"] == "calculator, matrix_message"
     assert listing["contactable_agents"] == [
         {"agent": "mind_bob", "owner": CO_OWNER},
         {"agent": "mind_carol", "owner": CAROL},
     ]
 
+    _activate(paths, record.id)
     bob_listing = yaml.safe_load(flow.list_contacts(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"))
-    assert {contact["you"] for contact in bob_listing["contacts"]} == {"target", "requester"}
+    by_side = {contact["you"]: contact for contact in bob_listing["contacts"]}
+    assert set(by_side) == {"target", "requester"}
+    assert (by_side["target"]["status"], by_side["target"]["room_id"]) == ("active", CONTACT_ROOM)
+    assert (by_side["target"]["your_rules"], by_side["target"]["your_tools"]) == (
+        "- Never share keys.",
+        "matrix_message",
+    )
     assert bob_listing["contactable_agents"] == [
         {"agent": "mind_alice", "owner": OWNER},
         {"agent": "mind_carol", "owner": CAROL},

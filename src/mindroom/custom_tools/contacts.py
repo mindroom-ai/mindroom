@@ -44,7 +44,8 @@ def _asked(context: ToolRuntimeContext, record: ContactRecord, *, posted: bool) 
         )
         return f"Asked {record.target.owner} to approve contact {record.id} with {record.target.id}; {answer}."
     other = record.target if record.requester.owner == owner else record.requester
-    return f"Contact {record.id} with {other.id} already exists and is {record.status}; it is returned unchanged."
+    room = f" in the contact room {record.room_id}" if record.status == "active" else ""
+    return f"Contact {record.id} with {other.id} already exists and is {record.status}{room}; it is returned unchanged."
 
 
 class ContactsTools(Toolkit):
@@ -71,7 +72,7 @@ class ContactsTools(Toolkit):
         return function
 
     async def list_contacts(self) -> str:
-        """List your owner's contacts with their IDs, status and your side's rules and tools, and the agents that can be asked.
+        """List your owner's contacts with their IDs, status, room, and your side's rules and tools, and the agents that can be asked.
 
         Pending requests that wait for your owner's answer show `you: target`.
         """
