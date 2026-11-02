@@ -354,9 +354,11 @@ class BudgetMonitor:
                 if delay > 0:
                     await asyncio.sleep(delay)
             # Requests made while waiting are covered by this scan; ones made during it earn one trailing scan.
+            # Startup, a config change, or a reply of unknown cost asks for a scan; otherwise the schedule is due.
+            requested = self._wake.is_set()
             self._wake.clear()
             last_scan_started = time.monotonic()
-            await self._scan()
+            await self._scan(requested=requested)
             last_scan_seconds = time.monotonic() - last_scan_started
 
     def _scan_due(self, last_scan_started: float | None) -> bool:
@@ -367,7 +369,7 @@ class BudgetMonitor:
             or time.monotonic() - last_scan_started >= self.reconcile_seconds
         )
 
-    async def _scan(self) -> None:
+    async def _scan(self, *, requested: bool) -> None:
         config = self.config_provider()
         if config is None:
             return
@@ -378,13 +380,23 @@ class BudgetMonitor:
             self._costs_before_scan[user_id] = self._costs_before_scan.get(user_id, 0.0) + cost_usd
         self._costs_since_scan = {}
         try:
-            snapshot = await asyncio.to_thread(self._collect, config, self.clock())
+            snapshot, scan_seconds = await asyncio.to_thread(self._collect, config, self.clock())
         except Exception:
             # Usage storage is external state; keep enforcing the last good scan and the replies since it started.
             logger.warning("budget_scan_failed", exc_info=True)
             return
         self._snapshot = snapshot
         self._costs_before_scan = {}
+        logger.info(
+            "budget_scan_completed",
+            requested=requested,
+            duration_seconds=round(scan_seconds, 3),
+            scanned_sources=snapshot.scanned_sources,
+            unavailable_sources=snapshot.unavailable_sources,
+        )
 
-    def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
-        return collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))
+    def _collect(self, config: Config, now: datetime) -> tuple[SpendSnapshot, float]:
+        # Timed in the worker thread, so waiting for a free worker or for the loop to resume is not counted.
+        started = time.monotonic()
+        snapshot = collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))
+        return snapshot, time.monotonic() - started

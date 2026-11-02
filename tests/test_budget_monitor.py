@@ -704,6 +704,25 @@ async def test_a_completed_unpriced_reply_neither_adds_nor_scans(
 
 
 @pytest.mark.asyncio
+async def test_each_scan_logs_its_duration_and_whether_something_requested_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scan holds the GIL in a worker thread, so how long each one ran and what started it is logged."""
+    _Scans(monkeypatch, {ALICE: 1.0})
+    monitor, _current = _monitor(tmp_path, _config(), tick_seconds=0.01, reconcile_seconds=0.05)
+
+    with capture_logs() as logs:
+        await monitor.sync(_config())
+        await _until(lambda: sum(entry["event"] == "budget_scan_completed" for entry in logs) >= 2)
+        await monitor.stop()
+
+    completed = [entry for entry in logs if entry["event"] == "budget_scan_completed"]
+    assert [entry["requested"] for entry in completed[:2]] == [True, False]
+    assert all(entry["duration_seconds"] >= 0 and entry["scanned_sources"] == 2 for entry in completed)
+
+
+@pytest.mark.asyncio
 async def test_a_stopped_reply_adds_nothing_and_requests_a_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
