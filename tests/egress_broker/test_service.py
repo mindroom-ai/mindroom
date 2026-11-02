@@ -1752,6 +1752,61 @@ async def test_a_github_app_service_injects_its_minted_token_and_never_a_stored_
     ]
 
 
+@pytest.mark.asyncio
+async def test_github_app_services_limited_to_different_agents_each_serve_their_own(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    get_through: GetThrough,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two App services on the same hosts: each agent gets its own service's token, any other agent a refusal."""
+
+    async def token_endpoint(request: httpx.Request) -> httpx.Response:
+        repositories = json.loads(request.read())["repositories"]
+        return httpx.Response(
+            201,
+            json={"token": f"token-for-{'-'.join(repositories)}", "expires_at": "2099-01-01T00:00:00Z"},
+        )
+
+    monkeypatch.setattr(
+        service,
+        "GitHubAppTokenProvider",
+        lambda: GitHubAppTokenProvider(client=httpx.AsyncClient(transport=httpx.MockTransport(token_endpoint))),
+    )
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    agents = {name: AgentConfig(display_name=name.title()) for name in ("code", "general", "research")}
+
+    def team(agent: str, repository: str, access: str) -> dict[str, object]:
+        app = {"credentials_service": "acme_app", "repositories": {repository: access}}
+        return {**_GITHUB, "agents": [agent], "github_app": app}
+
+    services = {
+        "github_team_a": team("code", "acme/api", "read_write"),
+        "github_team_b": team("general", "acme/docs", "read"),
+    }
+    config = Config(agents=agents, egress_broker={"services": services})
+    _save_github_app(manager, tmp_path / "app.pem")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        envs = {
+            agent: execution_env_for_worker(
+                runtime_paths,
+                config=config,
+                worker_target=_routable_target("@alice:example.org", agent),
+            )
+            for agent in agents
+        }
+        responses = {agent: await get_through(env) for agent, env in envs.items()}
+
+    assert responses["code"].json()["headers"]["authorization"] == ["Bearer token-for-api"]
+    assert responses["general"].json()["headers"]["authorization"] == ["Bearer token-for-docs"]
+    assert responses["research"].status_code == 403
+    assert responses["research"].json()["error"] == "agent_not_allowed"
+    assert "GH_TOKEN" not in envs["research"]
+    assert len(tls_upstream.hits) == 2
+
+
 _DRIVE_PLACEHOLDER = "DRIVE_TOKEN"
 
 

@@ -362,9 +362,10 @@ class EgressService(BaseModel):
     agents: list[str] | None = Field(
         default=None,
         description=(
-            "Agents whose requests get the service's credential; requests it matches from any other agent are "
-            "refused (403 agent_not_allowed), and it is not offered to them. Omit to serve every agent that uses "
-            "Agent Keys. Only config.yaml may set it, and presets never do"
+            "Agents whose requests get the service's credential; a request of any other agent goes to a matching "
+            "service that serves it, is refused (403 agent_not_allowed) when none does, and the service is not offered "
+            "to that agent. Omit to serve every agent that uses Agent Keys. Only config.yaml may set it, and presets "
+            "never do"
         ),
     )
     github_app: EgressGitHubApp | None = Field(

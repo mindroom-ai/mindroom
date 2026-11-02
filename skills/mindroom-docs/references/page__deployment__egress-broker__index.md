@@ -149,7 +149,7 @@ egress_broker:
 
 Prefer `bearer`, `basic`, or `header` over `query`, which puts the key in the URL; see [What the broker cannot protect against](#what-the-broker-cannot-protect-against).
 
-Matching follows this order: exact host over wildcard, specific port over none, longest path prefix, then the service whose name sorts first, so the order services are written in never matters.
+Matching follows this order: a service that serves the requesting agent (see [`agents`](#limiting-a-service-to-some-agents)) over one that does not, exact host over wildcard, specific port over none, longest path prefix, then the service whose name sorts first, so the order services are written in never matters.
 
 Service names use up to 63 lowercase letters, digits, `_`, and `-`, start with a letter or digit, and must not end in `_oauth` or `_oauth_client`.
 
@@ -380,9 +380,11 @@ egress_broker:
       agents: [research, coder]
 ```
 
-Requests from any other agent that the service matches get 403 `agent_not_allowed`, its egress page and the [`egress_credentials` tool](#agent-tool) leave the service out for that agent, and its placeholder variables are not set.
+A request from any other agent goes to the best matching service that serves that agent, which can be another config service on the same hosts or the user's own service, and gets 403 `agent_not_allowed` only when no such service matches.
+So services limited to different agents can share hosts and paths, such as one [GitHub App](#github-app) service per team.
+When two services that serve the agent match equally well, the config service wins over a user's own, then the one whose name sorts first.
+The service's egress page and the [`egress_credentials` tool](#agent-tool) leave the service out for other agents, and its placeholder variables are not set for them.
 The dashboard lists the service in every scope with the agents it is limited to.
-A user's own service on the same hosts and paths loses the tie to it, so for another agent a request uses that service only by naming it with the `X-Agent-Keys-Service` header (see [A service's own account](#a-services-own-account)).
 Every name must be an existing agent.
 Where agents share a sandbox, the list decides which agents get the key but not which code can reach it: the static runner runs every agent's calls in one process, and a requester's `user` agents share one worker, so code there can use a listed agent's proxy token (see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes)).
 
@@ -431,11 +433,34 @@ egress_broker:
   To let agents fetch other public repositories, such as a `pip install git+https://github.com/<owner>/<repository>` dependency, write the service's rules yourself instead of `preset: github`, limited to the App's owner (`path_prefix: /repos/acme/` on `api.github.com` and `uploads.github.com`, `/acme/` on `github.com`, plus `/graphql` on `api.github.com`), so other repositories match no rule and go out without credentials.
 - A request that names no repository in its path, such as GraphQL, which `gh pr create` and `gh pr view` use, gets read access to every listed repository, or read and write when every listed repository is `read_write`.
   In a service that mixes the two, `gh` commands that write through GraphQL therefore fail; `gh api repos/<owner>/<repository>/...` and git work at each repository's own access.
+  Prefer one access level per service, as in the example below.
 - GitHub refuses a token anything private outside its repositories and anything its permissions do not allow, so that holds even for requests whose path names no repository.
 - The service uses no key or connected account: a preset's account login is left out, setting `oauth_provider`, `read_only`, `oauth_on_shared_workers`, or `admin_key` next to `github_app` is an error, and the egress pages offer no key for it.
 - Every agent the service serves shares the App, whatever its worker scope.
   Combine it with [`agents`](#limiting-a-service-to-some-agents) to choose which agents get it.
   Because the tokens are shared, code in any of those agents' sandboxes can use up the installation's rate limit or revoke the current token, which cuts the others off until the broker mints the next one, within an hour.
+
+To give teams different repositories, define one service per team, each limited with [`agents`](#limiting-a-service-to-some-agents) and with one access level, so `gh pr create` works for the team that writes:
+
+```yaml
+egress_broker:
+  services:
+    github_team_a:
+      preset: github
+      agents: [agent_a]
+      github_app:
+        credentials_service: acme_github_app
+        repositories: {acme/api: read_write, acme/web: read_write}
+    github_team_b:
+      preset: github
+      agents: [agent_b]
+      github_app:
+        credentials_service: acme_github_app
+        repositories: {acme/docs: read}
+```
+
+Each agent's requests then use its own team's service; an agent in neither list gets 403 `agent_not_allowed`.
+Two services that serve the same agent on the same hosts do not combine: the one whose name sorts first takes every request, so list all of an agent's repositories in one service.
 
 Until the credential is stored, the service shows as not set, its placeholder variables are not added, and requests get 403 `credential_not_configured`.
 When GitHub issues no token, for example because the App lacks a permission or an installation does not include a listed repository, requests get 503 `github_app_token_failed` and the primary logs `egress_broker_github_app_token_failed` with GitHub's HTTP status.
@@ -749,7 +774,7 @@ The broker returns these errors to worker code:
 | Request that an account allowed read only may not make (see [Read-only accounts](#read-only-accounts)) | 403 JSON `{"error": "read_only", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; allow read and write at `manage_url` |
 | Matched service, no key, and an account provider nobody allowed Agent Keys to use | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "provider": "<id>", "oauth_reuse": "off", "manage_url": "<link>", "message": "..."}` with no `connect_url`; add a key or allow the account at `manage_url` |
 | Matched service whose [own account](#a-services-own-account) is not connected or not allowed | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}` with no `connect_url`, plus `"provider": "<id>"` and `"oauth_reuse": "off"` while nobody allowed it; connect and allow the service's own account at `manage_url` |
-| Matched service whose `agents` list leaves out the calling agent (see [Limiting a service to some agents](#limiting-a-service-to-some-agents)) | 403 JSON `{"error": "agent_not_allowed", "service": "<name>", "message": "..."}`; an administrator changes the list |
+| Matched service whose `agents` list leaves out the calling agent, with no matching service that serves it (see [Limiting a service to some agents](#limiting-a-service-to-some-agents)) | 403 JSON `{"error": "agent_not_allowed", "service": "<name>", "message": "..."}`; an administrator changes the list |
 | Matched [administrator key](#administrator-keys) service whose key is not set | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "message": "..."}` with no `manage_url`; an administrator sets the key on the dashboard |
 | Matched [GitHub App](#github-app) service whose App credential is not stored | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "message": "..."}` with no `manage_url`; an administrator stores the credential |
 | Matched [GitHub App](#github-app) service, request for a repository it does not list | 403 JSON `{"error": "repository_not_allowed", "service": "<name>", "repository": "<owner>/<repository>", "message": "..."}`; an administrator adds the repository |

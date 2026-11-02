@@ -135,6 +135,33 @@ def test_config_service_wins_a_tie_with_a_user_service_whatever_their_names() ->
     assert route.match.service == "zeta"
 
 
+def test_a_request_routes_to_a_service_that_serves_its_agent() -> None:
+    """Services limited to different agents can share hosts: each agent's request takes a service that serves it.
+
+    That beats a more specific rule of a service that does not; with no serving service the best match stays, as
+    without `agents`, and the secret lookup refuses it.
+    """
+    config = EgressBrokerConfig(
+        services={
+            "team_a": EgressService(rules=[_rule("api.github.com")], agents=["agent_a"]),
+            "team_b": EgressService(rules=[_rule("api.github.com")], agents=["agent_b"]),
+            "docs_b": EgressService(rules=[_rule("api.github.com", "/repos/acme/docs")], agents=["agent_b"]),
+        },
+    )
+
+    def routed(agent_name: str, path: str = "/repos/acme/api") -> str:
+        match = route_request(EgressRules.from_config(config), "api.github.com", 443, path, agent_name=agent_name).match
+        assert match is not None
+        return match.service
+
+    assert routed("agent_a") == "team_a"
+    assert routed("agent_b") == "team_b"
+    assert routed("agent_a", "/repos/acme/docs") == "team_a"
+    assert routed("agent_b", "/repos/acme/docs") == "docs_b"
+    assert routed("agent_c") == "team_a"
+    assert routed("agent_c", "/repos/acme/docs") == "docs_b"
+
+
 def test_no_rule_returns_none_and_host_has_rules_false() -> None:
     """No matching rule returns None and host_has_rules returns False."""
     config = _config(_rule("api.example.com"))

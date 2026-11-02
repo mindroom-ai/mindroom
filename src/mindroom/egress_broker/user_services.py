@@ -296,7 +296,8 @@ def effective_config(
 def services_for_agent(services: Mapping[str, EgressService], agent_name: str | None) -> dict[str, EgressService]:
     """Return, in order, the services whose credential `agent_name` may get: those whose `agents` does not leave it out.
 
-    The broker still routes the others for the agent and refuses them; listings and placeholders leave them out.
+    The broker routes the agent to one of the others only when none of these matches its request, and then refuses it;
+    listings and placeholders leave them out.
     """
     return {name: service for name, service in services.items() if service.serves_agent(agent_name)}
 
