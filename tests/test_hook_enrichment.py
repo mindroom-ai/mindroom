@@ -31,12 +31,12 @@ def test_render_enrichment_block_is_stable() -> None:
 
 
 def test_render_enrichment_block_escapes_xml_sensitive_content() -> None:
-    """Rendered enrichment should escape keys and text so the block stays well-formed."""
+    """Rendered enrichment escapes keys fully and text only where the block needs it, so quotes stay plain."""
     rendered = render_enrichment_block(
         [
             EnrichmentItem(
                 key='weather"<now>',
-                text='Use <rain & wind> "carefully"',
+                text='Use <rain & wind> "carefully" in Bob\'s town',
             ),
         ],
     )
@@ -44,7 +44,7 @@ def test_render_enrichment_block_escapes_xml_sensitive_content() -> None:
     assert rendered == (
         "<mindroom_message_context>\n"
         '<item key="weather&quot;&lt;now&gt;" cache_policy="volatile">\n'
-        "Use &lt;rain &amp; wind&gt; &quot;carefully&quot;\n"
+        'Use &lt;rain &amp; wind&gt; "carefully" in Bob\'s town\n'
         "</item>\n"
         "</mindroom_message_context>"
     )
