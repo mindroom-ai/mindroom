@@ -825,15 +825,8 @@ async def test_a_coalesced_turn_s_reply_writes_only_in_the_membership_that_admit
     await principal.replies.write_generation("gen-1")
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
     rejoined = await admit_room_membership(principal, ROOM, "join")
-    coalesced = replace(
-        _request(),
-        delivery_id="$source+$other",
-        sources=ResponseSources(
-            pending_event_ids=("$source", "$other"),
-            logical_source_event_ids=("$other", "$source"),
-        ),
-        membership_epoch=rejoined,
-    )
+    sources = ResponseSources(pending_event_ids=("$source", "$other"), logical_source_event_ids=("$other", "$source"))
+    coalesced = replace(_request(), delivery_id=sources.delivery_id, sources=sources, membership_epoch=rejoined)
 
     claim = (await principal.replies.claim(coalesced)).transition
     assert claim.reply is not None
@@ -845,7 +838,7 @@ async def test_a_coalesced_turn_s_reply_writes_only_in_the_membership_that_admit
     )
 
     assert finished is None
-    assert await principal.load_matrix_delivery(delivery_id="$source+$other", stage=DeliveryStage.FINAL) is None
+    assert await principal.load_matrix_delivery(delivery_id=sources.delivery_id, stage=DeliveryStage.FINAL) is None
 
 
 async def test_a_regeneration_keeps_the_membership_its_edit_was_admitted_in(journal_store: EventJournalStore) -> None:

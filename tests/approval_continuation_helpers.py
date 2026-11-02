@@ -113,8 +113,8 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
         "state": "ready",
     }
     merged = defaults | changes
-    # The paused span's rows are named by all its turn's messages, as a response names them.
-    return ApprovalContinuation(**({"final_delivery_id": "+".join(merged["sources"].pending_event_ids)} | merged))
+    # The paused span's rows are named by its turn's messages, as a response names them.
+    return ApprovalContinuation(**({"final_delivery_id": merged["sources"].delivery_id} | merged))
 
 
 def decided_calls(

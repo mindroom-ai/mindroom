@@ -6038,7 +6038,7 @@ class TestApprovalContinuations:
     """A paused run remains owned by its original journal sources."""
 
     # The rows of the coalesced turn's paused reply, its answer's included, are named by both its messages.
-    RUN_DELIVERY = "$source-1+$source-2"
+    RUN_DELIVERY = ResponseSources(("$source-1", "$source-2"), ("$source-1", "$source-2")).delivery_id
 
     @pytest.mark.parametrize("next_count", [None, 3])
     async def test_continuation_count_survives_reopen_and_advance(
