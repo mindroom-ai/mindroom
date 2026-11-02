@@ -249,7 +249,6 @@ Custom events default to 1000 ms.
   `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
   Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
 - **`contact:before_send`**: `ctx.text` is the message the agent wants to send, and `ctx.rules` holds the rules that apply to it.
-  The default timeout is 10 seconds because a useful hook may call a model.
   `agents` matches the sending agent, and `rooms` matches the room the message goes to.
 
 ## Message enrichment (`message:enrich`)
