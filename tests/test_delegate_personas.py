@@ -12,7 +12,7 @@ from mindroom import ai as ai_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
@@ -64,6 +64,8 @@ def _config(
     knowledge_bases: tuple[str, ...] = (),
 ) -> Config:
     return Config(
+        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             "leader": AgentConfig(
                 display_name="Leader",

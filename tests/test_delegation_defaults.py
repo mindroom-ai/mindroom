@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.state import DelegationState
 from mindroom.llm.runs import RunStatus
@@ -48,6 +48,8 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
     """Omitted/null targets run self, including after approval; empty/disallowed targets cannot execute."""
     allowed = ["other"] if target == "not_allowed" else ["leader"]
     config = Config(
+        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             "leader": AgentConfig(display_name="Leader", tools=["calculator"], delegate_to=allowed),
             "other": AgentConfig(display_name="Other"),

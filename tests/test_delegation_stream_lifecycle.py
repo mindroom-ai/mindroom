@@ -16,6 +16,7 @@ from mindroom.agents import create_agent
 from mindroom.approval.resume import ResumeRunner
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation import execution
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.storage import new_scope_session
@@ -282,6 +283,8 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
     closed where it stands and its terminal record lands before the failure propagates.
     """
     config = Config(
+        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["helper"]),
             "helper": AgentConfig(display_name="Helper"),

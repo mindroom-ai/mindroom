@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.execution import _drive_delegations, drive_delegation_stream
 from mindroom.delegation.state import DelegationState
 from mindroom.hooks import (
@@ -57,6 +58,8 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
 ) -> None:
     """Every rejection must deliver its result through the real stream presentation, answering the call as failed."""
     config = Config(
+        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(
@@ -172,6 +175,7 @@ async def test_a_refused_subagent_call_answers_with_its_refusal_instead_of_its_o
 ) -> None:
     """A refusal after the output path was accepted writes no file; the model reads the refusal as a failed call."""
     config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             # A private leader has the workspace that output redirection writes to.
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"], private=AgentPrivateConfig(per="user")),

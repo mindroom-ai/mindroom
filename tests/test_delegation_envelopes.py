@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.records import DelegationRecordOwner
@@ -52,6 +52,8 @@ if TYPE_CHECKING:
 
 def _leader_and_child() -> Config:
     return Config(
+        # Delegation here pauses the parent for the native driver, which needs background tool jobs off.
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child"),
@@ -265,6 +267,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
 ) -> None:
     """Native children settle real failures and preserve tool results across continuation."""
     config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(
@@ -368,6 +371,7 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
 ) -> None:
     """A switch the child's call limit refused never ran, so the child's answer after it settles the delegation."""
     config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(

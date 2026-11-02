@@ -36,6 +36,9 @@
           ]
         }
       },
+      "background_tool_jobs": {
+        "enabled": false
+      },
       "defaults": {
         "tools": []
       },
