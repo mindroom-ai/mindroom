@@ -577,10 +577,14 @@ async def compact_scope_mid_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
+    max_summary_tokens: int,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
 ) -> CompactionOutcome | None:
-    """Fold the stored runs after ``session``'s latest summary row and the running turn into one summary row."""
+    """Fold the stored runs after ``session``'s latest summary row and the running turn into one summary row.
+
+    A summary over ``max_summary_tokens`` fails the compaction and stores nothing.
+    """
     execution_plan = resolved_inputs.execution_plan
     scope = owner_scope(session)
 
@@ -613,6 +617,7 @@ async def compact_scope_mid_turn(
             replay_window_tokens=execution_plan.replay_window_tokens,
             threshold_tokens=execution_plan.trigger_threshold_tokens,
             available_history_budget=execution_plan.hard_replay_budget_tokens,
+            max_summary_tokens=max_summary_tokens,
             on_commit=on_commit,
             rewritten_request_tokens=rewritten_request_tokens,
             complete=complete,

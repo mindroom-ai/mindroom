@@ -237,7 +237,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         state.record,
         scope_fold,
         request_tokens,
-        partial(_estimated_request_tokens, compaction, policy, messages, state.tools),
+        partial(_estimated_request_tokens, compaction, policy, tools=state.tools),
     )
     if fold is None:
         compaction.stopped = True
@@ -270,11 +270,11 @@ async def _summarize(
     record: AnyRunRecord,
     scope_fold: tuple[ConversationStore, ConversationSession] | None,
     request_tokens: int,
-    size_request: Callable[[], int],
+    size_request: Callable[[list[Message]], int],
 ) -> _Fold | None:
     """Fold the history and every exchange of the turn into a summary and rewrite the request.
 
-    ``request_tokens`` sized the request before the fold and ``size_request`` estimates ``messages`` as they stand.
+    ``request_tokens`` sized the request before the fold and ``size_request`` estimates a request of given messages.
     Returns the summary message with the rewritten request's estimate, or None when compaction failed and the request
     is unchanged.
     """
@@ -286,8 +286,10 @@ async def _summarize(
             summary_message = await _summarize_run_locally(compaction, inputs, layout, record)
             _finish(messages, layout, summary_message, record)
             # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
-            return _Fold(summary_message, await asyncio.to_thread(size_request))
+            return _Fold(summary_message, await asyncio.to_thread(size_request, messages))
         store, session = scope_fold
+        # What the fold keeps is this reply's static prompt, so the summary gets the history budget left beside it.
+        kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
         return await _compact_scope(
             compaction,
             inputs,
@@ -298,6 +300,7 @@ async def _summarize(
             size_request,
             store=store,
             session=session,
+            max_summary_tokens=max(0, policy.limit - kept_tokens),
         )
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
@@ -316,15 +319,17 @@ async def _compact_scope(
     messages: list[Message],
     record: AnyRunRecord,
     request_tokens: int,
-    size_request: Callable[[], int],
+    size_request: Callable[[list[Message]], int],
     *,
     store: ConversationStore,
     session: ConversationSession,
+    max_summary_tokens: int,
 ) -> _Fold | None:
     """Append one summary row to ``session``'s scope, covering its runs after the latest row and this run's exchanges.
 
     The append stores the run's folded part with the row and leaves the turn's session as the store holds it, and
-    once the row is stored, the run's request and record follow.
+    once the row is stored, the run's request and record follow. A summary over ``max_summary_tokens`` is not
+    stored, and the request stays as it was.
     """
     basis = await asyncio.to_thread(read_fold_basis, store, session)
     if basis is None:
@@ -354,9 +359,10 @@ async def _compact_scope(
         config=compaction.config,
         runtime_paths=compaction.runtime_paths,
         compaction_lifecycle=compaction.lifecycle,
+        max_summary_tokens=max_summary_tokens,
         on_commit=on_commit,
         # The request ``on_commit`` rewrote, estimated from what it holds, since no response has reported its size.
-        rewritten_request_tokens=size_request,
+        rewritten_request_tokens=partial(size_request, messages),
     )
     if outcome is None or not summary_messages:
         return None

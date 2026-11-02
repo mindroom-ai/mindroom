@@ -26,7 +26,11 @@ from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.prompt_tokens import build_static_token_estimator
-from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
+from mindroom.history.replay import (
+    configured_replay_plan,
+    estimate_request_messages_tokens,
+    estimate_summary_text_tokens,
+)
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
@@ -72,7 +76,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.usage.storage import run_usage_snapshot
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     BIG_TOOL,
@@ -107,6 +111,7 @@ if TYPE_CHECKING:
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def probe() -> str:
@@ -173,6 +178,7 @@ class _Agent:
     native_compaction: NativeCompactionReplay | None = None
     max_tool_calls_per_turn: int | None = None
     before_request: tuple[BeforeRequestHook, ...] = ()
+    system_messages: tuple[Message, ...] = ()
     records: list[RunRecord] = field(default_factory=list)
 
     def spec(self) -> AgentSpec:
@@ -180,7 +186,7 @@ class _Agent:
             id="test_agent",
             name="test_agent",
             model=self.model,
-            system_messages=(),
+            system_messages=self.system_messages,
             toolkits=(adapt_toolkit(Toolkit(name="probes", tools=list(self.tools))),),
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
         )
@@ -281,6 +287,26 @@ def _before_each_request(prepare: Callable[[LoopState], None]) -> BeforeRequestH
         return SendRequest()
 
     return before_request
+
+
+def _observed_compaction_hooks(
+    config: Config,
+    paths: RuntimePaths,
+) -> tuple[ToolRuntimeContext, list[CompactionHookContext]]:
+    """Return a runtime context whose compaction hooks record every context they see, and that record."""
+    observed: list[CompactionHookContext] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def before(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
+    context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+    return context, observed
 
 
 def _first_compacted(model: ToolLoopModel) -> ToolLoopRequest:
@@ -707,18 +733,14 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    *,
-    scoped: bool,
 ) -> None:
+    """A run-local fold, which stores no summary, fails the turn when its rewritten request exceeds the model's window."""
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
-    agent = (
-        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _Agent(model, config, paths)
-    )
+    agent = _Agent(model, config, paths)
 
     with pytest.raises(
         mid_turn_compaction.HistorySummaryBudgetError,
@@ -731,24 +753,104 @@ async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scoped", [False, True])
 async def test_rewritten_request_within_the_model_window_is_sent(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    *,
-    scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     model = ToolLoopModel(tool_rounds=5)
-    agent = (
-        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _Agent(model, config, paths)
-    )
 
-    output = await _run(agent, [Message(role="user", content="p" * 16_000)])
+    output = await _run(_Agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
 
     assert str(output.content).endswith("done")
     # The prompt alone exceeds the replay window, so compacting again would only summarize every new tool result.
     assert len(summary_calls.inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_fold_beside_a_prompt_that_fills_the_replay_window_is_not_stored(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """A prompt over the replay window leaves no history budget, so the fold stores nothing and the turn continues."""
+    config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
+    storage = seeded_storage(config, paths)
+    lifecycle = RecordingCompactionLifecycle()
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
+
+    output = await _run(agent, [Message(role="user", content="p" * 16_000)])
+
+    assert str(output.content).endswith("done")
+    # A failed fold stops compacting for the turn.
+    assert len(summary_calls.inputs) == 1
+    [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+    assert failure.failure_reason.endswith("; 0 available).")
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_window", "replay_window_tokens", "context_in"),
+    [
+        # The model's own window holds the summary beside the context; only the replay window does not.
+        (100_000, 4000, "prompt"),
+        (4000, None, "prompt"),
+        (100_000, 4000, "system"),
+        (100_000, 4000, "tools"),
+    ],
+)
+async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    *,
+    context_window: int,
+    replay_window_tokens: int | None,
+    context_in: str,
+) -> None:
+    """Replay never drops a saved summary, so a fold stores none the reply's history budget cannot hold.
+
+    The turn continues uncompacted, and the next reply prepares its history instead of failing on that summary.
+    """
+    config, paths = _config(tmp_path, context_window=context_window, replay_window_tokens=replay_window_tokens)
+    storage = seeded_storage(config, paths)
+    # About 1,000 tokens of context in the prompt, system prompt, or tool definitions, which every fold keeps; the
+    # summary fits the replay window only without it.
+    context = "c" * 4000
+    summary_calls.summary = "fact " * 2400
+    assert estimate_summary_text_tokens(summary_calls.summary) < 3500
+    lifecycle = RecordingCompactionLifecycle()
+    agent = _scoped_agent(
+        ToolLoopModel(tool_rounds=5),
+        config,
+        paths,
+        storage,
+        lifecycle=lifecycle,
+        system_messages=(Message(role="system", content=context),) if context_in == "system" else (),
+        tools=[probe, Function(name="lookup", description=context, entrypoint=lambda: "ok")]
+        if context_in == "tools"
+        else [probe],
+    )
+
+    output = await _run(agent, f"Do the task. {context}" if context_in == "prompt" else "Do the task")
+    # The next reply's static prompt carries the same context, here in its prompt.
+    next_reply = await prepare_history_for_run_for_test(
+        agent_name="test_agent",
+        full_prompt=f"Thanks. {context}",
+        session_id="session-1",
+        runtime_paths=paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=storage.load_session("session-1"),
+    )
+
+    assert str(output.content).endswith("done")
+    [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
+    assert failure.failure_reason.startswith("The summary exceeds the history budget")
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
+    # The fold stopped compacting for the turn; the next reply refuses the same summary and replays what fits.
+    assert len(summary_calls.inputs) == 2
+    assert next_reply.compaction_reply_outcome == "failed"
 
 
 @pytest.mark.asyncio
@@ -1511,18 +1613,7 @@ async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, m
 async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
-    observed: list[CompactionHookContext] = []
-
-    @hook(EVENT_COMPACTION_BEFORE)
-    async def before(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    @hook(EVENT_COMPACTION_AFTER)
-    async def after(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
-    hook_context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+    hook_context, observed = _observed_compaction_hooks(config, paths)
 
     with tool_runtime_context(hook_context):
         await _run(
@@ -1533,6 +1624,25 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
     assert observed[1].token_count_after is not None
     assert observed[1].token_count_after < observed[1].token_count_before
+
+
+@pytest.mark.asyncio
+async def test_a_fold_whose_summary_is_not_stored_emits_no_compaction_hooks(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """Hooks hear only of a summary that is about to be stored, as before a reply."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    summary_calls.summary = "fact " * 4000
+    hook_context, observed = _observed_compaction_hooks(config, paths)
+
+    with tool_runtime_context(hook_context):
+        await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+
+    assert summary_calls.inputs
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
+    assert observed == []
 
 
 @pytest.mark.asyncio
@@ -1589,18 +1699,7 @@ async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_min
     )
     seed_session(storage, _session("session-1", runs=[asked]))
     memory = render_enrichment_block([EnrichmentItem(key="memory", text="Alice prefers short answers.")])
-    observed: list[CompactionHookContext] = []
-
-    @hook(EVENT_COMPACTION_BEFORE)
-    async def before(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    @hook(EVENT_COMPACTION_AFTER)
-    async def after(ctx: CompactionHookContext) -> None:
-        observed.append(ctx)
-
-    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
-    hook_context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+    hook_context, observed = _observed_compaction_hooks(config, paths)
 
     with tool_runtime_context(hook_context):
         await _run(
