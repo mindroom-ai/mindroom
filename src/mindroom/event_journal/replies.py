@@ -489,11 +489,7 @@ def _supersede_replay(
 
 def _sources_pending(transaction: Transaction, principal_id: str, span: Span, *, besides: tuple[str, ...] = ()) -> bool:
     """Return whether any of the span's sources, other than ``besides``, still waits in the journal for its replay."""
-    return any(
-        journal.is_pending(transaction, principal_id, event_id)
-        for event_id in span.sources.pending_event_ids
-        if event_id not in besides
-    )
+    return bool(journal.pending_among(transaction, principal_id, span.sources.pending_event_ids).difference(besides))
 
 
 def drop_replays(

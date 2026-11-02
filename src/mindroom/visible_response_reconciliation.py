@@ -140,7 +140,6 @@ class VisibleResponseReconciler:
         """Discard a superseded replay unless the reply it would continue keeps it; return whether it was discarded."""
         superseded = await self.deps.delivery_gateway.supersede_replay(handled_turn.source_event_ids)
         if superseded is not None:
-            # The reply's records settled what the replay would have answered, or kept it for the replay to run.
             return superseded
         await self.settle_source_events_ignored(handled_turn)
         return True

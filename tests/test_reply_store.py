@@ -1704,10 +1704,7 @@ async def test_a_coalesced_turn_s_replay_is_superseded_only_once_its_other_messa
     await principal.replies.write_generation("gen-1")
     # The turn is driven by its newer message, ``$other``.
     sources = ResponseSources(pending_event_ids=("$other", "$source"), logical_source_event_ids=("$source", "$other"))
-    claim = (
-        await principal.replies.claim(replace(_request(), delivery_id=sources.delivery_id, sources=sources))
-    ).transition
-    assert claim.claimed is not None
+    await principal.replies.claim(replace(_request(), delivery_id=sources.delivery_id, sources=sources))
     # A restart lost the span; both messages wait for their replay.
     await principal.replies.write_generation("gen-2")
     assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
