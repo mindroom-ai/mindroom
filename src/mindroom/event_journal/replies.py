@@ -370,8 +370,8 @@ def claim(
         active_generation=active_generation,
     )
     if reply is None or request.driving_edit_id is not None:
-        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
-        admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
+        # A new reply, or a regeneration of one, writes in the membership the message driving it was admitted in.
+        admitted = journal.admitted_membership_owner(transaction, principal_id, request.sources.pending_event_ids[0])
         if admitted is not None:
             request = replace(request, membership_epoch=admitted[1])
     return apply(transaction, principal_id, rl.claim(request, context))

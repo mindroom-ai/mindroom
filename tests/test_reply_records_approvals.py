@@ -54,6 +54,7 @@ from tests.conftest import (
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_reply_records_turns import (
     _admit_edit,
+    _coalesced_turn,
     _FlakyHomeserver,
     _model_stream,
     _pending_turn,
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import MatrixDelivery
     from mindroom.message_target import MessageTarget
+    from mindroom.reply_turn.request import ResponseRequest
     from tests.runtime_fakes import ReadyRuntime
 
 pytestmark = pytest.mark.asyncio
@@ -154,19 +156,20 @@ async def _respond(
     bot: AgentBot,
     *,
     resume: AsyncMock | None = None,
-    target: MessageTarget | None = None,
+    request: ResponseRequest | None = None,
 ) -> None:
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = target or _target()
+    request = request or _plain_request(_target())
+    session_id = request.response_envelope.target.session_id
     with (
         patch_response_runner_module(
-            stream_agent_response=_pausing_stream(replace(_paused(), session_id=target.session_id)),
+            stream_agent_response=_pausing_stream(replace(_paused(), session_id=session_id)),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ),
         patch.object(type(runner.approvals), "_continue_entity_call", resume or AsyncMock()),
     ):
-        await runner.generate_response(_plain_request(target))
+        await runner.generate_response(request)
 
 
 def _resume_until_cancelled(resuming: asyncio.Event) -> AsyncMock:
@@ -218,6 +221,30 @@ async def test_an_approved_resume_completes_the_reply_it_paused(tmp_path: Path) 
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
         assert not await bot._reply_runtime.store.is_pending("$event")
         assert _sent_bodies(bot) == ["Thinking...", "Reading document", "Approved answer."]
+
+
+@pytest.mark.parametrize("ending", ["approved", "failed"])
+async def test_a_coalesced_turn_s_approval_ends_the_reply_it_paused(tmp_path: Path, ending: str) -> None:
+    """A coalesced turn's approval finds the answer or the note its reply ends with, as a single message's does."""
+    async with _approval_bot(tmp_path, requires_human=ending == "failed") as bot:
+        # A pause waiting for a human never resumes here, so only the approved turn's resume runs.
+        resume = AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {}))
+        await _respond(bot, resume=resume, request=await _coalesced_turn(bot))
+        if ending == "failed":
+            runner = unwrap_extracted_collaborator(bot._response_runner)
+            continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event2")
+            assert continuation is not None
+            failing = await runner.approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
+            assert failing is not None
+            assert await runner.approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+
+        reply = await _reply(bot)
+        assert reply.state is (rl.ReplyState.COMPLETED if ending == "approved" else rl.ReplyState.FAILED)
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event2") is None
+        assert not await bot._reply_runtime.store.is_pending("$event2")
+        assert _sent_bodies(bot)[-1] == (
+            "Approved answer." if ending == "approved" else "Reading document\n\nCard publication failed"
+        )
 
 
 async def test_a_finished_approval_records_its_turn_answered(tmp_path: Path) -> None:
@@ -413,7 +440,7 @@ async def test_a_message_in_another_conversation_is_answered_while_an_approval_w
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         # In thread mode the paused request roots its own thread, and a later top-level message starts another one.
         paused = _target(thread_id="$event")
-        await _respond(bot, target=paused)
+        await _respond(bot, request=_plain_request(paused))
         model = AsyncMock(return_value="Other answer.")
         with patch_response_runner_module(
             stream_agent_response=_model_stream(model),
