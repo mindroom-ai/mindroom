@@ -251,8 +251,11 @@ class _ClaudeSessionManager:
             try:
                 await close_requested.wait()
             finally:
-                drain.cancel()
-                await client.disconnect()
+                # The drain keeps queueing what the SDK already holds while it disconnects.
+                try:
+                    await client.disconnect()
+                finally:
+                    drain.cancel()
 
         owner = asyncio.create_task(own(), name="claude_session", context=Context())
         try:
@@ -712,6 +715,8 @@ class ClaudeAgentTools(Toolkit):
         while True:
             message = await session.messages.get()
             if isinstance(message, Exception):
+                # The stream has ended, so a call already waiting for this session reads the same error.
+                session.messages.put_nowait(message)
                 raise message
             turn = turns[-1]
             if isinstance(message, UserMessage):

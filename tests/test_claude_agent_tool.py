@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKError,
+    CLIJSONDecodeError,
     ProcessError,
     ResultMessage,
     SystemMessage,
@@ -137,6 +138,8 @@ class _FakeClaudeSDKClient:
         self.interrupted = True
 
     async def disconnect(self) -> None:
+        # Like the SDK's, which waits for Claude Code to exit, so other tasks run meanwhile.
+        await asyncio.sleep(0)
         self.connected = False
 
 
@@ -1334,6 +1337,35 @@ async def test_claude_start_session_error_includes_context(
     assert "- fork_session: False" in result
 
 
+@pytest.mark.asyncio
+async def test_a_call_waiting_on_a_session_whose_message_stream_broke_still_returns(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a session's message stream breaks, every call that reads it gets the error, also one already waiting."""
+
+    class _BrokenStreamClaudeSDKClient(_FakeClaudeSDKClient):
+        async def receive_messages(self) -> AsyncGenerator[Message]:
+            yield await self.stream.get()
+            line = "{not json"
+            raise CLIJSONDecodeError(line, ValueError(line))
+
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BrokenStreamClaudeSDKClient)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    replies = await asyncio.wait_for(
+        asyncio.gather(
+            _in_call(run_context, tools.claude_send("one")),
+            _in_call(run_context, tools.claude_send("two")),
+        ),
+        timeout=1,
+    )
+
+    assert all("Claude session error: Failed to decode JSON: {not json..." in reply for reply in replies)
+    assert not fake_manager._sessions
+
+
 async def _until(condition: Callable[[], bool]) -> None:
     """Let other tasks run until ``condition`` holds."""
     while not condition():  # noqa: ASYNC110 - the queues polled here signal no event to await
@@ -1725,7 +1757,10 @@ async def test_unread_turns_count_when_their_session_closes(
     async def answer_then_close() -> None:
         [session] = fake_manager._sessions.values()
         client = cast("_ScriptedClaudeSDKClient", session.client)
-        # Claude Code answers the stopped call's prompt, runs a turn of its own, and starts another; nothing reads them.
+        closing = asyncio.create_task(close(fake_manager, session.key))
+        await _until(session.close_requested.is_set)
+        # Still in the SDK's buffer as the session stops: the stopped call's answer, a turn Claude Code ran on its
+        # own, and the start of another.
         for message in [
             _claude_response("claude-sonnet-5-5", "msg-2", 500),
             _claude_result(60),
@@ -1734,8 +1769,7 @@ async def test_unread_turns_count_when_their_session_closes(
             _claude_response("claude-sonnet-5-5", "msg-4", 700),
         ]:
             client.stream.put_nowait(message)
-        await _until(client.stream.empty)
-        await close(fake_manager, session.key)
+        await closing
 
     _replies, rows = await _send_metered_turns(
         tmp_path,
