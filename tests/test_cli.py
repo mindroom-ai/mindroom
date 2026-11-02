@@ -24,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import _register_user
+from mindroom.startup_errors import PermanentStartupError
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -450,7 +451,7 @@ def test_startup_probes_answer_on_every_localhost_address() -> None:
         occupied.bind(second_address)
         occupied.listen()
         with (
-            pytest.raises(OSError, match=re.escape(f"localhost:{port} (Address already in use)")),
+            pytest.raises(PermanentStartupError, match=re.escape(f"localhost:{port} (Address already in use)")),
             serve_startup_probes("localhost", port, detail=_PAIRING),
         ):
             pass
@@ -490,7 +491,10 @@ def test_startup_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.M
         assert _probe_status("127.0.0.1", port) == 200
 
     with (
-        pytest.raises(OSError, match=re.escape(f"ipv6-only.test:{port} (could not bind on any resolved address)")),
+        pytest.raises(
+            PermanentStartupError,
+            match=re.escape(f"ipv6-only.test:{port} (could not bind on any resolved address)"),
+        ),
         serve_startup_probes("ipv6-only.test", port, detail=_PAIRING),
     ):
         pass
