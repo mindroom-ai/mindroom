@@ -7644,7 +7644,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 
 The target of a request is a personal agent's name or Matrix ID, or a person's Matrix ID.
 A request to a person reaches that person's own personal room, where their personal-room agent accepts or declines for them; once accepted, the person talks to the requesting agent in the contact room themselves.
-With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly.
+With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, and her invitation to the contact room is how she learns that Bob accepted.
 A contact needs an agent on at least one side and two different owners.
 
 Asking again for a pair that already has a pending or active contact returns that contact unchanged instead of creating another, and asking again with `rules` or `tools` is refused; change them with `update_contact`.

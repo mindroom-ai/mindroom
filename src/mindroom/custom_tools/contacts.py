@@ -31,13 +31,18 @@ def _require_context() -> ToolRuntimeContext:
 
 
 def _asked(context: ToolRuntimeContext, record: ContactRecord, *, posted: bool) -> str:
-    """Say where a request stands for the owner who just made it; only a posted request notice asked anyone."""
+    """Say where a request stands for the owner who just made it; only a posted request notice asked anyone.
+
+    A person who asked has no agent to tell in this thread, so they learn of an acceptance from the room invitation.
+    """
     owner = resolve_human_requester_alias(context.requester_id, context.current_config, context.runtime_paths)
     if posted and record.requester.owner == owner:
-        return (
-            f"Asked {record.target.owner} to approve contact {record.id} with {record.target.id}; "
-            "you are told in this thread when they accept or decline."
+        answer = (
+            "you are told in this thread when they accept or decline"
+            if record.requester.kind == "agent"
+            else "you are invited to the contact room when they accept"
         )
+        return f"Asked {record.target.owner} to approve contact {record.id} with {record.target.id}; {answer}."
     other = record.target if record.requester.owner == owner else record.requester
     return f"Contact {record.id} with {other.id} already exists and is {record.status}; it is returned unchanged."
 
@@ -89,7 +94,7 @@ class ContactsTools(Toolkit):
         `rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
         With `party="me"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.
         Your owner approves the request on a card, then the other owner decides in their personal room;
-        you are told in this thread when they accept or decline.
+        you are told in this thread when they accept or decline, or with `party="me"` your owner is invited to the contact room when they accept.
         """
         try:
             context = _require_context()

@@ -721,6 +721,23 @@ async def test_toolkit_calls_run_the_flow_and_report_errors_as_text(tmp_path: Pa
     assert record.requester_side.rules == "Be kind"
 
 
+@pytest.mark.asyncio
+async def test_a_request_as_oneself_says_that_the_invitation_brings_the_acceptance(tmp_path: Path) -> None:
+    """A person who asked has no agent to tell in their thread, so they learn of an acceptance from the room invitation."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+
+    with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered():
+        requested = await ContactsTools("mind_alice").request_contact("mind_bob", "Say hi", party="me")
+
+    (record,) = _stored(paths)
+    assert record.requester.kind == "person"
+    assert requested == (
+        f"Asked {CO_OWNER} to approve contact {record.id} with mind_bob; "
+        "you are invited to the contact room when they accept."
+    )
+
+
 def test_injected_for_agents_with_contacts(tmp_path: Path) -> None:
     """An agent with a contacts object gets the contacts tools and matrix_message without authoring them."""
     config, _ = _setup(tmp_path)

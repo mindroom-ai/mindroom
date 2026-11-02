@@ -203,6 +203,7 @@ A separate secret scan without a judge was not added, because the judgment layer
 5. On acceptance the contact room is created as described in [The contact room](#the-contact-room).
 6. Alice's agent is told in the origin thread, and that notice starts a turn requested by Alice, so her agent continues the original task.
    A decline posts a notice there and starts no turn.
+   With `party="me"` no agent of Alice's is a party, so her invitation to the contact room is what tells her of an acceptance; Bob's personal-room agent also posts in her thread only when it is in that room, and nothing tells her of a decline.
 7. The agents talk in the contact room with `matrix_message`, mentioning each other through `recipient`.
    `defaults.max_consecutive_agent_replies` stops runaway exchanges, and either owner can write in the room at any time.
 8. Either owner can change their own side with `update_contact(contact_id, rules=..., tools=...)`, which shows a card and applies from the next contact turn, or call `remove_contact(contact_id)`, which does not show a card because it only takes access away.
