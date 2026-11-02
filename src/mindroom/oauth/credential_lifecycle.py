@@ -11,7 +11,7 @@ import time
 from concurrent.futures import Future as ConcurrentFuture
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 import httpx
 from requests import exceptions as requests_exceptions
@@ -37,7 +37,7 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -619,6 +619,91 @@ async def _exchange_and_store_oauth_credentials_locked(
     )
     await transaction.commit()
     return published.credentials or {}
+
+
+OAuthGroupSkipReason = Literal["changed", "account_not_allowed", "scopes_not_granted"]
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthGroupMember:
+    """One consent group member and the connection generation it had when the shared sign-in started."""
+
+    context: OAuthCredentialContext
+    expected_connection_generation: str
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthGroupConnectResult:
+    """Provider IDs a shared sign-in connected or skipped, in member order."""
+
+    connected: tuple[str, ...]
+    skipped: tuple[tuple[str, OAuthGroupSkipReason], ...]
+
+
+async def exchange_and_store_oauth_group_credentials(
+    lead: OAuthProvider,
+    members: Sequence[OAuthGroupMember],
+    code: str,
+    code_verifier: str | None,
+    *,
+    token_url: str,
+) -> OAuthGroupConnectResult:
+    """Exchange one code at the lead's token endpoint and store the grant for each member that can take it.
+
+    The exchange runs outside every member transaction, so no credential lock is held across provider I/O.
+    Each member is stored in its own transaction and skipped, never failed, when it cannot take the grant.
+    """
+    adapter_scope = _oauth_provider_adapter_active.set(True)
+    try:
+        result = await lead.exchange_code(
+            code,
+            members[0].context.runtime_paths,
+            token_url=token_url,
+            code_verifier=code_verifier,
+        )
+    finally:
+        _oauth_provider_adapter_active.reset(adapter_scope)
+    connected: list[str] = []
+    skipped: list[tuple[str, OAuthGroupSkipReason]] = []
+    for member in members:
+        provider_id = member.context.provider.id
+        skip_reason = await _run_oauth_transaction(_store_oauth_group_member(member, result))
+        if skip_reason is None:
+            connected.append(provider_id)
+        else:
+            logger.info("oauth_group_member_skipped", provider_id=provider_id, reason=skip_reason)
+            skipped.append((provider_id, skip_reason))
+    return OAuthGroupConnectResult(connected=tuple(connected), skipped=tuple(skipped))
+
+
+async def _store_oauth_group_member(
+    member: OAuthGroupMember,
+    result: OAuthTokenResult,
+) -> OAuthGroupSkipReason | None:
+    """Store one shared grant for a member, or return why it was skipped."""
+    context = member.context
+    provider = context.provider
+    async with oauth_credential_transaction(context) as transaction:
+        if (await transaction.generations()).connection_generation != member.expected_connection_generation:
+            return "changed"
+        member_result = replace(result, token_data={**result.token_data, "_oauth_provider": provider.id})
+        adapter_scope = _oauth_provider_adapter_active.set(True)
+        try:
+            await asyncio.to_thread(provider.validate_claims, member_result, context.runtime_paths)
+            safe_result = provider.token_result_with_safe_claims(member_result)
+        except OAuthClaimValidationError:
+            return "account_not_allowed"
+        finally:
+            _oauth_provider_adapter_active.reset(adapter_scope)
+        if not oauth_credentials_have_required_scopes(provider, safe_result.token_data):
+            return "scopes_not_granted"
+        token_data = _token_data_preserving_refresh_token(
+            (await transaction.snapshot()).credentials,
+            safe_result.token_data,
+        )
+        await transaction.publish(token_data, advance_connection_generation=True)
+        await transaction.commit()
+    return None
 
 
 async def reset_oauth_credentials(
