@@ -9,13 +9,14 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import Context
 from dataclasses import dataclass
 from time import monotonic
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
 import mcp.types as mcp_types
 from httpx2 import HTTPStatusError
 from mcp import ClientSession
+from mcp import MCPError as SdkMCPError
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -999,7 +1000,7 @@ class MCPServerManager:
             msg = f"MCP server '{state.server_id}' authorization changed after remote dispatch; retry manually"
             raise MCPConnectionError(state.server_id, msg) from exc
         assert ambiguous_dispatch_error is not None
-        msg = f"MCP server '{state.server_id}' remote call outcome is unknown; retry manually"
+        msg = f"MCP server '{state.server_id}' remote call outcome is unknown; retry manually ({ambiguous_dispatch_error})"
         raise MCPConnectionError(state.server_id, msg) from ambiguous_dispatch_error
 
     async def _call_tool_with_lock(
@@ -1157,15 +1158,26 @@ class MCPServerManager:
                 ),
                 context=Context(),
             )
+        except SdkMCPError as exc:
+            # Invalid params is always the server's own answer; the SDK raises other codes for transport failures too.
+            if exc.code != mcp_types.INVALID_PARAMS:
+                self._raise_runtime_exception(state.server_id, exc)
+            msg = f"MCP error {exc.code}: {exc.message}"
+            schema = self._sent_input_schema(state, remote_tool_name)
+            raise MCPToolCallError(state.server_id, msg, input_schema=schema) from exc
         except Exception as exc:
             self._raise_runtime_exception(state.server_id, exc)
         try:
             return tool_value_from_call_result(state.server_id, result)
         except MCPToolCallError as exc:
-            # The failure may be about the arguments, so it carries the schema the call was sent against.
-            tools = state.catalog.tools if state.catalog is not None else ()
-            exc.input_schema = next((tool.input_schema for tool in tools if tool.remote_name == remote_tool_name), None)
+            exc.input_schema = self._sent_input_schema(state, remote_tool_name)
             raise
+
+    @staticmethod
+    def _sent_input_schema(state: MCPServerState, remote_tool_name: str) -> dict[str, Any] | None:
+        """Return the input schema a failed call was sent against, since the failure may be about its arguments."""
+        tools = state.catalog.tools if state.catalog is not None else ()
+        return next((tool.input_schema for tool in tools if tool.remote_name == remote_tool_name), None)
 
     async def _record_catalog_refresh_error(
         self,
