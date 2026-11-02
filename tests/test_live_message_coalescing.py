@@ -124,7 +124,7 @@ from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_
 from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued, prepared_turn_recorder
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -218,6 +218,48 @@ async def _admit_pending_thread_event(
     assert admitted is AdmissionResult.ADMITTED
 
 
+async def _admit_visible_message(bot: AgentBot, message: ResolvedVisibleMessage) -> None:
+    """Admit one message the thread shows as unfinished work, as sync does before ingress resolves it."""
+    await _admit_pending_thread_event(
+        bot,
+        _text_event(
+            event_id=message.event_id,
+            body=message.body,
+            sender=message.sender,
+            server_timestamp=int(message.timestamp or 0),
+            thread_id=message.thread_id,
+        ).source,
+    )
+
+
+async def _admitted_thread_history(
+    bot: AgentBot,
+    messages: Sequence[tuple[str, str, str, int]],
+) -> ThreadHistoryResult:
+    """Admit each ``(event_id, body, sender, timestamp)`` thread message, as sync does, and return the full history."""
+    for event_id, body, sender, timestamp in messages:
+        await _admit_pending_thread_event(
+            bot,
+            _text_event(
+                event_id=event_id,
+                body=body,
+                sender=sender,
+                server_timestamp=timestamp,
+                thread_id="$thread",
+            ).source,
+        )
+    return thread_history_result(
+        [
+            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
+            *(
+                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
+                for event_id, body, sender, timestamp in messages
+            ),
+        ],
+        is_full_history=True,
+    )
+
+
 @dataclass
 class _RecordingPendingTurns:
     """A real journal read that also records how the replay guard asked for it."""
@@ -243,6 +285,17 @@ class _RecordingPendingTurns:
             excluding_event_id=excluding_event_id,
             limit=limit,
         )
+
+    async def pending_among(self, event_ids: Collection[str]) -> frozenset[str]:
+        """Answer from the journal; only the degraded read's bounds are recorded."""
+        return await self.store.pending_among(event_ids)
+
+
+def _journal_owing_every_event() -> PendingTurnView:
+    """Return a journal read that still owes work for every event it is asked about."""
+    pending_turns = MagicMock(spec=PendingTurnView)
+    pending_turns.pending_among = AsyncMock(side_effect=frozenset)
+    return pending_turns
 
 
 def _watch_pending_turns(bot: AgentBot) -> _RecordingPendingTurns:
@@ -1772,16 +1825,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
         ("$alice-last", "alice last", "@alice:localhost", 1003),
     ]
     dispatched_messages = messages[:dispatched_count]
-    history = thread_history_result(
-        [
-            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
-            *(
-                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
-                for event_id, body, sender, timestamp in messages
-            ),
-        ],
-        is_full_history=True,
-    )
+    history = await _admitted_thread_history(bot, messages)
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
@@ -1856,16 +1900,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
         ("$research", "@test_agent please check this for alice", research, 1002),
         ("$alice-last", "alice last", "@alice:localhost", 1003),
     ]
-    history = thread_history_result(
-        [
-            make_visible_message(sender="@alice:localhost", body="root", event_id="$thread", timestamp=1000),
-            *(
-                make_visible_message(sender=sender, body=body, event_id=event_id, timestamp=timestamp)
-                for event_id, body, sender, timestamp in messages
-            ),
-        ],
-        is_full_history=True,
-    )
+    history = await _admitted_thread_history(bot, messages)
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
@@ -4896,7 +4931,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     )
     dispatch = _prepared_dispatch(event_id="$m1", body="old")
 
-    # Thread history already contains a newer unresponded message from the same sender
+    # Thread history already contains a newer unresponded message from the same sender, which the journal still owes
     newer_msg = ResolvedVisibleMessage(
         sender="@user:localhost",
         body="newer",
@@ -4907,6 +4942,7 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_msg]
+    await _admit_visible_message(bot, newer_msg)
 
     action_mock = AsyncMock()
     with (
@@ -5002,18 +5038,9 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
             },
         )
         dispatch.context.thread_history = degraded_history
-        await _admit_pending_thread_event(
-            bot,
-            _text_event(
-                event_id="$newer-bob",
-                body="newer bob",
-                sender="@bob:localhost",
-                server_timestamp=3000,
-                thread_id="$thread",
-            ).source,
-        )
     else:
         dispatch.context.thread_history = [newer_bob_message]
+    await _admit_visible_message(bot, newer_bob_message)
     pending_turns = _watch_pending_turns(bot)
     handled_turn = _coalesced_ownership_record(ownership)
     superseded = ownership == "single"
@@ -5098,6 +5125,7 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
             latest_event_id="$newer-bob",
         ),
     ]
+    await _admit_visible_message(bot, dispatch.context.thread_history[0])
     source_event_metadata = {
         relay_event_id: SourceEventMetadata(
             sender="@bob:localhost",
@@ -5334,9 +5362,10 @@ async def test_replay_guard_does_not_supersede_non_interactive_origin_turns() ->
         ("@mindroom_general:localhost", None),
         [newer_msg],
         may_be_superseded_by_newer_requester_turn=False,
+        pending_turns=_journal_owing_every_event(),
         classify=lambda sender, _source: make_ingress_facts(sender, sender_entity_name="general"),
         is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=lambda _source: False,
+        for_another_participant=AsyncMock(return_value=False),
         logger=MagicMock(),
     )
 
@@ -5374,6 +5403,7 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
         ("@user:localhost", None),
         [visible_echo],
         may_be_superseded_by_newer_requester_turn=True,
+        pending_turns=_journal_owing_every_event(),
         classify=lambda sender, source: make_ingress_facts(
             sender,
             source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -5383,7 +5413,7 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
             sender_entity_name="router",
         ),
         is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=lambda _source: False,
+        for_another_participant=AsyncMock(return_value=False),
         logger=MagicMock(),
     )
 
@@ -5421,6 +5451,7 @@ async def test_full_history_replay_guard_counts_non_router_visible_echo_marker()
         ("@user:localhost", None),
         [marked_helper_relay],
         may_be_superseded_by_newer_requester_turn=True,
+        pending_turns=_journal_owing_every_event(),
         classify=lambda sender, _source: make_ingress_facts(
             sender,
             source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -5430,7 +5461,7 @@ async def test_full_history_replay_guard_counts_non_router_visible_echo_marker()
             sender_entity_name="helper",
         ),
         is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=lambda _source: False,
+        for_another_participant=AsyncMock(return_value=False),
         logger=MagicMock(),
     )
 
@@ -6111,6 +6142,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
+    await _admit_visible_message(bot, newer_cmd)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6161,6 +6193,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_cmd]
+    await _admit_visible_message(bot, newer_cmd)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6218,6 +6251,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [newer_msg]
+    await _admit_visible_message(bot, newer_msg)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6267,6 +6301,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$h2",
     )
     dispatch.context.thread_history = [newer_msg]
+    await _admit_visible_message(bot, newer_msg)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6318,6 +6353,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         latest_event_id="$s2",
     )
     dispatch.context.thread_history = [second_fire_msg]
+    await _admit_visible_message(bot, second_fire_msg)
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6373,6 +6409,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         latest_event_id="$m2",
     )
     dispatch.context.thread_history = [newer_msg]
+    await _admit_visible_message(bot, newer_msg)
 
     action_mock = AsyncMock()
     with (
@@ -6415,6 +6452,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
         latest_event_id="$img2",
     )
     dispatch.context.thread_history = [newer_msg]
+    await _admit_visible_message(bot, newer_msg)
 
     action_mock = AsyncMock()
     with (

@@ -221,8 +221,13 @@ async def final_in_resume_span(
     gateway: DeliveryGateway,
     principal: PrincipalStore,
     request: FinalDeliveryRequest,
+    *,
+    end_failed_span: bool = False,
 ) -> FinalDeliveryOutcome:
-    """Deliver one final answer as an approved run's resume, below the pause its request's event shows."""
+    """Deliver one final answer as an approved run's resume, below the pause its request's event shows.
+
+    With ``end_failed_span``, a failure that leaves the resume running ends it as the locked turn's exit does.
+    """
     runtime = _runtime(principal)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     source = request.identity.response_envelope.source_event_id
@@ -260,7 +265,8 @@ async def final_in_resume_span(
         assert claimed is not None
         assert handle is not None
         slot.handle = handle
-        return await gateway.deliver_final(request)
+        outcome = await gateway.deliver_final(request)
+        return await end_span_as_locked_turn(gateway, handle, request.target, outcome) if end_failed_span else outcome
 
 
 def response_span(

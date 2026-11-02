@@ -360,6 +360,10 @@ async def test_a_contact_turn_is_superseded_only_by_its_own_speaker(tmp_path: Pa
     own_reply = _later(_agent(paths, "mind_bob"), "$own-reply", **{ACTING_REQUESTER_KEY: CO_OWNER})
     own_relay = _later(_agent(paths, "mind_bob"), "$own-relay", **_relay(paths, CO_OWNER, recipient="mind_alice"))
 
+    # Every later message still owes a reply.
+    pending_turns = AsyncMock()
+    pending_turns.pending_among.side_effect = frozenset
+
     async def superseded(turn_sender: str, later: list[ResolvedVisibleMessage]) -> bool:
         turn = PreparedIngress(
             sender=turn_sender,
@@ -374,10 +378,11 @@ async def test_a_contact_turn_is_superseded_only_by_its_own_speaker(tmp_path: Pa
             facts.run_identity,
             later,
             may_be_superseded_by_newer_requester_turn=True,
+            pending_turns=pending_turns,
             classify=partial(validator.classify_source, room_id=CONTACT_ROOM),
             is_handled=AsyncMock(return_value=frozenset()),
             # No message is for another participant, so only the speaker keeps the senders apart.
-            for_another_participant=lambda _source: False,
+            for_another_participant=AsyncMock(return_value=False),
             logger=get_logger(__name__),
         )
 
