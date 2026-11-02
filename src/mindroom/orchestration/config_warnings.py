@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.egress_broker.env import egress_broker_enabled, egress_tool_without_worker_commands
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authorities
+from mindroom.script_runs.manager import script_execution_uses_worker
 from mindroom.tool_system.agent_tools import AgentTools
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.plugins import config_plugins
@@ -30,10 +31,13 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
     _warn_about_agent_keys_without_worker_commands(config, runtime_paths)
 
 
-def _primary_tool_is_unconfined(metadata: ToolMetadata, file_access: str) -> bool:
+def _primary_tool_is_unconfined(metadata: ToolMetadata, file_access: str, *, scripts_run_in_primary: bool) -> bool:
     """Return whether a primary-process tool can reach files beyond the agent workspace."""
     if metadata.file_access is ToolFileAccess.UNCONFINED:
         return True
+    if metadata.executes_code:
+        # A confined primary tool that executes code, such as `script`, launches that code on the script backend.
+        return scripts_run_in_primary
     return metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted"
 
 
@@ -41,6 +45,8 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
     """Log one warning per agent that isolates code tools in a worker while primary-process tools stay unconfined."""
     tools = config_plugins(config, runtime_paths).tools
     placement = tool_placement(runtime_paths, tools)
+    # Only the explicit local execution modes run background scripts in the primary process.
+    scripts_run_in_primary = not script_execution_uses_worker(runtime_paths, worker_backend_configured=True)
     for agent_name in config.agents:
         agent = config.resolve_agent(agent_name)
         agent_tools = AgentTools(config=config, facts=agent.tools, tools=tools)
@@ -50,7 +56,12 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
         unconfined_primary_tools = sorted(
             name
             for name in tool_names
-            if name not in worker_tools and _primary_tool_is_unconfined(tools.entries[name], agent.file_access)
+            if name not in worker_tools
+            and _primary_tool_is_unconfined(
+                tools.entries[name],
+                agent.file_access,
+                scripts_run_in_primary=scripts_run_in_primary,
+            )
         )
         if worker_code_tools and unconfined_primary_tools:
             logger.warning(

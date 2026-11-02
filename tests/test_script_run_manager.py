@@ -2445,13 +2445,29 @@ async def test_controls_hide_runs_from_other_requesters(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_path_must_be_regular_and_workspace_contained(tmp_path: Path) -> None:
-    """Path launch rejects a path that leaves the workspace."""
-    manager, _backend, _client = _manager(tmp_path)
+@pytest.mark.parametrize("escape", ["traversal", "inner_traversal", "absolute", "linked_directory"])
+async def test_source_path_must_be_regular_and_workspace_contained(tmp_path: Path, escape: str) -> None:
+    """Path launch refuses every path that would read a file outside the workspace."""
+    manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
+    workspace = agent_workspace_root_path(context.runtime_paths.storage_root, "watcher")
+    workspace.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("print('outside')\n", encoding="utf-8")
+    (workspace / "linked").symlink_to(outside, target_is_directory=True)
+    path = {
+        "traversal": "../../../outside/secret.py",
+        "inner_traversal": "linked/../../../../outside/secret.py",
+        "absolute": str(outside / "secret.py"),
+        "linked_directory": "linked/secret.py",
+    }[escape]
 
-    with pytest.raises(ScriptRunManagerError, match="workspace"):
-        await manager.run(context, path="../../outside.py")
+    with pytest.raises(ScriptRunManagerError):
+        await manager.run(context, path=path)
+
+    assert manager.store.list_runs() == []
+    assert client.launched_run_ids == []
 
 
 @pytest.mark.asyncio

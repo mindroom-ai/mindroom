@@ -1859,7 +1859,7 @@ def test_a_config_s_plugin_view_does_not_outlive_the_config(tmp_path: Path) -> N
 
 def test_code_execution_tools_declare_unconfined_file_access() -> None:
     """Tools that run arbitrary programs cannot be confined in-process."""
-    for name in ("shell", "python", "docker", "script", "claude_agent"):
+    for name in ("shell", "python", "docker", "claude_agent"):
         assert _BUILTINS.entries[name].file_access is ToolFileAccess.UNCONFINED, name
         assert _BUILTINS.entries[name].executes_code, name
 
