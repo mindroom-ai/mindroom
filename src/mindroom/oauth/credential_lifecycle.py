@@ -717,9 +717,8 @@ async def _store_oauth_group_member(
     async with oauth_credential_transaction(context) as transaction:
         if (await transaction.generations()).connection_generation != member.expected_connection_generation:
             return "changed"
-        member_result = replace(result, token_data={**result.token_data, "_oauth_provider": provider.id})
         try:
-            safe_result = await _safe_token_result(provider, member_result, context.runtime_paths)
+            safe_result = await _safe_token_result(provider, result, context.runtime_paths)
         except OAuthClaimValidationError:
             return "account_not_allowed"
         if not oauth_credentials_have_required_scopes(provider, safe_result.token_data):

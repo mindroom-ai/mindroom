@@ -63,7 +63,6 @@ function ConsentGroupRow({
 
   /** One abandoned by leaving the page or by Cancel changes nothing; any other end reloads the statuses. */
   const connect = async () => {
-    if (busy) return;
     const controller = new AbortController();
     const { signal } = controller;
     operation.current = controller;

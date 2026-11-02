@@ -1449,6 +1449,30 @@ def test_group_connect_skips_a_member_connected_while_signing_in(google_group_po
     assert drive["scopes"] == ["drive.scope"]
 
 
+def test_group_callback_refuses_a_member_whose_connection_moved(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member whose account would now be stored elsewhere refuses the sign-in, and no member is connected."""
+    state = _auth_query(_group_connect(google_group_portal, "alice"))["state"][0]
+    # Sheets now keeps one account per user instead of one per user and agent.
+    _use_providers(google_group_portal, monkeypatch, _drive(), _sheets(requester_scoped_credentials=True))
+    page = _oauth_callback(google_group_portal, "alice", state)
+    assert page.status_code == 409, page.text
+    assert "<title>OAuth connection changed</title>" in page.text
+    assert '"status": "error", "provider": "google_drive"' in page.text
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "alice", "personal", provider) is False
+    for worker_scope in ("user", "user_agent"):
+        stored = _stored_oauth_credentials(
+            _sheets(),
+            google_group_portal["paths"],
+            worker_scope=worker_scope,
+            agent_name="personal",
+        )
+        assert stored is None
+
+
 def test_group_connect_leaves_a_connected_member_alone(google_group_portal: dict[str, Any]) -> None:
     """Only members that are not connected join the sign-in, so it never replaces a connected account."""
     _connect_one(google_group_portal, "alice", "google_drive")

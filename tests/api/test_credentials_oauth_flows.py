@@ -93,16 +93,16 @@ def test_pending_oauth_request_preserves_group_members(tmp_path: Path) -> None:
     assert response.json() == {"agent_name": "general", "payload": {}, "group_members": members}
 
 
-def test_pending_oauth_request_drops_malformed_group_members(tmp_path: Path) -> None:
-    """One malformed member drops the whole member list, so the callback never trusts part of it."""
+def test_pending_oauth_request_refuses_malformed_group_members(tmp_path: Path) -> None:
+    """One malformed member refuses the callback, so it never connects fewer services than the sign-in named."""
     client = _oauth_state_test_client(tmp_path)
     members = [{"provider": "google_drive"}, {"provider": 1}]
 
     state = client.post("/issue-group/google_drive", json=members).json()["state"]
     response = client.post(f"/consume/google_drive?user_id=alice&state={state}")
 
-    assert response.status_code == 200
-    assert response.json()["group_members"] == []
+    assert response.status_code == 400
+    assert response.json()["detail"] == "OAuth state does not record its consent group members correctly"
 
 
 def test_pending_oauth_state_consume_twice_fails(tmp_path: Path) -> None:

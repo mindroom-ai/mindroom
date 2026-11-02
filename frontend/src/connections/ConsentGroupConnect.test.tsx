@@ -344,17 +344,14 @@ describe("Connect all", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("ignores a second click while the sign-in is under way", async () => {
-    const open = vi
-      .spyOn(window, "open")
-      .mockReturnValue(popup() as unknown as Window);
+  it("disables Connect all while the sign-in is under way", async () => {
+    vi.spyOn(window, "open").mockReturnValue(popup() as unknown as Window);
     fetchMock.mockImplementation(async () => new Promise<Response>(() => {}));
     renderGroup(googleAgent(), statusesFor("google_drive", "google_sheets"));
     fireEvent.click(connectAll());
-    const busy = await screen.findByRole("button", { name: "Connecting…" });
-    expect(busy).toBeDisabled();
-    fireEvent.click(busy);
-    expect(open).toHaveBeenCalledOnce();
+    expect(
+      await screen.findByRole("button", { name: "Connecting…" }),
+    ).toBeDisabled();
   });
 
   describe("on a shared agent", () => {

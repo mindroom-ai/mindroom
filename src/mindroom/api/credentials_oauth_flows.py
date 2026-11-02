@@ -136,16 +136,17 @@ def _string_mapping(value: object) -> dict[str, str] | None:
 
 
 def _group_members(value: object) -> tuple[dict[str, str], ...]:
-    """Return every member a pending state stores, or none at all when any member is malformed."""
-    if not isinstance(value, list):
+    """Return every member a pending state stores, none for a state without members.
+
+    A malformed member list refuses the callback, so a consent group sign-in never stores its grant for fewer services.
+    """
+    if value is None:
         return ()
-    members: list[dict[str, str]] = []
-    for raw_member in value:
-        member = _string_mapping(raw_member)
-        if member is None:
-            return ()
-        members.append(member)
-    return tuple(members)
+    members = [_string_mapping(member) for member in value] if isinstance(value, list) else []
+    valid_members = tuple(member for member in members if member is not None)
+    if not isinstance(value, list) or len(valid_members) != len(value):
+        raise HTTPException(status_code=400, detail="OAuth state does not record its consent group members correctly")
+    return valid_members
 
 
 def consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:
