@@ -45,7 +45,7 @@ from mindroom.tool_system.worker_routing import (
     worker_log_id,
     written_by_other_workers,
 )
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import WorkerBackendError, WorkerStartTimeoutError
 from mindroom.workers.backends._dedicated_worker_common import (
     SharedDirectoryMount,
     agent_names_addressed_by_worker_key,
@@ -994,7 +994,7 @@ class KubernetesResourceManager:
                 return deployment
             if time.time() >= deadline:
                 msg = f"Kubernetes worker '{deployment_name}' did not become ready within {timeout_seconds:.0f}s."
-                raise WorkerBackendError(msg)
+                raise WorkerStartTimeoutError(msg)
             if on_poll_tick is not None:
                 on_poll_tick()
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
@@ -1014,7 +1014,7 @@ class KubernetesResourceManager:
                     return response
                 if time.time() >= deadline:
                     msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
-                    raise WorkerBackendError(msg)
+                    raise WorkerStartTimeoutError(msg)
                 time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
     def _apply_object(

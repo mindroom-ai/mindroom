@@ -39,6 +39,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import (
     WorkerBackendError,
+    WorkerStartTimeoutError,
     filter_and_sort_worker_handles,
     mirrored_credential_services,
 )
@@ -103,7 +104,7 @@ from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_
 from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
 from mindroom.workers.models import SANDBOX_RUNNER_API_ROOT, ConfiguredWorkerBackend
-from mindroom.workers.progress import WorkerWarmupProgress, noop_finalize_progress
+from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
@@ -113,7 +114,6 @@ if TYPE_CHECKING:
         ProgressSink,
         WorkerHandle,
         WorkerLaunchConfig,
-        WorkerReadyPhase,
         WorkerSpec,
         WorkerStatus,
     )
@@ -565,10 +565,9 @@ class DockerWorkerBackend:
                 should_restart=cold_start or metadata.lifecycle.status == "failed",
             )
             self._save_metadata(paths, metadata)
-            poll_reporter: Callable[[], None] | None = None
-            finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = noop_finalize_progress
+            reporter: WorkerStartReporter | None = None
             if cold_start:
-                poll_reporter, finalize_progress = self._progress.start_reporter(spec.worker_key)
+                reporter = self._progress.start_reporter(spec)
 
             try:
                 sync_shared_credentials_to_worker(
@@ -578,7 +577,7 @@ class DockerWorkerBackend:
                 )
                 container = self._ensure_container(paths, spec=spec, launch=launch, state=state)
                 try:
-                    self._wait_for_ready(container, on_poll_tick=poll_reporter)
+                    self._wait_for_ready(container, on_poll_tick=None if reporter is None else reporter.on_poll_tick)
                 except _WorkerImageIncompatibleError as stale_error:
                     metadata.lifecycle = prepare_worker_ensure_lifecycle(
                         metadata.lifecycle,
@@ -586,8 +585,8 @@ class DockerWorkerBackend:
                         should_restart=True,
                     )
                     self._save_metadata(paths, metadata)
-                    if poll_reporter is None:
-                        poll_reporter, finalize_progress = self._progress.start_reporter(spec.worker_key)
+                    if reporter is None:
+                        reporter = self._progress.start_reporter(spec)
                     container = self._relaunch_after_stale_image(
                         paths,
                         spec=spec,
@@ -596,16 +595,18 @@ class DockerWorkerBackend:
                         mismatch=stale_error.mismatch,
                     )
                     # A worker is replaced once; a replacement that still mismatches fails the request.
-                    self._wait_for_ready(container, on_poll_tick=poll_reporter)
+                    self._wait_for_ready(container, on_poll_tick=reporter.on_poll_tick)
             except Exception as exc:
                 failure_reason = str(exc)
-                finalize_progress("failed", failure_reason)
+                if reporter is not None:
+                    reporter.finish(exc)
                 self._record_failure_locked(paths, metadata, failure_reason, now=timestamp)
                 if isinstance(exc, WorkerBackendError):
                     raise
                 raise WorkerBackendError(failure_reason) from exc
 
-            finalize_progress("ready", None)
+            if reporter is not None:
+                reporter.finish(None)
             metadata.lifecycle = mark_worker_ready(metadata.lifecycle, now=timestamp)
             self._save_metadata(paths, metadata)
             return self._to_handle(metadata, container, now=timestamp, paths=paths)
@@ -1104,7 +1105,7 @@ class DockerWorkerBackend:
                         f"Docker worker did not become ready within {self.config.ready_timeout_seconds:.0f}s."
                         + self._container_logs_excerpt(container)
                     )
-                    raise WorkerBackendError(msg)
+                    raise WorkerStartTimeoutError(msg)
                 if on_poll_tick is not None:
                     on_poll_tick()
                 time.sleep(_READY_POLL_INTERVAL_SECONDS)

@@ -44,10 +44,11 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     worker_dir_name,
     worker_id_for_key,
+    worker_log_id,
     worker_root_path,
 )
 from mindroom.workers import progress as progress_module
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import WorkerBackendError, WorkerStartTimeoutError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
@@ -4882,7 +4883,7 @@ def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _UnreachableClient)
     monkeypatch.setattr(kubernetes_resources_module, "_READY_POLL_INTERVAL_SECONDS", 0.0)
 
-    with pytest.raises(WorkerBackendError, match="did not answer its health check"):
+    with pytest.raises(WorkerStartTimeoutError, match="did not answer its health check"):
         kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
             backend._resources,
             "mindroom-worker-abc",
@@ -4980,6 +4981,94 @@ def test_kubernetes_backend_skips_progress_for_warm_worker() -> None:
     )
 
     assert events == []
+
+
+def _cold_start_records(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [entry for entry in logs if entry["event"] == "worker_cold_start"]
+
+
+def test_kubernetes_backend_logs_a_cold_start_and_nothing_for_a_warm_worker() -> None:
+    """A call that waits for a worker to start logs one ``worker_cold_start``; a ready worker logs none."""
+    backend, _apps_api, _core_api = _backend()
+
+    with capture_logs() as cold_logs:
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    with capture_logs() as warm_logs:
+        # The first call answers from the ready cache, the second reads the Deployment and finds it ready.
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=11.0)
+        backend._invalidate_ready_worker(_TEST_SCOPED_WORKER_KEY_A)
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=12.0)
+
+    [record] = _cold_start_records(cold_logs)
+    assert record["log_level"] == "info"
+    assert {key: record[key] for key in ("worker", "backend", "kind", "scope", "agent_name", "outcome")} == {
+        "worker": worker_log_id(_TEST_SCOPED_WORKER_KEY_A),
+        "backend": "kubernetes",
+        "kind": "tool",
+        "scope": "shared",
+        "agent_name": "code",
+        "outcome": "ready",
+    }
+    assert 0.0 <= record["pod_ready_ms"] <= record["wait_ms"]
+    assert _cold_start_records(warm_logs) == []
+
+
+def test_kubernetes_backend_logs_a_script_worker_cold_start_as_script() -> None:
+    """A background script's run-pinned worker logs its start as ``script``."""
+    backend, _apps_api, _core_api = _backend()
+    base_worker_key = "v1:tenant-123:user_agent:@alice:example.org:code"
+    worker_key = script_worker_key_for_run(base_worker_key, f"script-{'a' * 32}")
+
+    with capture_logs() as logs:
+        backend.ensure_worker(
+            _spec(worker_key, private_agent_names=frozenset(), state_scope_worker_key=base_worker_key),
+            now=10.0,
+        )
+
+    [record] = _cold_start_records(logs)
+    assert (record["kind"], record["scope"], record["agent_name"]) == ("script", "user_agent", "code")
+    assert record["worker"] == worker_log_id(worker_key)
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [
+        (WorkerStartTimeoutError("Kubernetes worker did not become ready within 5s."), "timeout"),
+        (WorkerBackendError("Kubernetes worker deployment disappeared during startup."), "error"),
+    ],
+)
+def test_kubernetes_backend_logs_the_outcome_of_a_failed_cold_start(error: WorkerBackendError, outcome: str) -> None:
+    """A start that never became ready logs whether it timed out or failed."""
+    backend, _apps_api, _core_api = _backend()
+
+    def _fail(*_args: object, **_kwargs: object) -> object:
+        raise error
+
+    backend._resources.wait_for_ready = _fail
+
+    with capture_logs() as logs, pytest.raises(WorkerBackendError, match=str(error)):
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    [record] = _cold_start_records(logs)
+    assert record["outcome"] == outcome
+    assert record["wait_ms"] >= 0.0
+    assert "pod_ready_ms" not in record
+
+
+def test_kubernetes_worker_readiness_timeouts_are_start_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker that never turns ready or never answers its health check fails with a start timeout."""
+    backend, apps_api, _core_api = _backend()
+    backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    worker_id = backend._worker_id(_TEST_SCOPED_WORKER_KEY_A)
+    monkeypatch.setattr(kubernetes_resources_module, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+    apps_api.deployments[worker_id].status.ready_replicas = 0
+
+    with pytest.raises(WorkerStartTimeoutError, match="did not become ready"):
+        backend._resources.wait_for_ready(
+            worker_id,
+            timeout_seconds=0.0,
+            deployment_ready_fn=backend._deployment_ready,
+        )
 
 
 def test_kubernetes_backend_reports_progress_for_recreated_ready_deployment(tmp_path: Path) -> None:

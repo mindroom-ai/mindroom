@@ -53,11 +53,10 @@ from mindroom.workers.models import (
     WorkerHandle,
     WorkerLaunchConfig,
     WorkerMaintenanceResult,
-    WorkerReadyPhase,
     WorkerSpec,
     WorkerStatus,
 )
-from mindroom.workers.progress import WorkerWarmupProgress, noop_finalize_progress
+from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 from . import kubernetes_resources as resources
@@ -254,7 +253,7 @@ class KubernetesWorkerBackend:
                 return cached_handle
             return self._provision_worker_locked(spec, launch, timestamp=timestamp)
 
-    def _provision_worker_locked(  # noqa: PLR0915
+    def _provision_worker_locked(  # noqa: C901, PLR0915
         self,
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
@@ -281,11 +280,10 @@ class KubernetesWorkerBackend:
             state_subpath=state_subpath,
             state=lifecycle,
         )
-        poll_reporter: Callable[[], None] | None = None
-        finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = noop_finalize_progress
+        reporter: WorkerStartReporter | None = None
         destructive_failure_allowed = current_handle is None or current_handle.status != "ready"
         if should_restart or existing is None or not self._deployment_ready(existing):
-            poll_reporter, finalize_progress = self._progress.start_reporter(worker_key)
+            reporter = self._progress.start_reporter(spec)
         auth_secret_applied = False
         try:
             # kubelet resolves the read-only mirror subPath when the pod starts, so the
@@ -313,8 +311,8 @@ class KubernetesWorkerBackend:
                 )
                 startup_triggered = should_restart or recreated
                 destructive_failure_allowed = destructive_failure_allowed or startup_triggered
-                if startup_triggered and poll_reporter is None:
-                    poll_reporter, finalize_progress = self._progress.start_reporter(worker_key)
+                if startup_triggered and reporter is None:
+                    reporter = self._progress.start_reporter(spec)
                 if recreated and (replacing_stale_worker or not should_restart):
                     lifecycle = prepare_worker_ensure_lifecycle(lifecycle, now=timestamp, should_restart=True)
                     annotations = resources.metadata_annotations(
@@ -329,8 +327,10 @@ class KubernetesWorkerBackend:
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,
                     deployment_ready_fn=self._deployment_ready,
-                    on_poll_tick=poll_reporter,
+                    on_poll_tick=None if reporter is None else reporter.on_poll_tick,
                 )
+                if reporter is not None:
+                    reporter.mark("pod_ready")
                 if not self._ready_worker_needs_replacement(worker_id, is_replacement=replacing_stale_worker):
                     break
                 # A mutable tag such as `:latest` keeps an older pod running after an upgrade, and
@@ -346,7 +346,8 @@ class KubernetesWorkerBackend:
             self._resources.patch_deployment(worker_id, annotations=final_annotations)
         except Exception as exc:
             failure_reason = str(exc)
-            finalize_progress("failed", failure_reason)
+            if reporter is not None:
+                reporter.finish(exc)
             self._record_startup_failure_or_cleanup_secret(
                 worker_key=worker_key,
                 worker_id=worker_id,
@@ -360,7 +361,8 @@ class KubernetesWorkerBackend:
                 raise
             raise WorkerBackendError(failure_reason) from exc
 
-        finalize_progress("ready", None)
+        if reporter is not None:
+            reporter.finish(None)
         final_deployment_annotations = {
             **dict(deployment.metadata.annotations or {}),
             **final_annotations,

@@ -1680,6 +1680,8 @@ async def _drain_worker_progress_events(
         event = await queue.get()
         if pump.shutdown.is_set():
             return
+        if event.progress.phase in {"ready", "failed"} and streaming.pipeline_timing is not None:
+            streaming.pipeline_timing.note_worker_wait(event.progress.elapsed_seconds)
         if streaming._warmup_state.apply_event(event):
             if pump.shutdown.is_set():
                 return
