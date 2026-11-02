@@ -113,6 +113,8 @@ def test_gemini_sizes_a_replayed_thought_signature_as_the_reasoning_its_reply_re
     beyond their prompts and visible text. The running turn's own replies are left to mid-turn sizing.
     """
     gemini = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, lambda _r: None)
+    # A system prompt larger than the reasoning, which Gemini sends as its system instruction.
+    system = Message(role="system", content="You answer questions about MindRoom's design records. " * 100)
     question = Message(role="user", content="What does the document decide?", from_history=True)
     signature = base64.b64encode(b"signature" * 40).decode("ascii")
     signed = Message(
@@ -130,7 +132,22 @@ def test_gemini_sizes_a_replayed_thought_signature_as_the_reasoning_its_reply_re
     counter = gemini.token_counter
 
     def sized(reply: Message) -> int:
-        return estimate_request_messages_tokens([question, reply], counter=counter)
+        return estimate_request_messages_tokens([system, question, reply], counter=counter)
 
     assert sized(signed) - sized(unsigned) == 500
     assert sized(replace(signed, from_history=False)) == sized(replace(unsigned, from_history=False))
+
+
+def test_gemini_counts_replayed_text_as_the_model_reads_it(tmp_path: Path) -> None:
+    """Text parts travel as JSON, but Gemini reads their text, so quotes and newlines cost no escaping."""
+    gemini = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, lambda _r: None)
+    code = 'def greet(name: str) -> str:\n    """Say hello."""\n    return f"Hello, {name}!\\n"\n' * 40
+    messages = [
+        Message(role="system", content="You review code."),
+        Message(role="user", content=code, from_history=True),
+        Message(role="assistant", content='{"verdict": "ok", "notes": ["a", "b"]}\n' * 20, from_history=True),
+    ]
+
+    sized = gemini.token_counter.replay.estimate_portable_replay_tokens(messages)
+
+    assert sized == count(gemini.token_counter, "".join(str(message.content) for message in messages))

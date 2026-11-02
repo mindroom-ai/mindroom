@@ -177,14 +177,16 @@ async def format_contents(
 
 
 def estimate_replay_tokens(messages: Sequence[Message], *, counter: TokenCounter) -> int:
-    """Count the contents an explicitly replayed request sends for ``messages``, their text with ``counter``.
+    """Count what an explicitly replayed request sends for ``messages``, its text with ``counter``.
 
-    Gemini bills a replayed thought signature about as the reasoning its reply reported, so each earlier reply that
-    replays one adds its reasoning tokens; the running turn's own replies are left to mid-turn sizing, which adds each
-    response's reported thinking. Media is left to the history estimate's allowances, and server-side tool parts count
-    as though the request asked for them.
+    The system instruction and text parts count as the model reads them, without the escaping JSON adds; function
+    calls, function responses, and server-side tool parts count as serialized, the last as though the request asked
+    for them. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each earlier
+    reply that replays one adds its reasoning tokens; the running turn's own replies are left to mid-turn sizing, which
+    adds each response's reported thinking. Media is left to the history estimate's allowances.
     """
-    parts: list[dict[str, Any]] = []
+    texts = [system_text(messages)]
+    structured: list[dict[str, Any]] = []
     reasoning_tokens = 0
     for message in messages:
         if message.role == "system":
@@ -192,10 +194,13 @@ def estimate_replay_tokens(messages: Sequence[Message], *, counter: TokenCounter
         message_parts = _message_parts(message, _ROLE_MAP.get(message.role, message.role), server_tool_parts=True)
         if not is_own_model_message(message) and any("thought_signature" in part for part in message_parts):
             reasoning_tokens += message.metrics.tokens.reasoning_tokens
-        parts.extend(
-            {key: value for key, value in part.items() if key != "thought_signature"} for part in message_parts
-        )
-    return count(counter, stable_serialize(parts)) + reasoning_tokens
+        for part in message_parts:
+            if isinstance(part.get("text"), str):
+                texts.append(part["text"])
+            else:
+                structured.append({key: value for key, value in part.items() if key != "thought_signature"})
+    sent = "".join(texts) + (stable_serialize(structured) if structured else "")
+    return count(counter, sent) + reasoning_tokens
 
 
 def _is_tool_result(message: Message) -> bool:
