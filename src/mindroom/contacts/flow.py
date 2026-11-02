@@ -561,7 +561,7 @@ class _ListedContact(BaseModel):
 
     id: str
     status: str
-    you: SideName
+    lister_side: SideName = Field(serialization_alias="you")
     other_party: ContactParty = Field(serialization_alias="with")
     reason: str
     your_rules: str | None
@@ -596,7 +596,7 @@ def list_contacts(context: ToolRuntimeContext, agent_name: str) -> str:
             _ListedContact(
                 id=record.id,
                 status=record.status,
-                you=side,
+                lister_side=side,
                 other_party=record.party(record.other(side)),
                 reason=record.reason,
                 your_rules=yours.rules,

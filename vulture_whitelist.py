@@ -65,7 +65,7 @@ value_max_length  # JSON response field consumed by the egress service editor (s
 requester_scoped  # JSON response field consumed by the egress service editor (src/mindroom/api/egress_status.py)
 max_rules_per_service  # JSON response field consumed by the egress service editor (src/mindroom/api/egress_status.py)
 max_service_bytes  # JSON response field consumed by the egress service editor (src/mindroom/api/egress_status.py)
-you  # list_contacts YAML field the agent reads (src/mindroom/contacts/flow.py)
+lister_side  # list_contacts YAML field the agent reads as "you" (src/mindroom/contacts/flow.py)
 other_party  # list_contacts YAML field the agent reads as "with" (src/mindroom/contacts/flow.py)
 your_rules  # list_contacts YAML field the agent reads (src/mindroom/contacts/flow.py)
 your_tools  # list_contacts YAML field the agent reads (src/mindroom/contacts/flow.py)
