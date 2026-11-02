@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -357,6 +358,31 @@ def test_claude_counts_a_deferred_tool_in_the_tail_only_when_the_tail_loads_it(t
     without_the_tool = route.request_tokens(replace(request, tools=()), start=3)
 
     assert tail == without_the_tool if searched == "before" else tail > without_the_tool
+
+
+@pytest.mark.parametrize("thinking", [{"type": "disabled"}, {"type": "enabled", "budget_tokens": 2_048}])
+def test_claude_identifies_a_request_by_whether_it_replays_earlier_thinking(
+    tmp_path: Path,
+    thinking: dict[str, object],
+) -> None:
+    """A thinking setting that sends no binding leaves earlier thinking out, so no size reported before describes it."""
+    config = {"api_key": "parity-test-key", "id": "claude-sonnet-5-5", "provider": "anthropic"}
+    (tmp_path / "default").mkdir()
+    (tmp_path / "changed").mkdir()
+    default = provider_for(config, tmp_path / "default", httpx2.AsyncClient())
+    changed = provider_for(
+        {**config, "extra_kwargs": {"thinking": thinking}},
+        tmp_path / "changed",
+        httpx2.AsyncClient(),
+    )
+    blocks = (
+        {"type": "thinking", "thinking": _THINKING, "signature": "c2lnbmF0dXJl"},
+        {"type": "text", "text": "Pack light."},
+    )
+    request = _conversation(_claude_answer(default, *blocks))
+
+    assert default.request_tokens(request) > changed.request_tokens(request)
+    assert default.context_key(request) != changed.context_key(request)
 
 
 def test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks(tmp_path: Path) -> None:
