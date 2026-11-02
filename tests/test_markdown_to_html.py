@@ -380,6 +380,23 @@ def test_unsafe_raw_html_attributes_are_stripped() -> None:
     assert "onerror=" not in html
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "obsidian://open?vault=notes",
+        "readdlespark://bl=QTpqb2huQGV4YW1wbGUuY29tO0lEOjxhYmNAeC5jb20+",
+    ],
+)
+def test_app_links_keep_their_href(url: str) -> None:
+    """Links to the apps MindRoom Chat opens by default stay clickable."""
+    assert markdown_to_html(f"[open]({url})") == f'<p><a href="{url}">open</a></p>\n'
+
+
+def test_unknown_app_links_lose_their_href() -> None:
+    """Other custom schemes keep their text but not their link."""
+    assert markdown_to_html("[open](someapp://x)") == "<p><a>open</a></p>\n"
+
+
 def test_data_uri_attributes_are_stripped() -> None:
     """Dangerous data: URIs should be removed from otherwise allowed tags."""
     html = markdown_to_html('<a href="data:text/html,<script>alert(1)</script>">click</a>')

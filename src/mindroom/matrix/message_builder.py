@@ -103,7 +103,9 @@ _ALLOWED_FORMATTED_BODY_ATTRIBUTES = {
 }
 _VOID_FORMATTED_BODY_TAGS = frozenset({"br", "hr", "img"})
 _URL_ATTRIBUTES = frozenset({"href", "src"})
-_ALLOWED_URL_SCHEMES = frozenset({"", "http", "https", "mailto", "matrix", "mxc"})
+# Besides web and Matrix links, keep the app links MindRoom Chat allows by default
+# (`messageRendering.additionalAllowedUriSchemes`): Obsidian notes and Spark email backlinks.
+_ALLOWED_URL_SCHEMES = frozenset({"", "http", "https", "mailto", "matrix", "mxc", "obsidian", "readdlespark"})
 _ALLOWED_STYLE_PROPERTIES = frozenset(
     {
         "background",
