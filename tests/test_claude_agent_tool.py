@@ -993,6 +993,7 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
     await asyncio.create_task(_in_call(run_context, tools.claude_end_session()))
     assert client.disconnect_task is client.connect_task
     assert client.reader.cancelled()
+    assert client.receiver.cancelled()
 
 
 @pytest.mark.asyncio
@@ -1710,13 +1711,13 @@ async def _evict(manager: claude_agent_module._ClaudeSessionManager, session_key
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("close", [_end_session, _expire, _evict], ids=["end-session", "expiry", "eviction"])
-async def test_a_stopped_calls_unread_answer_counts_when_its_session_closes(
+async def test_unread_turns_count_when_their_session_closes(
     tmp_path: Path,
     fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
     close: Callable[[claude_agent_module._ClaudeSessionManager, str], Awaitable[None]],
 ) -> None:
-    """The answer a stopped call left unread counts toward that call's requester when the session closes."""
+    """Complete turns no call read, such as a stopped call's answer, count toward its requester at session close."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
     turns = [[_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)], [_ECHO]]
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
@@ -1724,8 +1725,14 @@ async def test_a_stopped_calls_unread_answer_counts_when_its_session_closes(
     async def answer_then_close() -> None:
         [session] = fake_manager._sessions.values()
         client = cast("_ScriptedClaudeSDKClient", session.client)
-        # Claude Code answers the stopped call's prompt, and nothing reads that answer.
-        for message in [_claude_response("claude-sonnet-5-5", "msg-2", 500), _claude_result(60)]:
+        # Claude Code answers the stopped call's prompt, runs a turn of its own, and starts another; nothing reads them.
+        for message in [
+            _claude_response("claude-sonnet-5-5", "msg-2", 500),
+            _claude_result(60),
+            _BACKGROUND_NOTE,
+            _self_started_result(30),
+            _claude_response("claude-sonnet-5-5", "msg-4", 700),
+        ]:
             client.stream.put_nowait(message)
         await _until(client.stream.empty)
         await close(fake_manager, session.key)
@@ -1739,7 +1746,7 @@ async def test_a_stopped_calls_unread_answer_counts_when_its_session_closes(
 
     assert rows == [
         ("@alice:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0),
-        ("@bob:localhost", "claude-sonnet-5-5", 500, 60, 0, 0),
+        ("@bob:localhost", "claude-sonnet-5-5", 800, 90, 0, 0),
     ]
 
 
