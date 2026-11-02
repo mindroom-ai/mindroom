@@ -20,7 +20,6 @@ from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, RUN_SUBAGENT
 from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
@@ -54,6 +53,7 @@ class DelegateTools(Toolkit):
         delegation_depth: int = 0,
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
         persona: SubagentPersona | None = None,
+        calls_as_jobs: bool = False,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = config.get_agent(agent_name).delegate_to
@@ -61,6 +61,8 @@ class DelegateTools(Toolkit):
         self._config = config
         self._execution_identity = execution_identity
         self._delegation_depth = delegation_depth
+        # Whether the agent's build lets these calls become jobs, which a nested or minimal agent's never do.
+        self._calls_as_jobs = calls_as_jobs
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(
             config,
@@ -114,11 +116,8 @@ class DelegateTools(Toolkit):
         return instructions
 
     def _background_jobs_available(self) -> bool:
-        # A nested subagent's calls run inline inside its parent's job, so only a top-level caller can wait on one.
         return (
-            self._delegation_depth == 0
-            and background_tool_jobs_enabled(self._config, self._runtime_paths)
-            and not toolkit_is_background_excluded("delegate", self._config, self._runtime_paths)
+            self._calls_as_jobs
             and self._execution_identity is not None
             and self._execution_identity.channel == "matrix"
             and get_background_runtime(self._runtime_paths) is not None

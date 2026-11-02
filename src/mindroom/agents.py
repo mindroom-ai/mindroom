@@ -693,11 +693,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     persona: SubagentPersona | None = None,
     deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
+    calls_as_jobs: bool = False,
 ) -> AnyToolkit | None:
     """Build one of the toolkits ``agent_tools`` offers the agent, where ``placement`` runs it.
 
     ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
     the copies it authors within the persona's tools, skills, and knowledge bases.
+    ``calls_as_jobs`` says whether the agent's build lets this toolkit's calls become background jobs.
     ``workspace_in_worker`` says whether the build's workspace-path toolkits run in a worker, where attachments save.
 
     ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
@@ -758,6 +760,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
                 refresh_scheduler=refresh_scheduler,
                 workspace_root=agent_runtime.workspace.root,
                 persona=persona,
+                calls_as_jobs=calls_as_jobs,
             ),
         )
 
@@ -1111,9 +1114,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     """
     config = agent_tools.config
     agent_name = agent_tools.agent_name
-    approvals_as_jobs = (
-        background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
-    )
+    # Only a top-level agent's own calls can become jobs: a nested subagent's run inside its parent's job, and a
+    # minimal agent's return to the CLI command that made them.
+    calls_as_jobs = background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
     room_tools, matrix_room_tools = turn_room_flags(execution_identity)
@@ -1164,6 +1167,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         """Build and adapt one configured toolkit; what the agent records of it waits until both succeeded."""
         tool_name = tool_entry.name
         authored_name = tool_entry.authored_name or tool_name
+        toolkit_calls_as_jobs = calls_as_jobs and not toolkit_is_background_excluded(tool_name, config, runtime_paths)
         with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
             toolkit = build_agent_toolkit(
                 tool_name,
@@ -1178,6 +1182,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
                 deferred_toolkits=searched_toolkits,
+                calls_as_jobs=toolkit_calls_as_jobs,
             )
         if toolkit is None:
             return None
@@ -1199,9 +1204,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             config,
             registered_tool_name=tool_name,
             resumable=supports_native_tool_approval,
-            # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
-            approvals_as_jobs=approvals_as_jobs
-            and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
+            approvals_as_jobs=toolkit_calls_as_jobs,
         )
         # Instructions describe only the functions left; Agno's defaults that name a missing one are dropped.
         construction = get_toolkit_construction(toolkit)

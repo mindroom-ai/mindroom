@@ -23,6 +23,7 @@ from mindroom import ai
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
+from mindroom.agents import create_agent
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.cancellation import request_task_cancel
@@ -31,7 +32,6 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools import delegate as delegate_toolkit
-from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import recovery as delegation_recovery
@@ -55,14 +55,14 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_loop.helpers import collect, spec, toolkit
-from tests.agent_tool_helpers import toolkit_offers
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, respond
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
-from tests.identity_helpers import entity_ids
+from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import (
     DELEGATING_REQUESTER,
@@ -84,11 +84,13 @@ from tests.tool_job_helpers import (
     tool_job_runtime,
     wait_for_status,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, DelegationHookState
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
@@ -1450,9 +1452,17 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("depth", [0, 1])
-async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path, depth: int) -> None:
-    """A nested subagent's delegate calls always run inline, so its guidance offers no background wait."""
+@pytest.mark.parametrize(
+    ("depth", "agent_mode", "offered"),
+    [(0, "standard", True), (1, "standard", False), (0, "minimal", False)],
+)
+async def test_only_a_build_whose_subagent_calls_become_jobs_offers_background_waits(
+    tmp_path: Path,
+    depth: int,
+    agent_mode: AgentMode,
+    offered: bool,
+) -> None:
+    """A nested subagent's calls run inside its parent's job and a minimal agent's return to its CLI command."""
     paths = _runtime_paths(tmp_path)
     config = Config(
         agents={
@@ -1461,25 +1471,31 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
         },
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
+        models={"default": {"provider": "openai", "id": "gpt-4o-mini"}},
     )
     config.background_tool_jobs.enabled = True
+    persist_entity_accounts(config, paths)
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     try:
-        delegate = DelegateTools(
+        build = create_agent(
             "leader",
-            paths,
             config,
-            agent_workspace_root_path(paths.storage_root, "leader"),
-            execution_identity=owner,
+            paths,
+            owner,
+            knowledge=None,
+            model=turn_model(config, paths, "leader"),
+            plugins=config_plugins(config, paths),
             delegation_depth=depth,
+            agent_mode=agent_mode,
         )
-        description = toolkit_offers(delegate, "run_subagent").description or ""
-        offered = "background_after" in description
-        instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.instructions or "")
-        assert (offered, instructed) == (depth == 0, depth == 0)
+        # A minimal agent's CLI describes each function with its toolkit's guidance.
+        delegate = next(toolkit for toolkit in build.spec.toolkits if toolkit.name == "delegate")
+        [run_subagent] = (function for function in delegate.functions if function.name == "run_subagent")
+        instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.guidance or "")
+        assert ("background_after" in (run_subagent.description or ""), instructed) == (offered, offered)
     finally:
         await runtime.shutdown()
 
