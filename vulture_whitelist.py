@@ -66,6 +66,7 @@ max_rules_per_service  # JSON response field consumed by the egress service edit
 max_service_bytes  # JSON response field consumed by the egress service editor (src/mindroom/api/egress_status.py)
 me  # FastAPI route (src/mindroom/api/connections.py)
 agent_state  # FastAPI route (src/mindroom/api/connections.py)
+connect_consent_group  # FastAPI route (src/mindroom/api/connections.py)
 connect_egress_account  # FastAPI route (src/mindroom/api/egress_credentials.py)
 disconnect_egress_account  # FastAPI route (src/mindroom/api/egress_credentials.py)
 connect_service_account  # FastAPI route (src/mindroom/api/egress_broker.py)

@@ -24,7 +24,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.oauth import credential_lifecycle
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
-from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.providers import OAuthConsentGroup, OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.conftest import (
     publish_api_payload,
@@ -44,6 +44,8 @@ from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import httpx
 
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider, OAuthRuntimeEndpoints
@@ -1245,3 +1247,269 @@ def test_catalog_names_credential_managers_only_to_users_they_matter_to_while_th
     _enable_egress_broker(shared_portal)
     assert _catalog_managers(shared_portal, "bob")["research"] == research_managers
     assert _catalog_managers(shared_portal, "alice")["research"] == research_managers
+
+
+_GOOGLE_GROUP = OAuthConsentGroup("google", "Google")
+
+
+def _google_member(provider_id: str, display_name: str, scope: str, **kwargs: Any) -> OAuthProvider:  # noqa: ANN401
+    """Build a Google consent group member on the group's endpoints and shared OAuth client."""
+    provider = _fake_provider(
+        provider_id=provider_id,
+        credential_service=f"{provider_id}_oauth",
+        display_name=display_name,
+        scopes=(scope,),
+        consent_group=_GOOGLE_GROUP,
+        client_config_services=(f"{provider_id}_oauth_client",),
+        shared_client_config_services=("test_drive_oauth_client",),
+        **kwargs,
+    )
+    return replace(
+        provider,
+        authorization_url="https://auth.example.test/google/authorize",
+        token_url="https://auth.example.test/google/token",  # noqa: S106
+    )
+
+
+def _use_providers(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch, *providers: OAuthProvider) -> None:
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: providers)
+    publish_api_payload(main.app, portal["payload"])
+
+
+def _drive(**kwargs: Any) -> OAuthProvider:  # noqa: ANN401
+    return _google_member("google_drive", "Test Drive", "drive.scope", **kwargs)
+
+
+def _sheets(**kwargs: Any) -> OAuthProvider:  # noqa: ANN401
+    return _google_member("google_sheets", "Test Sheets", "sheets.scope", **kwargs)
+
+
+@pytest.fixture
+def google_group_portal(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Give the private agent Drive and Sheets, two Google consent group members that share one OAuth client."""
+    portal["payload"]["agents"]["personal"]["tools"] = ["google_drive", "google_sheets"]
+    _use_providers(portal, monkeypatch, _drive(), _sheets())
+    return portal
+
+
+def _group_connect(
+    portal: dict[str, Any],
+    user: str,
+    *,
+    agent: str = "personal",
+    group: str = "google",
+) -> httpx.Response:
+    return portal["client"].post(
+        f"/api/connections/agents/{agent}/consent-groups/{group}/connect",
+        headers=portal["headers"][user],
+        json={},
+    )
+
+
+def _auth_query(response: httpx.Response) -> dict[str, list[str]]:
+    assert response.status_code == 200, response.text
+    return parse_qs(urlparse(response.json()["auth_url"]).query)
+
+
+def _requested_scopes(response: httpx.Response) -> set[str]:
+    return set(_auth_query(response)["scope"][0].split())
+
+
+def _oauth_callback(portal: dict[str, Any], user: str, state: str, provider: str = "google_drive") -> httpx.Response:
+    return portal["client"].get(
+        f"/api/oauth/{provider}/callback",
+        params={"code": "test-code", "state": state},
+        headers=portal["headers"][user],
+        follow_redirects=False,
+    )
+
+
+def _finish_group_connect(portal: dict[str, Any], user: str, *, agent: str = "personal") -> httpx.Response:
+    """Start a group connect and complete its sign-in, as the popup does."""
+    response = _group_connect(portal, user, agent=agent)
+    return _oauth_callback(portal, user, _auth_query(response)["state"][0], response.json()["provider"])
+
+
+def _connect_one(portal: dict[str, Any], user: str, provider: str) -> None:
+    """Connect one member with its own Connect button."""
+    response = portal["client"].post(
+        f"/api/connections/agents/personal/{provider}/connect",
+        headers=portal["headers"][user],
+        json={},
+    )
+    assert _oauth_callback(portal, user, _auth_query(response)["state"][0], provider).status_code == 307
+
+
+def test_catalog_reports_each_service_consent_group(google_group_portal: dict[str, Any]) -> None:
+    """The portal learns which services one sign-in can connect together."""
+    response = google_group_portal["client"].get("/api/connections", headers=google_group_portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    services = response.json()["agents"][0]["services"]
+    assert {service["provider"]: service["consent_group"] for service in services} == {
+        "google_drive": {"key": "google", "display_name": "Google"},
+        "google_sheets": {"key": "google", "display_name": "Google"},
+    }
+
+
+def test_group_connect_asks_for_every_member_scope_in_one_sign_in(google_group_portal: dict[str, Any]) -> None:
+    """The first service leads one authorization request for the union of the members' scopes."""
+    response = _group_connect(google_group_portal, "alice")
+    query = _auth_query(response)
+    assert response.json()["provider"] == "google_drive"
+    assert response.json()["auth_url"].startswith("https://auth.example.test/google/authorize?")
+    assert query["scope"] == ["drive.scope sheets.scope"]
+    assert query["redirect_uri"] == ["https://portal.example.org/api/oauth/google_drive/callback"]
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_group_connect_requires_same_origin_and_empty_body(google_group_portal: dict[str, Any]) -> None:
+    """Cross-site requests and hidden body selectors cannot start a group connect."""
+    client, headers = google_group_portal["client"], google_group_portal["headers"]["alice"]
+    url = "/api/connections/agents/personal/consent-groups/google/connect"
+    assert client.post(url, headers={**headers, "Origin": "https://evil.example.org"}, json={}).status_code == 403
+    no_origin = {key: value for key, value in headers.items() if key != "Origin"}
+    assert client.post(url, headers=no_origin, json={}).status_code == 403
+    assert client.post(url, headers=headers, json={"provider": "google_sheets"}).status_code == 422
+
+
+def test_group_connect_connects_every_member(google_group_portal: dict[str, Any]) -> None:
+    """One sign-in stores the account for every member, in the requester's own private scope."""
+    page = _finish_group_connect(google_group_portal, "alice")
+    assert page.status_code == 200, page.text
+    assert "<title>Google connected</title>" in page.text
+    assert "Connected Test Drive, Test Sheets. You can close this window." in page.text
+    assert '"status": "connected", "provider": "google_drive"' in page.text
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "alice", "personal", provider) is True
+        assert _connected(google_group_portal, "bob", "personal", provider) is False
+
+
+def test_group_connect_names_a_service_the_user_did_not_grant(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member whose scope the user unticked on the consent screen stays unconnected, and the page says so."""
+    # The lead's exchange answers for the whole sign-in.
+    _use_providers(google_group_portal, monkeypatch, _drive(granted_scopes=("drive.scope",)), _sheets())
+    page = _finish_group_connect(google_group_portal, "alice")
+    assert page.status_code == 200, page.text
+    assert (
+        "Connected Test Drive. Not connected: Test Sheets (access was not granted). You can close this window."
+        in page.text
+    )
+    assert _connected(google_group_portal, "alice", "personal", "google_drive") is True
+    assert _connected(google_group_portal, "alice", "personal", "google_sheets") is False
+
+
+def test_group_connect_that_connects_nothing_is_an_error_page(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every member refuses the account, the page is an error and its opener hears that the flow failed."""
+    refused = {"allowed_email_domains": ("other.example",)}
+    _use_providers(google_group_portal, monkeypatch, _drive(**refused), _sheets(**refused))
+    page = _finish_group_connect(google_group_portal, "alice")
+    assert page.status_code == 400, page.text
+    assert "<title>Google not connected</title>" in page.text
+    assert (
+        "Nothing was connected: Test Drive (this account is not allowed); "
+        "Test Sheets (this account is not allowed)." in page.text
+    )
+    assert '"status": "error", "provider": "google_drive"' in page.text
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "alice", "personal", provider) is False
+
+
+def test_group_connect_skips_a_member_connected_while_signing_in(google_group_portal: dict[str, Any]) -> None:
+    """A member connected another way during the sign-in keeps that account, and the others still connect."""
+    response = _group_connect(google_group_portal, "alice")
+    state = _auth_query(response)["state"][0]
+    _connect_one(google_group_portal, "alice", "google_drive")
+    page = _oauth_callback(google_group_portal, "alice", state)
+    assert page.status_code == 200, page.text
+    assert "Connected Test Sheets. Not connected: Test Drive (changed while you were signing in)." in page.text
+    assert _connected(google_group_portal, "alice", "personal", "google_sheets") is True
+    # Drive keeps the grant of its own sign-in, not the group's.
+    drive = _stored_oauth_credentials(
+        _drive(),
+        google_group_portal["paths"],
+        requester_id="@alice:example.org",
+        agent_name="personal",
+    )
+    assert drive is not None
+    assert drive["scopes"] == ["drive.scope"]
+
+
+def test_group_connect_leaves_a_connected_member_alone(google_group_portal: dict[str, Any]) -> None:
+    """Only members that are not connected join the sign-in, so it never replaces a connected account."""
+    _connect_one(google_group_portal, "alice", "google_drive")
+    response = _group_connect(google_group_portal, "alice")
+    assert response.json()["provider"] == "google_sheets"
+    assert _requested_scopes(response) == {"sheets.scope"}
+
+
+@pytest.mark.parametrize("difference", ["oauth_client", "authorization_url", "token_url"])
+def test_group_connect_skips_a_member_that_signs_in_elsewhere(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    difference: str,
+) -> None:
+    """A member with another OAuth client or endpoint could not use the lead's token, so it is left out."""
+    if difference == "oauth_client":
+        get_runtime_credentials_manager(google_group_portal["paths"]).save_credentials(
+            "google_sheets_oauth_client",
+            {"client_id": "other-client", "client_secret": "other-secret", "_source": "ui"},
+        )
+    else:
+        other = {difference: f"https://other.example.test/{difference}"}
+        _use_providers(google_group_portal, monkeypatch, _drive(), replace(_sheets(), **other))
+    response = _group_connect(google_group_portal, "alice")
+    assert response.json()["provider"] == "google_drive"
+    assert _requested_scopes(response) == {"drive.scope"}
+
+
+def test_group_connect_with_nothing_to_connect_is_409(google_group_portal: dict[str, Any]) -> None:
+    """A group with no member left to connect, or an unknown group, is refused; an unlisted agent is not found."""
+    assert _finish_group_connect(google_group_portal, "alice").status_code == 200
+    for response in (
+        _group_connect(google_group_portal, "alice"),
+        _group_connect(google_group_portal, "alice", group="microsoft"),
+    ):
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Nothing in this group can be connected here"
+        assert "no-store" in response.headers["cache-control"]
+    assert _group_connect(google_group_portal, "alice", agent="missing").status_code == 404
+
+
+def test_group_connect_leaves_out_services_a_service_account_serves(google_group_portal: dict[str, Any]) -> None:
+    """A shared service account is never replaced by a personal account."""
+    paths = google_group_portal["paths"]
+    paths = replace(paths, process_env={**paths.process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"})
+    main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, google_group_portal["payload"])
+    assert _group_connect(google_group_portal, "alice").status_code == 409
+
+
+def test_group_connect_on_a_shared_agent_needs_a_credential_manager(google_group_portal: dict[str, Any]) -> None:
+    """A user of a shared agent cannot connect its group; an administrator connects it for everyone who uses it."""
+    google_group_portal["payload"]["agents"]["research"] = {
+        "display_name": "Research Team",
+        "role": "Research assistant",
+        "tools": ["google_drive", "google_sheets"],
+        "access": {"users": ["@bob:example.org"]},
+    }
+    publish_api_payload(main.app, google_group_portal["payload"])
+    assert _group_connect(google_group_portal, "bob", agent="research").status_code == 409
+    assert _finish_group_connect(google_group_portal, "admin", agent="research").status_code == 200
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "bob", "research", provider) is True
+
+
+def test_group_callback_refuses_another_users_state(google_group_portal: dict[str, Any]) -> None:
+    """The group's state finishes only for the user who started it."""
+    state = _auth_query(_group_connect(google_group_portal, "alice"))["state"][0]
+    assert _oauth_callback(google_group_portal, "bob", state).status_code == 403
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "bob", "personal", provider) is False
+    assert _oauth_callback(google_group_portal, "alice", state).status_code == 200

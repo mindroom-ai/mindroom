@@ -44,8 +44,18 @@ router = APIRouter(prefix="/api/connections", tags=["connections"])
 logger = get_logger(__name__)
 
 
+class ConnectionConsentGroup(BaseModel):
+    """Services that one provider sign-in can connect together, such as an agent's Google services."""
+
+    key: str
+    display_name: str
+
+
 class ConnectionService(BaseModel):
-    """One available account connection, without credential storage details."""
+    """One available account connection, without credential storage details.
+
+    `consent_group` is the group whose unconnected services one sign-in can connect together, if the service has one.
+    """
 
     provider: str
     is_shared: bool
@@ -54,6 +64,7 @@ class ConnectionService(BaseModel):
     description: str
     icon: str | None
     tools: list[str]
+    consent_group: ConnectionConsentGroup | None
 
 
 class ConnectionTool(BaseModel):
@@ -227,6 +238,14 @@ def _agent_connections(
                 description=tool.description,
                 icon=tool.icon,
                 tools=[],
+                consent_group=(
+                    ConnectionConsentGroup(
+                        key=provider.consent_group.key,
+                        display_name=provider.consent_group.display_name,
+                    )
+                    if provider.consent_group is not None
+                    else None
+                ),
             ),
         )
         if tool_name not in service.tools:
@@ -250,13 +269,19 @@ def _agent_connections(
 _ConnectionsContext = Annotated[_Connections, Depends(_connections)]
 
 
-def _service(context: _Connections, agent_name: str, provider_id: str) -> ConnectionService:
-    """Resolve the displayed service permissions before account operations."""
+def _agent(context: _Connections, agent_name: str) -> AgentConnections:
+    """Resolve a listed agent before account operations."""
     for agent in context.catalog.agents:
         if agent.agent_name == agent_name:
-            for service in agent.services:
-                if service.provider == provider_id:
-                    return service
+            return agent
+    raise HTTPException(404, "Connection is not available", headers=CONNECTIONS_HEADERS)
+
+
+def _service(context: _Connections, agent_name: str, provider_id: str) -> ConnectionService:
+    """Resolve the displayed service permissions before account operations."""
+    for service in _agent(context, agent_name).services:
+        if service.provider == provider_id:
+            return service
     raise HTTPException(404, "Connection is not available", headers=CONNECTIONS_HEADERS)
 
 
@@ -492,6 +517,75 @@ async def connect(
         )
     return await masked_oauth_call(
         oauth.start_connect(request, provider_id, agent_name=agent_name),
+        "Could not start account connection",
+    )
+
+
+async def _consent_group_members(
+    request: Request,
+    context: _Connections,
+    agent: AgentConnections,
+    group: str,
+) -> list[OAuthProvider]:
+    """Select the services of an agent's consent group that one sign-in may connect, in service order.
+
+    A member is a service of the group that this user manages, that no service account serves, and that can connect but
+    is neither connected nor awaiting a reset. It must also sign in with the first member's OAuth client and endpoints,
+    since every member stores the token of that one sign-in.
+    """
+    runtime_paths = context.user.runtime_paths
+    members: list[OAuthProvider] = []
+    lead_sign_in: tuple[str, str, str] | None = None
+    for service in agent.services:
+        provider = context.providers[service.provider]
+        if (
+            provider.consent_group is None
+            or provider.consent_group.key != group
+            or not service.can_manage
+            or oauth_provider_service_account_configured(provider, runtime_paths)
+        ):
+            continue
+        status = await oauth.connection_status(
+            request,
+            oauth.dashboard_oauth_context(request, provider.id, agent_name=agent.agent_name),
+            refresh=False,
+        )
+        view = oauth.personal_connection_view(status, can_manage=True)
+        if not view.can_connect or view.connected or view.reset_required:
+            continue
+        client = await asyncio.to_thread(provider.client_config, runtime_paths)
+        if client is None:
+            continue
+        sign_in = (client.client_id, provider.authorization_url, provider.token_url)
+        if lead_sign_in is None:
+            lead_sign_in = sign_in
+        if sign_in == lead_sign_in:
+            members.append(provider)
+    return members
+
+
+@router.post("/agents/{agent_name}/consent-groups/{group}/connect")
+async def connect_consent_group(
+    agent_name: str,
+    group: str,
+    request: Request,
+    context: _ConnectionsContext,
+    _body: _EmptyMutation,
+) -> oauth.OAuthConnectResponse:
+    """Start one sign-in that connects each service of a consent group this user may connect and has not connected.
+
+    The response names the first of those services, whose callback finishes the sign-in, as a per-service connect does.
+    """
+    require_connections_same_origin(request, context.user.runtime_paths)
+    agent = _agent(context, agent_name)
+    members = await masked_oauth_call(
+        _consent_group_members(request, context, agent, group),
+        "Could not start account connection",
+    )
+    if not members:
+        raise HTTPException(409, "Nothing in this group can be connected here", headers=CONNECTIONS_HEADERS)
+    return await masked_oauth_call(
+        oauth.start_group_connect(request, members, agent_name=agent_name),
         "Could not start account connection",
     )
 

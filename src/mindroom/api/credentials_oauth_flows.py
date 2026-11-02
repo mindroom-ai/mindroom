@@ -18,6 +18,8 @@ from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
@@ -26,7 +28,10 @@ _PENDING_OAUTH_STATE_KIND = "dashboard_oauth_state"
 
 @dataclass(frozen=True)
 class _PendingOAuthState:
-    """Pending OAuth connect request bound to its initiating authorization mode."""
+    """Pending OAuth connect request bound to its initiating authorization mode.
+
+    `group_members` holds one credential target per member of a consent group sign-in, empty for any other flow.
+    """
 
     browser_user_required: bool
     agent_name: str | None
@@ -36,6 +41,7 @@ class _PendingOAuthState:
     code_verifier: str | None
     token_url: str | None
     credential_service: str | None = None
+    group_members: tuple[dict[str, str], ...] = ()
 
 
 def issue_pending_oauth_state(
@@ -49,12 +55,14 @@ def issue_pending_oauth_state(
     browser_user_required: bool = True,
     opener_origin: str | None = None,
     credential_service: str | None = None,
+    group_members: Sequence[Mapping[str, str]] = (),
 ) -> str:
     """Create opaque OAuth state bound to a browser user or conversation capability.
 
     `opener_origin` is the already validated origin of the page that started the flow, which the popup's last page
     tells how the flow ended. `credential_service` is the name the callback stores the connection under instead of the
-    provider's own, for an Agent Keys service's own account.
+    provider's own, for an Agent Keys service's own account. `group_members` is each member's credential target for a
+    consent group sign-in.
     """
     if browser_user_required:
         auth_user = require_request_auth_user(request)
@@ -82,6 +90,7 @@ def issue_pending_oauth_state(
             "token_url": token_url or "",
             "opener_origin": opener_origin or "",
             "credential_service": credential_service or "",
+            "group_members": [dict(member) for member in group_members],
         },
     )
 
@@ -119,6 +128,26 @@ def pending_oauth_opener_origin(request: Request, service: str, state: str | Non
     return origin if isinstance(origin, str) and origin else None
 
 
+def _string_mapping(value: object) -> dict[str, str] | None:
+    """Return `value` when it is a mapping of strings to strings, as pending state stores one."""
+    if isinstance(value, dict) and all(isinstance(key, str) and isinstance(item, str) for key, item in value.items()):
+        return cast("dict[str, str]", value)
+    return None
+
+
+def _group_members(value: object) -> tuple[dict[str, str], ...]:
+    """Return every member a pending state stores, or none at all when any member is malformed."""
+    if not isinstance(value, list):
+        return ()
+    members: list[dict[str, str]] = []
+    for raw_member in value:
+        member = _string_mapping(raw_member)
+        if member is None:
+            return ()
+        members.append(member)
+    return tuple(members)
+
+
 def consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:
     """Consume and validate a previously issued OAuth state token."""
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
@@ -133,13 +162,6 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
     execution_scope_raw = data.get("execution_scope_override")
     execution_scope_override = execution_scope_raw if execution_scope_raw in {"shared", "user", "user_agent"} else None
     agent_name = data.get("agent_name")
-    payload_raw = data.get("payload")
-    payload = (
-        cast("dict[str, str]", payload_raw)
-        if isinstance(payload_raw, dict)
-        and all(isinstance(key, str) and isinstance(value, str) for key, value in payload_raw.items())
-        else None
-    )
     code_verifier = data.get("code_verifier")
     token_url = data.get("token_url")
     credential_service = data.get("credential_service")
@@ -148,8 +170,9 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
         agent_name=agent_name if isinstance(agent_name, str) and agent_name else None,
         execution_scope_override_provided=data.get("execution_scope_override_provided") is True,
         execution_scope_override=cast("WorkerScope | None", execution_scope_override),
-        payload=payload,
+        payload=_string_mapping(data.get("payload")),
         code_verifier=code_verifier if isinstance(code_verifier, str) and code_verifier else None,
         token_url=token_url if isinstance(token_url, str) and token_url else None,
         credential_service=credential_service if isinstance(credential_service, str) and credential_service else None,
+        group_members=_group_members(data.get("group_members")),
     )
