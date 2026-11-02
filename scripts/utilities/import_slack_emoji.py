@@ -220,8 +220,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--room", help="Alias or ID of the server emoji room (default: #emoji:<server of the account>)")
     parser.add_argument("--dry-run", action="store_true", help="Report what would be imported and change nothing")
     args = parser.parse_args(argv)
-    slack_token = os.environ.get("SLACK_TOKEN")
-    matrix_token = os.environ.get("MATRIX_ACCESS_TOKEN")
+    # Neither token has whitespace, and httpx's error for a header that ends in whitespace quotes the token.
+    slack_token = os.environ.get("SLACK_TOKEN", "").strip()
+    matrix_token = os.environ.get("MATRIX_ACCESS_TOKEN", "").strip()
     if not slack_token:
         parser.error("Set SLACK_TOKEN to a Slack token with the emoji:read scope")
     if not matrix_token:

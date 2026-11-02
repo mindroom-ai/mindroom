@@ -390,15 +390,20 @@ def test_a_big_workspace_fills_packs_the_homeserver_accepts(
     assert capsys.readouterr().out == "Imported 502 emoji and 1 aliases; skipped 0 taken, 1 unusable, 0 failed.\n"
 
 
+@pytest.mark.parametrize("value", [None, " \r\n"], ids=["unset", "only whitespace"])
 @pytest.mark.parametrize("variable", ["SLACK_TOKEN", "MATRIX_ACCESS_TOKEN"])
 def test_missing_tokens_exit_with_an_error(
     servers: Servers,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     variable: str,
+    value: str | None,
 ) -> None:
-    """Without either token the script names the missing variable and sends nothing."""
-    monkeypatch.delenv(variable)
+    """Without either token, or with only whitespace in it, the script names the variable and sends nothing."""
+    if value is None:
+        monkeypatch.delenv(variable)
+    else:
+        monkeypatch.setenv(variable, value)
     with pytest.raises(SystemExit) as stopped:
         main(HOMESERVER)
     assert stopped.value.code == 2
@@ -406,8 +411,15 @@ def test_missing_tokens_exit_with_an_error(
     assert servers.authorization == {}
 
 
-def test_tokens_are_never_printed(servers: Servers, capsys: pytest.CaptureFixture[str]) -> None:
-    """Neither token appears in the output, even on errors, and each goes only to its own service."""
+def test_tokens_are_never_printed(
+    servers: Servers,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither token is printed, even on errors, and each goes only to its own service, without trailing whitespace."""
+    # On a real connection httpx refuses a header that ends in whitespace, and its error quotes the token.
+    monkeypatch.setenv("SLACK_TOKEN", f"{SLACK_TOKEN} \r\n")
+    monkeypatch.setenv("MATRIX_ACCESS_TOKEN", f"{MATRIX_TOKEN} \r\n")
     servers.emoji["forbidden"] = f"{CDN}/forbidden/c.png"
     servers.files[f"{CDN}/forbidden/c.png"] = (403, "text/plain", b"Forbidden")
     servers.refuse_writes = True
