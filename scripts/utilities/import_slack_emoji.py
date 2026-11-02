@@ -4,8 +4,8 @@ Run from the repository with ``uv run python -m scripts.utilities.import_slack_e
 Supply a Slack token with the ``emoji:read`` scope in ``SLACK_TOKEN``, and in ``MATRIX_ACCESS_TOKEN``
 the access token of an account that may change the room's emoji packs.
 Each emoji keeps its Slack name, and a Slack alias becomes another name for its image.
-Names the packs have are left alone; a re-run imports every other Slack emoji, even one removed or renamed in the room.
-``--dry-run`` reports what a run would import, without uploading or changing anything.
+Names the packs have are left alone; a re-run imports all other Slack emoji, even one removed or renamed in the room.
+``--dry-run`` joins the room and reports what a run would import, but uploads and writes nothing.
 """
 
 from __future__ import annotations
@@ -218,7 +218,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--homeserver", required=True, help="Base URL of the homeserver")
     parser.add_argument("--room", help="Alias or ID of the server emoji room (default: #emoji:<server of the account>)")
-    parser.add_argument("--dry-run", action="store_true", help="Report what would be imported and change nothing")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Join the room and report what would be imported, but upload and write nothing",
+    )
     args = parser.parse_args(argv)
     # Neither token has whitespace, and httpx's error for a header that ends in whitespace quotes the token.
     slack_token = os.environ.get("SLACK_TOKEN", "").strip()

@@ -152,7 +152,7 @@ Pass another alias or the room ID with `--room`, such as `#emoji_<namespace>:<se
   A later run imports every Slack emoji whose name no pack has, so an emoji removed or renamed in the room since an earlier run comes back under its Slack name.
 - An alias of a standard emoji, such as `alias:+1`, and a name with a space or `:`, which MindRoom Chat cannot insert, count as unusable.
 - An image that cannot be downloaded, read, or uploaded counts as failed and is named in an error line; the next run tries it again.
-- When a pack is full, the script opens another one with the same name, as MindRoom Chat does.
+- When no pack has room for an emoji, the script opens another pack with the same name.
 
 Deleting or renaming an emoji in Slack changes nothing in the room, and a later run imports a renamed emoji again under its new name.
 
