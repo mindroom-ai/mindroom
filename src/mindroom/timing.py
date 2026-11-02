@@ -138,6 +138,11 @@ class DispatchPipelineTiming:
             if value is not None:
                 self.metadata[key] = value
 
+    def note_worker_wait(self, elapsed_seconds: float) -> None:
+        """Keep the longest worker start one of this turn's tool calls waited for."""
+        wait_ms = round(elapsed_seconds * 1000, 1)
+        self.metadata["worker_wait_ms"] = max(wait_ms, cast("float", self.metadata.get("worker_wait_ms", 0.0)))
+
     def mark_model_request(self) -> None:
         """Keep initial startup separate from the latest model attempt's timings."""
         now = time.perf_counter()

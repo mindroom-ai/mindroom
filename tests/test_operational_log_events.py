@@ -35,6 +35,8 @@ from tests.providers.test_provider_pipeline import _drain, _ScriptedProvider, _t
 from tests.session_storage.agno_layout import recorded_owner
 from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room
 from tests.test_decrypt_failure import _runtime_paths as _decrypt_runtime_paths
+from tests.test_kubernetes_worker_backend import _TEST_SCOPED_WORKER_KEY_A, _spec
+from tests.test_kubernetes_worker_backend import _backend as _kubernetes_backend
 from tests.test_oauth_service import _context, _credentials, _FakeOAuthProvider, _save
 
 if TYPE_CHECKING:
@@ -108,6 +110,16 @@ _STABLE_EVENTS = {
         "hint",
     },
     "conversation_converted": {"path", "runs", "messages", "compacted", "duration_seconds"},
+    "worker_cold_start": {
+        "worker",
+        "backend",
+        "kind",
+        "scope",
+        "agent_name",
+        "outcome",
+        "wait_ms",
+        "pod_ready_ms",
+    },
 }
 _STABLE_EVENT_LEVELS = {
     "event_loop_scheduler_lag_summary": "info",
@@ -121,6 +133,7 @@ _STABLE_EVENT_LEVELS = {
     "event_loop_stall_ended": "warning",
     "matrix_event_decryption_failed": "warning",
     "conversation_converted": "info",
+    "worker_cold_start": "info",
 }
 
 
@@ -301,3 +314,13 @@ async def test_matrix_event_decryption_failed_keeps_its_name_and_fields(tmp_path
         )
 
     _assert_logged(logs, "matrix_event_decryption_failed")
+
+
+def test_worker_cold_start_keeps_its_name_and_fields() -> None:
+    """Starting a Kubernetes worker that does not exist yet logs the pinned record."""
+    backend, _apps_api, _core_api = _kubernetes_backend()
+
+    with capture_logs() as logs:
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    _assert_logged(logs, "worker_cold_start")

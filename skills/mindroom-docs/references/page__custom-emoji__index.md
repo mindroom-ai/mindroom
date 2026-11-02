@@ -118,6 +118,40 @@ The form says where the emoji will go.
 
 A failed join is logged once in the browser console as `[server-emoji] could not join the server emoji room`, and it is not tried again until the page reloads.
 
+## Import emoji from Slack
+
+A team that moves from Slack would otherwise add every custom emoji again by hand.
+One command copies all custom emoji of a Slack workspace into the room's packs, each under its Slack name.
+Run it from the root of a MindRoom checkout, with two tokens in the environment:
+
+- `SLACK_TOKEN`: a Slack bot or user token with the `emoji:read` scope.
+  The **Bot User OAuth Token** of the MindRoom Slack app from [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) works once you add `emoji:read` to the app's bot scopes and reinstall the app.
+- `MATRIX_ACCESS_TOKEN`: the access token of an account that may [add emoji](#who-may-add-emoji) to the room.
+
+Start with `--dry-run`, which joins the room to read its packs and reports what a run would import, without uploading anything or changing the packs:
+
+```bash
+SLACK_TOKEN=xoxb-... MATRIX_ACCESS_TOKEN=... uv run python -m scripts.utilities.import_slack_emoji \
+  --homeserver https://matrix.example.com --dry-run
+```
+
+```text
+Would import 412 emoji and 37 aliases; skipped 3 taken, 2 unusable.
+```
+
+Then run the same command without `--dry-run` to import them.
+By default the emoji go to `#emoji:<server name>`, with the server name of the account behind the token.
+Pass another alias or the room ID with `--room`, such as `#emoji_<namespace>:<server name>` for a room MindRoom created with `MINDROOM_NAMESPACE` set.
+
+- Each emoji keeps its Slack name and its image as Slack serves it, and a Slack alias becomes another name for the same image.
+- A name the packs already have is never overwritten and counts as taken.
+  A later run imports every Slack emoji whose name no pack has, so an emoji removed or renamed in the room since an earlier run comes back under its Slack name.
+- An alias of a standard emoji, such as `alias:+1`, and a name with a space or `:`, which MindRoom Chat cannot insert, count as unusable.
+- An image that cannot be downloaded, read, or uploaded counts as failed and is named in an error line; the next run tries it again.
+- When no pack has room for an emoji, the script opens another pack with the same name.
+
+Deleting or renaming an emoji in Slack changes nothing in the room, and a later run imports a renamed emoji again under its new name.
+
 ## Who may add emoji
 
 The room's power level for `im.ponies.room_emotes` decides who may add emoji.

@@ -269,6 +269,7 @@ def test_registration_and_second_account_preserve_existing_connection(tmp_path: 
         worker_target=None,
     )
     original_tool = get_tool_by_name("gmail", paths, worker_target=None, runs_in_worker=False, tools=plugins.tools)
+    original_tool._authenticate()
     assert original_tool.creds.token == "original-access"  # noqa: S105
     assert load_oauth_credentials_snapshot_sync(original_context) == before
 

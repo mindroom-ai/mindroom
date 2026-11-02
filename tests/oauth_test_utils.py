@@ -15,6 +15,7 @@ import httpx
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync
 from mindroom.oauth.credential_store import oauth_credential_transaction
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.oauth.client import ScopedOAuthClientMixin
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -60,6 +62,19 @@ def publish_oauth_credentials(
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(asyncio.run, publish()).result()
+
+
+def hold_stored_google_credentials(tool: ScopedOAuthClientMixin) -> None:
+    """Give the calling thread ``tool``'s stored Google credentials as stored, without refreshing them."""
+    context = tool._oauth_credential_context()
+    snapshot = load_oauth_credentials_snapshot_sync(context)
+    assert snapshot.credentials is not None
+    tool._google_credential_key = (context, snapshot.generation)
+    tool.creds = tool._credentials_from_token_data(
+        snapshot.credentials,
+        context=context,
+        connection_generation=snapshot.connection_generation,
+    )
 
 
 async def oauth_authorization_url(

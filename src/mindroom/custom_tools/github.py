@@ -27,7 +27,6 @@ from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     OAuthCredentialUnreadableError,
-    load_oauth_credentials_snapshot_if_readable_sync,
     oauth_credentials_usable,
     refresh_oauth_credentials_blocking,
 )
@@ -303,22 +302,10 @@ class GithubTools(AgnoGithubTools):
         self._oauth_provider = github_oauth_provider()
         explicit_access_token = _normalized_access_token(access_token)
         self._explicit_access_token = explicit_access_token
-        initial_access_token = explicit_access_token or self._stored_access_token() or _PENDING_ACCESS_TOKEN
-        super().__init__(access_token=initial_access_token, base_url=base_url, **kwargs)
+        # Stored tokens are not read here: the token and client are kept per thread, and each calling thread
+        # authenticates on its first call, so a stored token read here would serve only the thread building the agent.
+        super().__init__(access_token=explicit_access_token or _PENDING_ACCESS_TOKEN, base_url=base_url, **kwargs)
         self._wrap_oauth_function_entrypoints()
-
-    def _stored_access_token(self) -> str | None:
-        context = self._oauth_credential_context()
-        if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
-            return None
-        snapshot = load_oauth_credentials_snapshot_if_readable_sync(context)
-        if snapshot is None:
-            return None
-        credentials = snapshot.credentials
-        if credentials is None:
-            return None
-        token = credentials.get("token") or credentials.get("access_token")
-        return _normalized_access_token(token)
 
     def _oauth_credential_context(self) -> OAuthCredentialContext:
         return active_oauth_credential_context(

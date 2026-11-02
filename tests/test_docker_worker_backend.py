@@ -50,11 +50,12 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
+    worker_log_id,
     worker_root_path,
 )
 from mindroom.workers import progress as progress_module
 from mindroom.workers import worker_retirement as worker_retirement_module
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import WorkerBackendError, WorkerStartTimeoutError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends import docker_projection as docker_projection_module
@@ -2196,6 +2197,61 @@ def test_docker_backend_reports_nothing_for_a_start_within_the_grace_period(
     assert handle.status == "ready"
     assert handle.startup_count == 1
     assert progress_events == []
+
+
+def test_docker_backend_logs_how_long_a_cold_start_kept_its_caller_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A start logs one ``worker_cold_start`` with its wait, and a call to the running worker logs none."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    clock = _control_progress_clock(monkeypatch)
+
+    def _ready_after_six_seconds(_container: _FakeContainer, *, on_poll_tick: Callable[[], None] | None) -> None:
+        del on_poll_tick
+        clock.now += 6.0
+
+    monkeypatch.setattr(backend, "_wait_for_ready", _ready_after_six_seconds)
+
+    with capture_logs() as cold_logs:
+        backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    with capture_logs() as warm_logs:
+        backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=11.0)
+
+    [record] = [entry for entry in cold_logs if entry["event"] == "worker_cold_start"]
+    assert record == {
+        "event": "worker_cold_start",
+        "log_level": "info",
+        "worker": worker_log_id(_TEST_UNSCOPED_WORKER_KEY),
+        "backend": "docker",
+        "kind": "tool",
+        "scope": "unscoped",
+        "agent_name": "code",
+        "outcome": "ready",
+        "wait_ms": 6000.0,
+    }
+    assert [entry for entry in warm_logs if entry["event"] == "worker_cold_start"] == []
+
+
+def test_docker_worker_that_never_answers_fails_with_a_start_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker that never answers its health check in time fails with a start timeout."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    container = _FakeContainer(
+        name="mindroom-worker-slow",
+        image_identity="sha256:slow",
+        host_port=44999,
+        environment={},
+        labels={},
+    )
+    _install_health(monkeypatch, lambda _url: httpx.Response(503))
+    monkeypatch.setattr(docker_backend_module, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+    object.__setattr__(backend.config, "ready_timeout_seconds", 0.01)
+
+    with pytest.raises(WorkerStartTimeoutError, match="did not become ready"):
+        DockerWorkerBackend._wait_for_ready(backend, container)
 
 
 def test_docker_backend_reports_no_progress_when_a_running_worker_fails_its_health_check(
