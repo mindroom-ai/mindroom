@@ -335,13 +335,15 @@ class _RecordingDeliveryGateway:
     # Records a turn answered, as a reply's records do when its failure notice settles its sources.
     answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
     reactions: list[tuple[str, str, str]] = field(default_factory=list)
+    # What the reply's records answer a superseded replay: ``None`` when no reply has its sources.
+    supersede_result: bool | None = None
 
     async def send_judgment_reaction(self, *, turn_id: str, room_id: str, event_id: str, key: str, kind: str) -> None:  # noqa: ARG002
         self.reactions.append((event_id, key, kind))
 
     async def supersede_replay(self, _source_event_ids: tuple[str, ...]) -> bool | None:
-        """No reply has the sources in this recording-only delivery fixture."""
-        return None
+        """Return what the fixture says the reply's records answer."""
+        return self.supersede_result
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         self.sent.append(request)
@@ -1048,6 +1050,21 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     assert harness.gateway.sent == []
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_turn_whose_reply_keeps_it_runs(config: Config, tmp_path: Path) -> None:
+    """A reply that refuses the supersede, as one whose turn's newer message still waits to replay, has the turn run."""
+    harness = _build_harness(config, tmp_path)
+    harness.gateway.supersede_result = False
+    await _serve_newer_requester_message(harness, config)
+    room = _room_with_members(config, "general")
+    event = _text_event("older superseded message", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
+
+    await harness.deliver(room, event)
+
+    assert harness.policy.plan_turn_calls == 1
+    assert harness.ignored_dispatch_sources == []
 
 
 def _thread_upload_event(msgtype: str, *, event_id: str, origin_server_ts: int) -> nio.Event:

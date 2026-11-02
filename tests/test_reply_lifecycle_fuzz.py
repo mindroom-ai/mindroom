@@ -1039,7 +1039,14 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert reply is not None
         last = self.model.spans[reply.last_span_id]
         transition = self._apply(
-            rl.replay_superseded(reply, last, durable_write_debt=self._unresolved_rows(), now_ns=self._now()),
+            rl.replay_superseded(
+                reply,
+                last,
+                durable_write_debt=self._unresolved_rows(),
+                # The modeled replay supersedes every message the last span pends, an edit included.
+                sources_pending=False,
+                now_ns=self._now(),
+            ),
         )
         assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
         if transition.outcome is rl.Outcome.DUPLICATE and self._held_by() is None:
