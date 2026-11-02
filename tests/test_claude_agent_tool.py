@@ -30,6 +30,7 @@ from claude_agent_sdk import (
 
 import mindroom.tools  # noqa: F401
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -1742,12 +1743,21 @@ async def _evict(manager: claude_agent_module._ClaudeSessionManager, session_key
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("close", [_end_session, _expire, _evict], ids=["end-session", "expiry", "eviction"])
+@pytest.mark.parametrize(
+    ("close", "stopped"),
+    [
+        pytest.param(_end_session, False, id="end-session"),
+        pytest.param(_end_session, True, id="end-session-stopped-while-disconnecting"),
+        pytest.param(_expire, False, id="expiry"),
+        pytest.param(_evict, False, id="eviction"),
+    ],
+)
 async def test_unread_turns_count_when_their_session_closes(
     tmp_path: Path,
     fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
     close: Callable[[claude_agent_module._ClaudeSessionManager, str], Awaitable[None]],
+    stopped: bool,
 ) -> None:
     """Complete turns no call read, such as a stopped call's answer, count toward its requester at session close."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
@@ -1769,7 +1779,12 @@ async def test_unread_turns_count_when_their_session_closes(
             _claude_response("claude-sonnet-5-5", "msg-4", 700),
         ]:
             client.stream.put_nowait(message)
-        await closing
+        if stopped:
+            # A stopped reply stops the call that closes the session, which the session's close outlives.
+            closing.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
+        await wait_for_background_tasks(owner=fake_manager)
+        assert not client.connected
 
     _replies, rows = await _send_metered_turns(
         tmp_path,

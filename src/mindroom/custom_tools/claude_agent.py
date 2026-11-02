@@ -25,6 +25,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from mindroom.background_tasks import create_background_task
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -176,7 +177,7 @@ class _ClaudeSessionManager:
             session = self._sessions.pop(session_key, None)
         if session is None:
             return False
-        await self._disconnect(session)
+        await self._disconnect_many([session])
         return True
 
     async def get(self, session_key: str) -> _ClaudeSessionState | None:
@@ -246,16 +247,16 @@ class _ClaudeSessionManager:
             except BaseException:
                 connected.cancel()
                 raise
-            drain = asyncio.create_task(_drain(client, messages), name="claude_session_messages")
+            queueing = asyncio.create_task(_queue_messages(client, messages), name="claude_session_messages")
             connected.set_result(None)
             try:
                 await close_requested.wait()
             finally:
-                # The drain keeps queueing what the SDK already holds while it disconnects.
+                # What the SDK already holds still reaches ``messages`` while it disconnects.
                 try:
                     await client.disconnect()
                 finally:
-                    drain.cancel()
+                    queueing.cancel()
 
         owner = asyncio.create_task(own(), name="claude_session", context=Context())
         try:
@@ -268,19 +269,24 @@ class _ClaudeSessionManager:
             raise
         return owner
 
-    async def _disconnect(self, session: _ClaudeSessionState) -> None:
-        async with session.lock:
-            session.close_requested.set()
-            with suppress(Exception):
-                await session.owner
-            await _record_unread_turns(session)
-
     async def _disconnect_many(self, sessions: list[_ClaudeSessionState]) -> None:
-        for session in sessions:
-            await self._disconnect(session)
+        """Close sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short."""
+        closes = [
+            create_background_task(_close(session), name="claude_session_close", owner=self) for session in sessions
+        ]
+        await asyncio.shield(asyncio.gather(*closes))
 
 
-async def _drain(client: ClaudeSDKClient, messages: asyncio.Queue[Message | Exception]) -> None:
+async def _close(session: _ClaudeSessionState) -> None:
+    """Stop the session's client once no call reads it, then count the complete turns no call read."""
+    async with session.lock:
+        session.close_requested.set()
+        with suppress(Exception):
+            await session.owner
+        await _record_unread_turns(session)
+
+
+async def _queue_messages(client: ClaudeSDKClient, messages: asyncio.Queue[Message | Exception]) -> None:
     """Move every message Claude Code sends into ``messages``, ending with the error that ends the stream.
 
     The SDK holds at most 100 unread messages and then stops reading Claude Code's output, which also carries the
