@@ -216,7 +216,7 @@ def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
 
 
 class _SignalAwareUvicornServer(uvicorn.Server):
-    """Uvicorn server that marks the shared shutdown event on signal exit and stops once that event is set."""
+    """Uvicorn server that sets the shared shutdown event on a signal and stops whenever that event is set."""
 
     def __init__(
         self,
@@ -249,20 +249,22 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         logger.info("embedded_api_server_started", host=bound_host, port=bound_port)
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
-        """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
+        """Surface a signal as the runtime's shutdown request; a repeated SIGINT forces exit, as in Uvicorn."""
         del frame
         signal_number = int(sig)
+        repeated = self.received_signal_name is not None
         # A signal handler can interrupt a log write, which is not reentrant, so it
         # only records the signal; the serve loop's exit log reports it.
         self.received_signal_name = _signal_name(signal_number)
         self._shutdown_requested.set()
-        if self.should_exit and signal_number == int(signal.SIGINT):
+        if repeated and signal_number == int(signal.SIGINT):
             self.force_exit = True
-            return
-        self.should_exit = True
 
     async def on_tick(self, counter: int) -> bool:
-        """End the main loop on every runtime shutdown request, not only a signal, always through Uvicorn's shutdown."""
+        """End the main loop once the runtime requests shutdown, always through Uvicorn's shutdown.
+
+        Uvicorn skips its shutdown, and so the app's, when `should_exit` is already set as startup ends.
+        """
         return self._shutdown_requested.is_set() or await super().on_tick(counter)
 
 
@@ -1758,39 +1760,41 @@ async def _await_api_task_graceful_shutdown(
     shutdown_requested: asyncio.Event,
     api_server: _EmbeddedApiServerContext,
 ) -> None:
-    """Give Uvicorn a bounded window to run FastAPI lifespan shutdown."""
+    """Give Uvicorn a bounded window to run FastAPI lifespan shutdown, and cancel the server once it ends."""
     grace_deadline = time.monotonic() + _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS
     monitored_tasks: set[asyncio.Task] = {api_task, orchestrator_task}
-    while api_task in monitored_tasks:
-        timeout_seconds = grace_deadline - time.monotonic()
-        if timeout_seconds <= 0:
-            break
-        done, _pending = await asyncio.wait(
-            monitored_tasks,
-            timeout=timeout_seconds,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if not done:
-            break
-        await _consume_completed_runtime_tasks(
-            done,
-            orchestrator_task=orchestrator_task,
-            shutdown_wait_task=shutdown_wait_task,
-            api_task=api_task,
-            shutdown_requested=shutdown_requested,
-            api_server=api_server,
-        )
-        if api_task in done:
-            return
-        monitored_tasks.difference_update(done)
+    try:
+        while api_task in monitored_tasks:
+            timeout_seconds = grace_deadline - time.monotonic()
+            if timeout_seconds <= 0:
+                break
+            done, _pending = await asyncio.wait(
+                monitored_tasks,
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            await _consume_completed_runtime_tasks(
+                done,
+                orchestrator_task=orchestrator_task,
+                shutdown_wait_task=shutdown_wait_task,
+                api_task=api_task,
+                shutdown_requested=shutdown_requested,
+                api_server=api_server,
+            )
+            if api_task in done:
+                return
+            monitored_tasks.difference_update(done)
 
-    logger.warning(
-        "embedded_api_server_shutdown_timeout",
-        **api_server.log_context(),
-        timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
-    )
-    # Its window is spent, so runtime cleanup does not wait for it a second time.
-    await _cancel_task_if_pending(api_task)
+        logger.warning(
+            "embedded_api_server_shutdown_timeout",
+            **api_server.log_context(),
+            timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
+        )
+    finally:
+        # However the window ends, by timeout, failure, or cancellation, runtime cleanup must not open a second one.
+        await _cancel_task_if_pending(api_task)
 
 
 async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:

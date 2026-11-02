@@ -28,6 +28,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from starlette.applications import Starlette
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
@@ -739,7 +740,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     async def test_embedded_uvicorn_signal_handler_requests_application_shutdown(self) -> None:
-        """Uvicorn process signals should propagate to the top-level shutdown event."""
+        """A Uvicorn signal becomes the runtime's shutdown request, which ends the serve loop; a second SIGINT forces exit."""
         shutdown_requested = asyncio.Event()
 
         async def app(scope: object, receive: object, send: object) -> None:
@@ -756,11 +757,45 @@ class TestAgentBot(AgentBotTestBase):
             server.handle_exit(signal.SIGTERM, None)
 
         assert shutdown_requested.is_set()
-        assert server.should_exit is True
+        assert await server.on_tick(0) is True
+        assert server.force_exit is False
         assert server._captured_signals == []
         assert server.received_signal_name == "SIGTERM"
         # A signal can interrupt a log write, so the handler itself must not log.
         mock_info.assert_not_called()
+
+        server.handle_exit(signal.SIGINT, None)
+        assert server.force_exit is True
+
+    @pytest.mark.asyncio
+    async def test_embedded_uvicorn_stopped_by_a_signal_while_starting_still_runs_the_app_shutdown(self) -> None:
+        """A signal that lands while the server starts ends it through Uvicorn's shutdown, so the app's shutdown runs.
+
+        Uvicorn returns without its shutdown when `should_exit` is already set as startup ends.
+        """
+        lifespan_events: list[str] = []
+
+        @asynccontextmanager
+        async def lifespan(_app: object) -> AsyncIterator[None]:
+            lifespan_events.append("startup")
+            yield
+            lifespan_events.append("shutdown")
+
+        async def signal_while_starting(_host: str, _port: int) -> None:
+            server.handle_exit(signal.SIGTERM, None)
+
+        server = _SignalAwareUvicornServer(
+            uvicorn.Config(Starlette(lifespan=lifespan), host="127.0.0.1", port=0, ws="websockets-sansio"),
+            asyncio.Event(),
+            on_started=signal_while_starting,
+        )
+        reset_runtime_state()
+        try:
+            await asyncio.wait_for(server.serve(), timeout=10)
+        finally:
+            reset_runtime_state()
+
+        assert lifespan_events == ["startup", "shutdown"]
 
     @pytest.mark.asyncio
     async def test_embedded_uvicorn_publishes_actual_bound_port_after_startup(self) -> None:
@@ -1304,7 +1339,10 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     async def test_runtime_completion_raises_orchestrator_failure_during_api_shutdown_grace(self) -> None:
-        """API shutdown grace must keep observing orchestrator failures."""
+        """API shutdown grace keeps observing orchestrator failures, and a failure ends the API's window at once.
+
+        Runtime cleanup waits only for a server still running, so a server left running would get a second window.
+        """
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
 
@@ -1332,6 +1370,7 @@ class TestAgentBot(AgentBotTestBase):
                     shutdown_requested=shutdown_requested,
                     api_server=_EmbeddedApiServerContext(host="127.0.0.1", port=0),
                 )
+            assert api_task.cancelled()
         finally:
             api_task.cancel()
             await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
