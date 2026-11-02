@@ -16,6 +16,7 @@ from mindroom.tool_system.tool_environment import ToolEnvironment
 from .context import (
     AgentLifecycleContext,
     BeforeResponseContext,
+    CallHookContext,
     CompactionHookContext,
     ContactBeforeSendContext,
     CustomEventContext,
@@ -65,10 +66,7 @@ class _HookInvocationResult:
 
 def _scope_agent_name(context: HookContext) -> str | None:
     agent_name: str | None = None
-    if isinstance(
-        context,
-        ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext | ContactBeforeSendContext,
-    ):
+    if isinstance(context, CallHookContext):
         agent_name = context.agent_name
     else:
         envelope = message_envelope_for_hook_context(context)
@@ -85,10 +83,7 @@ def _scope_agent_name(context: HookContext) -> str | None:
 
 
 def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
-    if isinstance(
-        context,
-        ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext | ContactBeforeSendContext,
-    ):
+    if isinstance(context, CallHookContext):
         return (context.room_id,) if context.room_id else ()
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:

@@ -816,6 +816,10 @@ class ContactBeforeSendContext(HookContext):
         self.feedback = reason
 
 
+# The contexts of hooks that run during one of an agent's tool calls, which name its agent, room, and requester.
+CallHookContext = ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext | ContactBeforeSendContext
+
+
 def _check_env_name(name: str) -> None:
     if not name or any(char.isspace() or char in "=,\0" for char in name):
         msg = f"Invalid environment variable name: {name!r}"
@@ -831,10 +835,7 @@ def _requester_id_for_hook_send(context: HookContext, *, trigger_dispatch: bool)
         requester_id = context.created_by
     elif isinstance(context, ReactionReceivedContext | CustomEventContext):
         requester_id = context.sender_id
-    elif isinstance(
-        context,
-        ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext | ContactBeforeSendContext,
-    ):
+    elif isinstance(context, CallHookContext):
         requester_id = context.requester_id
     else:
         requester_id = None
@@ -850,14 +851,7 @@ def _message_received_depth_for_hook_send(context: HookContext) -> int:
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         return envelope.message_received_depth + 1
-    if isinstance(
-        context,
-        CustomEventContext
-        | ToolBeforeCallContext
-        | ToolAfterCallContext
-        | ToolEnvironmentContext
-        | ContactBeforeSendContext,
-    ):
+    if isinstance(context, CustomEventContext | CallHookContext):
         return context.message_received_depth + 1
     return 1
 
