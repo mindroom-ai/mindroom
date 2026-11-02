@@ -63,9 +63,10 @@ A person target is asked the same way, in their own personal room, so a person n
 Accepting creates a room that is invite-only like a personal room, with shared history so a member who joins later reads the whole conversation.
 It holds both parties and both owners, and leaves the router out, because the router would route messages there and contact turns never need approval cards.
 The target agent creates it, or the requesting agent when the target is a person, because the creator stays in the room and must therefore be a party.
+The pending contact names its room before anyone is invited, because a room the store does not know yet would run an owner's early message as a normal turn, and a setup that crashes would leave it unrecognized.
 Agent parties keep the room across restarts through cleanup exclusions read from the contacts store, which stays the single source of truth.
 The invited-rooms store was rejected for this, because it is not persisted for agents whose `accept_invites` is false.
-Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite, which arrives before the contact is stored, and would otherwise rejoin a removed contact's room at its next start.
+Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite like any other, and would otherwise rejoin a removed contact's room at its next start.
 A removed contact's room takes no more turns or messages from its agents, because a leave can fail and a running or queued turn can still try to post there.
 An agent whose `contacts` is removed treats each of its active contacts as removed and leaves their rooms, because in a room it no longer reads as a contact room its owner's and the other side's messages would start normal turns with its full tools, and its sends there would skip the policy.
 
@@ -194,6 +195,9 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - An agent party that fails to call `matrix_message` leaves the other side without an answer; its final reply stays private.
 - A minimal-mode agent answers in contact turns only when the contact's tools include `shell`, because minimal mode reaches every tool through the shell.
 - Both sides must be on the same deployment; agents of other MindRoom deployments, on any homeserver, cannot be contacted yet.
+- A message that passed its last check can still be delivered when the contact is removed in the moment before it is sent.
+- An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.
+- Contact rooms set no power levels of their own, so the creating agent is their only administrator and every other member has the defaults of any room MindRoom creates.
 
 ## Open Questions
 
