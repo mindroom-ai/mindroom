@@ -67,7 +67,7 @@ Cancellation cannot undo remote side effects or forcibly stop arbitrary Python t
 Excluded tools retain native behavior.
 Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
-Subagent calls of one model step run at the same time, as any managed calls do; of two follow-ups to one subagent in that step, the one that finds the other's turn running fails as busy.
+Subagent calls of one model step that run as jobs run at the same time, as other managed calls do; of two follow-ups to one subagent in that step, the one that finds the other's turn running fails as busy.
 An earlier subagent job whose outcome save failed, or that waited while background jobs were turned off, can report the attempt its saved child names, or an interruption, instead of its final answer, when a follow-up advanced its handle before a crash or a later start recovered it; its child never runs twice.
 A notice reaches only a model step after a tool batch; a reply that ends without another tool call leaves the job to its follow-up.
 A follow-up in a session switched to minimal mode runs and reports results it cannot acknowledge, so a later standard reply may report them again.
