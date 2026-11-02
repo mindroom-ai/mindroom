@@ -18,6 +18,7 @@ from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
     configured_bot_user_ids_for_room,
     configured_call_agent_name_for_room,
+    configured_routable_entity_names_for_room,
     entity_identity_registry,
     persisted_bot_user_ids,
     prepared_entity_names_by_user_id,
@@ -419,4 +420,46 @@ def test_resolving_every_entity_reads_matrix_state_once(
 
     resolve(config, runtime_paths)
 
+    assert reads == 1
+
+
+def test_room_entity_lookup_reads_matrix_state_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding a room's agents and teams reads Matrix state once, not once per entity.
+
+    Call reconciliation runs this for every joined room of every call agent.
+    """
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "by_key": AgentConfig(display_name="By Key", rooms=["dev"]),
+                "by_alias": AgentConfig(display_name="By Alias", rooms=["#dev:localhost"]),
+                "by_id": AgentConfig(display_name="By ID", rooms=["!dev:localhost"]),
+                "elsewhere": AgentConfig(display_name="Elsewhere", rooms=["lobby", "!other:localhost"]),
+            },
+            teams={"crew": TeamConfig(display_name="Crew", role="Crew", agents=["by_key"], rooms=["dev"])},
+        ),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    state.add_room("dev", "!dev:localhost", "#dev:localhost", "Dev")
+    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
+    save_matrix_state(state, runtime_paths)
+    reads = 0
+    cache_key = matrix_state._matrix_state_cache_key
+
+    def counting_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
+        nonlocal reads
+        reads += 1
+        return cache_key(state_file)
+
+    monkeypatch.setattr(matrix_state, "_matrix_state_cache_key", counting_cache_key)
+
+    names = configured_routable_entity_names_for_room(config, "!dev:localhost", runtime_paths)
+
+    assert names == ["by_key", "by_alias", "by_id", "crew"]
     assert reads == 1
