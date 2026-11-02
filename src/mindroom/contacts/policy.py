@@ -1,6 +1,7 @@
 """The policy every message of an agent passes before it reaches the other side of a contact.
 
 The conversation limit comes first, then the plugin hooks on ``contact:before_send``, then the judge when the agent has one.
+The limit is checked again last, because other messages can reach it while the hooks and the judge run.
 Everything fails closed: a message that cannot be checked is never sent.
 """
 
@@ -94,22 +95,8 @@ async def check_contact_message(
     """
     config = context.current_config
     sender = record.party(side)
-    limit = config.defaults.max_consecutive_agent_replies
-    if adds_message:
-        consecutive = await consecutive_agent_messages(
-            context.conversation_reader,
-            config,
-            context.runtime_paths,
-            room_id=room_id,
-            thread_id=thread_id,
-            limit=limit,
-        )
-        if consecutive >= limit:
-            return ContactVerdict(
-                "deny",
-                text,
-                f"The conversation already has {consecutive} agent messages in a row; wait for a person to write.",
-            )
+    if adds_message and (denied := await _limit_refusal(context, room_id=room_id, thread_id=thread_id, text=text)):
+        return denied
     rules = effective_rules(config, sender.id, record.side(side))
     final_text = text
     if context.hooks.registry.has_hooks(EVENT_CONTACT_BEFORE_SEND):
@@ -140,7 +127,37 @@ async def check_contact_message(
         )
         if refusal is not None:
             return ContactVerdict(refusal[0], text, refusal[1])
+    # The hooks and the judge can take seconds, in which other messages can fill the conversation up to the limit.
+    if adds_message and (denied := await _limit_refusal(context, room_id=room_id, thread_id=thread_id, text=text)):
+        return denied
     return ContactVerdict("send", final_text, rewritten=final_text != text)
+
+
+async def _limit_refusal(
+    context: ToolRuntimeContext,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    text: str,
+) -> ContactVerdict | None:
+    """Return the denial of a message once the conversation ends with the limit of agent messages, or None."""
+    config = context.current_config
+    limit = config.defaults.max_consecutive_agent_replies
+    consecutive = await consecutive_agent_messages(
+        context.conversation_reader,
+        config,
+        context.runtime_paths,
+        room_id=room_id,
+        thread_id=thread_id,
+        limit=limit,
+    )
+    if consecutive < limit:
+        return None
+    return ContactVerdict(
+        "deny",
+        text,
+        f"The conversation already has {consecutive} agent messages in a row; wait for a person to write.",
+    )
 
 
 async def _run_hooks(

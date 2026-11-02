@@ -609,6 +609,32 @@ async def test_a_removal_while_the_policy_runs_stops_the_message(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_a_send_the_agent_message_limit_catches_up_with_while_the_policy_runs_is_refused(tmp_path: Path) -> None:
+    """The policy can take seconds, so a message that fills the limit of agent messages meanwhile stops this one."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    alice_agent, bob_agent = _agent(paths, "mind_alice"), _agent(paths, "mind_bob")
+    trail = [make_visible_message(sender=sender) for sender in (CO_OWNER, bob_agent, alice_agent)]
+
+    @hook(EVENT_CONTACT_BEFORE_SEND)
+    async def answered_meanwhile(_ctx: ContactBeforeSendContext) -> None:
+        trail.append(make_visible_message(sender=bob_agent))
+        serve_conversation_reader(context.conversation_reader, trail, room_id=CONTACT_ROOM, thread_id=THREAD_ID)
+
+    context = _context(config, paths, answered_meanwhile)
+    serve_conversation_reader(context.conversation_reader, trail, room_id=CONTACT_ROOM, thread_id=THREAD_ID)
+
+    payload = await _call(context, message="Dinner at eight?")
+
+    assert (payload["status"], payload["message"]) == (
+        "error",
+        "Not sent: The conversation already has 3 agent messages in a row; wait for a person to write.",
+    )
+    assert len(trail) == 4
+    assert _sent(context) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("room_id", [CONTACT_ROOM, PERSONAL_ROOM])
 @pytest.mark.parametrize("status", ["active", "removed"])

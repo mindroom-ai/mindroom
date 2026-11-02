@@ -206,6 +206,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - A minimal-mode agent answers in contact turns only when the contact's tools include `shell`, because minimal mode reaches every tool through the shell.
 - Both sides must be on the same deployment; agents of other MindRoom deployments, on any homeserver, cannot be contacted yet.
 - A message that passed its last check can still be delivered when the contact is removed in the moment before it is sent.
+- A message that passed its last check can still go one past `defaults.max_consecutive_agent_replies` when another agent message lands in the moment before it is sent.
 - An agent party that restarts or reloads in the under-a-second window between joining the contact room and the acceptance making the contact active leaves the room, because an agent keeps only active contacts' rooms, so the contact goes active without it.
 - The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends none of them into its room, and only a plugin hook could.
 - An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.
