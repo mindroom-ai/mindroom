@@ -17,7 +17,7 @@ from mindroom.approval.receipt import approval_receipt_hook, build_approval_rece
 from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.event_journal import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     ApprovalCall,
@@ -539,6 +539,8 @@ def _leader_delegating_to_code(
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
+        # These turns pause for approval and delegate through the native delegation driver.
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
     )
     for name in names[1:]:
         with_responder_access(config, name, users=[requester])

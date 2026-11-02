@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
+from mindroom.delegation.state import is_delegation_function
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
@@ -149,7 +150,7 @@ def _resolve_live_function(
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
     if toolkit_name is not None and function.toolkit != toolkit_name:
         return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
-    if function.gate is ToolGate.DELEGATION or function.controls_run:
+    if is_delegation_function(function) or function.controls_run:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
         function=function,

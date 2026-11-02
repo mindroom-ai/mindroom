@@ -389,6 +389,7 @@ async def test_a_private_ad_hoc_team_approval_that_retained_no_scope_resumes_in_
             "checker-model": [calls(tool_call("touch", "call-touch", label="dangerous"))],
         },
     )
+    team.config.background_tool_jobs.enabled = False
     team.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )

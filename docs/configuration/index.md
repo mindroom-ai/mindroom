@@ -82,7 +82,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `slack` | How Slack workspace members map to Matrix users | [Slack](../tools/slack.md#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
-| `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
+| `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
 | `personal_agents` | Templates that give each onboarded user their own agent | [Personal Agents](../personal-agents.md#personal-agents) |
 | `budgets` | Default monthly spending cap per user and the fallback model | [Budgets](../budgets.md) |

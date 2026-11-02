@@ -245,6 +245,7 @@ async def test_an_approved_team_reply_publishes_the_usage_of_the_empty_attempt_r
         leader=[answer("", usage(100, 5)), delegate("call-team", "general", "Touch it")],
         general=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
     )
+    team.config.background_tool_jobs.enabled = False
     team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)

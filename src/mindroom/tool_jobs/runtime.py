@@ -90,6 +90,24 @@ class BackgroundOutcome:
     result_payload: EncodedResultPayload | None = None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class JobSpec:
+    """What one accepted job runs and how it is known.
+
+    ``tool_name`` and ``kind`` are what people and models see: a tool's job is named by its function, a subagent's
+    (``kind="delegation"``) by the agent it runs. ``adapter`` is the exact mapping the runtime admits, saves, and hands
+    to cleanup. ``cancel`` settles the job's own work after a cancellation or shutdown in this process, before the
+    runtime's cleanup for its kind.
+    """
+
+    tool_name: str
+    kind: str = "tool"
+    toolkit_name: str | None = None
+    adapter: dict[str, Any]
+    operation: _Operation
+    cancel: _Cleanup | None = None
+
+
 @dataclass(frozen=True)
 class BackgroundJob:
     """Durable execution and result, scoped to one conversation and requester."""
@@ -346,10 +364,6 @@ class ToolJobRuntime:
         """Return every job this runtime retains, unfiltered by access, for the coordinator's own passes."""
         return tuple(entry.job for entry in self._entries.values())
 
-    def has_job(self, job_id: str) -> bool:
-        """Recognize accepted ownership; access still requires an authorized lookup."""
-        return job_id in self._entries
-
     def _add_entry(self, entry: _Entry) -> None:
         """Make an accepted job current and findable by its conversation, which never changes."""
         job = entry.job
@@ -525,7 +539,7 @@ class ToolJobRuntime:
                 toolkit_name=toolkit_name,
                 source_event_id=source_event_id,
                 source_kind=source_kind,
-                # Native adapters mutate this exact mapping; owns_execution verifies its identity.
+                # A subagent job updates this exact mapping; owns_execution verifies its identity.
                 adapter=adapter,
             )
             readable = True
@@ -562,6 +576,15 @@ class ToolJobRuntime:
             status = "awaiting_approval" if awaiting else "running"
             if entry.job.status in _RUNNING_STATUSES and entry.job.status != status:
                 await self._publish(entry, _updated(entry.job, status=status))
+
+    async def save_adapter(self, job_id: str, **changes: object) -> None:
+        """Save a running job with ``changes`` to its adapter, as the job stands now; an ended job keeps its own."""
+        async with self._lock:
+            entry = self._entries[job_id]
+            if entry.job.status not in TERMINAL_STATUSES:
+                # The adapter is the exact mapping the job was admitted with, so its operation and cleanup see it too.
+                entry.job.adapter.update(changes)
+                await self._publish(entry, _updated(entry.job))
 
     async def _run(self, entry: _Entry, operation: _Operation) -> None:
         outcome = None

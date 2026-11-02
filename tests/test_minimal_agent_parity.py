@@ -238,6 +238,8 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
             memory_backend="file",
         )
         runtime.config.agents["code"] = AgentConfig(display_name="Code")
+        # The standard parent pauses for the native driver only with background tool jobs off.
+        runtime.config.background_tool_jobs.enabled = False
         with_responder_access(runtime.config, "code", users=[runtime.requester_id])
         runtime = replace(
             runtime,

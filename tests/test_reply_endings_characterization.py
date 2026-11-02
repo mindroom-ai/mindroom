@@ -525,10 +525,11 @@ def _silent_schedule(request: ResponseRequest) -> ResponseRequest:
 
 
 def _require_echo_approval(turn: _Turn) -> None:
-    """Make ``echo`` need approval and start the approval runtime whose cards ``turn`` sends."""
+    """Make ``echo`` need approval, pausing the reply, and start the approval runtime whose cards ``turn`` sends."""
     turn.bot.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
     )
+    turn.bot.config.background_tool_jobs.enabled = False
 
     async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
         return content

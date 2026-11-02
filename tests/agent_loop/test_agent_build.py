@@ -88,6 +88,8 @@ def _config(tmp_path: Path, **agent: object) -> tuple[Config, RuntimePaths]:
         "memory": {"backend": "none"},
         "models": {"default": _CLAUDE},
         "timezone": "UTC",
+        # Tests that offer background jobs turn them on themselves.
+        "background_tool_jobs": {"enabled": False},
     }
     runtime_paths = test_runtime_paths(tmp_path)
     workspace = agent_workspace_root_path(runtime_paths.storage_root, "assistant")
