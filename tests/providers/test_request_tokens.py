@@ -154,6 +154,22 @@ def test_an_answer_and_what_follows_it_add_no_more_than_their_own_size(path: Pat
         )
 
 
+@pytest.mark.parametrize("path", GOLDENS, ids=golden_id)
+def test_an_answer_and_what_follows_it_count_none_of_the_definitions_sent_before_it(path: Path, tmp_path: Path) -> None:
+    """The tools and output schema a request repeats are in the answer's reported size, so its tail never counts them.
+
+    Only a deferred tool the tail's own tool search loaded is new there, so a request that defers tools keeps them.
+    """
+    golden = load_golden(path)
+    adapter = _adapter(path, tmp_path)
+    request = golden_request(golden["input"], native=adapter.native_history_route)
+    bare = replace(request, tools=(), output_schema=None)
+    for index, message in enumerate(request.messages):
+        if message.role != "assistant" or index == 0 or request.deferred_tools.names:
+            continue
+        assert adapter.request_tokens(request, start=index) == adapter.request_tokens(bare, start=index)
+
+
 _REASONING = "The forecast says rain in the evening, so a light jacket and closed shoes are the right call. " * 12
 _THINKING = "Weigh the evening forecast against the walking plan before suggesting what to pack. " * 12
 
