@@ -30,6 +30,7 @@ from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, reco
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.providers.names import ROUTE_PROVIDERS
+from mindroom.runtime_shutdown import close_at_process_shutdown
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
@@ -45,6 +46,8 @@ _DEFAULT_PERMISSION_MODE: _PermissionMode = "default"
 _DEFAULT_SESSION_TTL_MINUTES = 60
 _DEFAULT_MAX_SESSIONS = 200
 _DEFAULT_LIMITS = (_DEFAULT_SESSION_TTL_MINUTES * 60, _DEFAULT_MAX_SESSIONS)
+# As often as the shortest TTL, so an idle session closes at most a minute after its TTL passed.
+_SWEEP_INTERVAL_SECONDS = 60
 _MAX_STDERR_LINES = 12
 _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
@@ -120,6 +123,7 @@ class _ClaudeSessionManager:
         self._sessions: dict[str, _ClaudeSessionState] = {}
         self._lock = asyncio.Lock()
         self._namespace_limits: dict[str, tuple[int, int]] = {}
+        self._sweep: asyncio.Task[None] | None = None
 
     def configure_namespace(
         self,
@@ -142,8 +146,6 @@ class _ClaudeSessionManager:
         stale: list[_ClaudeSessionState] = []
         try:
             async with self._lock:
-                stale.extend(self._collect_expired_locked())
-
                 existing = self._sessions.get(session_key)
                 if existing is not None:
                     existing.last_used_at = monotonic()
@@ -167,6 +169,12 @@ class _ClaudeSessionManager:
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
                 )
                 self._sessions[session_key] = session
+                if self._sweep is None or self._sweep.done():
+                    self._sweep = create_background_task(
+                        self._sweep_idle(),
+                        name="claude_session_sweep",
+                        context=Context(),
+                    )
                 return session, True
         finally:
             await self._close_many(stale)
@@ -189,17 +197,30 @@ class _ClaudeSessionManager:
         await self._close_many([session])
 
     async def get(self, session_key: str) -> _ClaudeSessionState | None:
-        """Get a session by key, cleaning up expired sessions first."""
-        stale: list[_ClaudeSessionState] = []
-        try:
+        """Get a session by key."""
+        async with self._lock:
+            session = self._sessions.get(session_key)
+            if session is not None:
+                session.last_used_at = monotonic()
+            return session
+
+    async def close_all(self) -> None:
+        """Close every session no call is using, which counts the turns no call read.
+
+        A session still in use, such as by an API request that shutdown leaves running, ends with the process.
+        """
+        async with self._lock:
+            idle_keys = [key for key, session in self._sessions.items() if not session.lock.locked()]
+            idle = [self._sessions.pop(key) for key in idle_keys]
+        await self._close_many(idle)
+
+    async def _sweep_idle(self) -> None:
+        """Close each session idle past its TTL, whether or not calls still come, while the manager holds any."""
+        while self._sessions:
+            await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
             async with self._lock:
-                stale.extend(self._collect_expired_locked())
-                session = self._sessions.get(session_key)
-                if session is not None:
-                    session.last_used_at = monotonic()
-                return session
-        finally:
-            await self._close_many(stale)
+                expired = self._collect_expired_locked()
+            await self._close_many(expired)
 
     def _collect_expired_locked(self) -> list[_ClaudeSessionState]:
         now = monotonic()
@@ -817,3 +838,7 @@ class ClaudeAgentTools(Toolkit):
         if not removed:
             return f"No active Claude session for `{session_key}`."
         return f"Closed Claude session `{session_key}`."
+
+
+# The runtime's orderly shutdown closes the sessions, which counts the turns no call read, such as a stopped call's answer.
+close_at_process_shutdown(lambda: ClaudeAgentTools._session_manager.close_all())
