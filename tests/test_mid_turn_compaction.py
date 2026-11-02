@@ -953,21 +953,30 @@ class _DenseTextRoute:
 
 
 @pytest.mark.asyncio
-async def test_a_fold_sizes_its_summary_as_the_route_sizes_the_request(
+@pytest.mark.parametrize(
+    "counter",
+    [
+        pytest.param(fake_token_counter(replay=_DenseTextRoute()), id="route-request-estimate"),
+        pytest.param(TokenCounter(estimate=lambda _text: None), id="vocabulary-loading"),
+    ],
+)
+async def test_a_fold_never_stores_a_summary_on_a_count_that_undercounts_it(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    counter: TokenCounter,
 ) -> None:
-    """A dense summary within the characters / 4 estimate but over the route's own estimate is not stored.
+    """A dense summary within a quarter token per character, but over the route's request estimate, is not stored.
 
-    The rewritten request, which the route sizes, would exceed the model's window once the summary was stored.
+    The rewritten request, which the route sizes, would exceed the model's window once the summary was stored, and
+    while the vocabulary loads, its bytes bound it for every later reply that replays it.
     """
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     model = ToolLoopModel(tool_rounds=5)
-    model.token_counter = fake_token_counter(replay=_DenseTextRoute())
+    model.token_counter = counter
     summary_calls.summary = "事实" * 5000
-    assert estimate_summary_text_tokens(summary_calls.summary, model.token_counter) < 3000
-    assert estimate_summary_text_tokens(summary_calls.summary, model.token_counter, as_request=True) > 3500
+    assert estimate_summary_text_tokens(summary_calls.summary, counter) < 3000
+    assert estimate_summary_text_tokens(summary_calls.summary, counter, as_request=True, upper_bound=True) > 3500
     lifecycle = RecordingCompactionLifecycle()
 
     output = await _run(_scoped_agent(model, config, paths, storage, lifecycle=lifecycle), "Do the task")

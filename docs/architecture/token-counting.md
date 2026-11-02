@@ -49,7 +49,7 @@ Provider tokens per o200k_base token on those samples:
 - Reported sizes are not turned into a route-wide ratio for other text: the ratio depends on the content (Claude Opus 5.5 ranges from 1.225 to 1.798 above), so a ratio learned from one text misjudges another, and a moving ratio would move the `MEMORY.md` cut of an unchanged file and break the conversation's cached prompt.
 - Every local encode on a reply's path runs in a worker thread, and text is encoded in pieces of at most 8,192 characters, cut just before a word: tiktoken's cost grows with the square of a run without whitespace (200,000 such characters took 18 s in one piece), while the pieces counted 829 repository files exactly as one encode did.
   A stretch of 8,192 characters with no word start is cut anyway, which can add a token per cut.
-- While o200k_base loads, and for good when it cannot, estimates count a quarter token per character, and sizes that must not undercount (compaction input, the `MEMORY.md` preload) count UTF-8 bytes.
+- While o200k_base loads, and for good when it cannot, estimates count a quarter token per character, and sizes that must not undercount (compaction input, a compaction summary before it is stored, the `MEMORY.md` preload) count UTF-8 bytes.
   The byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
 - The `MEMORY.md` preload counts each line with its newline and keeps the curated head, then the newest entries, within the token cap.
   Counting line by line rounds each line up, so the preload can stop a little under the cap; that keeps the cut a single pass whose result never changes for an unchanged file.
