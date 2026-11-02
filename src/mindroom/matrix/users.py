@@ -96,7 +96,7 @@ def preflight_managed_account_provisioning(
     for account_key, request in unique_requests.items():
         existing_account = state.get_account(account_key)
         if existing_account is not None:
-            _validate_existing_internal_user_request(
+            _validate_existing_account_request(
                 agent_name=request.entity_name,
                 requested_username=request.username,
                 existing_account=existing_account,
@@ -515,24 +515,28 @@ def _direct_token_registration_error(
     return None
 
 
-# LEGACY_COMPAT: Persisted Matrix accounts without the requested username.
-# Legacy format: Persisted internal Matrix accounts omitted requested_username.
-# Last legacy release: v2026.5.160; replacement: v2026.5.161 persisted the immutable creation request.
-# Handling: Use the actual stored username as the original request only when the dedicated field is absent.
-# Coverage: tests/test_matrix_agent_manager.py::TestAgentUserCreation::test_create_internal_user_legacy_state_uses_actual_username_as_original_request.
-def _validate_existing_internal_user_request(
+def _validate_existing_account_request(
     *,
     agent_name: str,
     requested_username: str | None,
     existing_account: MatrixAccount,
 ) -> None:
-    if agent_name != INTERNAL_USER_AGENT_NAME or requested_username is None:
+    """Refuse a configured username that differs from the one the stored account was created with.
+
+    An account without a recorded request counts its stored username as the request: one added by hand to adopt an
+    existing Matrix account, as docs/matrix.md describes, or one saved before v2026.5.161 recorded requests.
+    """
+    if requested_username is None:
         return
     stored_request = existing_account.requested_username or existing_account.username
     if stored_request == requested_username:
         return
+    if agent_name == INTERNAL_USER_AGENT_NAME:
+        setting, account = "mindroom_user.username", "internal Matrix account"
+    else:
+        setting, account = f"agents.{agent_name}.matrix_username", "agent's Matrix account"
     msg = (
-        "mindroom_user.username cannot be changed after the internal Matrix account has been created. "
+        f"{setting} cannot be changed after the {account} has been created. "
         f"Configured username {requested_username!r} does not match the original requested username "
         f"{stored_request!r}."
     )
@@ -909,7 +913,7 @@ async def create_agent_user(
     # Check if credentials already exist in matrix_state.yaml
     existing_account = _get_agent_credentials(agent_name, runtime_paths)
     if existing_account is not None:
-        _validate_existing_internal_user_request(
+        _validate_existing_account_request(
             agent_name=agent_name,
             requested_username=username,
             existing_account=existing_account,

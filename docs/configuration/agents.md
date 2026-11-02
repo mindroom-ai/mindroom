@@ -61,6 +61,7 @@ agents:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `display_name` | string | *required* | Name shown in Matrix |
+| `matrix_username` | string or null | `null` | Exact localpart of the Matrix account MindRoom creates for the agent, such as `jarvis` for `@jarvis:example.com`, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`. When unset, the account is `mindroom_<agent key>`; unlike that default name, `matrix_username` gets no `_<MINDROOM_NAMESPACE>` suffix. MindRoom uses it when it creates the account, so set it before the agent's first start; changing it to another name later stops startup with `agents.<agent key>.matrix_username cannot be changed after the agent's Matrix account has been created.`, and removing it keeps the existing account. Installs paired with a provisioning service, such as hosted `mindroom.chat`, can register only `mindroom_` names the service allows, so a name such as `jarvis` is refused there. To use an account that already exists, see [Use an Existing Matrix Account](../matrix.md#use-an-existing-matrix-account) |
 | `role` | string | `""` | System prompt describing the agent's purpose and expertise |
 | `model` | string | `"default"` | Key of an entry under `models:` |
 | `cheap_model` | string or null | `null` | Cheaper model key this agent may switch to; used by `cold_cache`. Inherits `defaults.cheap_model`. See [Cold-Cache Model](models.md#cold-cache-model) |

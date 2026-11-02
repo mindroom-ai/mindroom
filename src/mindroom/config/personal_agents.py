@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.validation import validate_matrix_localpart
 from mindroom.constants import AGENT_NAME_PATTERN, tracking_dir
 
 if TYPE_CHECKING:
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
 
 _USERNAME_PLACEHOLDER = "{username}"
 _PLACEHOLDER_PATTERN = re.compile(r"\{(user|username|user_display_name|user_first_name)\}")
-_MATRIX_LOCALPART_PATTERN = re.compile(r"[a-z0-9._=/-]+")
 _MAX_USERNAME_LENGTH = 40
 _MAX_DISPLAY_NAME_LENGTH = 100
 _PROBE_USER_ID = "@personal_agent_probe:example.invalid"
@@ -34,13 +34,22 @@ def _name_pattern(name: str | None, key: str) -> str:
     return name or f"{key}_{_USERNAME_PLACEHOLDER}"
 
 
-def _reject_unsupported_fields(*, private: object, allow_self_config: object, where: str) -> None:
+def _reject_unsupported_fields(
+    *,
+    private: object,
+    allow_self_config: object,
+    matrix_username: object,
+    where: str,
+) -> None:
     if private is not None:
         msg = f"{where}: private is not supported, a personal agent already belongs to one user"
         raise ValueError(msg)
     # Raw overrides are not coerced yet, and pydantic would accept "true" or 1 as true.
     if allow_self_config not in (None, False):
         msg = f"{where}: allow_self_config is not supported, edit the template's users overrides instead"
+        raise ValueError(msg)
+    if matrix_username is not None:
+        msg = f"{where}: matrix_username is not supported, set the template's matrix_username instead"
         raise ValueError(msg)
 
 
@@ -108,9 +117,7 @@ class PersonalAgentTemplateConfig(BaseModel):
         if value.count(_USERNAME_PLACEHOLDER) != 1 or value == _USERNAME_PLACEHOLDER:
             msg = f"matrix_username must contain {_USERNAME_PLACEHOLDER} exactly once plus at least one other character"
             raise ValueError(msg)
-        if not _MATRIX_LOCALPART_PATTERN.fullmatch(value.replace(_USERNAME_PLACEHOLDER, "x")):
-            msg = "matrix_username must render to a Matrix localpart of lowercase letters, digits, and ._=/-"
-            raise ValueError(msg)
+        validate_matrix_localpart(value.replace(_USERNAME_PLACEHOLDER, "x"), field_name="matrix_username")
         return value
 
     @field_validator("users")
@@ -124,6 +131,7 @@ class PersonalAgentTemplateConfig(BaseModel):
             _reject_unsupported_fields(
                 private=overrides.get("private"),
                 allow_self_config=overrides.get("allow_self_config"),
+                matrix_username=overrides.get("matrix_username"),
                 where=f"users[{user_id!r}]",
             )
         return value
@@ -133,6 +141,7 @@ class PersonalAgentTemplateConfig(BaseModel):
         _reject_unsupported_fields(
             private=self.agent.private,
             allow_self_config=self.agent.allow_self_config,
+            matrix_username=self.agent.matrix_username,
             where="agent",
         )
         return self

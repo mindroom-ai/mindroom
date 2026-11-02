@@ -174,6 +174,8 @@ def test_expansion_leaves_malformed_sections_for_pydantic() -> None:
         ("users", {"@bob:x": {"private": {"per": "user"}}}, "private"),
         ("users", {"@bob:x": {"allow_self_config": True}}, "allow_self_config"),
         ("users", {"@bob:x": {"allow_self_config": "true"}}, "allow_self_config"),
+        ("users", {"@bob:x": {"matrix_username": "bob.mind"}}, "set the template's matrix_username instead"),
+        ("agent", {"display_name": "Mind", "matrix_username": "mind"}, "agent: matrix_username is not supported"),
     ],
 )
 def test_template_validation(field: str, value: object, match: str) -> None:

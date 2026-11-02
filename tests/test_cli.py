@@ -152,7 +152,7 @@ def test_mindroom_user_username_rejects_multiple_at() -> None:
 
 def test_mindroom_user_username_rejects_invalid_characters() -> None:
     """Config should reject localparts containing disallowed characters."""
-    with pytest.raises(ValueError, match="contains invalid characters"):
+    with pytest.raises(ValueError, match=r"mindroom_user\.username must be a Matrix localpart"):
         Config(mindroom_user={"username": "alice smith", "display_name": "Alice"})
 
 
