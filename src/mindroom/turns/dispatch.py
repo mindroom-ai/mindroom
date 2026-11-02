@@ -31,7 +31,7 @@ from mindroom.dispatch_source import (
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.media import is_matrix_media_dispatch_event
+from mindroom.matrix.media import is_matrix_media_dispatch_event, is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -609,15 +609,13 @@ class TurnDispatcher:
     async def _for_another_participant(self, room: nio.MatrixRoom, event_id: str, source: Mapping[str, object]) -> bool:
         """Return whether a message may be for other agents or people only, so this agent may never answer it.
 
-        A voice message's audio event mentions nobody: ingress judges it by the
-        transcript it stored for this agent, and one not transcribed yet could be for anyone.
+        A voice message is judged by the transcript ingress stored for this agent.
+        An upload that mentions nobody, a voice message not transcribed yet
+        included, takes whom it addresses from the caption coalescing batches it
+        with, so by itself it could be for anyone.
         """
-        content = source.get("content")
         voice = await self.deps.turn_store.prepared_voice_for_source(event_id)
-        if voice is not None:
-            content = voice.to_content()
-        elif isinstance(content, dict) and cast("dict[str, object]", content).get("msgtype") == "m.audio":
-            return True
+        content = voice.to_content() if voice is not None else source.get("content")
         mentions = mentions_another_participant(
             {**source, "content": content},
             self.deps.matrix_id,
@@ -625,7 +623,11 @@ class TurnDispatcher:
             self.deps.runtime_paths,
             room=room,
         )
-        return mentions is True
+        if mentions is None:
+            return isinstance(content, dict) and is_matrix_media_msgtype(
+                cast("dict[str, object]", content).get("msgtype"),
+            )
+        return mentions
 
     async def _agent_mention_may_wake(
         self,

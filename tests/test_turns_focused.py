@@ -1050,26 +1050,25 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
 
 
-def _voice_note_event(*, event_id: str, thread_id: str, origin_server_ts: int) -> nio.RoomMessageAudio:
-    """Return one voice note as it arrives: an audio event that mentions nobody."""
-    return cast(
-        "nio.RoomMessageAudio",
-        nio.RoomMessageAudio.from_dict(
-            {
-                "content": {
-                    "body": "voice.ogg",
-                    "msgtype": "m.audio",
-                    "url": "mxc://localhost/voice",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-                },
-                "event_id": event_id,
-                "sender": _SENDER,
-                "origin_server_ts": origin_server_ts,
-                "room_id": _ROOM_ID,
-                "type": "m.room.message",
+def _thread_upload_event(msgtype: str, *, event_id: str, origin_server_ts: int) -> nio.Event:
+    """Return one upload in the thread as it arrives, mentioning nobody: a voice note for ``m.audio``."""
+    event = nio.Event.parse_event(
+        {
+            "content": {
+                "body": "upload",
+                "msgtype": msgtype,
+                "url": "mxc://localhost/upload",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
             },
-        ),
+            "event_id": event_id,
+            "sender": _SENDER,
+            "origin_server_ts": origin_server_ts,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
     )
+    assert isinstance(event, nio.Event)
+    return event
 
 
 async def _serve_newer_requester_message(
@@ -1080,13 +1079,15 @@ async def _serve_newer_requester_message(
     voice: bool,
     history_degraded: bool,
     transcribed: bool = True,
+    upload_before: bool = False,
 ) -> nio.Event:
     """Admit one newer requester message to the journal and serve it as this thread's history.
 
     ``mentions`` names the one entity it mentions, or None for nobody. A voice
     note mentions nobody itself; the transcript ingress stored for it names
-    whom it addresses. A degraded read lets only the journal prove the newer
-    message exists.
+    whom it addresses. ``upload_before`` puts an image that mentions nobody
+    just before the message, as its caption. A degraded read lets only the
+    journal prove the newer messages exist.
     """
     content: dict[str, Any] = {
         "body": "what do you think?" if mentions is None else f"@{mentions} what do you think?",
@@ -1097,7 +1098,7 @@ async def _serve_newer_requester_message(
         content["m.mentions"] = {"user_ids": [_entity_user_id(config, mentions)]}
     newer: nio.Event
     if voice:
-        newer = _voice_note_event(event_id="$newer:localhost", thread_id=_THREAD_ROOT, origin_server_ts=2_000_000)
+        newer = _thread_upload_event("m.audio", event_id="$newer:localhost", origin_server_ts=2_000_000)
         if transcribed:
             await harness.turn_store.record_prepared_voice(
                 _ROOM_ID,
@@ -1107,9 +1108,11 @@ async def _serve_newer_requester_message(
     else:
         newer = _text_event("", event_id="$newer:localhost", thread_id=_THREAD_ROOT, origin_server_ts=2_000_000)
         newer.source["content"] = content
-    await harness.journal_principal.admit(
-        _inbound_event(_ROOM_ID, newer, EventKind.MEDIA if voice else EventKind.MESSAGE, EventClass.ACTIONABLE),
-    )
+    uploads = [_thread_upload_event("m.image", event_id="$upload:localhost", origin_server_ts=1_500_000)]
+    events = [*(uploads if upload_before else []), newer]
+    for event in events:
+        kind = EventKind.MESSAGE if isinstance(event, nio.RoomMessageText) else EventKind.MEDIA
+        await harness.journal_principal.admit(_inbound_event(_ROOM_ID, event, kind, EventClass.ACTIONABLE))
     if history_degraded:
         # A read that must still refetch a revision cannot prove that no newer message exists.
         reader = harness.ingress.deps.resolver.deps.conversation_reader
@@ -1121,17 +1124,17 @@ async def _serve_newer_requester_message(
             next_cursor=None,
         )
     else:
-        newer_content = newer.source["content"]
         _serve_conversation(
             harness,
             [
                 make_visible_message(
                     sender=_SENDER,
-                    body=newer_content["body"],
-                    event_id=newer.event_id,
-                    timestamp=newer.server_timestamp,
-                    content=newer_content,
-                ),
+                    body=event.source["content"]["body"],
+                    event_id=event.event_id,
+                    timestamp=event.server_timestamp,
+                    content=event.source["content"],
+                )
+                for event in events
             ],
         )
     return newer
@@ -1172,6 +1175,37 @@ async def test_only_a_newer_message_this_agent_answers_supersedes_a_replayed_tur
 
     assert len(harness.runner.requests) == (1 if answered else 0)
     assert harness.ignored_dispatch_sources == ([] if answered else [(event.event_id,)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_degraded", [False, True])
+async def test_an_upload_before_a_caption_for_another_agent_never_supersedes(
+    config: Config,
+    tmp_path: Path,
+    history_degraded: bool,
+) -> None:
+    """An upload that mentions nobody takes whom it addresses from the caption after it.
+
+    Coalescing batches the upload with a caption for another agent, so this
+    agent ignores both; counting the upload by itself would drop the older turn.
+    """
+    harness = _build_harness(config, tmp_path)
+    await _serve_newer_requester_message(
+        harness,
+        config,
+        mentions="research",
+        voice=False,
+        history_degraded=history_degraded,
+        upload_before=True,
+    )
+    room = _room_with_members(config, "general", "research")
+    event = _text_event("older message for general", thread_id=_THREAD_ROOT, origin_server_ts=1_000_000)
+    event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    assert harness.ignored_dispatch_sources == []
 
 
 @pytest.mark.asyncio
