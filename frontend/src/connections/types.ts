@@ -1,3 +1,9 @@
+/** Services that one sign-in connects together, such as an agent's Google services. */
+export interface ConnectionConsentGroup {
+  key: string;
+  display_name: string;
+}
+
 export interface ConnectionService {
   provider: string;
   is_shared: boolean;
@@ -12,6 +18,8 @@ export interface ConnectionService {
   description: string;
   icon: string | null;
   tools: string[];
+  /** The group whose unconnected services one sign-in connects together, `null` for a service in none. */
+  consent_group: ConnectionConsentGroup | null;
 }
 
 export interface AgentConnections {

@@ -8,7 +8,7 @@ How connections are made, stored per credential scope, disconnected, and reset i
 
 ## Providers
 
-Each Google Workspace tool has its own provider, so users connect and approve each service separately.
+Each Google Workspace tool has its own provider, so users can approve each service separately or connect all of an agent's Google services at once from the [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows).
 Google Cloud is the exception: one read-only provider serves every Google Cloud tool, such as `google_bigquery`, so users connect once for all of them.
 
 | Tool | Provider ID | Token service | Client config service | Settings service | Google scopes |

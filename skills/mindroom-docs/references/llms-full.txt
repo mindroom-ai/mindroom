@@ -13706,6 +13706,7 @@ The scopes stay the same with `write: false`, so turning writes back on does not
 When a requester has not connected a tool's service yet, each of its functions returns `oauth_connection_required: true` with a `connect_url` for that requester.
 The requester opens the link, signs in to Microsoft, approves the requested permissions, and retries the request.
 Users can also connect and disconnect from the dashboard Integrations page, where each service is a separate connection.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows) can connect all of an agent's unconnected Microsoft 365 services with one sign-in, except Teams, Teams Meetings, and People, which need administrator consent.
 
 Tokens belong to the requester and are never shared with other users or stored globally.
 A call without a concrete requester always asks for a connection instead of using another account.
@@ -16022,6 +16023,8 @@ The portal groups OAuth services by agent, covering every agent the user may use
 Services come from each agent's tools, including deferred tools and plugin or MCP OAuth providers; tools that need no browser sign-in are listed too, and room-dependent tools are marked **MindRoom only**.
 The agent list shows at once, and each agent's counts of connected accounts and set keys fill in as they load.
 Each service's status loads independently, so one failing or unconnected service does not block the others.
+When an agent has two or more unconnected services of Google, of an additional Google workspace, or of Microsoft 365 (except Teams, Teams Meetings, and People), a **Connect all** button above its tools, such as **Connect all Google services**, connects them with one sign-in.
+Services whose access the user does not grant on the consent screen stay unconnected, and the result page names them.
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
@@ -16173,7 +16176,7 @@ How connections are made, stored per credential scope, disconnected, and reset i
 
 ## Providers
 
-Each Google Workspace tool has its own provider, so users connect and approve each service separately.
+Each Google Workspace tool has its own provider, so users can approve each service separately or connect all of an agent's Google services at once from the [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows).
 Google Cloud is the exception: one read-only provider serves every Google Cloud tool, such as `google_bigquery`, so users connect once for all of them.
 
 | Tool | Provider ID | Token service | Client config service | Settings service | Google scopes |
