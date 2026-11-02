@@ -576,8 +576,8 @@ async def test_no_send_into_a_contact_room_takes_an_idempotency_key(
     _contact(paths)
     seen: list[str] = []
     context = _context(config, paths, _recorder(seen), room_id=room_id)
-    # A send prepared before the owner changed the contact's rules or removed it.
-    async with claim_matrix_message_send(context, CONTACT_ROOM, "answer-1") as claim:
+    # A send prepared in the contact room before the owner changed the contact's rules or removed it.
+    async with claim_matrix_message_send(_context(config, paths), CONTACT_ROOM, "answer-1") as claim:
         await claim.prepare(
             {"msgtype": "m.text", "body": "The budget is 500."},
             recipient=None,
