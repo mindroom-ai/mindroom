@@ -1833,7 +1833,7 @@ class TestAgentBot(AgentBotTestBase):
             await asyncio.Event().wait()
 
         async def _api_fails(*_args: object, **_kwargs: object) -> None:
-            msg = "Embedded API server exited unexpectedly"
+            msg = "API crashed"
             raise RuntimeError(msg)
 
         with (
@@ -1842,7 +1842,7 @@ class TestAgentBot(AgentBotTestBase):
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_fails),
-            pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly"),
+            pytest.raises(RuntimeError, match="API crashed"),
         ):
             await main(
                 log_level="INFO",

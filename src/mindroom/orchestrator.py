@@ -200,9 +200,9 @@ def _raise_embedded_api_server_exit(
     raise RuntimeError(msg) from cause
 
 
-def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
-    """Raise the fatal lifecycle error for an unexpected orchestrator exit, which `_run_runtime` logs."""
-    msg = f"MindRoom orchestrator exited unexpectedly: {reason}"
+def _raise_orchestrator_exit() -> NoReturn:
+    """Raise the error for an orchestrator that returned while no shutdown was requested, which `_run_runtime` logs."""
+    msg = "MindRoom orchestrator exited unexpectedly"
     raise RuntimeError(msg)
 
 
@@ -1706,9 +1706,7 @@ async def _consume_completed_runtime_tasks(
                         task_name=task_name,
                     )
                     continue
-                _raise_orchestrator_exit(
-                    reason="Orchestrator task finished while application shutdown was not requested",
-                )
+                _raise_orchestrator_exit()
             logger.info(
                 "runtime_task_completed",
                 task_name=task_name,
