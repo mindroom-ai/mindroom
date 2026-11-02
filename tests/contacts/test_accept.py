@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -144,6 +145,18 @@ def _room_lifecycle(config: Config, paths: RuntimePaths, agent_name: str) -> Bot
             get_conversation_reader=MagicMock(),
         ),
     )
+
+
+def _failing_membership(*, fails_on: str) -> Callable[[str, str], Awaitable[bool]]:
+    """Return a membership change that raises for ``fails_on`` and succeeds otherwise."""
+
+    async def change(_room_id: str, target_membership: str) -> bool:
+        if target_membership == fails_on:
+            msg = f"{fails_on} failed"
+            raise RuntimeError(msg)
+        return True
+
+    return change
 
 
 def _kept(paths: RuntimePaths) -> set[str]:
@@ -416,6 +429,49 @@ async def test_an_acceptance_that_cannot_be_stored_leaves_the_room(tmp_path: Pat
     assert _joined(runtime) == _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert [stored.status for stored in _stored(paths)] == ["pending"]
     runtime.sent("mind_alice").assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_leave_that_fails_during_cleanup_still_lets_the_other_agent_leave(tmp_path: Path) -> None:
+    """One agent's failed leave neither keeps the other in the room nor hides the failure that stopped the setup."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    runtime.bots["mind_alice"].change_local_membership.side_effect = _failing_membership(fails_on="leave")
+    runtime.bots["mind_bob"].change_local_membership.side_effect = _failing_membership(fails_on="join")
+
+    with _matrix(), pytest.raises(RuntimeError, match=r"^join failed$"):
+        await _accept(config, paths, runtime, record.id)
+
+    assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
+    assert [stored.status for stored in _stored(paths)] == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_during_the_store_write_keeps_the_contact_it_activated(tmp_path: Path) -> None:
+    """The store write finishes before a cancellation propagates, so its active contact keeps its agents in the room."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    writing, release = threading.Event(), threading.Event()
+    store = flow.update_contacts
+
+    def slow_update(runtime_paths: RuntimePaths, change: Callable[[Any], Any]) -> Any:  # noqa: ANN401
+        writing.set()
+        release.wait(timeout=10)
+        return store(runtime_paths, change)
+
+    with _matrix(), patch("mindroom.contacts.flow.update_contacts", side_effect=slow_update):
+        accepting = asyncio.create_task(_accept(config, paths, runtime, record.id))
+        assert await asyncio.to_thread(writing.wait, 10)
+        accepting.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await accepting
+
+    assert [(stored.status, stored.room_id) for stored in _stored(paths)] == [("active", CONTACT_ROOM)]
+    assert _joined(runtime) == _kept(paths) == {"mind_alice", "mind_bob"}
+    assert _memberships(runtime, "leave") == set()
 
 
 @pytest.mark.asyncio

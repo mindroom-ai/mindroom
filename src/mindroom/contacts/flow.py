@@ -351,10 +351,17 @@ async def _seat_parties(
 
 
 async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord, room_id: str) -> None:
-    """Make the running agents of a contact leave its room; they keep only the rooms of active contacts across restarts."""
+    """Make the running agents of a contact leave its room; they keep only the rooms of active contacts across restarts.
+
+    Each agent leaves even when another's leave raises, which is only logged, so the caller's own outcome stands.
+    """
     for party in (record.requester, record.target):
-        if party.kind == "agent" and (bot := _bot(context, party.id)) is not None and bot.running:
+        if party.kind != "agent" or (bot := _bot(context, party.id)) is None or not bot.running:
+            continue
+        try:
             await bot.change_local_membership(room_id, "leave")
+        except Exception:
+            logger.exception("contact_room_leave_failed", contact_id=record.id, agent_name=party.id, room_id=room_id)
 
 
 async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecord, poster: str) -> None:
@@ -461,9 +468,12 @@ async def accept_contact(
     try:
         await _seat_parties(context, record, room_id, agents)
         accepted = await run_blocking_until_complete(update_contacts, paths, activate)
-    # Any failure, a cancellation included, leaves the room, which no contact refers to yet.
+    # Any failure, a cancellation included, leaves the room unless the store already made it the contact's room:
+    # the store write finishes before a cancellation propagates, and agents never rejoin a contact room on their own.
     except BaseException:
-        await _leave_contact_room(context, record, room_id)
+        current = _by_id(await run_blocking_until_complete(read_contacts, paths), contact_id)
+        if current.status != "active" or current.room_id != room_id:
+            await _leave_contact_room(context, record, room_id)
         raise
     await _announce_acceptance(context, accepted, poster)
     return accepted
