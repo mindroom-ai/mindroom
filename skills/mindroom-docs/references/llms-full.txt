@@ -20775,7 +20775,7 @@ A GitHub App owned by an organization can serve shared agents instead of one per
 The broker mints the App's installation tokens in the primary, limited to the repositories the service lists, and refreshes each one before it expires.
 Workers never see the App's private key or its tokens, only the placeholder variables.
 
-Store the App as a credential, the same object [Git knowledge bases](https://docs.mindroom.chat/knowledge/#private-repository-authentication) use, through the dashboard **Credentials** tab or `POST /api/credentials/<name>`:
+Store the App as a credential, the same object [Git knowledge bases](https://docs.mindroom.chat/knowledge/#private-repository-authentication) use, through the dashboard **Credentials** tab or as the `credentials` field of `POST /api/credentials/<name>`:
 
 ```json
 {
@@ -20813,10 +20813,11 @@ egress_broker:
 - A request for a repository the service does not list, a public one included, gets 403 `repository_not_allowed` and no token.
 - A request that names no repository in its path, such as GraphQL, which `gh pr create` and `gh pr view` use, gets read access to every listed repository, or read and write when every listed repository is `read_write`.
   In a service that mixes the two, `gh` commands that write through GraphQL therefore fail; `gh api repos/<owner>/<repository>/...` and git work at each repository's own access.
-- GitHub refuses a token everything outside its repositories and permissions, so that holds even for requests whose path names no repository.
+- GitHub refuses a token anything private outside its repositories and anything its permissions do not allow, so that holds even for requests whose path names no repository.
 - The service uses no key or connected account: a preset's account login is left out, setting `oauth_provider`, `read_only`, `oauth_on_shared_workers`, or `admin_key` next to `github_app` is an error, and the egress pages offer no key for it.
 - Every agent the service serves shares the App, whatever its worker scope.
   Combine it with [`agents`](#limiting-a-service-to-some-agents) to choose which agents get it.
+  Because the tokens are shared, code in any of those agents' sandboxes can use up the installation's rate limit or revoke the current token, which cuts the others off until the broker mints the next one, within an hour.
 
 Until the credential is stored, the service shows as not set, its placeholder variables are not added, and requests get 403 `credential_not_configured`.
 When GitHub issues no token, for example because the App lacks a permission or an installation does not include a listed repository, requests get 503 `github_app_token_failed` and the primary logs `egress_broker_github_app_token_failed` with GitHub's HTTP status.

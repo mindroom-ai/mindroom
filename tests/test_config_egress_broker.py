@@ -299,6 +299,7 @@ def test_a_service_that_sends_a_credential_needs_auth_on_every_rule() -> None:
         ("placeholder_env", {"GH_TOKEN": "mindroom-brokered"}),
         ("oauth_on_shared_workers", True),
         ("read_only", {"post_paths": []}),
+        ("github_app", {"credentials_service": "acme_app", "repositories": {"acme/api": "read"}}),
     ],
 )
 def test_restrict_only_refuses_credential_settings(field: str, value: object) -> None:

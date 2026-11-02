@@ -45,18 +45,21 @@ GITHUB_APP_PERMISSIONS: Mapping[GitHubRepositoryAccess, Mapping[str, str]] = Map
 _API_HOSTS = frozenset({"api.github.com", "uploads.github.com"})
 # The host that serves git over HTTPS at `/<owner>/<repository>[.git]`.
 _GIT_HOST = "github.com"
+# A `github.com` path prefix that names no repository: GitHub reserves it for issue and pull request attachments.
+_GIT_HOST_ATTACHMENTS = "user-attachments"
 
 
 def request_repository(host: str, path: str) -> str | None:
     """Return the `owner/repository` a GitHub request's path names, or None for one that names none.
 
     Such paths are `/repos/<owner>/<repository>/...` on the API and upload hosts and `/<owner>/<repository>[.git]/...`
-    on `github.com`. A path such as `/graphql`, `/user`, or `/repositories/<id>` names none.
+    on `github.com`. A path such as `/graphql`, `/user`, `/repositories/<id>`, or an attachment's
+    `/user-attachments/...` names none.
     """
     segments = path.split("/")
     if host in _API_HOSTS and len(segments) > 3 and segments[1] == "repos":
         owner, repository = segments[2], segments[3]
-    elif host == _GIT_HOST and len(segments) > 2:
+    elif host == _GIT_HOST and len(segments) > 2 and segments[1] != _GIT_HOST_ATTACHMENTS:
         owner, repository = segments[1], segments[2].removesuffix(".git")
     else:
         return None

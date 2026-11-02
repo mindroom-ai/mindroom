@@ -54,6 +54,7 @@ _MIXED = EgressGitHubApp(
         ("api.github.com", "/repos/acme", None),
         ("api.github.com", "/repos/acme/", None),
         ("github.com", "/acme", None),
+        ("github.com", "/user-attachments/assets/0f3c2d1e", None),
         ("github.com", "/", None),
         ("example.com", "/repos/acme/api", None),
     ],
@@ -244,3 +245,25 @@ async def test_a_failed_mint_is_unavailable_and_logged_without_the_response(
     assert log["service"] == "acme"
     assert "HTTP 422" in log["error"]
     assert "nope" not in repr(logs)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_private_key_is_unavailable_and_logged(
+    tmp_path: Path,
+    github: tuple[_GitHub, GitHubAppTokenProvider],
+) -> None:
+    """A setup mistake such as a missing key file is the same retryable failure, logged with its reason, unminted."""
+    fake, tokens = github
+    manager = CredentialsManager(tmp_path / "credentials")
+    manager.save_credentials(
+        "acme_app",
+        {"auth_type": "github_app", "app_id": 1, "installation_id": 2, "private_key_file": str(tmp_path / "gone.pem")},
+    )
+
+    with capture_logs() as logs:
+        result = await _resolver(manager, tokens)("api.github.com", "/repos/acme/api")
+
+    assert result == SecretGitHubAppUnavailable()
+    [log] = [entry for entry in logs if entry["event"] == "egress_broker_github_app_token_failed"]
+    assert (log["error_type"], log["error"]) == ("ValueError", "GitHub App private_key_file could not be read")
+    assert fake.mints == []

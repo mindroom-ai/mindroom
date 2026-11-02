@@ -222,7 +222,8 @@ class EgressCredentialsTools(Toolkit):
             "`admin_key: true` marks a service whose one key only an administrator sets, for every agent that uses it, "
             "so when it is not configured ask an administrator, not the user. "
             "A service with `github_app_repositories` uses a GitHub App the administrator set up, which covers only "
-            "those repositories at the listed access; only an administrator can change them. "
+            "those repositories at the listed access and takes no key; only an administrator can change them or, "
+            "when it is not configured, store the App's credential. "
             f"{fix}"
             '`oauth_access: "read"` means Agent Keys may use the account only to read, so writes fail with `read_only` '
             "until whoever allows the account allows read and write there. "

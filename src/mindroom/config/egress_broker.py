@@ -60,7 +60,7 @@ _RESERVED_CA_VARS = {*RUNNER_CA_BUNDLE_ENV, "NODE_EXTRA_CA_CERTS"}
 # Every exact name a placeholder cannot take; the prefixes above are refused on top of these.
 RESERVED_PLACEHOLDER_NAMES = frozenset(_RESERVED_EXACT | _RESERVED_PROXY_VARS | _RESERVED_CA_VARS)
 # EgressService fields that only matter for a service that sends a credential; restrict_only services cannot set them.
-_CREDENTIAL_FIELDS = ("oauth_provider", "placeholder_env", "oauth_on_shared_workers", "read_only")
+_CREDENTIAL_FIELDS = ("oauth_provider", "placeholder_env", "oauth_on_shared_workers", "read_only", "github_app")
 # EgressService fields that only matter for a connected account; admin_key services use only a key, so cannot set them.
 _ACCOUNT_FIELDS = ("oauth_provider", "read_only", "oauth_on_shared_workers")
 # EgressService fields a github_app service cannot set: it sends only the tokens its App mints.
