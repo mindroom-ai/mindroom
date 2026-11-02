@@ -17,15 +17,21 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRequirement
     from mindroom.llm.usage import RunMetrics
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
-# The functions of the ``delegate`` toolkit, which run outside the loop: the driver runs the child and continues the
-# parent with its result.
+# The functions of the ``delegate`` toolkit, each of which runs one child turn.
 RUN_SUBAGENT = "run_subagent"
 CONTINUE_SUBAGENT = "continue_subagent"
 DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
+
+
+def is_delegation_function(function: ToolFunction) -> bool:
+    """Return whether ``function`` is one of the ``delegate`` toolkit's subagent functions."""
+    return function.registered_toolkit == "delegate" and function.name in DELEGATION_FUNCTIONS
+
 
 # A child, or its record, in one of these statuses is settled for good; a running or paused one can still advance.
 type DelegationTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]

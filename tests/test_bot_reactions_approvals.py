@@ -1454,6 +1454,8 @@ class TestAgentBot(AgentBotTestBase):
         config.tool_approval = ToolApprovalConfig(
             rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
         )
+        # The gated call pauses the reply, which only a reply without background tool jobs does.
+        config.background_tool_jobs.enabled = False
         runtime_paths = runtime_paths_for(config)
         target = MessageTarget.resolve("!test:localhost", None, "$source")
         identity = ToolExecutionIdentity(

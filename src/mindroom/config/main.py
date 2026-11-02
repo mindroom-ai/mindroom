@@ -435,7 +435,7 @@ class Config(BaseModel):
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
     background_tool_jobs: BackgroundToolJobsConfig = Field(
         default_factory=BackgroundToolJobsConfig,
-        description="Opt-in managed background tool execution; turning it on or off and its exclusions need a restart.",
+        description="Managed background tool execution, on by default; turning it on or off and its exclusions need a restart.",
     )
     event_journal: EventJournalConfig = Field(
         default_factory=EventJournalConfig,

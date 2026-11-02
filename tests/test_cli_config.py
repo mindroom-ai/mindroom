@@ -364,7 +364,8 @@ class TestConfigInit:
             {"match": "manage_agent", "action": "require_approval"},
             {"match": "manage_team", "action": "require_approval"},
         ]
-        assert config["background_tool_jobs"] == {"enabled": True}
+        # Background tool jobs are on by default, so the starter leaves the setting out.
+        assert "background_tool_jobs" not in config
         config_manager_entry = next(
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
         )

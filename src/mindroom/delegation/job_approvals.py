@@ -10,7 +10,6 @@ from mindroom.delegation.lifecycle import live_delegation_config
 from mindroom.event_journal import ApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.approvals import ask_job_approvals
-from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -20,6 +19,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.runs import RunRecord
+    from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -28,11 +28,13 @@ async def request_child_approvals(
     response: RunRecord,
     toolkit_owners: Mapping[tuple[str, str], str],
     *,
+    runtime: ToolJobRuntime,
+    job_id: str,
     owner: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[ApprovalCall, ...]:
-    """Ask the requester about each gated call of a paused child through cards its job owns, and wait for them.
+    """Ask the requester about each gated call of a paused child through cards ``runtime``'s job ``job_id`` owns, and wait.
 
     Returns the planned calls the child resumes with, each approved, or denied with its reason.
     """
@@ -55,13 +57,9 @@ async def request_child_approvals(
         room_id=owner.room_id,
         thread_id=owner.resolved_thread_id,
     )
-    runtime = get_background_runtime(runtime_paths)
-    if runtime is None:
-        msg = "Background tool jobs are not running."
-        raise RuntimeError(msg)
     decided = await ask_job_approvals(
         runtime,
-        child.delegation_id,
+        job_id,
         plan.tools,
         plan.calls,
         owner=owner,

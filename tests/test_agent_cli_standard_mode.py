@@ -315,6 +315,18 @@ def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:
     assert not _cli_callable(toolkit_offers(JobTools(test_runtime_paths(tmp_path)), "job"))
 
 
+def test_a_subagent_call_is_not_offered_to_the_cli() -> None:
+    """A subagent call runs its child as the reply's own call or job, never inside a shell command, gated or not."""
+
+    def run_subagent(task: str) -> str:
+        return task
+
+    function = replace(adapt_callable(run_subagent), registered_toolkit="delegate")
+
+    assert not _cli_callable(function)
+    assert _cli_callable(replace(function, registered_toolkit="research"))
+
+
 @pytest.mark.parametrize("gate", list(ToolGate))
 def test_a_function_whose_calls_wait_is_not_offered_to_the_cli(gate: ToolGate) -> None:
     """A call that waits for a decision or runs outside the loop cannot finish inside the shell command."""

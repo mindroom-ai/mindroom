@@ -23,7 +23,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution
 from mindroom.delegation.lifecycle import authorize_delegation
@@ -100,6 +100,8 @@ def _config(paths: RuntimePaths, *, child_tools: Sequence[str] = ("report",), ga
             # A configured model the child's ``switch_thread_model`` calls can switch to.
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval={"rules": rules},
+            # These replies pause for approval and delegate through the native delegation driver.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
         "code",
         users=[REQUESTER],

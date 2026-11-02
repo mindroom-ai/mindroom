@@ -19,10 +19,9 @@ from mindroom.agents import create_agent
 from mindroom.approval import manager as approval_manager
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ToolConfigEntry
-from mindroom.constants import subagent_sessions_dir
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ToolConfigEntry
 from mindroom.delegation import recovery as delegation_recovery
-from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.matrix import state as matrix_state
@@ -50,10 +49,10 @@ from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    admit_delegation_job,
     awaiting_approval,
     completed_delegation_job,
     job_card_decision,
-    keep_child,
     lookup,
     managed_team_config,
     pending_outcomes,
@@ -282,8 +281,6 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
         raise AssertionError
 
     fixture = completed_delegation_job()
-    # A parent's liveness claim on its child creates the sessions directory before any job starts the child.
-    subagent_sessions_dir(coordinator.runtime_paths).mkdir(parents=True)
     await start_delegation_job(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     await started.wait()
     assert get_background_runtime(coordinator.runtime_paths) is coordinator.runtime
@@ -347,12 +344,11 @@ async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> 
         return BackgroundOutcome("completed", "answer")
 
     try:
-        job, claim = await start_delegation(
+        job, claim = await admit_delegation_job(
             coordinator.runtime,
             delegation_child(fixture),
             owner=fixture.owner,
             operation=operation,
-            cancel=keep_child,
         )
         await done.wait()
         assert pending_outcomes(coordinator.runtime) == []
@@ -677,7 +673,7 @@ async def test_a_disabled_instance_leaves_saved_jobs_untouched(tmp_path: Path) -
     journal_provider = MagicMock(return_value=journal)
     coordinator = ToolJobRuntimeCoordinator(
         paths,
-        Config,
+        lambda: Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=False)),
         lambda _name: None,
         AgentReplyMembershipIndex(),
         journal_provider,
@@ -743,8 +739,6 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
     control = JobControl()
     control.cancel(shutdown=restart)
     job = replace(completed_delegation_job(), status="running", result=None)
-    # A parent's liveness claim on its child creates the sessions directory before any job starts the child.
-    subagent_sessions_dir(test_runtime_paths(tmp_path)).mkdir(parents=True)
     coordinator._runtime = await tool_job_runtime(tmp_path)
     try:
         with job_control_context(control), patch.object(delegation_recovery, "interrupt_child", new=interrupt):

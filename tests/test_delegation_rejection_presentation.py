@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.main import Config
 from mindroom.delegation.execution import _drive_delegations, drive_delegation_stream
 from mindroom.delegation.state import DelegationState
 from mindroom.hooks import (
@@ -25,7 +24,13 @@ from mindroom.private_storage.private_instance_identity import private_instances
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.approval_continuation_helpers import answered_calls
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, pause_parent
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    native_delegation_config,
+    pause_parent,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids, fixture_entity_matrix_id
 from tests.test_delegation_direct_audit import _identity
@@ -56,7 +61,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
     expected_result: str,
 ) -> None:
     """Every rejection must deliver its result through the real stream presentation, answering the call as failed."""
-    config = Config(
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(
@@ -64,8 +69,6 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
                 private=AgentPrivateConfig(per="user") if rejection == "private" else None,
             ),
         },
-        defaults={"tools": []},
-        memory={"backend": "none"},
         tool_approval={
             "rules": [{"match": "run_subagent", "action": "require_approval"}] if rejection == "policy" else [],
         },
@@ -171,14 +174,12 @@ async def test_a_refused_subagent_call_answers_with_its_refusal_instead_of_its_o
     expected_result: str,
 ) -> None:
     """A refusal after the output path was accepted writes no file; the model reads the refusal as a failed call."""
-    config = Config(
+    config = native_delegation_config(
         agents={
             # A private leader has the workspace that output redirection writes to.
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"], private=AgentPrivateConfig(per="user")),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults={"tools": []},
-        memory={"backend": "none"},
         tool_approval={
             "rules": [{"match": "run_subagent", "action": "require_approval"}] if rejection == "policy" else [],
         },

@@ -1249,6 +1249,8 @@ def _delegated_child_turn(root: Path) -> AgentTurn:
         "memory": {"backend": "none"},
         "models": {"default": _ANTHROPIC},
         "timezone": "UTC",
+        # The parent pauses on its delegations for the native driver, which runs with background tool jobs off.
+        "background_tool_jobs": {"enabled": False},
     }
     config, runtime_paths = _bound_config(root, authored)
     workspace_files = {"subagents/critic.md": _CRITIC_PROFILE}

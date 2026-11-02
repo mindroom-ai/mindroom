@@ -25,7 +25,7 @@ from mindroom.approval.tool_approval import ToolApprovalTransportError, schedule
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.custom_tools.thread_model import ThreadModelTools
@@ -1999,6 +1999,8 @@ def _code_config() -> Config:
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
+            # The build's gated calls run under the approval policy gate, not as background jobs.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
     )
 
@@ -2492,21 +2494,15 @@ class _MediaSlackTools(_SlackTools):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("needs", ["delegation", "stop-after-tool-call"])
 async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
-    needs: str,
 ) -> None:
-    """A stored call whose function runs elsewhere or ends the turn runs nothing, unspent."""
+    """A stored call whose function now ends the turn runs nothing, unspent."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
-    agent = _live_agent(
-        runs,
-        stop_after_tool_call=needs == "stop-after-tool-call",
-        gate=ToolGate.DELEGATION if needs == "delegation" else None,
-    )
+    agent = _live_agent(runs, stop_after_tool_call=True)
     try:
         await _armed(manager)
 
@@ -2798,21 +2794,36 @@ async def test_scheduler_functions_are_never_scheduled_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_model_switch_is_never_a_scheduled_call() -> None:
-    """A switch may stop the run that makes it, so it is conversation control, which a stored call cannot exercise."""
+@pytest.mark.parametrize(
+    ("tool_name", "arguments_json"),
+    [("switch_thread_model", '{"model_name": "default"}'), ("run_subagent", '{"task": "Research"}')],
+)
+async def test_a_model_switch_or_subagent_call_is_never_a_scheduled_call(tool_name: str, arguments_json: str) -> None:
+    """A stored call can neither exercise conversation control nor run a child turn in its conversation later.
+
+    A switch may stop the run that makes it, so it is conversation control; a subagent call runs a child turn.
+    """
     context = _tool_context(_gated_config())
 
+    def run_subagent(task: str) -> str:
+        """Run a subagent."""
+        return task
+
+    toolkit = {
+        "switch_thread_model": (ThreadModelTools(), "thread_model"),
+        "run_subagent": (Toolkit(name="delegate", tools=[run_subagent]), "delegate"),
+    }[tool_name]
     with (
         tool_runtime_context(context),
         _responders(context.config, "general"),
         pytest.raises(SchedulingError, match="needs live input or conversation control"),
     ):
-        await _LiveRun(((ThreadModelTools(), "thread_model"),)).call(
+        await _LiveRun((toolkit,)).call(
             "schedule_tool_call",
-            tool_name="switch_thread_model",
-            arguments_json='{"model_name": "default"}',
+            tool_name=tool_name,
+            arguments_json=arguments_json,
             execute_at="2030-01-02T09:00:00-05:00",
-            description="Switch later",
+            description="Run later",
         )
 
 
