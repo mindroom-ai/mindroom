@@ -333,12 +333,22 @@ def _entities_with_room_changes(
     configured_entities: set[str],
     existing_entities: set[str],
 ) -> set[str]:
-    """Return live entities whose desired Matrix room memberships changed."""
+    """Return live entities whose desired Matrix room memberships changed.
+
+    An agent keeps its contact rooms only while it has ``contacts``, so setting or removing them changes its rooms too.
+    """
     return {
         entity_name
         for entity_name in configured_entities & existing_entities
         if set(get_rooms_for_entity(entity_name, config)) != set(get_rooms_for_entity(entity_name, new_config))
+        or _has_contacts(config, entity_name) != _has_contacts(new_config, entity_name)
     }
+
+
+def _has_contacts(config: Config, entity_name: str) -> bool:
+    """Return whether an entity is an agent with ``contacts``."""
+    agent = config.agents.get(entity_name)
+    return agent is not None and agent.contacts is not None
 
 
 def _responder_access_changed(config: Config, new_config: Config) -> bool:

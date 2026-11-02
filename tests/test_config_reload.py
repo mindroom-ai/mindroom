@@ -1795,6 +1795,23 @@ def test_config_update_plan_applies_live_entity_edits_without_restarting(
     assert plan.live_updated == {entity}
 
 
+def test_config_update_plan_reconciles_the_rooms_of_an_agent_whose_contacts_are_set_or_removed() -> None:
+    """An agent keeps its contact rooms only while it has contacts, so it leaves them without a restart once removed."""
+    with_contacts = _update_helper(contacts={})
+    bots = {entity: AsyncMock(running=True) for entity in (ROUTER_AGENT_NAME, "helper", "other", "crew")}
+
+    def plan(current: Config, new: Config) -> ConfigUpdatePlan:
+        return build_config_update_plan(current_config=current, new_config=new, bots=bots)
+
+    removed = plan(_entity_edit_config(with_contacts), _entity_edit_config())
+    added = plan(_entity_edit_config(), _entity_edit_config(with_contacts))
+    changed = plan(_entity_edit_config(with_contacts), _entity_edit_config(_update_helper(contacts={"rules": ["x"]})))
+
+    assert (removed.restart, removed.reconcile_rooms) == (set(), {"helper"})
+    assert (added.restart, added.reconcile_rooms) == (set(), {"helper"})
+    assert (changed.restart, changed.reconcile_rooms) == (set(), set())
+
+
 @pytest.mark.parametrize(
     ("change", "restarted"),
     [
