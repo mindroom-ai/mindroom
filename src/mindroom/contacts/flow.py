@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 import yaml
@@ -281,27 +281,25 @@ def _bot(context: ToolRuntimeContext, agent_name: str) -> AgentBot | None:
     return None if context.orchestrator is None else context.orchestrator.agent_bots.get(agent_name)
 
 
-async def _post_to_origin(
-    context: ToolRuntimeContext,
-    record: ContactRecord,
-    agent_name: str,
-    body: str,
-    extra_content: dict[str, Any],
-    *,
-    trigger_dispatch: bool = False,
-) -> None:
-    """Post in the thread a request came from as one agent; a post that fails is logged, because the decision stands."""
+async def _post_to_origin(context: ToolRuntimeContext, record: ContactRecord, agent_name: str, body: str) -> None:
+    """Post a notice in the thread a request came from as one agent; one that fails is logged, as the decision stands.
+
+    The notice mentions nobody, so a Matrix ID it names stays plain text and pings no one.
+    """
     bot = _bot(context, agent_name)
     sent = None
-    if bot is not None:
-        sent = await bot.hook_context.send_message(
-            record.origin_room_id,
-            body,
-            record.origin_thread_id,
-            _SOURCE_HOOK,
-            extra_content,
-            trigger_dispatch=trigger_dispatch,
+    if bot is not None and bot.client is not None:
+        latest_thread_event_id = await bot.conversation_reader.latest_thread_event_id(
+            room_id=record.origin_room_id,
+            thread_id=record.origin_thread_id,
         )
+        content = build_message_content(
+            body,
+            thread_event_id=record.origin_thread_id,
+            latest_thread_event_id=latest_thread_event_id,
+            extra_content={SKIP_MENTIONS_KEY: True, "m.mentions": {}},
+        )
+        sent = await send_message_result(bot.client, record.origin_room_id, content)
     if sent is None:
         logger.warning("contact_origin_post_failed", contact_id=record.id, agent_name=agent_name)
 
@@ -362,21 +360,27 @@ async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecor
     """Start the requesting agent's turn in the thread it asked from, as its owner, so it continues its task.
 
     A person who asked has no agent to continue, so the accepting agent tells their thread, when it is in that room.
+    A post that fails is logged, because the acceptance stands.
     """
     # A display name is the other owner's to choose, so a message the requesting agent acts on names the ID.
     target = record.target.id
     requester = record.requester
     if requester.kind == "agent":
-        await _post_to_origin(
-            context,
-            record,
-            requester.id,
-            # Only a mentioned agent answers a message in a room with other responders.
-            f"@{requester.id} {target} accepted your contact request. "
-            f"Continue the task in the contact room {record.room_id}: {record.reason}",
-            {ORIGINAL_SENDER_KEY: requester.owner},
-            trigger_dispatch=True,
-        )
+        bot = _bot(context, requester.id)
+        kickoff = None
+        if bot is not None:
+            kickoff = await bot.hook_context.send_message(
+                record.origin_room_id,
+                # Only a mentioned agent answers a message in a room with other responders.
+                f"@{requester.id} {target} accepted your contact request. "
+                f"Continue the task in the contact room {record.room_id}: {record.reason}",
+                record.origin_thread_id,
+                _SOURCE_HOOK,
+                {ORIGINAL_SENDER_KEY: requester.owner},
+                trigger_dispatch=True,
+            )
+        if kickoff is None:
+            logger.warning("contact_origin_post_failed", contact_id=record.id, agent_name=requester.id)
         return
     bot = _bot(context, poster)
     joined = None if bot is None else await bot.current_joined_room_ids()
@@ -388,7 +392,6 @@ async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecor
         record,
         poster,
         f"{target} accepted your contact request. The contact room is {record.room_id}.",
-        {SKIP_MENTIONS_KEY: True},
     )
 
 
@@ -485,7 +488,6 @@ async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_
             record.requester.id,
             f"{record.target.owner} declined contact {record.id} with {record.target.id}; "
             "they must remove it before you can ask again.",
-            {SKIP_MENTIONS_KEY: True},
         )
     return record
 

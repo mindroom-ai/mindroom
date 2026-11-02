@@ -30,6 +30,7 @@ from tests.contacts.test_tools import (
     ORIGIN_THREAD,
     TOOLS,
     _context,
+    _delivered,
     _pending,
     _Runtime,
     _runtime,
@@ -301,22 +302,20 @@ async def test_a_person_requester_hears_from_the_accepting_agent_only_in_a_room_
     to_carol = await _pending(config, paths, runtime, party="me", target="mind_carol")
     runtime.bots["mind_carol"].current_joined_room_ids.return_value = frozenset({ORIGIN_ROOM})
 
-    with _matrix() as matrix:
+    with _matrix() as matrix, _delivered() as send:
         await _accept(config, paths, runtime, to_bob.id)
         await _accept(config, paths, runtime, to_carol.id, agent_name="mind_carol", requester_id=CAROL)
 
     first = matrix.create.await_args_list[0]
     assert first.args == (runtime.clients["mind_bob"], f"{OWNER} ↔ Bob's Mind")
-    for name in ("mind_alice", "mind_bob"):
+    for name in TOOLS:
         runtime.sent(name).assert_not_awaited()
-    runtime.sent("mind_carol").assert_awaited_once_with(
-        ORIGIN_ROOM,
-        f"mind_carol accepted your contact request. The contact room is {CONTACT_ROOM}.",
-        ORIGIN_THREAD,
-        "native:contacts",
-        {SKIP_MENTIONS_KEY: True},
-        trigger_dispatch=False,
-    )
+    (call,) = send.await_args_list
+    client, room_id, content = call.args
+    assert (client, room_id) == (runtime.clients["mind_carol"], ORIGIN_ROOM)
+    assert content["body"] == f"mind_carol accepted your contact request. The contact room is {CONTACT_ROOM}."
+    assert content["m.relates_to"]["event_id"] == ORIGIN_THREAD
+    assert (content["m.mentions"], content[SKIP_MENTIONS_KEY]) == ({}, True)
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,13 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
+from tests.conftest import (
+    make_conversation_reader_mock,
+    make_latest_thread_event_id_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal, _with_template
 from tests.turn_model_helpers import turn_model
@@ -66,9 +72,11 @@ def _runtime() -> _Runtime:
     orchestrator = MagicMock()
     runtime = _Runtime(orchestrator)
     for name in TOOLS:
-        runtime.clients[name] = AsyncMock()
+        runtime.clients[name] = make_matrix_client_mock(user_id=f"@{name}:localhost")
         runtime.bots[name] = bot = MagicMock(running=True, client=runtime.clients[name])
         bot.hook_context.send_message = AsyncMock(return_value="$origin-notice")
+        bot.conversation_reader = make_conversation_reader_mock()
+        bot.conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
         bot.change_local_membership = AsyncMock(return_value=True)
         bot.current_joined_room_ids = AsyncMock(return_value=frozenset())
     orchestrator.running_entity_client.side_effect = runtime.clients.get
@@ -496,19 +504,28 @@ async def test_decline_by_target_owner_only_and_notifies_origin(tmp_path: Path) 
             await flow.decline_contact(_context(config, paths, caller, requester, runtime), caller, record.id)
     assert _stored(paths)[0].status == "pending"
 
-    declined = await flow.decline_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
+    with _delivered() as send:
+        declined = await flow.decline_contact(
+            _context(config, paths, "mind_bob", CO_OWNER, runtime),
+            "mind_bob",
+            record.id,
+        )
 
     assert declined.status == "declined"
     assert _stored(paths) == [declined]
-    runtime.sent("mind_alice").assert_awaited_once()
-    args = runtime.sent("mind_alice").await_args
-    room_id, body, thread_id, source_hook, extra_content = args.args
-    assert (room_id, thread_id) == (ORIGIN_ROOM, ORIGIN_THREAD)
-    assert "declined" in body
-    assert CO_OWNER in body
-    assert (source_hook, extra_content) == ("native:contacts", {SKIP_MENTIONS_KEY: True})
-    assert args.kwargs == {"trigger_dispatch": False}
-    runtime.sent("mind_bob").assert_not_awaited()
+    (call,) = send.await_args_list
+    client, room_id, content = call.args
+    assert (client, room_id) == (runtime.clients["mind_alice"], ORIGIN_ROOM)
+    assert content["m.relates_to"]["event_id"] == ORIGIN_THREAD
+    assert content["body"] == (
+        f"{CO_OWNER} declined contact {record.id} with mind_bob; they must remove it before you can ask again."
+    )
+    # The owner who declined is named as plain text, so the notice neither mentions nor pings anyone.
+    assert content["m.mentions"] == {}
+    assert "matrix.to" not in content["formatted_body"]
+    assert content[SKIP_MENTIONS_KEY] is True
+    for name in TOOLS:
+        runtime.sent(name).assert_not_awaited()
     with pytest.raises(ValueError, match=r"^Only a pending contact can be declined"):
         await flow.decline_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
 
