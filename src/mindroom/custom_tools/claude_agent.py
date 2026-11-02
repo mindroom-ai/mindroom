@@ -144,7 +144,7 @@ class _ClaudeSessionManager:
         options: ClaudeAgentOptions,
     ) -> tuple[_ClaudeSessionState, bool]:
         """Get an existing session or create a new one for the given key."""
-        evicted: list[_ClaudeSessionState] = []
+        closing = self._close_many([])
         try:
             async with self._lock:
                 existing = self._sessions.get(session_key)
@@ -153,7 +153,8 @@ class _ClaudeSessionManager:
                     existing.ttl_seconds = self._namespace_ttl_seconds(namespace)
                     return existing, False
 
-                evicted = self._evict_if_needed_locked(namespace)
+                # Evicted sessions close while this one starts, so a shutdown meanwhile waits for their closes.
+                closing = self._close_many(self._evict_if_needed_locked(namespace))
 
                 client = ClaudeSDKClient(options=options)
                 close_requested = asyncio.Event()
@@ -178,7 +179,7 @@ class _ClaudeSessionManager:
                     )
                 return session, True
         finally:
-            await self._close_many(evicted)
+            await closing
 
     async def close(self, session_key: str) -> bool:
         """Close and remove a session by key."""
@@ -302,12 +303,15 @@ class _ClaudeSessionManager:
             raise
         return owner
 
-    async def _close_many(self, sessions: list[_ClaudeSessionState]) -> None:
-        """Close sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short."""
+    def _close_many(self, sessions: list[_ClaudeSessionState]) -> asyncio.Future[list[None]]:
+        """Start closing sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short.
+
+        Return a future that ends once every close has.
+        """
         closes = [
             create_background_task(_close(session), name="claude_session_close", owner=self) for session in sessions
         ]
-        await asyncio.shield(asyncio.gather(*closes))
+        return asyncio.shield(asyncio.gather(*closes))
 
 
 async def _close(session: _ClaudeSessionState) -> None:

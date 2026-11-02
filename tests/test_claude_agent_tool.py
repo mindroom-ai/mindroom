@@ -1902,12 +1902,14 @@ async def test_shutdown_leaves_a_session_that_a_call_still_uses(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_sessions", [200, 1], ids=["beside-it", "evicted-by-it"])
 async def test_shutdown_does_not_wait_for_a_session_that_a_call_still_opens(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
+    max_sessions: int,
 ) -> None:
     """Shutdown closes the idle sessions while a call it leaves running, such as an API request's, still opens one."""
-    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", max_sessions=max_sessions)
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
     await _in_call(run_context, tools.claude_send("quick", session_label="idle"))
     [idle_client] = _FakeClaudeSDKClient.instances
