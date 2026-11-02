@@ -52,10 +52,8 @@ class IngressFacts:
     sender_entity_name: str | None = None
     # The entity behind the run requester, if one is.
     requester_entity_name: str | None = None
-    # The contact whose room this is, when the responder is one of its agent parties.
-    contact_id: str | None = None
-    # Whether that contact refuses the sender: only the counterparty and the responder's owner start an active
-    # contact's turns, and a removed contact's room starts none.
+    # Whether this is a contact room of the responder that refuses the sender: only the counterparty and the
+    # responder's owner start an active contact's turns, and a removed contact's room starts none.
     contact_refused: bool = False
 
     @property

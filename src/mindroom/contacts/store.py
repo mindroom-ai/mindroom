@@ -153,18 +153,3 @@ def contact_room_ids(runtime_paths: RuntimePaths, agent_name: str, *, include_re
         and record.room_id is not None
         and record.agent_side(agent_name) is not None
     )
-
-
-def contact_of_room(
-    runtime_paths: RuntimePaths,
-    room_id: str,
-    agent_name: str,
-) -> tuple[ContactRecord, SideName] | None:
-    """Return the contact whose room this is, in any status, and this agent's side; None when it is no party of one.
-
-    A contact keeps its room once removed.
-    """
-    for record in read_contacts(runtime_paths).contacts:
-        if record.room_id == room_id and (side := record.agent_side(agent_name)) is not None:
-            return record, side
-    return None

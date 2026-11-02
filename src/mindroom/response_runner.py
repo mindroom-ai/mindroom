@@ -999,10 +999,11 @@ class ResponseRunner:
         A contact turn offers only its contact's tools, none that would show an approval card to the other side, and
         no interactive questions, since its reply never shows.
         """
-        tool_names = None
-        if request.contact is not None:
-            record, side = request.contact
-            tool_names = contact_turn_tools(self.deps.runtime.config, self.deps.agent_name, record.side(side))
+        tool_names = (
+            None
+            if request.contact is None
+            else contact_turn_tools(self.deps.runtime.config, self.deps.agent_name, *request.contact)
+        )
         state_root = resolve_agent_storage(
             self.deps.agent_name,
             self.deps.runtime.config,
@@ -1036,8 +1037,8 @@ class ResponseRunner:
             compaction_lifecycle=compaction_lifecycle,
             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
             knowledge=knowledge,
-            include_interactive_questions=tool_names is None,
-            supports_native_tool_approval=tool_names is None,
+            include_interactive_questions=request.contact is None,
+            supports_native_tool_approval=request.contact is None,
             tool_names=tool_names,
         )
 

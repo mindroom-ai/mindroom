@@ -178,7 +178,7 @@ def test_only_an_agent_that_can_be_a_party_reads_the_contacts_store(tmp_path: Pa
 
 def _tools(config: Config, side: ContactSide) -> tuple[str, ...]:
     """Return the tools Bob's agent's contact turns offer when Bob chose ``side``."""
-    return contact_turn_tools(config, "mind_bob", side)
+    return contact_turn_tools(config, "mind_bob", _record(target_side=side), "target")
 
 
 def test_a_contact_turn_offers_the_chosen_tools_the_agent_still_has_plus_matrix_message(tmp_path: Path) -> None:

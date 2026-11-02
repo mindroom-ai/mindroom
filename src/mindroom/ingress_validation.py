@@ -18,7 +18,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
 )
-from mindroom.contacts.admission import contact_admission
+from mindroom.contacts.turns import contact_admission
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -196,7 +196,6 @@ class IngressValidator:
             or _final_reply_original_event_id(sender_entity_name, source_dict),
             sender_entity_name=sender_entity_name,
             requester_entity_name=self.managed_entity_name_for_sender(acting_requester_id or lane_requester_id),
-            contact_id=None if contact is None else contact.contact_id,
             contact_refused=contact is not None and contact.requester_id is None,
         )
 
@@ -282,7 +281,6 @@ class IngressValidator:
                 room_id=room.room_id,
                 event_id=event.event_id,
                 sender=facts.physical_sender,
-                contact_id=facts.contact_id,
             )
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
             return False

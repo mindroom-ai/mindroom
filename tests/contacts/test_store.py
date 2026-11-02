@@ -13,7 +13,6 @@ from mindroom.contacts.store import (
     ContactRecord,
     ContactSide,
     _contacts_path,
-    contact_of_room,
     read_contacts,
     update_contacts,
 )
@@ -53,7 +52,6 @@ def test_a_missing_file_is_an_empty_book(paths: RuntimePaths) -> None:
     """Before the first contact, the book is empty and no file is created by reading."""
     assert read_contacts(paths) == ContactBook()
     assert not _contacts_path(paths).exists()
-    assert contact_of_room(paths, "!room:localhost", "mind_bob") is None
 
 
 def test_update_contacts_round_trips_and_read_sees_new_mtime(paths: RuntimePaths) -> None:
@@ -109,19 +107,6 @@ def test_contact_files_reject_unknown_fields(paths: RuntimePaths) -> None:
     path.write_text('{"contacts": [], "extra": 1}', encoding="utf-8")
     with pytest.raises(ValueError, match=r"^Contacts file"):
         read_contacts(paths)
-
-
-def test_a_contact_keeps_its_room_once_removed(paths: RuntimePaths) -> None:
-    """A room belongs to its contact in any status, and only to the agents that are its parties."""
-    removed = _record("c1", status="removed", room_id="!removed:localhost")
-    active = _record("c2", status="active", room_id="!room:localhost")
-    update_contacts(paths, lambda book: book.contacts.extend([_record("c0"), removed, active]))
-
-    assert contact_of_room(paths, "!removed:localhost", "mind_bob") == (removed, "target")
-    assert contact_of_room(paths, "!room:localhost", "mind_bob") == (active, "target")
-    assert contact_of_room(paths, "!room:localhost", "mind_alice") == (active, "requester")
-    assert contact_of_room(paths, "!room:localhost", "other") is None
-    assert contact_of_room(paths, "!elsewhere:localhost", "mind_bob") is None
 
 
 def test_record_helpers_name_the_side_of_an_agent_or_owner() -> None:

@@ -7,24 +7,25 @@ and its prompt also says who it acts for and which rules apply.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.resolution import authored_tool_entries
-from mindroom.contacts.parties import agent_party, party_label, personal_room_of
+from mindroom.contacts.parties import agent_party, party_label, party_matrix_ids, personal_room_of
 from mindroom.contacts.policy import NO_CONTACT_RULES, effective_rules
-from mindroom.contacts.store import contact_of_room, contact_room_ids
+from mindroom.contacts.store import contact_room_ids, read_contacts
 from mindroom.hooks import EnrichmentItem
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_ids import session_in_room
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import ContactRecord, ContactSide, SideName
+    from mindroom.contacts.store import ContactRecord, SideName
 
 
 def contact_room(
@@ -35,13 +36,48 @@ def contact_room(
 ) -> tuple[ContactRecord, SideName] | None:
     """Return the contact whose room ``room_id`` is or was and this agent's side, in any status, or None.
 
-    A turn reads this once when it starts and stays a contact turn whatever happens to the contact while it runs, and
-    tools read it to police every message into the room; a removed contact's room takes no more turns or messages.
-    Only an agent that can be a party reads the contacts store.
+    Only an agent that can be a party reads the contacts store, so a corrupt store stops no other agent's turns.
     """
     if agent_party(config, agent_name) is None:
         return None
-    return contact_of_room(runtime_paths, room_id, agent_name)
+    for record in read_contacts(runtime_paths).contacts:
+        if record.room_id == room_id and (side := record.agent_side(agent_name)) is not None:
+            return record, side
+    return None
+
+
+@dataclass(frozen=True)
+class ContactAdmission:
+    """The owner a turn in a contact room runs as, or None when nobody may start it."""
+
+    requester_id: str | None
+
+
+def contact_admission(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    room_id: str,
+    agent_name: str,
+    sender_ids: Iterable[str],
+) -> ContactAdmission | None:
+    """Return who a turn of this agent in its contact room runs as, or None when the room is no contact room of it.
+
+    Every such turn runs as the agent's owner, but only the counterparty and the owner may start one.
+    ``sender_ids`` are every identity the event speaks for: its sender, a relayed original sender, and an acting
+    requester; any one of them that is the counterparty or the owner admits it.
+    A removed contact's room admits nobody, so a message there starts no turn even when the agent's leave failed.
+    """
+    found = contact_room(config, runtime_paths, room_id, agent_name)
+    if found is None:
+        return None
+    record, side = found
+    if record.status != "active":
+        return ContactAdmission(None)
+    owner = record.party(side).owner
+    allowed = party_matrix_ids(record.counterparty(side), runtime_paths) | {owner}
+    resolved = {resolve_human_requester_alias(sender_id, config, runtime_paths) for sender_id in sender_ids}
+    return ContactAdmission(owner if not allowed.isdisjoint(resolved) else None)
 
 
 def contact_session_check(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> Callable[[str], bool]:
@@ -70,13 +106,14 @@ def contact_tool_choices(config: Config, agent_name: str) -> list[str]:
     return [name for name in authored if not config.is_tool_preset(name) and not _refused_tool(name)]
 
 
-def contact_turn_tools(config: Config, agent_name: str, side: ContactSide) -> tuple[str, ...]:
+def contact_turn_tools(config: Config, agent_name: str, record: ContactRecord, side: SideName) -> tuple[str, ...]:
     """Return the tools a contact turn offers: its owner's choice, else the configured default, plus matrix_message.
 
     A chosen tool the agent no longer has, or one a contact may never offer, is left out until the agent has it again.
     """
     contacts = config.agents[agent_name].contacts
-    chosen = side.tools if side.tools is not None else (contacts.tools if contacts is not None else [])
+    contact_side = record.side(side)
+    chosen = contact_side.tools if contact_side.tools is not None else (contacts.tools if contacts is not None else [])
     allowed = set(contact_tool_choices(config, agent_name))
     return tuple(dict.fromkeys([*(name for name in chosen if name in allowed), "matrix_message"]))
 
@@ -118,14 +155,6 @@ def contact_turn_instructions(
         persist=False,
         minimal_required=True,
     )
-
-
-def answers_alone(config: Config, runtime_paths: RuntimePaths, *, room_id: str, agent_name: str) -> bool:
-    """Return whether this agent never joins a team in ``room_id``, because it is or was the agent's contact room.
-
-    Each agent answers there as its own owner's contact turn, while a team turn would show an unrestricted reply.
-    """
-    return contact_room(config, runtime_paths, room_id, agent_name) is not None
 
 
 def contact_counterparty_agent(

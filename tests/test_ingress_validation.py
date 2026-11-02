@@ -286,7 +286,7 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
     assert agent_reply.acts_for_requester
     assert agent_reply.origin.acting_sender_id == research
     assert agent_reply.origin.speaker_id == research
-    assert agent_reply.contact_id is None
+    assert not agent_reply.contact_refused
 
     human_relay = validator.classify(
         _text(
@@ -313,7 +313,7 @@ def test_an_agent_that_cannot_be_a_contact_party_never_reads_the_contacts_store(
 
     facts = validator.classify(_text("@user:localhost", "hello"), room_id="!room:localhost")
 
-    assert (facts.run_requester_id, facts.contact_id, facts.contact_refused) == ("@user:localhost", None, False)
+    assert (facts.run_requester_id, facts.contact_refused) == ("@user:localhost", False)
 
 
 def test_a_room_level_router_handoff_names_the_human_message_it_relays(tmp_path: Path) -> None:

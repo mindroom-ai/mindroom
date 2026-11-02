@@ -12,8 +12,8 @@ from structlog.testing import capture_logs
 
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
-from mindroom.contacts.admission import _ContactAdmission, contact_admission
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
+from mindroom.contacts.turns import ContactAdmission, contact_admission
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -94,8 +94,8 @@ def test_the_counterparty_and_the_owner_start_turns_that_run_as_the_owner(tmp_pa
     """The other agent, its owner, and this agent's owner are admitted as the owner; anyone else is refused."""
     config, paths = _setup(tmp_path)
     _contact(paths)
-    admitted = _ContactAdmission("c1", CO_OWNER)
-    refused = _ContactAdmission("c1", None)
+    admitted = ContactAdmission(CO_OWNER)
+    refused = ContactAdmission(None)
 
     assert _admission(config, paths, _agent(paths, "mind_alice")) == admitted
     assert _admission(config, paths, OWNER) == admitted
@@ -105,7 +105,7 @@ def test_the_counterparty_and_the_owner_start_turns_that_run_as_the_owner(tmp_pa
     # Any identity the event speaks for admits it, such as the original sender a managed relay names.
     assert _admission(config, paths, _agent(paths, "mind_carol"), OWNER) == admitted
     # The other side runs as its own owner in the same room.
-    assert _admission(config, paths, CO_OWNER, agent_name="mind_alice") == _ContactAdmission("c1", OWNER)
+    assert _admission(config, paths, CO_OWNER, agent_name="mind_alice") == ContactAdmission(OWNER)
 
 
 def test_a_person_counterparty_is_admitted_under_any_of_their_aliases(tmp_path: Path) -> None:
@@ -113,9 +113,9 @@ def test_a_person_counterparty_is_admitted_under_any_of_their_aliases(tmp_path: 
     config, paths = _setup(tmp_path)
     _contact(paths, requester=DAVE_PERSON)
 
-    assert _admission(config, paths, DAVE) == _ContactAdmission("c1", CO_OWNER)
-    assert _admission(config, paths, DAVE_BRIDGE) == _ContactAdmission("c1", CO_OWNER)
-    assert _admission(config, paths, _agent(paths, "mind_alice")) == _ContactAdmission("c1", None)
+    assert _admission(config, paths, DAVE) == ContactAdmission(CO_OWNER)
+    assert _admission(config, paths, DAVE_BRIDGE) == ContactAdmission(CO_OWNER)
+    assert _admission(config, paths, _agent(paths, "mind_alice")) == ContactAdmission(None)
 
 
 @pytest.mark.parametrize("status", ["pending", "declined"])
@@ -135,7 +135,7 @@ def test_a_removed_contacts_room_admits_nobody(tmp_path: Path) -> None:
     """Once removed, a contact's room starts no turn of its agents, whoever writes there, their owners included."""
     config, paths = _setup(tmp_path)
     _contact(paths, status="removed")
-    refused = _ContactAdmission("c1", None)
+    refused = ContactAdmission(None)
 
     for sender in (OWNER, CO_OWNER, _agent(paths, "mind_alice"), ADMIN):
         assert _admission(config, paths, sender) == refused
@@ -212,7 +212,7 @@ async def test_a_counterparty_relay_runs_as_the_owner_and_keeps_its_speaker(tmp_
     facts = validator.classify(event, room_id=CONTACT_ROOM)
 
     assert (facts.physical_sender, facts.lane_requester_id, facts.run_requester_id) == (alice_agent, CO_OWNER, CO_OWNER)
-    assert facts.contact_id == "c1"
+    assert not facts.contact_refused
     assert facts.acts_for_requester
     assert facts.requester_entity_name is None
     origin = facts.origin
@@ -222,7 +222,7 @@ async def test_a_counterparty_relay_runs_as_the_owner_and_keeps_its_speaker(tmp_
     assert await _precheck(validator, event, facts)
     # The same message in any other room runs as the other side's owner, whom Bob's agent refuses.
     outside = validator.classify(event, room_id=OTHER_ROOM)
-    assert (outside.run_requester_id, outside.contact_id) == (OWNER, None)
+    assert (outside.run_requester_id, outside.contact_refused) == (OWNER, False)
     assert not await _precheck(validator, event, outside)
 
 
@@ -235,13 +235,13 @@ async def test_people_in_a_contact_room_run_as_the_owner_and_speak_as_themselves
     validator = _validator(config, paths)
 
     alice = validator.classify(_event(OWNER), room_id=CONTACT_ROOM)
-    assert (alice.run_requester_id, alice.contact_id) == (CO_OWNER, "c1")
+    assert (alice.run_requester_id, alice.contact_refused) == (CO_OWNER, False)
     assert alice.acts_for_requester
     assert alice.origin.speaker_id == OWNER
     assert await _precheck(validator, _event(OWNER), alice)
 
     bob = validator.classify(_event(CO_OWNER), room_id=CONTACT_ROOM)
-    assert (bob.lane_requester_id, bob.run_requester_id, bob.contact_id) == (CO_OWNER, CO_OWNER, "c1")
+    assert (bob.lane_requester_id, bob.run_requester_id, bob.contact_refused) == (CO_OWNER, CO_OWNER, False)
     assert not bob.acts_for_requester
     assert bob.origin.speaker_id is None
     assert await _precheck(validator, _event(CO_OWNER), bob)
@@ -283,7 +283,7 @@ async def test_anyone_else_in_a_contact_room_starts_nothing(tmp_path: Path) -> N
 
     for event in events:
         facts = validator.classify(event, room_id=CONTACT_ROOM)
-        assert facts.contact_id == "c1"
+        assert facts.contact_refused
         assert facts.run_requester_id != CO_OWNER
         with capture_logs() as logs:
             assert not await _precheck(validator, event, facts)
@@ -306,7 +306,7 @@ async def test_the_agents_own_messages_in_its_contact_room_stay_dropped(tmp_path
 
     for event in events:
         facts = validator.classify(event, room_id=CONTACT_ROOM)
-        assert (facts.lane_requester_id, facts.contact_id) == (bob_agent, None)
+        assert (facts.lane_requester_id, facts.contact_refused) == (bob_agent, False)
         with capture_logs() as logs:
             assert not await _precheck(validator, event, facts)
         assert logs == []
@@ -329,7 +329,7 @@ async def test_a_message_in_a_removed_contacts_room_starts_nothing(tmp_path: Pat
 
     for event in events:
         facts = validator.classify(event, room_id=CONTACT_ROOM)
-        assert (facts.contact_id, facts.contact_refused) == ("c1", True)
+        assert facts.contact_refused
         with capture_logs() as logs:
             assert not await _precheck(validator, event, facts)
         assert [log["event"] for log in logs] == ["contact_room_sender_refused"]
