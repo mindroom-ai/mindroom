@@ -1262,7 +1262,7 @@ class ResponseRunner:
             return admitted
         return await self._prepare_claimed_request(admitted, resolved_target=resolved_target, placeholder_event_id=None)
 
-    async def _finalize_empty_prompt_locked(
+    async def _finalize_without_running_locked(
         self,
         request: ResponseRequest,
         *,
@@ -1376,7 +1376,7 @@ class ResponseRunner:
         return await self._run_locked_response_lifecycle(
             request,
             response_kind=response_kind,
-            locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
+            locked_operation=lambda resolved_target: self._finalize_without_running_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind=response_kind,
@@ -1457,7 +1457,7 @@ class ResponseRunner:
             )
         )
         if (suppression := self._runs_nothing(request)) is not None:
-            return await self._finalize_empty_prompt_locked(
+            return await self._finalize_without_running_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind="ai" if team is None else "team",
