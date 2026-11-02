@@ -28,7 +28,7 @@ from mindroom.native_compaction import (
     native_checkpoint_id,
     native_replay_messages,
 )
-from mindroom.token_budget import estimate_char_tokens, estimate_text_tokens, stable_serialize
+from mindroom.token_budget import estimate_char_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -172,7 +172,15 @@ def estimate_summary_tokens(session: ConversationSession) -> int:
     summary = current_summary_text(session)
     if summary is None:
         return 0
-    return estimate_text_tokens(str(compaction_summary_message(summary, run_local=False).content))
+    return estimate_summary_text_tokens(summary, replay_estimator=None)
+
+
+def estimate_summary_text_tokens(summary: str, *, replay_estimator: PortableReplayEstimator | None) -> int:
+    """Estimate the tokens the summary message holding ``summary`` adds to a request ``replay_estimator`` sizes."""
+    return estimate_request_messages_tokens(
+        [compaction_summary_message(summary, run_local=False)],
+        replay_estimator=replay_estimator,
+    )
 
 
 def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:

@@ -172,6 +172,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       { root: "timezone" },
       { root: "scheduler_catch_up_grace_seconds" },
       { root: "matrix_space" },
+      { root: "server_emoji" },
       { root: "matrix_sync" },
       { root: "event_journal" },
     ],

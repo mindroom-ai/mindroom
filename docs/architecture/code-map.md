@@ -48,7 +48,7 @@ Matrix sync callback
 | `api/config_lifecycle.py` | The dashboard API's published config snapshots: loads, commits published atomically with the file write, and the strict and last-good per-request readers |
 | `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
 | `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
-| `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, and bot memberships |
+| `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, server emoji room, and bot memberships |
 | `orchestration/accounts.py` | Managed Matrix accounts: the internal user's and each configured entity's, localpart collisions checked before any is created, then the identity registry validated |
 | `orchestration/storage_preparation.py` | Every startup migration, in the one order they depend on, before anything reads the storage root |
 | `orchestration/turn_recovery.py` | When each bot replays the turn-journal work it left pending: once the bots its turns need completed their first sync |
@@ -420,7 +420,7 @@ Matrix sync callback
 | `credentials/policy.py` | Each credential service's placement per worker scope, and whether workers may receive it by grant or lease |
 | `credentials/environment.py` | Credentials the environment declares (provider keys, bootstrap values, seeds), read by the primary under its saved ones |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
-| `matrix/state.py` | `matrix_state.yaml` accounts, rooms, and space, changed only through `update_matrix_state` |
+| `matrix/state.py` | `matrix_state.yaml` accounts, rooms, space, and server emoji room, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/server_features.py` | The unstable features a homeserver lists in `/_matrix/client/versions` |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |

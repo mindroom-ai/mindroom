@@ -9,7 +9,8 @@
 #   A module's `visibility` list names exactly the declared modules whose
 #   `depends_on` lists it, and an interface's `visibility` names only such
 #   modules; `tests/test_tach_visibility.py` enforces both and explains why.
-# - Use `[[interfaces]]` only for symbol-level public APIs.
+# - Use `[[interfaces]]` only for symbol-level public APIs of a declared
+#   module; Tach ignores an interface whose `from` names any other path.
 # - Do not rely on interface `visibility` as a substitute for module
 #   dependency rules.
 # - Use grouped `paths = [...]` only when every grouped module intentionally
@@ -1520,12 +1521,12 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
-    "mindroom.oauth.legacy_credentials",
+    "mindroom.oauth.legacy_requester_bindings",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
 
 [[modules]]
-path = "mindroom.oauth.legacy_credentials"
+path = "mindroom.oauth.legacy_requester_bindings"
 depends_on = [
     "mindroom.credentials.policy",
     "mindroom.tool_system.worker_routing",
@@ -6605,25 +6606,6 @@ visibility = [
     "mindroom.desktop.session",
     "mindroom.orchestration.runtime",
 ]
-
-[[interfaces]]
-expose = [
-    "ActiveFollowUpCoalescingOwner",
-    "CoalescingKey",
-    "CoalescingOwner",
-    "PendingEvent",
-    "PreparedTurn",
-    "RequesterCoalescingOwner",
-    "TimestampFormatter",
-    "active_follow_up_coalescing_key",
-    "build_prepared_turn",
-    "coalesced_prompt",
-    "coalescing_owner_log_label",
-    "is_active_follow_up_coalescing_key",
-    "requester_coalescing_key",
-    "tagged_coalesced_prompt",
-]
-from = ["mindroom.coalescing.batch"]
 
 [[interfaces]]
 expose = [

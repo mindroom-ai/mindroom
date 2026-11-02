@@ -250,7 +250,7 @@ Otherwise it logs in with `-u` and `-p`, then `MATRIX_USERNAME` and `MATRIX_PASS
 Matty refers to messages by handles `m1`, `m2`, … and to threads by `t1`, `t2`, …; thread handles persist across sessions.
 `matty messages` takes `--limit` (default 20), `matty thread-start "$room_id" m2 "text"` starts a thread from a message, and most commands have a short alias (`r`, `m`, `t`, `th`, `ts`, `tr`, …; see `matty --help`).
 Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b`).
-Correlate replies with the submitted event ID through either `m.thread` relations or room-mode `m.in_reply_to` relations, then apply edits targeting the matched response event; follow the [tester observation protocol](../../../agents/mindroom-tester.md) for sender checks, terminal status, and timeouts.
+Correlate replies with the submitted event ID through either `m.thread` relations or the room-mode `m.relates_to["io.mindroom.in_reply_to"]` relation, then apply edits targeting the matched response event; follow the [tester observation protocol](../../../agents/mindroom-tester.md) for sender checks, terminal status, and timeouts.
 
 List rooms:
 

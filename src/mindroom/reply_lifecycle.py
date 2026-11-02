@@ -107,6 +107,7 @@ class NoteKind(StrEnum):
     DELIVERY_FAILED = "delivery_failed"
     APPROVAL_WAIT = "approval_wait"
     APPROVAL_FAILED = "approval_failed"
+    NOTHING_TO_SHOW = "nothing_to_show"
 
 
 # What a reply ended by a state the rules do not model shows; the error note has no text of its own.

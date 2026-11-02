@@ -523,6 +523,8 @@ async def _compact_before_reply(
                 on_usage=scope_usage_recorder(storage, session.session_id),
             ),
             available_history_budget=history_budget,
+            # A trigger-level pass may store a summary above its target, but never one the reply cannot replay.
+            max_summary_tokens=resolved_inputs.execution_plan.hard_replay_budget_tokens,
             before_tokens=before_tokens,
             replay_window_tokens=resolved_inputs.execution_plan.replay_window_tokens,
             threshold_tokens=resolved_inputs.execution_plan.trigger_threshold_tokens,
@@ -575,10 +577,15 @@ async def compact_scope_mid_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
+    max_summary_tokens: int,
+    replay_estimator: PortableReplayEstimator | None,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
 ) -> CompactionOutcome | None:
-    """Fold the stored runs after ``session``'s latest summary row and the running turn into one summary row."""
+    """Fold the stored runs after ``session``'s latest summary row and the running turn into one summary row.
+
+    A summary over ``max_summary_tokens``, as ``replay_estimator`` sizes it, fails the compaction and stores nothing.
+    """
     execution_plan = resolved_inputs.execution_plan
     scope = owner_scope(session)
 
@@ -611,6 +618,8 @@ async def compact_scope_mid_turn(
             replay_window_tokens=execution_plan.replay_window_tokens,
             threshold_tokens=execution_plan.trigger_threshold_tokens,
             available_history_budget=execution_plan.hard_replay_budget_tokens,
+            max_summary_tokens=max_summary_tokens,
+            replay_estimator=replay_estimator,
             on_commit=on_commit,
             rewritten_request_tokens=rewritten_request_tokens,
             complete=complete,

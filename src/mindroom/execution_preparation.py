@@ -578,8 +578,8 @@ def _get_unseen_event_ids_for_metadata(
 def _has_nothing_to_read(msg: ResolvedVisibleMessage) -> bool:
     """Return whether one message is a notice rather than a turn, or a streamed reply showing only its placeholder.
 
-    MindRoom redacts a placeholder that ends empty, so recording one as consumed would let that tidy-up remove
-    the history of whoever read it.
+    MindRoom redacts a placeholder whose answer is suppressed or never delivered, so recording one as consumed would
+    let that tidy-up remove the history of whoever read it.
     """
     content = msg.content
     if isinstance(content, dict) and any(key in content for key in _NON_TURN_NOTICE_CONTENT_KEYS):

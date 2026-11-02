@@ -1276,8 +1276,11 @@ class _MultiAgentOrchestrator:
         bots_to_setup = self._running_bots_for_entities(changed_entities | plan.reconcile_rooms)
         if bots_to_setup or plan.mindroom_user_changed or plan.room_access_changed or plan.authorization_changed:
             await self._rooms.setup(bots_to_setup)
-        elif plan.matrix_space_changed:
+            return
+        if plan.matrix_space_changed:
             await self._rooms.link_root_space(await self._rooms.ensure_rooms_exist())
+        if plan.server_emoji_changed:
+            await self._rooms.ensure_server_emoji_room()
 
     async def _finalize_config_reload(
         self,

@@ -25,6 +25,7 @@ from mindroom.orchestration.runtime import create_logged_task
 from mindroom.response_admission import ResponseAdmissionGate
 from tests.api.conftest import request_for, save_config
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     bind_runtime_paths,
     make_config_reload_lifecycle,
     published_config_load,
@@ -360,11 +361,14 @@ async def test_busy_reload_waits_only_for_restarts_or_reply_authorization_change
     assert gate.admit()
     update_task = asyncio.create_task(lifecycle._update_config())
     try:
-        done, _pending = await asyncio.wait({update_task}, timeout=0.5)
+        # A reload that waits for idle must stay pending over a window far below the 600 s force-apply timer;
+        # one that does not wait finishes on its own after loading and diffing the config.
+        timeout = 0.5 if waits_for_idle else SETTLE_TIMEOUT_SECONDS
+        done, _pending = await asyncio.wait({update_task}, timeout=timeout)
         assert bool(done) is not waits_for_idle
     finally:
         gate.release()
-    assert await asyncio.wait_for(update_task, timeout=1) is True
+    assert await asyncio.wait_for(update_task, timeout=SETTLE_TIMEOUT_SECONDS) is True
 
     # Admission is closed for the swap itself, over the busy response only when nothing restarts.
     assert observed_gate_states == [(True, 0 if waits_for_idle else 1)]

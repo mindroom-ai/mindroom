@@ -100,7 +100,8 @@ See [Bug Reports](../../../docs/bug-reports.md) for what a report contains and w
 ## Server Custom Emoji
 
 The client can offer the custom emoji of one shared room to everyone on the homeserver.
-Create that room once with an operator's access token, from the root of this repository:
+When the MindRoom runtime runs against the homeserver, set `server_emoji.enabled: true` in its config, and it creates the room `#emoji:<server name>`; see [Custom Emoji](../../../docs/custom-emoji.md#let-mindroom-create-the-room).
+Otherwise, create that room once with an operator's access token, from the root of this repository:
 
 ```bash
 MATRIX_ACCESS_TOKEN=... uv run python -m scripts.utilities.create_server_emoji_room \
