@@ -1494,7 +1494,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `slack` | How Slack workspace members map to Matrix users | [Slack](https://docs.mindroom.chat/tools/slack/#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
-| `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
+| `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
 | `personal_agents` | Templates that give each onboarded user their own agent | [Personal Agents](https://docs.mindroom.chat/personal-agents/#personal-agents) |
 | `budgets` | Default monthly spending cap per user and the fallback model | [Budgets](https://docs.mindroom.chat/budgets/) |
@@ -5180,6 +5180,8 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
 | `Done.` | The agent finished without writing an answer of its own, for example after tool calls hidden by `show_tool_calls: false` or after a tool posted its answer; those tool calls still ran. |
+| `Response delivery failed. Please retry.` | Matrix refused the answer or could not take it, so the note replaces what the reply showed; send the message again for a new answer. |
+| `Tool approval could not be started. Please try again.` | The agent paused for a tool approval, but MindRoom could not start the approval or show it in the room, so the tool did not run; send the message again. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
 The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
@@ -14587,7 +14589,7 @@ Set `minimal=True` to run the child in [minimal mode](https://docs.mindroom.chat
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
 Delegated runs do not create a Matrix thread and cannot ask the user interactive questions.
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
-In Matrix conversations, a parent runs its subagents one at a time.
+Subagent calls that run as [background jobs](#background-jobs) start at the same time when a parent makes several in one step; otherwise a parent in a Matrix conversation runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/).
 Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
 
@@ -14595,7 +14597,7 @@ Use `continue_subagent` with the returned ID to send a follow-up into the same c
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
 Follow-ups keep the child's history, model, and mode, and recheck current permissions.
 A follow-up sent while the child is still running or awaiting approval is refused; finish that turn first.
-If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun, and a pending approval stays pending.
+If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.
 
 ```python
 run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")
@@ -14695,7 +14697,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 ## Background jobs
 
-This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; configs from `mindroom config init` turn it on.
+Background jobs are on by default; set the root option `background_tool_jobs.enabled: false` and restart to turn them off.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
@@ -14705,6 +14707,7 @@ Tools that can run as background jobs accept an optional `background_after` argu
 It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
 The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
+The function name `job` is reserved for the job controls, so while background jobs are on, every reply of an agent whose tools offer another function named `job` fails with `Tool function name job is reserved for managed job controls`; rename that function or turn background jobs off.
 Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
 Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
@@ -14713,7 +14716,6 @@ Exclude complete toolkits in YAML when they should retain native execution:
 
 ```yaml
 background_tool_jobs:
-  enabled: true
   exclude_toolkits: [my_plugin_toolkit]
   approval_wait_timeout: 120
 ```
@@ -15920,6 +15922,8 @@ tool_approval:
 - An unanswered card expires after its `timeout_days` and the call is denied.
 - A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 
+With background jobs on, the default, most gated calls ask from their job instead; [Approvals](https://docs.mindroom.chat/tools/agent-orchestration/#approvals) says how long the reply waits for the decision and what a restart does.
+A call that pauses its reply instead, such as a tool that asks for confirmation itself, a subagent call, or any gated call with background jobs off, works as follows.
 While approval is pending, the agent stops typing and counts as still responding in that conversation: later messages to it there wait until the approval ends and get a ⏳ reaction, while other conversations and agents carry on.
 Stopping the reply with 🛑, or deleting the message it answers, cancels the approval and expires its card, and deleting the message also removes the reply; an edit that regenerates the reply cancels it too (see [Message Edits](https://docs.mindroom.chat/configuration/threads/#message-edits)).
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
@@ -22698,6 +22702,8 @@ Smaller changes that need operator action:
 - **Model names**: a model key under `models` may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load even when no agent uses it, and `mindroom run` and the dashboard do not start until you rename it, as [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields) describes, and update every reference to it.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
+- **Background tool jobs on by default**: a config without `background_tool_jobs` turns on [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs), so a tool call can continue in the background and most gated calls ask from their job instead of pausing the reply until the decision; to keep replies waiting for every call and pausing for approvals, set `background_tool_jobs.enabled: false` and restart MindRoom.
+  Every reply of an agent whose tools offer a function named `job` fails while background jobs are on, because [that name is reserved](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs); rename that function or turn background jobs off.
 - **Pending tool approvals after going back**: once this release has opened a conversation, an earlier release cannot resume a reply in it that waits for a tool approval, and approving it there fails; answer pending approvals before going back, or ask again afterwards.
 - **Knowledge index state**: the first start converts each semantic knowledge base's index in place, and older releases cannot read the converted index, so going back to one rebuilds every semantic base from scratch, embedding every file again, and its search is unavailable until that rebuild finishes.
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.

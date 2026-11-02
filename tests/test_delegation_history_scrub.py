@@ -8,8 +8,6 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
@@ -22,6 +20,7 @@ from tests.delegation_helpers import (
     _saved_approval_calls,
     approval_calls_for,
     approval_executor,
+    native_delegation_config,
     respond,
     resume,
 )
@@ -44,13 +43,11 @@ async def test_delegating_run_is_stored_without_replayed_history(
 ) -> None:
     """The stored parent row keeps its own turn only, also when the delegation driver finishes it after a pause."""
     paths = _runtime_paths(tmp_path)
-    config = Config(
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
         tool_approval={"default": "require_approval"} if outcome == "policy_denied" else {},
     )
     if outcome == "policy_denied":

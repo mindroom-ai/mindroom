@@ -19,7 +19,7 @@ from structlog.testing import capture_logs
 from mindroom.approval.resume import with_resumed_turn_log_context
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DebugConfig, DefaultsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DebugConfig, DefaultsConfig
 from mindroom.delegation.state import DelegationState
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
@@ -79,6 +79,8 @@ def _config(paths: RuntimePaths) -> Config:
             defaults=DefaultsConfig(tools=[]),
             memory={"backend": "none"},
             tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
+            # These turns pause for approval and delegate through the native delegation driver.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
         "code",
         users=[REQUESTER],

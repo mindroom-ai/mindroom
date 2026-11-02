@@ -57,6 +57,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
@@ -79,6 +81,7 @@ from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, ma
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import replay_settings
+from tests.tool_job_helpers import tool_job_runtime
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -279,6 +282,32 @@ def _tool_support(config: Config, runtime_paths: object) -> SimpleNamespace:
     )
 
 
+def _chat_build(config: Config, runtime_paths: RuntimePaths, context: ToolRuntimeContext) -> AgentBuild:
+    """Return the build a text-chat reply in the call's room runs for the call's requester."""
+    return create_agent(
+        AGENT,
+        config,
+        runtime_paths,
+        context.execution_identity,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, AGENT),
+        plugins=config_plugins(config, runtime_paths),
+    )
+
+
+def _cached_call_build(config: Config, runtime_paths: RuntimePaths, context: ToolRuntimeContext) -> AgentBuild:
+    """Return the build a cascaded or Live call's cache makes for its turns."""
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        context=context,
+        active_model_name=None,
+    )
+    return cache._build(knowledge=None, refresh_scheduler=None)
+
+
 @pytest.mark.asyncio
 async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() -> None:
     """A realtime provider cannot invoke a tool after current call access is denied."""
@@ -316,6 +345,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
 ) -> None:
     """The cached call agent offers chat's functions and prompt, less the Markdown line a spoken reply has no use for.
 
+    No job runtime runs here, so chat's prompt has no background-job guidance for the call's to leave out either.
     A gated call is refused in a call whether chat would pause for it or ask as its job, before any other tool-call
     policy sees it, so no card is posted and nothing is recorded.
     """
@@ -333,24 +363,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         runtime_paths,
     )
     context = _runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target())
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=config,
-        runtime_paths=runtime_paths,
-        context=context,
-        active_model_name=None,
-    )
-    call_build = cache._build(knowledge=None, refresh_scheduler=None)
-    chat_build = create_agent(
-        AGENT,
-        config,
-        runtime_paths,
-        context.execution_identity,
-        supports_native_tool_approval=True,
-        knowledge=None,
-        model=turn_model(config, runtime_paths, AGENT),
-        plugins=config_plugins(config, runtime_paths),
-    )
+    call_build = _cached_call_build(config, runtime_paths, context)
+    chat_build = _chat_build(config, runtime_paths, context)
     call_functions = _functions(call_build)
     chat_functions = _functions(chat_build)
 
@@ -362,8 +376,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     assert chat_functions["add"].gate is (ToolGate.JOB if jobs else ToolGate.POLICY)
     add = call_functions["add"]
     assert add.gate is None
-    # Delegation runs the child turn directly in calls instead of pausing for chat's driver.
-    assert chat_functions["run_subagent"].gate is ToolGate.DELEGATION
+    # Chat runs a subagent call as its job with jobs on, else pauses for the native driver; a call runs it directly.
+    assert chat_functions["run_subagent"].gate is (None if jobs else ToolGate.DELEGATION)
     assert call_functions["run_subagent"].gate is None
 
     started: list[str] = []
@@ -401,6 +415,61 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
 
     delegation = ToolCall(function=call_functions["run_subagent"], arguments={}, context=_CALL_CONTEXT)
     assert await refuse(delegation, delegate) == "delegated"
+
+
+@pytest.mark.parametrize("realtime", [False, True], ids=["cascaded", "realtime"])
+@pytest.mark.asyncio
+async def test_a_call_s_agent_is_not_offered_background_subagent_waits(tmp_path: Path, *, realtime: bool) -> None:
+    """A call runs its tools inline, so its agent is never told a subagent call can continue as a background job.
+
+    Chat's agent, built while the same instance runs background jobs, is told so.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                AGENT: AgentConfig(display_name="Helper", delegate_to=["other"]),
+                "other": AgentConfig(display_name="Other"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test")},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+        runtime_paths,
+    )
+    pin_background_tool_jobs(config, runtime_paths)
+    runtime = await tool_job_runtime(runtime_paths.storage_root)
+    register_background_runtime(runtime_paths, runtime)
+    try:
+        context = _runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target())
+        chat_build = _chat_build(config, runtime_paths, context)
+        if realtime:
+            tooling = await build_call_tools(
+                agent_name=AGENT,
+                config=config,
+                runtime_paths=runtime_paths,
+                tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+                room_id="!room:example.org",
+                requester_id=REQUESTER,
+                authorize_operation=_authorized_call_operation,
+            )
+            [description] = [
+                tool.info.raw_schema["description"]
+                for tool in tooling.tools
+                if tool.info.raw_schema["name"] == "run_subagent"
+            ]
+            instructions = tooling.instructions
+        else:
+            call_build = _cached_call_build(config, runtime_paths, context)
+            description = _functions(call_build)["run_subagent"].description
+            instructions = _call_instructions(call_build)
+    finally:
+        await runtime.shutdown()
+
+    background_instructions = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS")
+    assert "background_after" in (_functions(chat_build)["run_subagent"].description or "")
+    assert background_instructions in system_text(prompt_for_turn(chat_build))
+    assert "background_after" not in (description or "")
+    assert background_instructions not in instructions
 
 
 @pytest.mark.asyncio

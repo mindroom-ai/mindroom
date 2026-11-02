@@ -135,7 +135,7 @@ class BackgroundToolJobsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = Field(default=False, description="Enable managed tool waits and durable jobs; requires restart.")
+    enabled: bool = Field(default=True, description="Enable managed tool waits and durable jobs; requires restart.")
     exclude_toolkits: list[str] = Field(
         default_factory=list,
         description="Registered toolkit names that keep their own waiting behavior; requires restart.",

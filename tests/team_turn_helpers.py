@@ -513,6 +513,8 @@ def squad_turn(
         mode=TeamMode(mode),
     )
     with_responder_access(team.config, "helper", users=[REQUESTER_ID])
+    # Tests that offer background jobs turn them on themselves.
+    team.config.background_tool_jobs.enabled = False
     if approval_rules:
         team.config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     return team

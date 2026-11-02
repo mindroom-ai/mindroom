@@ -1,4 +1,4 @@
-"""Startup opt-in and passive recovery for generic tool jobs."""
+"""Startup settings and passive recovery for generic tool jobs."""
 
 from __future__ import annotations
 
@@ -103,8 +103,8 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
 
 
 @pytest.mark.asyncio
-async def test_default_startup_does_not_create_job_runtime(tmp_path: Path) -> None:
-    """Default startup leaves job persistence and scheduling absent."""
+async def test_default_startup_creates_job_runtime(tmp_path: Path) -> None:
+    """Default startup turns background jobs on, so it opens job persistence and scheduling."""
     paths = test_runtime_paths(tmp_path)
     config = Config()
     coordinator = ToolJobRuntimeCoordinator(
@@ -116,7 +116,7 @@ async def test_default_startup_does_not_create_job_runtime(tmp_path: Path) -> No
     )
     try:
         await coordinator.sync()
-        assert get_background_runtime(paths) is None
+        assert get_background_runtime(paths) is not None
     finally:
         await coordinator.stop()
 
@@ -128,7 +128,7 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
     Its late stop withdraws only the instance it pinned, never the one that replaced it.
     """
     paths = test_runtime_paths(tmp_path)
-    disabled = Config()
+    disabled = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=False))
     enabled = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True))
     journal = partial(tool_job_journal, paths.storage_root)
     stale = ToolJobRuntimeCoordinator(paths, lambda: disabled, lambda _: None, AgentReplyMembershipIndex(), journal)
@@ -147,8 +147,11 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
 
 
 def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> None:
-    """Default delegation must not promise a job API or reserved wait argument."""
-    config = Config(agents={"lead": AgentConfig(display_name="Lead", delegate_to=["lead"])})
+    """Delegation without background jobs must not promise a job API or reserved wait argument."""
+    config = Config(
+        agents={"lead": AgentConfig(display_name="Lead", delegate_to=["lead"])},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+    )
     paths = test_runtime_paths(tmp_path)
     toolkit = DelegateTools("lead", paths, config, agent_workspace_root_path(paths.storage_root, "lead"))
     instructions = toolkit.instructions or ""
@@ -156,9 +159,9 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
     assert "background_after" not in instructions + description
     assert "job(action=" not in instructions + description
     assert "continue_subagent" in instructions + description
-    # Background semantics live only in the opt-in addendum; the function description says the caller waits.
+    # Background semantics live only in the background-job addendum; the function description says the caller waits.
     assert "The caller waits; this does not create a Matrix thread." in description
-    assert "child tools that require approval pause both runs" in instructions
+    assert "a child tool that requires approval runs only once the user approves it" in instructions
 
 
 @pytest.mark.parametrize("initial", [False, True])

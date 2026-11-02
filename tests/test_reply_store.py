@@ -814,6 +814,33 @@ async def _answered_and_regenerating(principal: PrincipalStore) -> rl.Span:
     return claimed.claimed
 
 
+async def test_a_coalesced_turn_s_reply_writes_only_in_the_membership_that_admitted_its_messages(
+    journal_store: EventJournalStore,
+) -> None:
+    """A coalesced turn's rows are named by all its messages; a reply it claims after the bot rejoined writes nothing."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await admit(principal, "$other")
+    admitted = await principal.membership_epoch(ROOM)
+    await principal.replies.write_generation("gen-1")
+    await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
+    rejoined = await admit_room_membership(principal, ROOM, "join")
+    sources = ResponseSources(pending_event_ids=("$source", "$other"), logical_source_event_ids=("$other", "$source"))
+    coalesced = replace(_request(), delivery_id=sources.delivery_id, sources=sources, membership_epoch=rejoined)
+
+    claim = (await principal.replies.claim(coalesced)).transition
+    assert claim.reply is not None
+    assert claim.claimed is not None
+    assert claim.reply.membership_epoch == admitted != rejoined
+    finished = await principal.enqueue_reply_row(
+        ReplyRowRequest(reply_id=claim.reply.reply_id, span_id=claim.claimed.span_id, decide=_finish()),
+        PreparedReplyRow(payload={"body": "answer"}),
+    )
+
+    assert finished is None
+    assert await principal.load_matrix_delivery(delivery_id=sources.delivery_id, stage=DeliveryStage.FINAL) is None
+
+
 async def test_a_regeneration_keeps_the_membership_its_edit_was_admitted_in(journal_store: EventJournalStore) -> None:
     """After the bot left and rejoined, the regenerated reply's records name the membership its rows now belong to."""
     principal = journal_store.principal(PRINCIPAL)
@@ -1665,6 +1692,35 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
     assert gone.redaction_pending == ("$reply",)
     assert not await principal.is_pending("$source")
     assert await principal.replies.supersede_replay(("$elsewhere",), now_ns=110) is None
+
+
+async def test_a_coalesced_turn_s_replay_is_superseded_only_once_its_other_messages_settled(
+    journal_store: EventJournalStore,
+) -> None:
+    """While the turn's newer message waits to replay, superseding the older one leaves both to the reply."""
+    principal = journal_store.principal(PRINCIPAL)
+    await admit(principal, "$source")
+    await admit(principal, "$other")
+    await principal.replies.write_generation("gen-1")
+    # The turn is driven by its newer message, ``$other``.
+    sources = ResponseSources(pending_event_ids=("$other", "$source"), logical_source_event_ids=("$source", "$other"))
+    await principal.replies.claim(replace(_request(), delivery_id=sources.delivery_id, sources=sources))
+    # A restart lost the span; both messages wait for their replay.
+    await principal.replies.write_generation("gen-2")
+    assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 1
+
+    kept = await principal.replies.supersede_replay(("$source",), now_ns=90)
+    assert kept is not None
+    assert kept.transition.outcome is rl.Outcome.DEFERRED
+    assert await principal.is_pending("$source")
+    assert await principal.is_pending("$other")
+
+    # Once the newer message settled without a turn, nothing else replays, and the older one's replay ends the reply.
+    assert await principal.settle("$other") == ()
+    superseded = await principal.replies.supersede_replay(("$source",), now_ns=100)
+    assert superseded is not None
+    assert superseded.transition.outcome is rl.Outcome.APPLIED
+    assert not await principal.is_pending("$source")
 
 
 async def test_a_removed_entitys_open_replies_end_without_writing(journal_store: EventJournalStore) -> None:

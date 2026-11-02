@@ -27,7 +27,7 @@ from mindroom.delegation.personas import (
     persona_tool_policy,
     require_built_persona_tools,
 )
-from mindroom.delegation.state import DELEGATION_FUNCTIONS
+from mindroom.delegation.state import is_delegation_function
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
@@ -693,11 +693,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     persona: SubagentPersona | None = None,
     deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
+    calls_as_jobs: bool = False,
 ) -> AnyToolkit | None:
     """Build one of the toolkits ``agent_tools`` offers the agent, where ``placement`` runs it.
 
     ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
     the copies it authors within the persona's tools, skills, and knowledge bases.
+    ``calls_as_jobs`` says whether the agent's build lets this toolkit's calls become background jobs.
     ``workspace_in_worker`` says whether the build's workspace-path toolkits run in a worker, where attachments save.
 
     ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
@@ -758,6 +760,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 refresh_scheduler=refresh_scheduler,
                 workspace_root=agent_runtime.workspace.root,
                 persona=persona,
+                calls_as_jobs=calls_as_jobs,
             ),
         )
 
@@ -999,20 +1002,23 @@ def apply_tool_approval_capability(
 
     A caller that cannot resume a paused run (``resumable`` False) is offered none of the functions that ask for
     approval. Otherwise each function an approval rule gates pauses the run for its approval, or, with
-    ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one; the
-    delegation functions pause for their driver, which owns the policy gate and the exact child wait.
+    ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one. Without
+    ``approvals_as_jobs`` the delegation functions pause for their native driver, which owns the policy gate and the
+    exact child wait; with it they are ordinary calls whose subagents run as jobs.
     """
 
     def offered(function: ToolFunction) -> ToolFunction | None:
         may_gate = _approval_may_gate(config, function.name, registered_tool_name)
         if not resumable:
             return None if function.gate is ToolGate.CONFIRM or may_gate else function
-        if registered_tool_name == "delegate" and function.name in DELEGATION_FUNCTIONS:
+        delegation = is_delegation_function(function)
+        if delegation and not approvals_as_jobs:
             return replace(function, gate=ToolGate.DELEGATION)
         # A function that asks for its own confirmation keeps it; a rule may gate any other.
         if function.gate is ToolGate.CONFIRM or not may_gate:
             return function
-        if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
+        # A subagent call pauses the reply for its own approval, so its job only ever waits for its child's.
+        if approvals_as_jobs and not delegation and approval_can_run_as_job(function, toolkit):
             return replace(function, gate=ToolGate.JOB)
         return replace(function, gate=ToolGate.POLICY)
 
@@ -1101,6 +1107,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     eager_deferred_tools: bool,
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
+    inline_tools: bool,
     persona: SubagentPersona | None,
     narrowed_tools: tuple[str, ...] | None,
     plugins: ConfigPlugins,
@@ -1116,8 +1123,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     """
     config = agent_tools.config
     agent_name = agent_tools.agent_name
-    approvals_as_jobs = (
-        background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
+    # Only a top-level agent's own calls can become jobs: a nested subagent's run inside its parent's job, a minimal
+    # agent's return to the CLI command that made them, and a voice call's finish inside the call's turn.
+    calls_as_jobs = (
+        background_tool_jobs_enabled(config, runtime_paths)
+        and delegation_depth == 0
+        and not minimal_mode
+        and not inline_tools
     )
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
@@ -1169,6 +1181,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         """Build and adapt one configured toolkit; what the agent records of it waits until both succeeded."""
         tool_name = tool_entry.name
         authored_name = tool_entry.authored_name or tool_name
+        toolkit_calls_as_jobs = calls_as_jobs and not toolkit_is_background_excluded(tool_name, config, runtime_paths)
         with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
             toolkit = build_agent_toolkit(
                 tool_name,
@@ -1183,6 +1196,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
                 deferred_toolkits=searched_toolkits,
+                calls_as_jobs=toolkit_calls_as_jobs,
             )
         if toolkit is None:
             return None
@@ -1207,9 +1221,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             config,
             registered_tool_name=tool_name,
             resumable=supports_native_tool_approval,
-            # Only a top-level agent's own calls ask as their job; the same setting installs the job executor.
-            approvals_as_jobs=approvals_as_jobs
-            and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
+            approvals_as_jobs=toolkit_calls_as_jobs,
         )
         # Instructions describe only the functions left; Agno's defaults that name a missing one are dropped.
         construction = get_toolkit_construction(toolkit)
@@ -1620,6 +1632,7 @@ def create_agent(
     required_tool_names: tuple[str, ...] = (),
     agent_mode: AgentMode = "standard",
     agent_cli_in_shell: bool = False,
+    inline_tools: bool = False,
     persona: SubagentPersona | None = None,
     tool_names: tuple[str, ...] | None = None,
     provider: ModelProvider | None = None,
@@ -1660,6 +1673,8 @@ def create_agent(
         agent_mode: Operating mode frozen by the response owner; standard by default.
         agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
             reach MindRoom; only callers that bind the response turn to the agent pass True.
+        inline_tools: Whether every tool call finishes inside the turn that made it, as a voice call's do, so
+            none can become a background job.
         persona: Authored subagent presentation: its authored prompt, which replaces the configured identity, and optional tool, skill, and knowledge base subsets.
         tool_names: The agent's own toolkits or ``toolkit.function`` entries the build may offer, as a contact turn
             narrows them; unlike a persona it keeps the agent's identity, instructions, and memory, but loads no
@@ -1768,6 +1783,7 @@ def create_agent(
         eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",
+        inline_tools=inline_tools,
         persona=persona,
         narrowed_tools=narrowed_tools,
         plugins=plugins,

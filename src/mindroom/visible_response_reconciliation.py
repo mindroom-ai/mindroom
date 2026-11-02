@@ -137,10 +137,9 @@ class VisibleResponseReconciler:
         await self.deps.settle_ignored_sources(handled_turn.source_event_ids)
 
     async def settle_superseded_turn(self, handled_turn: TurnRecord) -> bool:
-        """Discard a superseded replay unless what it would answer still owes Matrix a write."""
+        """Discard a superseded replay unless the reply it would continue keeps it; return whether it was discarded."""
         superseded = await self.deps.delivery_gateway.supersede_replay(handled_turn.source_event_ids)
         if superseded is not None:
-            # The reply's records settled what the replay would have answered.
             return superseded
         await self.settle_source_events_ignored(handled_turn)
         return True
@@ -251,7 +250,6 @@ class VisibleResponseReconciler:
                 # It echoes the member's selected value, which may name agents.
                 skip_mentions=True,
                 reply_write=await replies.acknowledgement(
-                    delivery_id=delivery_turn_id,
                     pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),
                     logical=handled_turn.source_event_ids,
                     discovery=handled_turn.discovery_event_ids,

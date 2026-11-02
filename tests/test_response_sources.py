@@ -41,6 +41,21 @@ def test_response_source_values_are_validated_and_immutable() -> None:
         )
 
 
+def test_a_turn_names_its_reply_rows_by_all_its_messages_in_a_short_name() -> None:
+    """A one-message turn's rows keep its message's name; a coalesced turn's name differs from each of its messages'."""
+    single = ResponseSources(("$newest",), ("$newest",))
+    pair = ResponseSources(("$newest", "$older"), ("$older", "$newest"))
+    other_pair = ResponseSources(("$newest", "$other"), ("$other", "$newest"))
+    many = tuple(f"${index:043d}" for index in range(500))
+    flood = ResponseSources(many, many)
+
+    assert single.delivery_id == "$newest"
+    assert pair.delivery_id.startswith("$newest+")
+    assert len({single.delivery_id, pair.delivery_id, other_pair.delivery_id}) == 3
+    # The outbox keys rows by this name, so it stays short however many messages coalesced.
+    assert len(flood.delivery_id) < 100
+
+
 @pytest.mark.asyncio
 async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: Path) -> None:
     """Approval suspension persists only the pending edit selected by the producer."""

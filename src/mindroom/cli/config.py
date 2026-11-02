@@ -1341,9 +1341,6 @@ tool_approval:
     - match: manage_team
       action: require_approval
 
-background_tool_jobs:
-  enabled: true
-
 defaults:
   # Execution tools (shell, file, python, coding, docker) run directly in the
   # MindRoom process. For isolation, run them in a sandboxed worker instead:

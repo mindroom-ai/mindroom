@@ -201,6 +201,9 @@ class ApprovalContinuation:
     show_tool_calls: bool = True
     # The identity the paused run executed under; the resumed run and its tools execute under it again.
     execution_identity: ToolExecutionIdentity = field(kw_only=True)
+    # The delivery of the run's final answer, which its resume or its settlement writes: its paused span's. Read
+    # from that span like ``span_id`` below, so it takes no part in comparing two continuations.
+    final_delivery_id: str = field(kw_only=True, compare=False)
     runtime_model_name: str | None = None
     team_member_names: tuple[str, ...] = ()
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -239,11 +242,6 @@ class ApprovalContinuation:
     def source_event_ids(self) -> tuple[str, ...]:
         """Return the captured pending sources owned by this continuation."""
         return self.sources.pending_event_ids
-
-    @property
-    def final_delivery_id(self) -> str:
-        """Return the delivery of the run's final answer, which its resume or its settlement writes."""
-        return self.source_event_ids[0]
 
 
 def _context(continuation: ApprovalContinuation) -> dict[str, object]:
@@ -348,6 +346,7 @@ def _from_rows(
         requester_id=cast("str", stored["requester_id"]),
         response_event_id=reply.event_id,
         sources=span.sources,
+        final_delivery_id=span.delivery_id,
         calls=tuple(approval_calls.reply_call(call) for call in call_rows if int(call["generation"]) == generation),
         earlier_calls=tuple(
             approval_calls.reply_call(call) for call in call_rows if int(call["generation"]) < generation

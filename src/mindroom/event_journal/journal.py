@@ -1196,8 +1196,8 @@ def _pending_rows(
           ON claim_span.principal_id = continuations.principal_id
          AND claim_span.span_id = continuations.claim_span_id
     """
-    # A claim this instance's span holds keeps its sources until its FINAL
-    # exists; one an older instance left goes to recovery.
+    # A claim this instance's span holds keeps its sources until that span's
+    # FINAL exists; one an older instance left goes to recovery.
     continuation_clause = """
           AND (
             continuations.approval_id IS NULL
@@ -1218,7 +1218,7 @@ def _pending_rows(
                     OR EXISTS (
                       SELECT 1 FROM matrix_delivery_outbox AS approval_final
                       WHERE approval_final.principal_id = events.principal_id
-                        AND approval_final.delivery_id = events.event_id
+                        AND approval_final.delivery_id = claim_span.delivery_id
                         AND approval_final.stage = 'final'
                     )
                   )

@@ -11,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from mindroom.startup_errors import PermanentStartupError
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -60,7 +62,8 @@ def serve_startup_probes(host: str, port: int, *, detail: str) -> Iterator[None]
     """Serve `/api/health` and a `/api/ready` not ready for ``detail`` on the API address until the block exits.
 
     Container probes then see a live process that is waiting, for pairing or for the conversation storage conversion,
-    instead of a closed port. Raises OSError naming the address when it cannot be resolved or bound, before the wait.
+    instead of a closed port. Raises PermanentStartupError naming the address when it cannot be resolved or bound,
+    before the wait.
     """
     with ExitStack() as servers:
         try:
@@ -101,5 +104,5 @@ def serve_startup_probes(host: str, port: int, *, detail: str) -> Iterator[None]
                 f"Cannot listen on the API address {host}:{port} ({exc.strerror or exc}); "
                 "change --api-host or --api-port, or pass --no-api."
             )
-            raise OSError(msg) from exc
+            raise PermanentStartupError(msg) from exc
         yield

@@ -549,7 +549,7 @@ class ClaimRequest:
     sources: ResponseSources
     bot_generation: str
     now_ns: int
-    # The membership the claim's delivery was admitted in, which a new or regenerated reply writes in.
+    # The membership the claim's driving message was admitted in, which a new or regenerated reply writes in.
     membership_epoch: int
     # Used only when the claim creates a reply.
     new_reply_id: str
@@ -1506,17 +1506,26 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
     )
 
 
-def replay_superseded(reply: Reply, last: Span, *, durable_write_debt: bool, now_ns: int) -> Transition:
+def replay_superseded(
+    reply: Reply,
+    last: Span,
+    *,
+    durable_write_debt: bool,
+    sources_pending: bool,
+    now_ns: int,
+) -> Transition:
     """A newer message superseded the replay of the reply's sources; they settle in this transaction.
 
     A reply that still owes Matrix a write is never superseded, because its
-    replay is what resolves that write; nor is one ``replay_dropped`` keeps.
+    replay is what resolves that write; nor is one ``replay_dropped`` keeps,
+    such as a coalesced turn's reply while another of its messages, besides
+    the superseded ones, still waits to replay (``sources_pending``).
     """
     if reply.terminal:
         return _unchanged(Outcome.DUPLICATE, reply)
     if claim_blocked(reply, durable_write_debt=durable_write_debt):
         return _unchanged(Outcome.DEFERRED, reply)
-    return replay_dropped(reply, last, sources_pending=False, now_ns=now_ns)
+    return replay_dropped(reply, last, sources_pending=sources_pending, now_ns=now_ns)
 
 
 def replay_dropped(reply: Reply, last: Span, *, sources_pending: bool, now_ns: int) -> Transition:

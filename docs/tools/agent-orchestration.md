@@ -87,7 +87,7 @@ Set `minimal=True` to run the child in [minimal mode](agent-cli.md#minimal-subag
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
 Delegated runs do not create a Matrix thread and cannot ask the user interactive questions.
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
-In Matrix conversations, a parent runs its subagents one at a time.
+Subagent calls that run as [background jobs](#background-jobs) start at the same time when a parent makes several in one step; otherwise a parent in a Matrix conversation runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](../openai-api.md).
 Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](execution-and-coding.md#workspace-and-tool-output-files).
 
@@ -95,7 +95,7 @@ Use `continue_subagent` with the returned ID to send a follow-up into the same c
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
 Follow-ups keep the child's history, model, and mode, and recheck current permissions.
 A follow-up sent while the child is still running or awaiting approval is refused; finish that turn first.
-If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun, and a pending approval stays pending.
+If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun; a pending approval of a child running as a background job is denied, and one that paused its parent's reply stays pending.
 
 ```python
 run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")
@@ -195,7 +195,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 ## Background jobs
 
-This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; configs from `mindroom config init` turn it on.
+Background jobs are on by default; set the root option `background_tool_jobs.enabled: false` and restart to turn them off.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
 With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are reported as interrupted.
@@ -205,6 +205,7 @@ Tools that can run as background jobs accept an optional `background_after` argu
 It is how many seconds the call may hold the reply before it continues in the background, separate from a tool's own execution or network timeout.
 The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
+The function name `job` is reserved for the job controls, so while background jobs are on, every reply of an agent whose tools offer another function named `job` fails with `Tool function name job is reserved for managed job controls`; rename that function or turn background jobs off.
 Tools that can stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
 Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
@@ -213,7 +214,6 @@ Exclude complete toolkits in YAML when they should retain native execution:
 
 ```yaml
 background_tool_jobs:
-  enabled: true
   exclude_toolkits: [my_plugin_toolkit]
   approval_wait_timeout: 120
 ```

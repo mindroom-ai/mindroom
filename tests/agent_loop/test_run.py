@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from agno.run import RunContext as AgnoRunContext
 
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
 
@@ -656,14 +657,13 @@ def _golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
     return run
 
 
-def _gated_calculator() -> AdaptedToolkit:
-    """MindRoom's calculator with ``multiply`` under the approval policy, as the capture's config gated it."""
+def _gated_calculator(gate: ToolGate = ToolGate.POLICY) -> AdaptedToolkit:
+    """MindRoom's calculator with ``multiply`` under ``gate``, by default the approval policy the capture's config set."""
     adapted = adapt_toolkit(CalculatorTools())
     return replace(
         adapted,
         functions=tuple(
-            replace(function, gate=ToolGate.POLICY) if function.name == "multiply" else function
-            for function in adapted.functions
+            replace(function, gate=gate) if function.name == "multiply" else function for function in adapted.functions
         ),
     )
 
@@ -770,6 +770,31 @@ async def test_an_approved_call_resumes_into_a_completed_run_with_its_result() -
     # The resume request repeats the paused request, system message first.
     assert [message.role for message in model.requests[0].messages] == ["system", "user", "assistant", "tool"]
     assert model.requests[0].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_runs_with_the_decision_it_resumes_with_whatever_its_function_asks_now() -> None:
+    """A call approved on a paused reply's card is not asked about again, even once its function asks as its job.
+
+    Background jobs turned on while the reply waited, as an upgrade that turns them on by default does, gate the
+    function as a job's first phase; the decision the resume carries already covers the call.
+    """
+    paused = RunRecord.from_dict(_golden_run("agent_code", "!room:example.org:$conversation", "run-paused-approval"))
+    gates: list[ToolGate | None] = []
+
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        gates.append(call.function.gate)
+        return await call_next(call.arguments)
+
+    _, record, _ = await _resume(
+        _agent(_model("code-model", answer("6 x 7 = 42.")), [_gated_calculator(ToolGate.JOB)]),
+        paused,
+        approved=[_approval("call-multiply", "multiply", {"a": 6, "b": 7})],
+        hooks=replace(NO_HOOKS, tool_middleware=(observe,)),
+    )
+
+    assert gates == [None]
+    assert record.status is RunStatus.completed
 
 
 @pytest.mark.asyncio

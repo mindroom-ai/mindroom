@@ -15,7 +15,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -69,6 +69,8 @@ def _config(tmp_path: Path) -> Config:
             defaults=DefaultsConfig(tools=[]),
             memory={"backend": "none"},
             tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
+            # These replies pause for approval and resume from the stored pause.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
         "code",
         users=[REQUESTER],

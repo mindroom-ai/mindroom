@@ -7,18 +7,19 @@ Each turn runs independently and returns its response as the tool result.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
+from mindroom.ai import run_delegated_child_response
 from mindroom.delegation.direct import run_direct_child_turn
+from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn
 from mindroom.delegation.personas import list_profiles, render_profile_listing
 from mindroom.delegation.sessions import SubagentSessionError
-from mindroom.delegation.state import RUN_SUBAGENT
+from mindroom.delegation.state import CONTINUE_SUBAGENT, RUN_SUBAGENT
 from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
@@ -26,13 +27,15 @@ from mindroom.tool_system.runtime_context import current_budget_monitor, current
 from mindroom.tool_system.tool_schema import closed_parameters
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import SubagentPersona
+    from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.delegation.targets import DelegationTarget
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.tool_jobs.runtime import JobSpec, ToolJobRuntime
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -50,6 +53,7 @@ class DelegateTools(Toolkit):
         delegation_depth: int = 0,
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
         persona: SubagentPersona | None = None,
+        calls_as_jobs: bool = False,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = config.get_agent(agent_name).delegate_to
@@ -57,6 +61,8 @@ class DelegateTools(Toolkit):
         self._config = config
         self._execution_identity = execution_identity
         self._delegation_depth = delegation_depth
+        # Whether the agent's build lets these calls become jobs.
+        self._calls_as_jobs = calls_as_jobs
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(
             config,
@@ -110,11 +116,8 @@ class DelegateTools(Toolkit):
         return instructions
 
     def _background_jobs_available(self) -> bool:
-        # A nested subagent's calls run inline inside its parent's job, so only a top-level caller can wait on one.
         return (
-            self._delegation_depth == 0
-            and background_tool_jobs_enabled(self._config, self._runtime_paths)
-            and not toolkit_is_background_excluded("delegate", self._config, self._runtime_paths)
+            self._calls_as_jobs
             and self._execution_identity is not None
             and self._execution_identity.channel == "matrix"
             and get_background_runtime(self._runtime_paths) is not None
@@ -218,7 +221,8 @@ class DelegateTools(Toolkit):
             The delegated agent's response, or an error message if delegation failed.
 
         """
-        target = resolve_fresh_target(
+        return await self._run_direct(
+            RUN_SUBAGENT,
             {
                 "task": task,
                 "agent_name": agent_name,
@@ -230,16 +234,7 @@ class DelegateTools(Toolkit):
                 "knowledge": knowledge,
                 "profile": profile,
             },
-            caller_name=self._agent_name,
-            config=self._config,
-            runtime_paths=self._runtime_paths,
-            depth=self._delegation_depth,
-            workspace_root=lambda: self._workspace_root,
-            cap=self._persona,
         )
-        if isinstance(target, str):
-            return target
-        return await self._run_child(target)
 
     def _caller_identity(self) -> ToolExecutionIdentity:
         """Return who delegates: the running call's identity, for execution, ownership, and audit."""
@@ -266,19 +261,67 @@ class DelegateTools(Toolkit):
             The child's answer, stable subagent ID, and this turn's audit reference, or an error.
 
         """
-        target = await resolve_follow_up_target(
-            {"subagent_id": subagent_id, "message": message},
+        return await self._run_direct(CONTINUE_SUBAGENT, {"subagent_id": subagent_id, "message": message})
+
+    async def managed_job(
+        self,
+        function_name: str,
+        arguments: dict[str, Any],
+        *,
+        job_id: str,
+        runtime: ToolJobRuntime,
+    ) -> JobSpec | str:
+        """Prepare the child a managed call of ``function_name`` runs as ``runtime``'s job ``job_id``, or say why not.
+
+        The child's turn starts only once the job is admitted; the job starts and settles the child it is known by.
+        """
+        prepared = await self._prepare(function_name, arguments)
+        if isinstance(prepared, str):
+            return prepared
+        child, config, parent_run_id = prepared
+        return delegation_call_job(
+            child,
+            job_id=job_id,
+            runtime=runtime,
             owner=self._caller_identity(),
+            parent_run_id=parent_run_id,
+            tool_name=function_name,
+            arguments=arguments,
+            run_child=run_delegated_child_response,
+            config=config,
+            runtime_paths=self._runtime_paths,
+            refresh_scheduler=self._refresh_scheduler,
+        )
+
+    async def _target(self, function_name: str, arguments: Mapping[str, object]) -> DelegationTarget | str:
+        """Resolve the child a call of ``function_name`` starts or continues, or return why it cannot."""
+        if function_name == CONTINUE_SUBAGENT:
+            return await resolve_follow_up_target(
+                arguments,
+                owner=self._caller_identity(),
+                config=self._config,
+                runtime_paths=self._runtime_paths,
+                depth=self._delegation_depth,
+            )
+        return resolve_fresh_target(
+            arguments,
+            caller_name=self._agent_name,
             config=self._config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
+            workspace_root=lambda: self._workspace_root,
+            cap=self._persona,
         )
+
+    async def _prepare(
+        self,
+        function_name: str,
+        arguments: Mapping[str, object],
+    ) -> tuple[DelegationChild, Config, str | None] | str:
+        """Resolve and authorize one call's child and prepare its turn: the child, its live config, and parent run."""
+        target = await self._target(function_name, arguments)
         if isinstance(target, str):
             return target
-        return await self._run_child(target)
-
-    async def _run_child(self, target: DelegationTarget) -> str:
-        """Authorize a resolved target and run it as one direct child, settled by the shared lifecycle owner."""
         config = authorize_delegation(
             self._agent_name,
             target.agent_name,
@@ -291,14 +334,13 @@ class DelegateTools(Toolkit):
         )
         if isinstance(config, str):
             return config
-        owner = self._caller_identity()
         # The parent's run and tool call are the framework's, never the model's arguments.
         parent = current_tool_call()
         child = prepare_child_turn(
             self._agent_name,
             target.agent_name,
             target.task,
-            owner=owner,
+            owner=self._caller_identity(),
             config=config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
@@ -309,11 +351,19 @@ class DelegateTools(Toolkit):
             parent_tool_call_id=(parent.context.call_id or "") if parent is not None else "",
             persona=target.persona,
         )
+        return child, config, parent.context.run_id if parent is not None else None
+
+    async def _run_direct(self, function_name: str, arguments: Mapping[str, object]) -> str:
+        """Run one call's child inside this call, settled by the shared lifecycle owner."""
+        prepared = await self._prepare(function_name, arguments)
+        if isinstance(prepared, str):
+            return prepared
+        child, config, parent_run_id = prepared
         try:
             result = await run_direct_child_turn(
                 child,
-                owner=owner,
-                parent_run_id=parent.context.run_id if parent is not None else None,
+                owner=self._caller_identity(),
+                parent_run_id=parent_run_id,
                 config=config,
                 runtime_paths=self._runtime_paths,
                 refresh_scheduler=self._refresh_scheduler,

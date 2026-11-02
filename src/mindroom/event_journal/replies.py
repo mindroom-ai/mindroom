@@ -370,8 +370,8 @@ def claim(
         active_generation=active_generation,
     )
     if reply is None or request.driving_edit_id is not None:
-        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
-        admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
+        # A new reply, or a regeneration of one, writes in the membership the message driving it was admitted in.
+        admitted = journal.admitted_membership_owner(transaction, principal_id, request.sources.pending_event_ids[0])
         if admitted is not None:
             request = replace(request, membership_epoch=admitted[1])
     return apply(transaction, principal_id, rl.claim(request, context))
@@ -480,9 +480,16 @@ def _supersede_replay(
             reply,
             last,
             durable_write_debt=has_unresolved_rows(transaction, principal_id, reply.reply_id),
+            # The superseded sources are pending until this settles them.
+            sources_pending=_sources_pending(transaction, principal_id, last, besides=source_event_ids),
             now_ns=now_ns,
         ),
     )
+
+
+def _sources_pending(transaction: Transaction, principal_id: str, span: Span, *, besides: tuple[str, ...] = ()) -> bool:
+    """Return whether any of the span's sources, other than ``besides``, still waits in the journal for its replay."""
+    return bool(journal.pending_among(transaction, principal_id, span.sources.pending_event_ids).difference(besides))
 
 
 def drop_replays(
@@ -501,13 +508,15 @@ def drop_replays(
         assert reply is not None
         last = reply_spans.load(transaction, principal_id, reply.last_span_id)
         assert last is not None
-        sources_pending = any(
-            journal.is_pending(transaction, principal_id, source) for source in last.sources.pending_event_ids
-        )
         applied = apply(
             transaction,
             principal_id,
-            rl.replay_dropped(reply, last, sources_pending=sources_pending, now_ns=now_ns),
+            rl.replay_dropped(
+                reply,
+                last,
+                sources_pending=_sources_pending(transaction, principal_id, last),
+                now_ns=now_ns,
+            ),
         )
         if applied.transition.applied:
             ended.append(reply_id)
@@ -549,9 +558,7 @@ def _owner_lost(
         assert last is not None
         facts = rl.OwnerLostFacts(
             active_generation=active_generation,
-            sources_pending=any(
-                journal.is_pending(transaction, principal_id, event_id) for event_id in last.sources.pending_event_ids
-            ),
+            sources_pending=_sources_pending(transaction, principal_id, last),
         )
         transition = rl.owner_lost(reply, last, facts, now_ns=now_ns)
         if transition.applied:

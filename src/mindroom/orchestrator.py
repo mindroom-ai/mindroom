@@ -70,7 +70,7 @@ from mindroom.memory.legacy_team_memory import migrate_team_memory
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, gather_shutdown_phase
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, gather_shutdown_phase, run_process_shutdown_closers
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -195,28 +195,13 @@ def _raise_embedded_api_server_exit(
     reason: str,
     cause: BaseException | None = None,
 ) -> NoReturn:
-    """Raise the fatal lifecycle error for an unexpected API server exit."""
-    logger.error(
-        "fatal_embedded_api_server_exit",
-        **api_server.log_context(),
-        reason=reason,
-        exc_info=(type(cause), cause, cause.__traceback__) if cause is not None else None,
-    )
-    msg = "Embedded API server exited unexpectedly"
-    if cause is not None:
-        raise RuntimeError(msg) from cause
-    raise RuntimeError(msg)
-
-
-def _raise_orchestrator_exit(*, reason: str) -> NoReturn:
-    """Raise the fatal lifecycle error for an unexpected orchestrator exit."""
-    logger.error("fatal_orchestrator_exit", reason=reason)
-    msg = "MindRoom orchestrator exited unexpectedly"
-    raise RuntimeError(msg)
+    """Raise the fatal lifecycle error for an unexpected API server exit, which `_run_runtime` logs."""
+    msg = f"Embedded API server on {api_server.host}:{api_server.port} exited unexpectedly: {reason}"
+    raise RuntimeError(msg) from cause
 
 
 class _SignalAwareUvicornServer(uvicorn.Server):
-    """Uvicorn server that marks the shared shutdown event on signal exit."""
+    """Uvicorn server that sets the shared shutdown event on a signal and stops whenever that event is set."""
 
     def __init__(
         self,
@@ -249,17 +234,22 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         logger.info("embedded_api_server_started", host=bound_host, port=bound_port)
 
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
-        """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
+        """Surface a signal as the runtime's shutdown request; a SIGINT during shutdown forces exit, as in Uvicorn."""
         del frame
         signal_number = int(sig)
+        if self._shutdown_requested.is_set() and signal_number == int(signal.SIGINT):
+            self.force_exit = True
         # A signal handler can interrupt a log write, which is not reentrant, so it
         # only records the signal; the serve loop's exit log reports it.
         self.received_signal_name = _signal_name(signal_number)
         self._shutdown_requested.set()
-        if self.should_exit and signal_number == int(signal.SIGINT):
-            self.force_exit = True
-            return
-        self.should_exit = True
+
+    async def on_tick(self, counter: int) -> bool:
+        """End the main loop once the runtime requests shutdown, always through Uvicorn's shutdown.
+
+        Uvicorn skips its shutdown, and so the app's, when `should_exit` is already set as startup ends.
+        """
+        return self._shutdown_requested.is_set() or await super().on_tick(counter)
 
 
 @dataclass
@@ -1659,7 +1649,6 @@ async def _wait_for_runtime_completion(
         shutdown_wait_task=shutdown_wait_task,
         api_task=api_task,
         shutdown_requested=shutdown_requested,
-        api_server=api_server,
     )
 
     if shutdown_wait_task in done:
@@ -1681,27 +1670,17 @@ async def _consume_completed_runtime_tasks(
     shutdown_wait_task: asyncio.Task[bool],
     api_task: asyncio.Task[None] | None,
     shutdown_requested: asyncio.Event,
-    api_server: _EmbeddedApiServerContext,
 ) -> None:
-    """Consume completed runtime tasks and raise the first non-cancellation failure."""
-    failures: list[Exception] = []
+    """Consume completed runtime tasks and raise the first non-cancellation failure, which `_run_runtime` logs.
+
+    The API task raises by itself when it returns while no shutdown was requested, so only the orchestrator's is checked.
+    """
+    failure: Exception | None = None
     for task in (orchestrator_task, api_task, shutdown_wait_task):
         if task is None or task not in done:
             continue
         try:
             task_name = task.get_name()
-            if api_task is not None and task is api_task:
-                await _await_api_task_completion(
-                    api_task,
-                    shutdown_requested=shutdown_requested,
-                    api_server=api_server,
-                )
-                logger.info(
-                    "runtime_task_completed",
-                    task_name=task_name,
-                    shutdown_requested=shutdown_requested.is_set(),
-                )
-                continue
             await task
             if task is orchestrator_task:
                 if shutdown_requested.is_set():
@@ -1710,9 +1689,8 @@ async def _consume_completed_runtime_tasks(
                         task_name=task_name,
                     )
                     continue
-                _raise_orchestrator_exit(
-                    reason="Orchestrator task finished while application shutdown was not requested",
-                )
+                msg = "MindRoom orchestrator exited unexpectedly"
+                raise RuntimeError(msg)  # noqa: TRY301 - handled below like a failed task's own error
             logger.info(
                 "runtime_task_completed",
                 task_name=task_name,
@@ -1723,27 +1701,13 @@ async def _consume_completed_runtime_tasks(
             logger.info("runtime_task_cancelled", task_name=task.get_name())
             continue
         except Exception as exc:
-            logger.exception("runtime_task_failed", task_name=task.get_name())
-            failures.append(exc)
-    if failures:
-        raise failures[0]
-
-
-async def _await_api_task_completion(
-    api_task: asyncio.Task[None],
-    *,
-    shutdown_requested: asyncio.Event,
-    api_server: _EmbeddedApiServerContext,
-) -> None:
-    """Await the API task and classify normal shutdown versus unexpected exit."""
-    await api_task
-    if shutdown_requested.is_set():
-        logger.info("embedded_api_server_requested_application_shutdown", **api_server.log_context())
-        return
-    _raise_embedded_api_server_exit(
-        api_server,
-        reason="API task finished while application shutdown was not requested",
-    )
+            if failure is None:
+                failure = exc
+            else:
+                # Only the first failure is raised, so a second one is reported here or never.
+                logger.exception("runtime_task_failed", task_name=task.get_name())
+    if failure is not None:
+        raise failure
 
 
 async def _await_api_task_graceful_shutdown(
@@ -1754,37 +1718,37 @@ async def _await_api_task_graceful_shutdown(
     shutdown_requested: asyncio.Event,
     api_server: _EmbeddedApiServerContext,
 ) -> None:
-    """Give Uvicorn a bounded window to run FastAPI lifespan shutdown."""
+    """Give Uvicorn a bounded window to run FastAPI lifespan shutdown, and cancel the server once it ends."""
     grace_deadline = time.monotonic() + _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS
     monitored_tasks: set[asyncio.Task] = {api_task, orchestrator_task}
-    while api_task in monitored_tasks:
-        timeout_seconds = grace_deadline - time.monotonic()
-        if timeout_seconds <= 0:
-            break
-        done, _pending = await asyncio.wait(
-            monitored_tasks,
-            timeout=timeout_seconds,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if not done:
-            break
-        await _consume_completed_runtime_tasks(
-            done,
-            orchestrator_task=orchestrator_task,
-            shutdown_wait_task=shutdown_wait_task,
-            api_task=api_task,
-            shutdown_requested=shutdown_requested,
-            api_server=api_server,
-        )
-        if api_task in done:
-            return
-        monitored_tasks.difference_update(done)
+    try:
+        while (timeout_seconds := grace_deadline - time.monotonic()) > 0:
+            done, _pending = await asyncio.wait(
+                monitored_tasks,
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            await _consume_completed_runtime_tasks(
+                done,
+                orchestrator_task=orchestrator_task,
+                shutdown_wait_task=shutdown_wait_task,
+                api_task=api_task,
+                shutdown_requested=shutdown_requested,
+            )
+            if api_task in done:
+                return
+            monitored_tasks.difference_update(done)
 
-    logger.warning(
-        "embedded_api_server_shutdown_timeout",
-        **api_server.log_context(),
-        timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
-    )
+        logger.warning(
+            "embedded_api_server_shutdown_timeout",
+            **api_server.log_context(),
+            timeout_seconds=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS,
+        )
+    finally:
+        # However the window ends, by timeout, failure, or cancellation, runtime cleanup must not open a second one.
+        await _cancel_task_if_pending(api_task)
 
 
 async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
@@ -1807,6 +1771,9 @@ async def _finish_runtime_shutdown(
 ) -> None:
     """Finish one runtime cleanup sequence without duplicating partial teardown."""
     await _cancel_task_if_pending(shutdown_wait_task)
+    if api_task is not None:
+        # Every exit has set shutdown_requested, which stops the server, so a failed run's API gets a signal's window.
+        await asyncio.wait({api_task}, timeout=_EMBEDDED_API_SHUTDOWN_GRACE_SECONDS)
     await _cancel_task_if_pending(api_task)
     try:
         try:
@@ -1825,6 +1792,7 @@ async def _finish_runtime_shutdown(
         reset_matrix_sync_health()
         reset_runtime_state()
         shutdown_primary_worker_manager()
+        await run_process_shutdown_closers()
         await aclose_model_http_client()
 
 

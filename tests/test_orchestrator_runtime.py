@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import ipaddress
 import os
+import re
 import signal
 import socket
 import ssl
@@ -28,10 +29,12 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from starlette.applications import Starlette
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
 import mindroom.workers.runtime as workers_runtime_module
+from mindroom import runtime_shutdown as runtime_shutdown_module
 from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
@@ -201,7 +204,7 @@ async def test_redacted_event_ids_read_only_synced_running_bots(tmp_path: Path) 
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
@@ -269,6 +272,15 @@ async def _await_until(condition: Callable[[], bool]) -> None:
     async with asyncio.timeout(5.0):
         while not condition():  # noqa: ASYNC110 - no event exists to wait on; production owns the task
             await asyncio.sleep(0)
+
+
+def _logged_errors(logs: Sequence[Mapping[str, Any]]) -> list[tuple[str, str | None, bool]]:
+    """Return each error-level log as its event, its task name, and whether it carries a traceback."""
+    return [
+        (entry["event"], entry.get("task_name"), bool(entry.get("exc_info")))
+        for entry in logs
+        if entry["log_level"] == "error"
+    ]
 
 
 @pytest.mark.asyncio
@@ -496,6 +508,42 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
 
 
 @pytest.mark.asyncio
+async def test_a_failed_start_lets_the_dashboard_api_finish_its_own_shutdown(tmp_path: Path) -> None:
+    """A startup error stops the served dashboard API as a signal does, so the app's shutdown runs before exit.
+
+    Cancelling the server instead skips the app's shutdown, and the process then ends with a traceback after the error.
+    """
+    reset_runtime_state()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+
+    async def account_collision(**_kwargs: object) -> None:
+        await _await_until(lambda: get_api_server_address() is not None)
+        msg = "Matrix account collision"
+        raise PermanentStartupError(msg)
+
+    async def blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    with (
+        patch("mindroom.orchestrator.setup_logging"),
+        patch("mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts"),
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=account_collision),
+        patch("mindroom.orchestrator._run_auxiliary_task_forever", new=blocked_auxiliary_task),
+        # The app's lifespan calls this last, once uvicorn has delivered its shutdown.
+        patch("mindroom.api.main.close_usage_export_runner") as app_shutdown_finished,
+        pytest.raises(PermanentStartupError, match="Matrix account collision"),
+    ):
+        await asyncio.wait_for(
+            main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=0),
+            timeout=10,
+        )
+
+    app_shutdown_finished.assert_called_once_with(api_main.app)
+
+
+@pytest.mark.asyncio
 async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_storage_converts(tmp_path: Path) -> None:
     """The first start after an upgrade converts before the API binds; probes answer meanwhile and stop when it ends.
 
@@ -545,6 +593,29 @@ async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_st
     async with httpx.AsyncClient(trust_env=False) as client:
         with pytest.raises(httpx.ConnectError):
             await client.get(f"http://127.0.0.1:{port}/api/health")
+
+
+@pytest.mark.asyncio
+async def test_a_taken_api_address_is_a_startup_error_without_a_traceback(tmp_path: Path) -> None:
+    """Another process on the API port is a misconfiguration, so the run reports it as a startup error, not a crash."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts"),
+            capture_logs() as logs,
+            pytest.raises(PermanentStartupError, match=re.escape(f"Cannot listen on the API address 127.0.0.1:{port}")),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=port)
+
+    assert _logged_errors(logs) == [("MindRoom startup failed", None, False)]
 
 
 @pytest.mark.asyncio
@@ -665,16 +736,85 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            capture_logs() as logs,
             pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
+        # A startup error, such as an account collision, is no crash, so it is logged once without a traceback.
+        assert _logged_errors(logs) == [("MindRoom startup failed", None, False)]
         mock_orchestrator.stop.assert_awaited_once()
         # Startup shortens the GIL switch interval before the orchestrator starts.
         assert sys.getswitchinterval() == pytest.approx(0.001)
         state = get_runtime_state()
         assert state.phase == "idle"
         assert state.detail is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "start_error",
+        # An orchestrator that returns while no shutdown was requested ends the run as a crash does.
+        [RuntimeError("orchestrator crashed"), None],
+        ids=["crash", "unexpected return"],
+    )
+    async def test_the_error_that_ends_the_run_is_logged_once(
+        self,
+        tmp_path: Path,
+        start_error: Exception | None,
+    ) -> None:
+        """The run logs the error that ends it exactly once, with its traceback."""
+        reset_runtime_state()
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.start = AsyncMock(side_effect=start_error)
+        mock_orchestrator.stop = AsyncMock()
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            capture_logs() as logs,
+            pytest.raises(RuntimeError),
+        ):
+            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
+
+        assert _logged_errors(logs) == [("Error in MindRoom runtime", None, True)]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_the_run_does_not_raise_is_logged_on_its_own(self, tmp_path: Path) -> None:
+        """When the orchestrator and the API fail at once, the run ends with the first error and still logs the other."""
+        reset_runtime_state()
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("orchestrator crashed"))
+        mock_orchestrator.stop = AsyncMock()
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch("mindroom.orchestrator._run_api_server", side_effect=RuntimeError("API crashed")),
+            capture_logs() as logs,
+            pytest.raises(RuntimeError, match="orchestrator crashed"),
+        ):
+            await main(
+                log_level="INFO",
+                runtime_paths=self._runtime_paths(tmp_path),
+                api=True,
+                api_host="127.0.0.1",
+                api_port=0,
+            )
+
+        assert _logged_errors(logs) == [
+            ("runtime_task_failed", "api_server", True),
+            ("Error in MindRoom runtime", None, True),
+        ]
 
     @pytest.mark.asyncio
     async def test_a_second_runtime_on_one_storage_root_refuses_to_start(self, tmp_path: Path) -> None:
@@ -702,7 +842,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     async def test_embedded_uvicorn_signal_handler_requests_application_shutdown(self) -> None:
-        """Uvicorn process signals should propagate to the top-level shutdown event."""
+        """A Uvicorn signal becomes the runtime's shutdown request, which ends the serve loop; a later SIGINT forces exit."""
         shutdown_requested = asyncio.Event()
 
         async def app(scope: object, receive: object, send: object) -> None:
@@ -719,11 +859,52 @@ class TestAgentBot(AgentBotTestBase):
             server.handle_exit(signal.SIGTERM, None)
 
         assert shutdown_requested.is_set()
-        assert server.should_exit is True
+        assert await server.on_tick(0) is True
+        assert server.force_exit is False
         assert server._captured_signals == []
         assert server.received_signal_name == "SIGTERM"
         # A signal can interrupt a log write, so the handler itself must not log.
         mock_info.assert_not_called()
+
+        server.handle_exit(signal.SIGINT, None)
+        assert server.force_exit is True
+
+        # As in Uvicorn, SIGINT forces exit once shutdown is underway, also when the runtime itself requested it.
+        already_stopping = asyncio.Event()
+        already_stopping.set()
+        failed_run = _SignalAwareUvicornServer(uvicorn.Config(app, host="127.0.0.1", port=0), already_stopping)
+        failed_run.handle_exit(signal.SIGINT, None)
+        assert failed_run.force_exit is True
+
+    @pytest.mark.asyncio
+    async def test_embedded_uvicorn_stopped_by_a_signal_while_starting_still_runs_the_app_shutdown(self) -> None:
+        """A signal that lands while the server starts ends it through Uvicorn's shutdown, so the app's shutdown runs.
+
+        Uvicorn returns without its shutdown when `should_exit` is already set as startup ends.
+        """
+        lifespan_events: list[str] = []
+
+        @asynccontextmanager
+        async def lifespan(_app: object) -> AsyncIterator[None]:
+            lifespan_events.append("startup")
+            yield
+            lifespan_events.append("shutdown")
+
+        async def signal_while_starting(_host: str, _port: int) -> None:
+            server.handle_exit(signal.SIGTERM, None)
+
+        server = _SignalAwareUvicornServer(
+            uvicorn.Config(Starlette(lifespan=lifespan), host="127.0.0.1", port=0, ws="websockets-sansio"),
+            asyncio.Event(),
+            on_started=signal_while_starting,
+        )
+        reset_runtime_state()
+        try:
+            await asyncio.wait_for(server.serve(), timeout=10)
+        finally:
+            reset_runtime_state()
+
+        assert lifespan_events == ["startup", "shutdown"]
 
     @pytest.mark.asyncio
     async def test_embedded_uvicorn_publishes_actual_bound_port_after_startup(self) -> None:
@@ -790,8 +971,11 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()) as mock_uvicorn_config,
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.orchestrator.logger.error") as mock_error,
-            pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly"),
+            capture_logs() as logs,
+            pytest.raises(
+                RuntimeError,
+                match=r"^Embedded API server on 127\.0\.0\.1:0 exited unexpectedly: server\.serve\(\) returned while",
+            ),
         ):
             await _run_api_server(
                 "127.0.0.1",
@@ -808,8 +992,8 @@ class TestAgentBot(AgentBotTestBase):
             log_level="info",
             ws="websockets-sansio",
         )
-        mock_error.assert_called_once()
-        assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
+        # The run that awaits the server logs the error once it ends.
+        assert _logged_errors(logs) == []
         assert get_api_server_address() is None
 
     @pytest.mark.asyncio
@@ -1178,7 +1362,6 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.orchestrator.logger.error") as mock_error,
         ):
             await _run_api_server(
                 "127.0.0.1",
@@ -1188,7 +1371,6 @@ class TestAgentBot(AgentBotTestBase):
                 shutdown_requested,
             )
 
-        mock_error.assert_not_called()
         assert get_api_server_address() is None
 
     @pytest.mark.asyncio
@@ -1216,8 +1398,11 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ExitingServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.orchestrator.logger.error") as mock_error,
-            pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly") as exc_info,
+            capture_logs() as logs,
+            pytest.raises(
+                RuntimeError,
+                match=r"^Embedded API server on 127\.0\.0\.1:0 exited unexpectedly: server\.serve\(\) raised SystemExit$",
+            ) as exc_info,
         ):
             await _run_api_server(
                 "127.0.0.1",
@@ -1230,10 +1415,7 @@ class TestAgentBot(AgentBotTestBase):
         cause = exc_info.value.__cause__
         assert isinstance(cause, SystemExit)
         assert cause.code == 1
-        mock_error.assert_called_once()
-        assert mock_error.call_args.args == ("fatal_embedded_api_server_exit",)
-        assert mock_error.call_args.kwargs["reason"] == "server.serve() raised SystemExit"
-        assert mock_error.call_args.kwargs["exc_info"] == (SystemExit, cause, cause.__traceback__)
+        assert _logged_errors(logs) == []
 
     @pytest.mark.asyncio
     async def test_runtime_completion_raises_done_orchestrator_failure_before_clean_shutdown_return(self) -> None:
@@ -1267,7 +1449,10 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     async def test_runtime_completion_raises_orchestrator_failure_during_api_shutdown_grace(self) -> None:
-        """API shutdown grace must keep observing orchestrator failures."""
+        """API shutdown grace keeps observing orchestrator failures, and a failure ends the API's window at once.
+
+        Runtime cleanup waits only for a server still running, so a server left running would get a second window.
+        """
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
 
@@ -1295,6 +1480,7 @@ class TestAgentBot(AgentBotTestBase):
                     shutdown_requested=shutdown_requested,
                     api_server=_EmbeddedApiServerContext(host="127.0.0.1", port=0),
                 )
+            assert api_task.cancelled()
         finally:
             api_task.cancel()
             await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
@@ -1325,80 +1511,50 @@ class TestAgentBot(AgentBotTestBase):
             await asyncio.gather(orchestrator_task, shutdown_wait_task, return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_logs_api_shutdown_timeout_before_cancelling_stuck_api_task(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Shutdown should wait for API grace timeout before cancelling a stuck API task."""
-        reset_runtime_state()
+    async def test_runtime_completion_cancels_an_api_task_that_outlives_its_shutdown_grace(self) -> None:
+        """A stuck API task gets one grace window: the timeout is logged, then the task is cancelled before cleanup."""
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
         events: list[str] = []
-        orchestrator_cancelled = asyncio.Event()
-        api_cancelled = asyncio.Event()
-        mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.stop = AsyncMock()
 
-        async def _start() -> None:
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                orchestrator_cancelled.set()
-                raise
-
-        async def _api_requests_shutdown_and_blocks(
-            _host: str,
-            _port: int,
-            _log_level: str,
-            orchestrator: object,
-            shutdown_requested: asyncio.Event,
-        ) -> None:
-            assert orchestrator is mock_orchestrator
-            shutdown_requested.set()
+        async def _stuck_api() -> None:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 events.append("api_cancelled")
-                api_cancelled.set()
                 raise
-
-        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
-            await asyncio.Event().wait()
 
         def _record_warning(*_args: object, **_kwargs: object) -> None:
             events.append("timeout_logged")
 
-        mock_orchestrator.start = AsyncMock(side_effect=_start)
+        orchestrator_task = asyncio.create_task(asyncio.Event().wait(), name="orchestrator")
+        shutdown_wait_task = asyncio.create_task(shutdown_requested.wait(), name="application_shutdown_wait")
+        api_task = asyncio.create_task(_stuck_api(), name="api_server")
+        try:
+            with (
+                patch("mindroom.orchestrator.logger.warning", side_effect=_record_warning) as mock_warning,
+                patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.01),
+            ):
+                await _wait_for_runtime_completion(
+                    orchestrator_task=orchestrator_task,
+                    shutdown_wait_task=shutdown_wait_task,
+                    api_task=api_task,
+                    shutdown_requested=shutdown_requested,
+                    api_server=_EmbeddedApiServerContext(host="127.0.0.1", port=0),
+                )
+            # Runtime cleanup waits only for a server still running, so it gives this one no second window.
+            assert api_task.cancelled()
+        finally:
+            orchestrator_task.cancel()
+            await asyncio.gather(orchestrator_task, shutdown_wait_task, api_task, return_exceptions=True)
 
-        with (
-            patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.reset_primary_worker_manager"),
-            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
-            _startup_config_loaded(),
-            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
-            patch("mindroom.orchestrator.logger.warning", side_effect=_record_warning) as mock_warning,
-            patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.01),
-        ):
-            await asyncio.wait_for(
-                main(
-                    log_level="INFO",
-                    runtime_paths=self._runtime_paths(tmp_path),
-                    api=True,
-                    api_host="127.0.0.1",
-                    api_port=0,
-                ),
-                timeout=1,
-            )
-
-        assert events[:2] == ["timeout_logged", "api_cancelled"]
-        assert orchestrator_cancelled.is_set()
-        assert api_cancelled.is_set()
+        assert events == ["timeout_logged", "api_cancelled"]
         mock_warning.assert_called_once_with(
             "embedded_api_server_shutdown_timeout",
             host="127.0.0.1",
             port=0,
             timeout_seconds=0.01,
         )
-        mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(
@@ -1597,6 +1753,55 @@ class TestAgentBot(AgentBotTestBase):
         orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_runtime_shutdown_cancels_an_api_task_that_outlives_its_grace(self) -> None:
+        """A failed run's API that cannot finish stopping is cancelled after one grace window, so cleanup never hangs."""
+        api_task = asyncio.create_task(asyncio.Event().wait(), name="api_server")
+
+        with patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.01):
+            await asyncio.wait_for(
+                _finish_runtime_shutdown(
+                    shutdown_wait_task=None,
+                    api_task=api_task,
+                    orchestrator_task=None,
+                    auxiliary_tasks=[],
+                    orchestrator=None,
+                    stall_detector=None,
+                ),
+                timeout=5,
+            )
+
+        assert api_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_runtime_shutdown_runs_every_process_closer_when_one_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failing process-wide closer neither skips the closers after it nor ends the rest of the cleanup."""
+        closed: list[str] = []
+
+        async def failing() -> None:
+            closed.append("failing")
+            msg = "closer failed"
+            raise RuntimeError(msg)
+
+        async def succeeding() -> None:
+            closed.append("succeeding")
+
+        monkeypatch.setattr(runtime_shutdown_module, "_PROCESS_SHUTDOWN_CLOSERS", [failing, succeeding])
+
+        await _finish_runtime_shutdown(
+            shutdown_wait_task=None,
+            api_task=None,
+            orchestrator_task=None,
+            auxiliary_tasks=[],
+            orchestrator=None,
+            stall_detector=None,
+        )
+
+        assert closed == ["failing", "succeeding"]
+
+    @pytest.mark.asyncio
     async def test_runtime_cleanup_preserves_unrequested_cancellation_after_cleanup_failure(
         self,
     ) -> None:
@@ -1643,17 +1848,13 @@ class TestAgentBot(AgentBotTestBase):
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
 
-        async def _api_fails(*_args: object, **_kwargs: object) -> None:
-            msg = "Embedded API server exited unexpectedly"
-            raise RuntimeError(msg)
-
         with (
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch("mindroom.orchestrator._run_api_server", side_effect=_api_fails),
-            pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly"),
+            patch("mindroom.orchestrator._run_api_server", side_effect=RuntimeError("API crashed")),
+            pytest.raises(RuntimeError, match="API crashed"),
         ):
             await main(
                 log_level="INFO",
@@ -4673,17 +4874,6 @@ class TestMultiAgentOrchestrator:
             await orchestrator._apply_config_update_plan(current_config, plan)
 
         assert completed_configs == [new_config, new_config]
-
-    def test_signal_aware_uvicorn_server_marks_shutdown_requested_on_signal(self) -> None:
-        """Uvicorn signal handling should surface shutdown intent before serve() returns."""
-        shutdown_requested = asyncio.Event()
-        config = uvicorn.Config(app=lambda _scope, _receive, _send: None)
-        server = _SignalAwareUvicornServer(config, shutdown_requested)
-
-        with patch.object(uvicorn.Server, "handle_exit"):
-            server.handle_exit(signal.SIGINT, None)
-
-        assert shutdown_requested.is_set()
 
     @pytest.mark.asyncio
     async def test_run_with_retry_can_skip_runtime_state_updates(self) -> None:

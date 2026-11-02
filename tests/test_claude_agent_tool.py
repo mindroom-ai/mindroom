@@ -38,6 +38,7 @@ from mindroom.custom_tools import claude_agent as claude_agent_module
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import load_scope_session
 from mindroom.message_target import MessageTarget
+from mindroom.runtime_shutdown import run_process_shutdown_closers
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
@@ -312,14 +313,9 @@ class _TimeJumpFakeClaudeSDKClient(_FakeClaudeSDKClient):
 class _BlockingPromptFakeClaudeSDKClient(_FakeClaudeSDKClient):
     """Fake client that blocks only for a configured prompt value."""
 
-    instances: ClassVar[list[_BlockingPromptFakeClaudeSDKClient]] = []
     blocked_prompt: ClassVar[str] = "hold"
     blocked_query_started: ClassVar[asyncio.Event | None] = None
     release_blocked_query: ClassVar[asyncio.Event | None] = None
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        _BlockingPromptFakeClaudeSDKClient.instances.append(self)
 
     async def query(self, prompt: AsyncIterable[dict[str, Any]], session_id: str = "default") -> None:
         await super().query(prompt, session_id=session_id)
@@ -804,23 +800,31 @@ async def test_claude_send_namespaces_sessions_by_agent_id(
     assert "beta:session-1" in fake_manager._sessions
 
 
-@pytest.mark.asyncio
-async def test_claude_send_does_not_expire_active_session_during_cleanup(
-    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+@pytest.fixture
+def blocking_prompt_client(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001 - installed over the plain fake
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TTL cleanup should skip active sessions that are currently processing a query."""
+    """Install the fake whose ``hold`` prompt blocks until released, with fresh events."""
+    monkeypatch.setattr(_BlockingPromptFakeClaudeSDKClient, "blocked_query_started", asyncio.Event())
+    monkeypatch.setattr(_BlockingPromptFakeClaudeSDKClient, "release_blocked_query", asyncio.Event())
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BlockingPromptFakeClaudeSDKClient)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("blocking_prompt_client")
+async def test_idle_sweep_skips_a_session_whose_call_runs_past_its_ttl(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idle sweep skips a session whose call is still running past its TTL."""
     clock = {"now": 0.0}
 
     def _fake_monotonic() -> float:
         return clock["now"]
 
-    _BlockingPromptFakeClaudeSDKClient.instances = []
-    _BlockingPromptFakeClaudeSDKClient.blocked_prompt = "hold"
-    _BlockingPromptFakeClaudeSDKClient.blocked_query_started = asyncio.Event()
-    _BlockingPromptFakeClaudeSDKClient.release_blocked_query = asyncio.Event()
     monkeypatch.setattr(claude_agent_module, "monotonic", _fake_monotonic)
-    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _BlockingPromptFakeClaudeSDKClient)
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
 
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
@@ -834,14 +838,47 @@ async def test_claude_send_does_not_expire_active_session_during_cleanup(
         # Simulate long-running in-flight work that exceeds TTL.
         clock["now"] = 61.0
 
+        # The sweep runs between the steps of this call, which opens another session.
         second_result = await asyncio.wait_for(
             _in_call(run_context, tools.claude_send("quick", session_label="b")),
             timeout=1,
         )
         assert "Echo: quick" in second_result
+        assert set(fake_manager._sessions) == {"mindroom:session-1:a", "mindroom:session-1:b"}
     finally:
         _BlockingPromptFakeClaudeSDKClient.release_blocked_query.set()
         await asyncio.wait_for(first_send, timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("blocking_prompt_client")
+async def test_a_stopped_call_starts_its_sessions_idle_time_when_it_stops(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call stopped after running past the TTL leaves Claude Code working, so the sweep counts idle time from then."""
+    clock = {"now": 0.0}
+    monkeypatch.setattr(claude_agent_module, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+
+    stopped = asyncio.create_task(_in_call(run_context, tools.claude_send("hold", session_label="long")))
+    try:
+        await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=5)
+        clock["now"] = 61.0
+        stopped.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopped
+    finally:
+        _BlockingPromptFakeClaudeSDKClient.release_blocked_query.set()
+
+    # Once the sweep has closed another session idle past its TTL, it has also seen the stopped call's session.
+    await _in_call(run_context, tools.claude_send("quick", session_label="probe"))
+    probe = fake_manager._sessions["mindroom:session-1:probe"]
+    probe.last_used_at -= probe.ttl_seconds + 1
+    await _until(lambda: probe.key not in fake_manager._sessions)
+    assert "mindroom:session-1:long" in fake_manager._sessions
 
 
 @pytest.mark.asyncio
@@ -925,8 +962,9 @@ async def test_claude_send_refreshes_last_used_after_long_query(
     _TimeJumpFakeClaudeSDKClient.clock = clock
     monkeypatch.setattr(claude_agent_module, "monotonic", _fake_monotonic)
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _TimeJumpFakeClaudeSDKClient)
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
 
-    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     await _in_call(run_context, tools.claude_send("short"))
@@ -935,6 +973,8 @@ async def test_claude_send_refreshes_last_used_after_long_query(
     await _in_call(run_context, tools.claude_send("long"))
 
     _TimeJumpFakeClaudeSDKClient.jump_seconds = 0.0
+    # The sweep runs a pass before the next call reuses the session.
+    await asyncio.sleep(0)
     result = await _in_call(run_context, tools.claude_send("after-long"))
 
     assert "Echo: after-long" in result
@@ -964,7 +1004,7 @@ _TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("tes
 
 @pytest.mark.asyncio
 async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
-    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    fake_manager: claude_agent_module._ClaudeSessionManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A session outlives its turn, whose contextvars hold the turn's Agent and tools."""
@@ -984,6 +1024,8 @@ async def test_session_opened_during_a_turn_does_not_inherit_the_turn_context(
     assert client.receiver is not None
     assert _TURN_OWNER not in client.reader.get_context()
     assert _TURN_OWNER not in client.receiver.get_context()
+    assert fake_manager._sweep is not None
+    assert _TURN_OWNER not in fake_manager._sweep.get_context()
 
     # A later turn ends the session; the task that connected the client still disconnects it.
     await asyncio.create_task(_in_call(run_context, tools.claude_end_session()))
@@ -1073,25 +1115,26 @@ async def test_stuck_cleanup_of_a_cancelled_start_does_not_block_other_sessions(
 
 
 @pytest.mark.asyncio
-async def test_expired_session_is_cleaned_and_recreated(
+async def test_idle_session_closes_on_its_own_after_its_ttl(
     fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Expired sessions should be disconnected and recreated on next use."""
-    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", session_ttl_minutes=1)
+    """Each session idle past its TTL closes with no later call, and the next call starts a new one."""
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
-    first_response = await _in_call(run_context, tools.claude_send("hello"))
-    assert "Echo: hello" in first_response
+    for prompt in ["hello", "again"]:
+        assert f"Echo: {prompt}" in await _in_call(run_context, tools.claude_send(prompt))
+        [session] = fake_manager._sessions.values()
+        session.last_used_at -= session.ttl_seconds + 1
 
-    session_key = "mindroom:session-1"
-    first_session = fake_manager._sessions[session_key]
-    first_client = first_session.client
-    first_session.last_used_at -= first_session.ttl_seconds + 1
-
-    second_response = await _in_call(run_context, tools.claude_send("again"))
-    assert "Echo: again" in second_response
+        # The sweep ends once it closed the last session, and the next session starts another.
+        assert fake_manager._sweep is not None
+        await fake_manager._sweep
+        assert not cast("_FakeClaudeSDKClient", session.client).connected
+        assert fake_manager._sessions == {}
     assert len(_FakeClaudeSDKClient.instances) == 2
-    assert first_client.connected is False
 
 
 @pytest.mark.asyncio
@@ -1402,9 +1445,11 @@ async def test_a_failed_call_closes_only_the_session_it_used(
 
 
 async def _until(condition: Callable[[], bool]) -> None:
-    """Let other tasks run until ``condition`` holds."""
-    while not condition():  # noqa: ASYNC110 - the queues polled here signal no event to await
-        await asyncio.sleep(0)
+    """Let other tasks run until ``condition`` holds, failing after 10 seconds."""
+    # A pytest-timeout raised inside another spinning task, such as the idle sweep, would leave this loop running.
+    async with asyncio.timeout(10):
+        while not condition():  # noqa: ASYNC110 - the queues polled here signal no event to await
+            await asyncio.sleep(0)
 
 
 async def _stop_when_waiting(call: Coroutine[Any, Any, str]) -> None:
@@ -1763,7 +1808,6 @@ async def test_claude_turns_read_by_a_stopped_call_still_count(
 async def _expire(manager: claude_agent_module._ClaudeSessionManager, session_key: str) -> None:
     session = manager._sessions[session_key]
     session.last_used_at -= session.ttl_seconds + 1
-    await manager.get("other-conversation")
 
 
 async def _evict(manager: claude_agent_module._ClaudeSessionManager, session_key: str) -> None:
@@ -1784,6 +1828,7 @@ async def _evict(manager: claude_agent_module._ClaudeSessionManager, session_key
         ),
         pytest.param(_expire, False, id="expiry"),
         pytest.param(_evict, False, id="eviction"),
+        pytest.param(lambda _manager, _session_key: run_process_shutdown_closers(), False, id="shutdown"),
     ],
 )
 async def test_unread_turns_count_when_their_session_closes(
@@ -1795,6 +1840,7 @@ async def test_unread_turns_count_when_their_session_closes(
 ) -> None:
     """Complete turns no call read, such as a stopped call's answer, count toward its requester at session close."""
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
     turns = [[_ECHO, _claude_response("claude-sonnet-5-5", "msg-1", 1000), _claude_result(200)], [_ECHO]]
     monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", turns)
 
@@ -1831,6 +1877,95 @@ async def test_unread_turns_count_when_their_session_closes(
         ("@alice:localhost", "claude-sonnet-5-5", 1000, 200, 0, 0),
         ("@bob:localhost", "claude-sonnet-5-5", 800, 90, 0, 0),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("blocking_prompt_client")
+async def test_shutdown_leaves_a_session_that_a_call_still_uses(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+) -> None:
+    """Shutdown closes the idle sessions without waiting for a call it leaves running, such as an API request's."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+    await _in_call(run_context, tools.claude_send("quick", session_label="idle"))
+    [idle_client] = _FakeClaudeSDKClient.instances
+
+    running = asyncio.create_task(_in_call(run_context, tools.claude_send("hold", session_label="busy")))
+    try:
+        await asyncio.wait_for(_BlockingPromptFakeClaudeSDKClient.blocked_query_started.wait(), timeout=5)
+        [_, busy_client] = _FakeClaudeSDKClient.instances
+        await asyncio.wait_for(run_process_shutdown_closers(), timeout=5)
+        assert set(fake_manager._sessions) == {"mindroom:session-1:busy"}
+        assert not idle_client.connected
+        assert busy_client.connected
+    finally:
+        _BlockingPromptFakeClaudeSDKClient.release_blocked_query.set()
+        await asyncio.wait_for(running, timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_sessions", [200, 1], ids=["beside-it", "evicted-by-it"])
+async def test_shutdown_does_not_wait_for_a_session_that_a_call_still_opens(
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+    max_sessions: int,
+) -> None:
+    """Shutdown closes the idle sessions while a call it leaves running, such as an API request's, still opens one."""
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", max_sessions=max_sessions)
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+    await _in_call(run_context, tools.claude_send("quick", session_label="idle"))
+    [idle_client] = _FakeClaudeSDKClient.instances
+    connecting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def connect_slowly(client: _FakeClaudeSDKClient) -> None:
+        connecting.set()
+        await release.wait()
+        client.connected = True
+
+    monkeypatch.setattr(_FakeClaudeSDKClient, "connect", connect_slowly)
+    opening = asyncio.create_task(_in_call(run_context, tools.claude_send("hello", session_label="new")))
+    try:
+        await asyncio.wait_for(connecting.wait(), timeout=5)
+        await asyncio.wait_for(run_process_shutdown_closers(), timeout=5)
+        assert not idle_client.connected
+    finally:
+        release.set()
+        await asyncio.wait_for(opening, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_close_the_idle_sweep_started(
+    fake_manager: claude_agent_module._ClaudeSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown waits for the sweep's close of an expired session, which counts the turns no call read."""
+    monkeypatch.setattr(claude_agent_module, "_SWEEP_INTERVAL_SECONDS", 0)
+    tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
+    run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
+    await _in_call(run_context, tools.claude_send("hello"))
+    [session] = fake_manager._sessions.values()
+    client = cast("_FakeClaudeSDKClient", session.client)
+    release = asyncio.Event()
+    disconnect = client.disconnect
+
+    async def disconnect_slowly() -> None:
+        await release.wait()
+        await disconnect()
+
+    monkeypatch.setattr(client, "disconnect", disconnect_slowly)
+    try:
+        session.last_used_at -= session.ttl_seconds + 1
+        await _until(session.close_requested.is_set)
+
+        shutdown = asyncio.create_task(run_process_shutdown_closers())
+        done, _pending = await asyncio.wait({shutdown}, timeout=0.2)
+        assert not done
+    finally:
+        release.set()
+    await asyncio.wait_for(shutdown, timeout=5)
+    assert not client.connected
+    assert not [task for task in asyncio.all_tasks() if task.get_name() == "claude_session_close"]
 
 
 @pytest.mark.asyncio

@@ -712,7 +712,6 @@ class ResponseRunner:
         if request.follow_up_key is not None and not await self._follow_up_due(request):
             return Unclaimed(UnclaimedReason.NOT_DUE)
         handle = await self.deps.replies.claim(
-            delivery_id=request.response_envelope.source_event_id,
             sources=request.sources,
             room_id=request.room_id,
             thread_id=request.thread_id,

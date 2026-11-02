@@ -224,6 +224,8 @@ def _reply(
         authored["defaults"]["compaction"] = {"model": "summary", "reserve_tokens": 500}
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
+    # An approval-gated call pauses the reply, which only a reply without background tool jobs does.
+    config.background_tool_jobs.enabled = False
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     model = ScriptedModel([list(turn) for turn in turns])
