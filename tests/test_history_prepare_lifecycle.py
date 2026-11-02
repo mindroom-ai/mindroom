@@ -2303,6 +2303,19 @@ async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_history_exactly_at_the_final_budget_replays_whole(tmp_path: Path) -> None:
+    """A request exactly at the limit still fits it, so its history is not trimmed."""
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})
+    reported = 3_500 + _TAIL_TOKENS - prepared.static_tokens
+
+    state = _finalize_with_history_budget(tmp_path, prepared, reported)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode != "limited"
+    assert state.replay_plan.estimated_tokens == reported
+
+
+@pytest.mark.asyncio
 async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(tmp_path: Path) -> None:
     """A reported size over the final budget trims history even where the estimate alone would fit it.
 
