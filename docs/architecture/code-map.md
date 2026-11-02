@@ -186,12 +186,12 @@ Matrix sync callback
 | `config/egress_broker.py` | `egress_broker` config models: services, preset expansion, rules, auth types, and their validation |
 | `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, and where to add missing ones |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
-| `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
-| `delegation/background.py` | A background subagent's job: native child admission, outcome, and cleanup inside the generic execution owner |
-| `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
+| `tool_jobs/runtime.py` | Accepted execution ownership, what a job runs and how it is known, durable outcomes, scoped discovery, and result claims |
+| `delegation/background.py` | A subagent call's job: the child it is known by, its saved snapshot, its outcome, and its cleanup inside the generic execution owner |
+| `delegation/job_approvals.py` | A child's approval requests, asked through the cards of the job that runs it |
 | `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting and published runtime |
 | `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
-| `tool_jobs/execution.py` | The loop's job admission middleware, the managed call it runs, and the `background_after` definitions step |
+| `tool_jobs/execution.py` | The loop's job admission middleware, the managed call it runs as a tool's or a subagent's job, and the `background_after` definitions step |
 | `tool_jobs/consumption.py` | Exact durable acknowledgement after the parent run saves a consumed result |
 | `tool_jobs/execution_scope.py` | Response execution envelopes |
 | `tool_jobs/resources.py` | Retained resource cleanup ownership |

@@ -11,8 +11,7 @@ import pytest
 from mindroom import ai as ai_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
@@ -31,6 +30,7 @@ from tests.delegation_helpers import (
     _saved_approval_calls,
     approval_executor,
     authored_prompts,
+    native_delegation_config,
     offered_tools,
     respond,
     resume,
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -63,7 +64,7 @@ def _config(
     approval: bool = False,
     knowledge_bases: tuple[str, ...] = (),
 ) -> Config:
-    return Config(
+    return native_delegation_config(
         agents={
             "leader": AgentConfig(
                 display_name="Leader",
@@ -76,8 +77,6 @@ def _config(
             "child": AgentConfig(display_name="Child"),
         },
         knowledge_bases={base_id: KnowledgeBaseConfig(path=f"./{base_id}") for base_id in knowledge_bases},
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         models={
             "default": ModelConfig(provider="openai", id="default-model"),

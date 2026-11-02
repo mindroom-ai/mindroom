@@ -27,7 +27,7 @@ from mindroom.delegation.personas import (
     persona_tool_policy,
     require_built_persona_tools,
 )
-from mindroom.delegation.state import DELEGATION_FUNCTIONS
+from mindroom.delegation.state import is_delegation_function
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
@@ -994,20 +994,23 @@ def apply_tool_approval_capability(
 
     A caller that cannot resume a paused run (``resumable`` False) is offered none of the functions that ask for
     approval. Otherwise each function an approval rule gates pauses the run for its approval, or, with
-    ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one; the
-    delegation functions pause for their driver, which owns the policy gate and the exact child wait.
+    ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one. Without
+    ``approvals_as_jobs`` the delegation functions pause for their native driver, which owns the policy gate and the
+    exact child wait; with it they are ordinary calls whose subagents run as jobs.
     """
 
     def offered(function: ToolFunction) -> ToolFunction | None:
         may_gate = _approval_may_gate(config, function.name, registered_tool_name)
         if not resumable:
             return None if function.gate is ToolGate.CONFIRM or may_gate else function
-        if registered_tool_name == "delegate" and function.name in DELEGATION_FUNCTIONS:
+        delegation = is_delegation_function(function)
+        if delegation and not approvals_as_jobs:
             return replace(function, gate=ToolGate.DELEGATION)
         # A function that asks for its own confirmation keeps it; a rule may gate any other.
         if function.gate is ToolGate.CONFIRM or not may_gate:
             return function
-        if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
+        # A subagent call pauses the reply for its own approval, so its job only ever waits for its child's.
+        if approvals_as_jobs and not delegation and approval_can_run_as_job(function, toolkit):
             return replace(function, gate=ToolGate.JOB)
         return replace(function, gate=ToolGate.POLICY)
 

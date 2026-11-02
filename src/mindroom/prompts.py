@@ -690,7 +690,7 @@ DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured
 
 Use run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.
 Delegation is limited to three nested child levels; a follow-up does not add nesting depth.
-In Matrix, child tools that require approval pause both runs until the user approves or denies them.
+In Matrix, a child tool that requires approval runs only once the user approves it.
 Other runtimes retain their approval restrictions.
 Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""

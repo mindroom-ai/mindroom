@@ -1,37 +1,30 @@
-"""Native delegation adapter for the generic durable tool-job owner."""
+"""A subagent call's job: the child it is known by, its saved snapshot, outcome, and cleanup."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
-from mindroom.tool_jobs.runtime import (
-    BackgroundJob,
-    BackgroundOutcome,
-    JobClaim,
-    JobRecoveryBlockedError,
-    ToolJobRuntime,
-)
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobRecoveryBlockedError, JobSpec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def _child_snapshot(child: DelegationChild) -> dict[str, Any]:
+def child_snapshot(child: DelegationChild) -> dict[str, Any]:
     """Keep execution identity in metadata; the job outcome owns retained result text."""
     return asdict(replace(child, result=None))
 
 
 def delegation_child(job: BackgroundJob) -> DelegationChild:
-    """Reconstruct a native child from an opaque durable adapter snapshot."""
+    """Reconstruct the child a subagent job saved in its adapter."""
     if job.kind != "delegation":
         msg = "Job does not represent a native delegation."
         raise SubagentSessionError(msg)
@@ -44,7 +37,7 @@ def delegation_outcome(status: DelegationTerminalStatus, text: str) -> Backgroun
 
 
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
-    # Metadata-only reconstruction still needs the durable native outcome.
+    # A child rebuilt from its saved snapshot has no result, so cleanup must settle it.
     if child.result is None or child.status not in TERMINAL_CHILD_STATUSES:
         return None
     return delegation_outcome(cast("DelegationTerminalStatus", child.status), child.result)
@@ -57,7 +50,10 @@ async def reconcile_delegation(
     runtime_paths: RuntimePaths | None = None,
     child: DelegationChild | None = None,
 ) -> BackgroundOutcome | None:
-    """Reconcile native durable evidence only while no native executor owns its handle."""
+    """Settle a stopped subagent job's child, under its recovery lock when rebuilt from its saved snapshot.
+
+    A live child already settled by its job needs no cleanup.
+    """
     if job.kind != "delegation":
         return None
     child = child or delegation_child(job)
@@ -70,42 +66,34 @@ async def reconcile_delegation(
                 await cleanup(child)
         else:
             await cleanup(child)
-    job.adapter["child"] = _child_snapshot(child)
+    job.adapter["child"] = child_snapshot(child)
     return _terminal(child)
 
 
-async def start_delegation(
-    runtime: ToolJobRuntime,
+def delegation_job(
     child: DelegationChild,
-    *,
-    owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
-    cancel: Callable[[DelegationChild], Awaitable[None]],
-) -> tuple[BackgroundJob, JobClaim | None]:
-    """Accept native child ownership without exposing its live object in a generic record, claiming its outcome."""
-    context = get_tool_runtime_context()
-    adapter = {"child": _child_snapshot(child)}
+    *,
+    cleanup: Callable[[DelegationChild], Awaitable[None]],
+) -> JobSpec:
+    """Return the job that runs ``operation`` for ``child``, known as that child, and settles it with ``cleanup``.
+
+    The saved child is the one admitted until the operation saves a newer one, and the one it ended with once it ends;
+    a cancellation or shutdown in this process settles the live child, which recovery after a crash rebuilds from the
+    saved one.
+    """
+    adapter: dict[str, Any] = {"child": child_snapshot(child)}
 
     async def run() -> BackgroundOutcome:
-        # Snapshot the child's native state into the job adapter however the run ends.
         try:
             return await operation()
         finally:
-            adapter["child"] = _child_snapshot(child)
+            adapter["child"] = child_snapshot(child)
 
-    async def cleanup(job: BackgroundJob) -> BackgroundOutcome | None:
-        return await reconcile_delegation(job, cleanup=cancel, child=child)
-
-    return await runtime.start(
-        child.delegation_id,
-        # A subagent job is known by the agent it runs.
+    return JobSpec(
         tool_name=child.child_agent_name,
-        depth=child.depth - 1,
         kind="delegation",
-        source_event_id=context.membership_turn_id if context is not None else None,
-        source_kind=context.source_kind if context is not None else None,
         adapter=adapter,
-        owner=owner,
         operation=run,
-        cancel=cleanup,
+        cancel=partial(reconcile_delegation, cleanup=cleanup, child=child),
     )

@@ -139,6 +139,7 @@ def _reviewed_team(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TeamTurn:
             "general-model": [],
         },
     )
+    team.config.background_tool_jobs.enabled = False
     team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
     return team
 

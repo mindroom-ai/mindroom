@@ -392,6 +392,8 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
                     "default": "auto_approve",
                     "rules": [{"match": function_name, "action": "require_approval"}],
                 },
+                # Without background tool jobs, the gated call pauses the reply and saves its approval.
+                "background_tool_jobs": {"enabled": False},
             },
         ),
         paths,

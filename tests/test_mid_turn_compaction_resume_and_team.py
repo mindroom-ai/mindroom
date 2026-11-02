@@ -180,6 +180,7 @@ def _resumable(
             "summary": {"provider": "openai", "id": "summary-model", "context_window": 100_000},
         },
         "tool_approval": {"rules": [{"match": "approve_me", "action": "require_approval"}]},
+        "background_tool_jobs": {"enabled": False},
         "timezone": "UTC",
     }
     paths = test_runtime_paths(tmp_path)

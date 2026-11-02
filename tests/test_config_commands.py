@@ -2386,6 +2386,8 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+                # Starting with jobs off lets the saved edit turn them on.
+                "background_tool_jobs": {"enabled": False},
             },
         ),
         encoding="utf-8",

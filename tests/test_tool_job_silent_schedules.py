@@ -14,7 +14,6 @@ from mindroom.ai import stream_agent_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
-from mindroom.delegation.background import delegation_child
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.response_turn import TurnSinks, collect_streamed_response_content
@@ -37,13 +36,11 @@ from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls,
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.tool_job_helpers import (
-    completed_delegation_job,
     job_actor,
     job_tool,
     pending_outcome,
     pending_outcomes,
     run_job_turn,
-    start_delegation_job,
     start_job,
     tool_job_runtime,
 )
@@ -241,9 +238,8 @@ async def test_quiet_and_visible_results_stay_with_their_own_replies(tmp_path: P
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("native", [False, True])
-async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_path: Path, *, native: bool) -> None:
-    """SDK and native delegated calls stay with quiet replies after a restart, apart from visible ones."""
+async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_path: Path) -> None:
+    """A silent schedule's jobs stay with quiet replies after a restart, apart from visible ones."""
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -265,21 +261,13 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
         await release.wait()
         return "No findings"
 
-    async def native_operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", await slow())
-
     model = ScriptedModel([calls(tool_call("slow", "call", background_after=0)), answer("NO_REPLY")])
     actor = job_actor(job_tool(slow), name="general")
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                if native:
-                    child = replace(delegation_child(completed_delegation_job()), caller_agent_name="general")
-                    accepted = await start_delegation_job(runtime, child, owner=owner, operation=native_operation)
-                    job_id = accepted.job_id
-                else:
-                    response = await run_job_turn(actor, model, "Check quietly", session_id=owner.session_id or "")
-                    job_id = json.loads(str(response.tools[0].result))["job_id"]
+                response = await run_job_turn(actor, model, "Check quietly", session_id=owner.session_id or "")
+                job_id = json.loads(str(response.tools[0].result))["job_id"]
             release.set()
             waited = await runtime.wait(job_id, owner=owner, depth=0)
             await runtime.release_wait(job_id, waited.claim)

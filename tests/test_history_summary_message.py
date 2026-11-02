@@ -222,7 +222,7 @@ _PAST = ["past-1 team question", "past-1 team answer", "past-2 team question", "
 
 
 def _checker_pauses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TeamTurn:
-    """Return the squad whose leader hands the checker a ``touch`` call that waits for approval."""
+    """Return the squad whose leader hands the checker a ``touch`` call that pauses the turn for approval."""
     return squad_turn(
         tmp_path,
         monkeypatch,

@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.state import DelegationState
 from mindroom.llm.runs import RunStatus
@@ -22,6 +20,7 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
     approval_executor,
+    native_delegation_config,
     respond,
     respond_team,
     resume,
@@ -47,14 +46,12 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
 ) -> None:
     """Omitted/null targets run self, including after approval; empty/disallowed targets cannot execute."""
     allowed = ["other"] if target == "not_allowed" else ["leader"]
-    config = Config(
+    config = native_delegation_config(
         agents={
             "leader": AgentConfig(display_name="Leader", tools=["calculator"], delegate_to=allowed),
             "other": AgentConfig(display_name="Other"),
         },
         teams={"squad": TeamConfig(display_name="Squad", role="Delegates.", agents=["leader"], mode="coordinate")},
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}]} if execution != "direct" else {},
     )
     paths = _runtime_paths(tmp_path)

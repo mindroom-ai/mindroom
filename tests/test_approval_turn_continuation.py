@@ -143,7 +143,11 @@ async def _paused_turn(
     *,
     show_tool_calls: bool = True,
 ) -> PausedAttempt:
-    """Run one reply of ``general`` as the response runner does and return the pause it suspended on, as it shows."""
+    """Run one reply of ``general`` as the response runner does and return the pause it suspended on, as it shows.
+
+    The reply runs without background tool jobs, so a gated call pauses it.
+    """
+    config.background_tool_jobs.enabled = False
     ctx = replace(
         make_turn_context(
             "general",
@@ -186,6 +190,8 @@ async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
                 "agents": {"general": {"display_name": "General", "tools": [{"calculator": {"defer": True}}]}},
                 "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
                 "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+                # Without background tool jobs, the gated call pauses the reply.
+                "background_tool_jobs": {"enabled": False},
             },
         ),
         paths,

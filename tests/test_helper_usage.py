@@ -141,6 +141,8 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         config.agents["general"].tools.append(ToolConfigEntry(name="shell"))
         config.administrators = ["@user:localhost"]
     config.memory.backend = "none"
+    # The approved call pauses the reply, which needs background tool jobs off.
+    config.background_tool_jobs.enabled = False
     config.models["helper"] = ModelConfig(provider="openai", id="helper-model")
     config.agents["helper"] = AgentConfig(display_name="Helper", model="helper")
     config.tool_approval = ToolApprovalConfig.model_validate(

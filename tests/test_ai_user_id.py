@@ -180,6 +180,8 @@ def _bound(
         bound.tool_approval = ToolApprovalConfig(
             rules=[ApprovalRuleConfig(match="dangerous", action="require_approval")],
         )
+        # A gated call pauses the reply, which only a reply without background tool jobs does.
+        bound.background_tool_jobs.enabled = False
     return bound, runtime_paths
 
 
