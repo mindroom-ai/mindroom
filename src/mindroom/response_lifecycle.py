@@ -234,6 +234,10 @@ class _QueuedMessageState:
             changed = self._changed
             if await self._interrupts():
                 return
+            # The judgment can absorb this wait's cancellation (an HTTP client whose own timeout fires with it takes it
+            # for that timeout), so a cancelled wait stops here instead of waiting again.
+            if (task := asyncio.current_task()) is not None and task.cancelling():
+                raise asyncio.CancelledError
             # A queue that changed while it was judged or acknowledged is judged again at once.
             await changed.wait()
 
