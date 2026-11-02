@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -9,7 +11,10 @@ from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.orchestration import config_warnings
 from mindroom.orchestration.config_warnings import warn_about_config_risks
+from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,3 +101,19 @@ def test_script_counts_as_unconfined_only_when_scripts_run_in_the_primary(
     warnings = _warnings(config, _runtime_paths(tmp_path, process_env))
 
     assert [warning["unconfined_primary_tools"] for warning in warnings] == ([unconfined] if unconfined else [])
+
+
+def test_unrestricted_plugin_tool_that_executes_code_still_warns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only `script` gets the script-backend rule; other primary tools that execute code keep the file_access check."""
+    builtins = builtin_tool_registry().entries
+    runner = replace(builtins["gmail"], name="plugin_runner", file_access=ToolFileAccess.AGENT, executes_code=True)
+    tools = ToolRegistry(entries={**builtins, "plugin_runner": runner})
+    monkeypatch.setattr(config_warnings, "config_plugins", lambda *_args: SimpleNamespace(tools=tools))
+    config = _config(["shell", "plugin_runner"], {"file_access": "unrestricted", "worker_tools": ["shell"]})
+
+    warnings = _warnings(config, _runtime_paths(tmp_path))
+
+    assert [warning["unconfined_primary_tools"] for warning in warnings] == [["plugin_runner"]]

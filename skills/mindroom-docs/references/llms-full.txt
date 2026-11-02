@@ -8599,6 +8599,7 @@ Scripts also need a worker backend or explicit local execution; see [Worker And 
 | `max_runtime_hours` | `24` | Maximum lifetime of one run in hours, positive and finite; the deadline holds even while the primary runtime is offline |
 
 Each run keeps the limits and `allowed_tools` value in effect when it started.
+`file_access` is not accepted on a `script` entry, since the tool reads only its source file from the agent workspace; an entry that still sets `file_access: unconfined` fails config validation with an error that says to remove it.
 
 ### Which tools a script can call and when it needs approval
 

@@ -2059,6 +2059,28 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
             )
 
 
+def test_script_file_access_override_is_rejected_with_removal_hint(tmp_path: Path) -> None:
+    """A config that still marks script unconfined fails to load and is told to remove the key."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "agents": {
+                    "watcher": {"display_name": "Watcher", "tools": [{"script": {"file_access": "unconfined"}}]},
+                },
+            },
+            runtime_paths,
+        )
+
+    expected = (
+        "agents.watcher.tools[0].script.file_access was removed; script reads only its workspace source and declares"
+        " no file access, so remove the setting."
+    )
+    assert expected in str(exc_info.value)
+
+
 @pytest.mark.parametrize("tool_name", ["reasoning", "zep", "daytona"])
 def test_add_instructions_is_rejected_because_instructions_always_show(tool_name: str) -> None:
     """The retired switch of Agno's toolkits is named and the author told to remove it, wherever a tool is authored."""

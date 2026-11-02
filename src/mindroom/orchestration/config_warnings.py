@@ -31,14 +31,20 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
     _warn_about_agent_keys_without_worker_commands(config, runtime_paths)
 
 
-def _primary_tool_is_unconfined(metadata: ToolMetadata, file_access: str, *, scripts_run_in_primary: bool) -> bool:
+def _primary_tool_is_unconfined(
+    name: str,
+    metadata: ToolMetadata,
+    file_access: str,
+    *,
+    scripts_run_in_primary: bool,
+) -> bool:
     """Return whether a primary-process tool can reach files beyond the agent workspace."""
     if metadata.file_access is ToolFileAccess.UNCONFINED:
         return True
-    if metadata.executes_code:
-        # A confined primary tool that executes code, such as `script`, launches that code on the script backend.
-        return scripts_run_in_primary
-    return metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted"
+    if metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted":
+        return True
+    # `script` itself reads only its workspace source, but the scripts it launches run here under local execution.
+    return name == "script" and scripts_run_in_primary
 
 
 def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Config, runtime_paths: RuntimePaths) -> None:
@@ -58,6 +64,7 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
             for name in tool_names
             if name not in worker_tools
             and _primary_tool_is_unconfined(
+                name,
                 tools.entries[name],
                 agent.file_access,
                 scripts_run_in_primary=scripts_run_in_primary,
