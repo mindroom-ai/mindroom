@@ -25,7 +25,7 @@ _.unique_products  # Pydantic field validator (src/mindroom/tool_system/atlassia
 _.pinned_site  # Pydantic model validator (src/mindroom/tool_system/atlassian_connections.py)
 _.give_each_name_one_entry  # Pydantic field validator (src/mindroom/config/knowledge_graph.py)
 _._validate_name  # Pydantic field validator (src/mindroom/config/personal_agents.py)
-_._validate_matrix_username  # Pydantic field validator (src/mindroom/config/personal_agents.py)
+_._validate_matrix_username  # Pydantic field validator (src/mindroom/config/agent.py, src/mindroom/config/personal_agents.py)
 _._validate_users  # Pydantic field validator (src/mindroom/config/personal_agents.py)
 _._validate_agent  # Pydantic model validator (src/mindroom/config/personal_agents.py)
 _.validate_identity_mapping  # Pydantic model validator (src/mindroom/config/slack.py)

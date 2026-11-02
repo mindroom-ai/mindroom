@@ -1754,7 +1754,12 @@ def _entity_edit_plan(
 def test_every_agent_and_team_field_is_classified_for_config_reload() -> None:
     """A new entity field must be classified, so it cannot silently skip a restart its bot needs."""
     assert set(AgentConfig.model_fields) >= _AGENT_LIVE_FIELDS
-    assert set(AgentConfig.model_fields) - _AGENT_LIVE_FIELDS == {"display_name", "accept_invites", "private"}
+    assert set(AgentConfig.model_fields) - _AGENT_LIVE_FIELDS == {
+        "display_name",
+        "accept_invites",
+        "private",
+        "matrix_username",
+    }
     assert set(TeamConfig.model_fields) >= _TEAM_LIVE_FIELDS
     assert set(TeamConfig.model_fields) - _TEAM_LIVE_FIELDS == {"display_name", "accept_invites"}
 
