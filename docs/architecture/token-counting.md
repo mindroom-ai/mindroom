@@ -30,6 +30,16 @@ Provider tokens per o200k_base token on those samples:
 | Gemini 3.8 Flash | 1.022 | 1.309 | 1.256 | 1.119 | 1.042 | 0.803 |
 | GPT-6 Astra | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
+A live run on 2026-11-02 sent three replies per model through the reply path, a first prompt of about 26,000 characters of docs, JSON, and Python, then two short follow-ups, and compared each reply's prepared first-request size with the size the provider reported:
+
+| Model | Reply 1 (estimated) | Reply 2 (reported size) | Reply 3 (reported size) |
+|---|---:|---:|---:|
+| GPT-6 Luna | −0.2% | +1.3% | 0.0% |
+| Gemini 3.8 Flash | +20.6% | +0.4% | +0.3% |
+| Claude Sonnet 5.5 (Vertex AI) | +19.6% | +0.2% | +0.2% |
+
+Gemini bills a replayed thought signature about as the reasoning its reply reported: before its route's replay estimate added it, replies that reported 476 and 389 reasoning tokens grew the next requests by 447 and 385 tokens beyond their text, and replies 2 and 3 came out 4.7% and 3.7% low.
+
 ## Assumptions
 
 - tiktoken's mapping of a model id to its encoding (`o200k_base`, `o200k_harmony`, or `cl100k_base` for older models such as GPT-4) is that model's tokenizer only on a route that serves OpenAI's own models (OpenAI's endpoint, Azure, Codex, OpenRouter `openai/` ids); a llama.cpp or other OpenAI-compatible server can serve any model under an OpenAI name.

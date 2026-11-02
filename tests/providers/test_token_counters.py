@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64
 import math
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx2
@@ -11,6 +13,11 @@ import pytest
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.history.replay import estimate_request_messages_tokens
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelIdentity
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.token_counting import families
@@ -97,3 +104,33 @@ def test_wrapped_provider_forwards_the_token_counter(tmp_path: Path) -> None:
     wrapped = WrappedProvider(adapter, lambda inner, request: inner.stream(request))
     assert count(wrapped.token_counter, "hello world") == count(adapter.token_counter, "hello world")
     assert wrapped.token_counter.replay is adapter
+
+
+def test_gemini_sizes_a_replayed_thought_signature_as_the_reasoning_its_reply_reported(tmp_path: Path) -> None:
+    """Gemini bills a replayed signed reply about as the reasoning that reply reported, beyond its visible text.
+
+    In a live run, replies that reported 476 and 389 reasoning tokens grew the next requests by 447 and 385 tokens
+    beyond their prompts and visible text. The running turn's own replies are left to mid-turn sizing.
+    """
+    gemini = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, lambda _r: None)
+    question = Message(role="user", content="What does the document decide?", from_history=True)
+    signature = base64.b64encode(b"signature" * 40).decode("ascii")
+    signed = Message(
+        role="assistant",
+        content="It drops counting endpoints.",
+        from_history=True,
+        metrics=MessageMetrics(tokens=TokenCounts(reasoning_tokens=500)),
+        provider_data={"gemini_parts": [{"text": "It drops counting endpoints.", "thought_signature": signature}]},
+    )
+    stamp_model(signed, ModelIdentity(id="gemini-3.8-flash", provider="google"))
+    unsigned = replace(
+        signed,
+        provider_data={key: value for key, value in signed.provider_data.items() if key != "gemini_parts"},
+    )
+    counter = gemini.token_counter
+
+    def sized(reply: Message) -> int:
+        return estimate_request_messages_tokens([question, reply], counter=counter)
+
+    assert sized(signed) - sized(unsigned) == 500
+    assert sized(replace(signed, from_history=False)) == sized(replace(unsigned, from_history=False))

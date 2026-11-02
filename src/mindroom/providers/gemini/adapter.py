@@ -34,6 +34,7 @@ from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.gemini.wire import (
     GeminiReply,
     MediaRoute,
+    estimate_replay_tokens,
     format_contents,
     function_declarations,
     malformed_tool_call_error,
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
 
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
@@ -74,7 +76,7 @@ class GeminiProvider:
     capabilities: Capabilities
     settings: GeminiSettings
     _client: Client | None = field(default=None, init=False, repr=False)
-    # Gemini keeps no history of its own, and its replayed history is sized canonically.
+    # Gemini keeps no history of its own; every request replays it.
     native_history_route: ClassVar[None] = None
 
     @property
@@ -85,7 +87,15 @@ class GeminiProvider:
     @property
     def token_counter(self) -> TokenCounter:
         """Gemini's tokenizer does not run locally, so the route estimates; a tuned model's id need not name Gemini."""
-        return counter_for_model(self.identity, family="gemini")
+        return counter_for_model(self.identity, family="gemini", replay=self)
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        """Replayed media is sized by the history estimate's allowances."""
+        return False
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
+        """Count the contents an explicitly replayed request sends for ``messages``, for history budgets."""
+        return estimate_replay_tokens(messages, counter=self.token_counter)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.
