@@ -376,9 +376,10 @@ setsid nohup "$upgrade_root/old/.venv/bin/mindroom" run --storage-path "$MINDROO
 
 Compaction knobs that make it fire within a few turns:
 
-- Automatic compaction runs only when history exceeds the *hard* budget, `replay_window_tokens - reserve_tokens - static_prompt_tokens`, not the soft threshold. The static prompt alone is about 1,250 tokens, so set `replay_window_tokens` to roughly `static + 350`, `reserve_tokens: 100`, and `threshold_tokens` to the same value as the replay window.
+- Text compaction runs before a reply when its whole first request (system prompt, tools, history, and prompt) exceeds `replay_window_tokens - reserve_tokens`; the soft threshold applies only to native compaction. The request without history is a few thousand tokens (`static_tokens` in the log line below), so set `replay_window_tokens` to roughly `static_tokens + 1000`, `reserve_tokens: 100`, and `threshold_tokens` to the same value as the replay window.
 - The summary budget comes from the model `context_window`: `context_window - reserve - 2000 - 10%` must exceed 2,000, so keep `context_window` at 64000 or more while capping `replay_window_tokens`.
-- Read the decision from the `History preparation check` log line: `compaction_decision`, `compaction_reason`, `current_tokens`, `hard_budget`, `unavailable_reason`.
+- Read the decision from the `History preparation check` log line: `compaction_decision`, `compaction_reason`, `request_tokens` (the first request's size), `reported` (whether a provider-reported size anchored it), `limit_tokens`, `static_tokens`, `unavailable_reason`.
+- To check sizing itself, make the stub report each request's size as `usage.prompt_tokens` (for example an o200k count of every string in the sent body) and compare it with `request_tokens`; a later request anchors on that reported size.
 - Hot reload on older versions did not apply model `context_window` or agent `compaction` changes; restart the backend after editing them.
 
 Reading the thread and the model stub:
