@@ -128,7 +128,6 @@ def _record(
         origin_room_id="!origin:localhost",
         origin_thread_id=None,
         room_id=CONTACT_ROOM,
-        created_at=1.0,
     )
 
 

@@ -39,7 +39,6 @@ def _record(contact_id: str = "c1", **kwargs: object) -> ContactRecord:
         "target_side": ContactSide(),
         "origin_room_id": "!alice:localhost",
         "origin_thread_id": "$thread",
-        "created_at": 1.0,
     }
     return ContactRecord.model_validate(fields | kwargs)
 
@@ -126,7 +125,7 @@ def test_a_contact_keeps_its_room_once_removed(paths: RuntimePaths) -> None:
 
 
 def test_record_helpers_name_the_side_of_an_agent_or_owner() -> None:
-    """Sides resolve by agent name or owner, and a person party has no agent side."""
+    """Sides resolve by agent name or owner, each side has the other as its counterparty, and a person has no agent side."""
     record = _record(
         target=ContactParty(kind="person", id="@carol:localhost", owner="@carol:localhost"),
         requester_side=ContactSide(rules="Be brief", tools=["calculator"]),
@@ -135,8 +134,8 @@ def test_record_helpers_name_the_side_of_an_agent_or_owner() -> None:
     assert record.party("target").kind == "person"
     assert record.side("requester") == ContactSide(rules="Be brief", tools=["calculator"])
     assert record.side("target") == ContactSide()
-    assert record.other("requester") == "target"
-    assert record.other("target") == "requester"
+    assert record.counterparty("requester") == record.target
+    assert record.counterparty("target") == record.requester
     assert record.agent_side("mind_alice") == "requester"
     assert record.agent_side("@carol:localhost") is None
     assert record.agent_side("nobody") is None

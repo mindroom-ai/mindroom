@@ -90,7 +90,7 @@ def contact_turn_instructions(
     """Return what a contact turn's agent must know: who it acts for, who the other side is, and how it may answer."""
     party = record.party(side)
     owner = party.owner
-    other = record.party(record.other(side))
+    other = record.counterparty(side)
     personal = personal_room_of(config, runtime_paths, owner)
     owner_room = (
         f"their personal room with you (room ID {personal[1]})"
@@ -144,7 +144,7 @@ def contact_counterparty_agent(
     if found is None:
         return None
     record, side = found
-    other = record.party(record.other(side))
+    other = record.counterparty(side)
     if record.status != "active" or other.kind != "agent" or other.id not in config.agents:
         return None
     return other.id
@@ -167,5 +167,5 @@ def leaves_to_other_agent(
     if found is None:
         return False
     record, side = found
-    other = record.party(record.other(side))
+    other = record.counterparty(side)
     return other.kind == "agent" and resolve_human_requester_alias(sender_id, config, runtime_paths) == other.owner

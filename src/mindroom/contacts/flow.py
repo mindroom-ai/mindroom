@@ -6,7 +6,6 @@ Every refusal is a ``ValueError`` whose text is meant for the agent that called.
 
 from __future__ import annotations
 
-import time
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
@@ -266,7 +265,6 @@ async def request_contact(
             target_side=ContactSide(),
             origin_room_id=context.room_id,
             origin_thread_id=context.resolved_thread_id,
-            created_at=time.time(),
         )
         book.contacts.append(record)
         return record.model_copy(deep=True)
@@ -597,7 +595,7 @@ def list_contacts(context: ToolRuntimeContext, agent_name: str) -> str:
                 id=record.id,
                 status=record.status,
                 lister_side=side,
-                other_party=record.party(record.other(side)),
+                other_party=record.counterparty(side),
                 reason=record.reason,
                 your_rules=yours.rules,
                 your_tools=yours.tools,

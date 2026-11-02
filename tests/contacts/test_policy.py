@@ -90,7 +90,6 @@ def _record(**kwargs: object) -> ContactRecord:
         "origin_room_id": "!alice:localhost",
         "origin_thread_id": "$thread",
         "room_id": ROOM,
-        "created_at": 1.0,
     }
     return ContactRecord.model_validate(fields | kwargs)
 

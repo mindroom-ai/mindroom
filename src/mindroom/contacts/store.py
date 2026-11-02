@@ -58,7 +58,6 @@ class ContactRecord(BaseModel):
     origin_thread_id: str | None
     notice_event_id: str | None = None
     room_id: str | None = None
-    created_at: float
 
     def party(self, side: SideName) -> ContactParty:
         """Return the party on one side."""
@@ -68,17 +67,16 @@ class ContactRecord(BaseModel):
         """Return what the owner of one side set."""
         return self.requester_side if side == "requester" else self.target_side
 
-    def other(self, side: SideName) -> SideName:
-        """Return the opposite side."""
-        return "target" if side == "requester" else "requester"
+    def counterparty(self, side: SideName) -> ContactParty:
+        """Return the party on the opposite side."""
+        return self.target if side == "requester" else self.requester
 
     def agent_side(self, agent_name: str) -> SideName | None:
         """Return the side whose party is this agent."""
-        for side in _SIDES:
-            party = self.party(side)
-            if party.kind == "agent" and party.id == agent_name:
-                return side
-        return None
+        return next(
+            (side for side in _SIDES if (party := self.party(side)).kind == "agent" and party.id == agent_name),
+            None,
+        )
 
     def owner_side(self, user_id: str) -> SideName | None:
         """Return the side whose party this user owns."""
@@ -100,10 +98,6 @@ _BOOKS: dict[Path, tuple[int, ContactBook]] = {}
 def _contacts_path(runtime_paths: RuntimePaths) -> Path:
     """Return the primary-only file of contacts, which no worker mounts."""
     return tracking_dir(runtime_paths) / "contacts.json"
-
-
-def _contacts_lock_path(runtime_paths: RuntimePaths) -> Path:
-    return tracking_dir(runtime_paths) / "contacts.lock"
 
 
 def _parse(path: Path, text: str) -> ContactBook:
@@ -135,7 +129,7 @@ def update_contacts[T](runtime_paths: RuntimePaths, change: Callable[[ContactBoo
     A change that raises stores nothing.
     """
     path = _contacts_path(runtime_paths)
-    with advisory_file_lock(_contacts_lock_path(runtime_paths)):
+    with advisory_file_lock(tracking_dir(runtime_paths) / "contacts.lock"):
         try:
             book = _parse(path, path.read_text(encoding="utf-8"))
         except FileNotFoundError:

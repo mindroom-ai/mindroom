@@ -78,7 +78,6 @@ def _contact(
         origin_room_id="!origin:localhost",
         origin_thread_id=None,
         room_id=room_id,
-        created_at=1.0,
     )
     update_contacts(paths, lambda book: book.contacts.append(record))
 

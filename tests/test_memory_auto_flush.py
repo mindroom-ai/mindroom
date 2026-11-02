@@ -790,7 +790,6 @@ async def test_conversations_in_a_contact_room_are_not_flushed(
         origin_room_id=ROOM,
         origin_thread_id=None,
         room_id=contact_room,
-        created_at=T0,
     )
     update_contacts(runtime_paths_for(config), lambda book: book.contacts.append(record))
     worker = await _started(config)

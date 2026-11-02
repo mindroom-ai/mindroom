@@ -63,7 +63,7 @@ def _contact_rules_question(config: Config, record: ContactRecord, side: SideNam
     """
     sender = record.party(side)
     owner = sender.owner
-    other = record.party(record.other(side))
+    other = record.counterparty(side)
     recipient = other.id if other.kind == "person" else f"{other.id}, the agent of {other.owner}"
     return JudgmentQuestion(
         id=_CONTACT_RULES_QUESTION_ID,
@@ -146,7 +146,7 @@ async def _run_hooks(
     text: str,
 ) -> ContactBeforeSendContext:
     """Run the ``contact:before_send`` hooks and return their context with the text and verdict they left."""
-    counterparty = record.party(record.other(side))
+    counterparty = record.counterparty(side)
     counterparty_agent = config.agents.get(counterparty.id) if counterparty.kind == "agent" else None
     hook_context = ContactBeforeSendContext(
         **context.hooks.context_kwargs(

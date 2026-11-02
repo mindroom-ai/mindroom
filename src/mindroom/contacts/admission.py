@@ -49,6 +49,6 @@ def contact_admission(
     if record.status != "active":
         return _ContactAdmission(record.id, None)
     owner = record.party(side).owner
-    allowed = party_matrix_ids(record.party(record.other(side)), runtime_paths) | {owner}
+    allowed = party_matrix_ids(record.counterparty(side), runtime_paths) | {owner}
     resolved = {resolve_human_requester_alias(sender_id, config, runtime_paths) for sender_id in sender_ids}
     return _ContactAdmission(record.id, owner if not allowed.isdisjoint(resolved) else None)

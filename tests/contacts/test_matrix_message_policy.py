@@ -106,7 +106,6 @@ def _contact(paths: RuntimePaths, status: _ContactStatus = "active") -> None:
         origin_room_id="!origin:localhost",
         origin_thread_id=None,
         room_id=CONTACT_ROOM,
-        created_at=1.0,
     )
     update_contacts(paths, lambda book: book.contacts.append(record))
 
