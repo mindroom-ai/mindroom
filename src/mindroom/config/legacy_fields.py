@@ -165,7 +165,7 @@ _REJECTED_TOOL_OVERRIDES = {
 }
 # LEGACY_COMPAT: Retired per-tool file_access override of the script tool.
 # Legacy format: a script tool entry authored `file_access: unconfined`, the only value its unconfined class accepted.
-# Last legacy release: v2026.11.69; replacement: unreleased; the next release declares script with no file access,
+# Last legacy release: v2026.11.71; replacement: unreleased; the next release declares script with no file access,
 #   because it reads only its workspace source and runs its scripts on the script backend.
 # Handling: Reject the key on script entries, saying to remove it.
 # Coverage: tests/test_tools_metadata.py::test_script_file_access_override_is_rejected_with_removal_hint.
