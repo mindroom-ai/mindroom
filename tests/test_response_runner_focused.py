@@ -2110,6 +2110,37 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
 
 
 @pytest.mark.asyncio
+async def test_a_placeholder_its_reply_refuses_is_not_sent_and_the_turn_goes_on(tmp_path: Path) -> None:
+    """A placeholder whose create the reply's rule refuses, as after the reply's event was bound behind the span, is not sent.
+
+    The rule has already decided the reply; the turn goes on without a placeholder instead of failing its preparation.
+    """
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id="$thread")
+    request = _plain_request(target, source_event_id="$source")
+    with _through_the_gateway(runner) as (_edit_text, send_text):
+        async with response_span(runner, request) as handle:
+            # The reply's event was bound after this span last read the reply.
+            await runner.deps.replies.store.replies.update(
+                handle.reply_id,
+                lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, event_id="$bound")),
+            )
+            placeholder_event_id = await runner._send_placeholder(
+                request,
+                resolved_target=target,
+                history_scope=runner.deps.state_writer.history_scope(),
+                execution_identity=runner.deps.tool_runtime.build_execution_identity(
+                    target=target,
+                    user_id=request.user_id,
+                ),
+                placeholder_message="Thinking...",
+            )
+
+    assert placeholder_event_id is None
+    send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_claimed_request_preparation_excludes_early_placeholder_from_refreshed_history(tmp_path: Path) -> None:
     """The early placeholder must not re-enter payload, memory, or summary inputs through refresh."""
     bot = _bot(tmp_path)
