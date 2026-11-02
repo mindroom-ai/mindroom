@@ -23,7 +23,6 @@ from mindroom.history.replay import (
     estimate_summary_tokens,
     prompt_visible_history,
 )
-from mindroom.history.request_messages import TurnMessages
 from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer, request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
@@ -58,13 +57,18 @@ from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, NativeCompactionReplay, TokenCounter
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
+from mindroom.llm.request_identity import RequestDigests
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import delete_runs, install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.conftest import (
+    delete_runs,
+    install_model_providers,
+    prepare_history_for_run_for_test,
+    request_frame,
+    seed_session,
+)
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
@@ -80,6 +84,7 @@ from tests.history_helpers import (
     compact_runs,
     completed_outcome,
     folded_run_ids,
+    stamp_request_identity,
     summary_rows_of,
 )
 from tests.providers.openai_family_support import responses_adapter
@@ -98,15 +103,6 @@ def _turn_tokens(prompt: str = "Current prompt") -> int:
     return estimate_only_model().request_tokens(ModelRequest(messages=(Message(role="user", content=prompt),)))
 
 
-def _frame() -> RequestFrame:
-    """Return the frame of a reply with no system prompt whose turn is ``Current prompt``."""
-    return RequestFrame(
-        ModelRequest(messages=()),
-        (),
-        TurnMessages(prompt=Message(role="user", content="Current prompt")),
-    )
-
-
 def _plan_with_history_budget(config: Config, runtime_paths: RuntimePaths, budget: int) -> ResolvedHistoryExecutionPlan:
     """Return the test agent's plan with room for ``budget`` tokens of history beside the ``Current prompt`` turn."""
     plan = resolve_entity_preparation_inputs(
@@ -117,6 +113,35 @@ def _plan_with_history_budget(config: Config, runtime_paths: RuntimePaths, budge
         active_context_window=None,
     ).execution_plan
     return replace(plan, trigger_tokens=budget + _turn_tokens(), limit_tokens=budget + _turn_tokens())
+
+
+def _compaction_plan(
+    *,
+    trigger_history: int,
+    limit_history: int,
+    summary_input_budget: int,
+    prompt: str = "Current prompt",
+    **overrides: object,
+) -> ResolvedHistoryExecutionPlan:
+    """Return a plan that compacts automatically with ``summary-model`` past ``trigger_history`` tokens of history.
+
+    The budgets are whole-request totals; the request holds the ``prompt`` turn besides its summary and history, so
+    the trigger and limit add that turn to ``trigger_history`` and ``limit_history``. ``overrides`` sets other fields.
+    """
+    plan = ResolvedHistoryExecutionPlan(
+        automatic_compaction=True,
+        text_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=1,
+        reserve_tokens=0,
+        trigger_tokens=trigger_history + _turn_tokens(prompt),
+        limit_tokens=limit_history + _turn_tokens(prompt),
+        summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
+    )
+    return replace(plan, **overrides)
 
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
@@ -617,19 +642,10 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         > replay_budget
     )
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        # The budgets are whole-request totals; the request holds the prompt besides its history.
-        trigger_tokens=replay_budget + _turn_tokens(),
-        limit_tokens=replay_budget + _turn_tokens(),
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+    execution_plan = _compaction_plan(
+        trigger_history=replay_budget,
+        limit_history=replay_budget,
+        summary_input_budget=summary_input_budget,
     )
 
     summary_mock = AsyncMock(
@@ -720,20 +736,11 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        # The budgets are whole-request totals; the request holds the prompt besides its history.
-        trigger_tokens=1 + _turn_tokens(),
+    execution_plan = _compaction_plan(
+        trigger_history=1,
         # Holds each summary message but not the raw history.
-        limit_tokens=100 + _turn_tokens(),
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+        limit_history=100,
+        summary_input_budget=summary_input_budget,
     )
 
     summary_mock = AsyncMock(
@@ -821,19 +828,12 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     seed_session(storage, session)
     # A summary exactly at the trigger already leaves no room for anything compaction keeps.
     trigger_budget = summary_tokens
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
+    execution_plan = _compaction_plan(
+        trigger_history=trigger_budget,
+        limit_history=summary_tokens * 4,
+        summary_input_budget=50_000,
         explicit_compaction_model=False,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
         trigger_threshold_tokens=trigger_budget,
-        reserve_tokens=0,
-        # The request holds the prompt besides its summary and history.
-        trigger_tokens=trigger_budget + _turn_tokens(),
-        limit_tokens=summary_tokens * 4 + _turn_tokens(),
-        summary_input_budget_tokens=50_000,
-        compaction_timeout_seconds=600.0,
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
@@ -851,7 +851,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
         prepared = await prepare_scope_history(
             compaction_lifecycle=RecordingCompactionLifecycle(),
             sizer=request_sizer(estimate_only_model(), config, "default"),
-            frame=_frame(),
+            frame=request_frame(),
             resolved_inputs=resolved_inputs,
             runtime_paths=runtime_paths,
             config=config,
@@ -917,19 +917,12 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     )
     trigger_budget = history_tokens // 2
     hard_budget = history_tokens * 2
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
+    execution_plan = _compaction_plan(
+        trigger_history=trigger_budget,
+        limit_history=hard_budget,
+        summary_input_budget=50_000,
         explicit_compaction_model=False,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
         trigger_threshold_tokens=trigger_budget,
-        reserve_tokens=0,
-        # The request holds the prompt besides its history.
-        trigger_tokens=trigger_budget + _turn_tokens(),
-        limit_tokens=hard_budget + _turn_tokens(),
-        summary_input_budget_tokens=50_000,
-        compaction_timeout_seconds=600.0,
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
@@ -948,7 +941,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
             sizer=request_sizer(_native_model() if native_model else estimate_only_model(), config, "default"),
-            frame=_frame(),
+            frame=request_frame(),
             resolved_inputs=resolved_inputs,
             runtime_paths=runtime_paths,
             config=config,
@@ -1133,19 +1126,11 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     )
     assert before_tokens > replay_budget
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        # The budgets are whole-request totals; the request holds the prompt besides its history.
-        trigger_tokens=replay_budget + _turn_tokens("CURRENT-RUN prompt"),
-        limit_tokens=replay_budget + _turn_tokens("CURRENT-RUN prompt"),
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+    execution_plan = _compaction_plan(
+        trigger_history=replay_budget,
+        limit_history=replay_budget,
+        summary_input_budget=summary_input_budget,
+        prompt="CURRENT-RUN prompt",
     )
 
     async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
@@ -1283,19 +1268,10 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         model=estimate_only_model(),
     )
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        # The budgets are whole-request totals; the request holds the prompt besides its history.
-        trigger_tokens=replay_budget + _turn_tokens(),
-        limit_tokens=replay_budget + _turn_tokens(),
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+    execution_plan = _compaction_plan(
+        trigger_history=replay_budget,
+        limit_history=replay_budget,
+        summary_input_budget=summary_input_budget,
     )
 
     async def summarize(**_kwargs: object) -> str:
@@ -1404,20 +1380,11 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         )
         == 1
     )
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        # The budgets are whole-request totals; the request holds the prompt besides its history.
-        trigger_tokens=1 + _turn_tokens(),
+    execution_plan = _compaction_plan(
+        trigger_history=1,
         # Holds each summary message.
-        limit_tokens=100 + _turn_tokens(),
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+        limit_history=100,
+        summary_input_budget=summary_input_budget,
         compaction_fallback_model_name="fallback-model",
         compaction_fallback_summary_input_budget_tokens=summary_input_budget,
     )
@@ -1483,20 +1450,11 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     session = _session("session-1", runs=[_completed_run("run-1")])
     session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        # The budgets are whole-request totals; the request holds the prompt besides its history.
-        trigger_tokens=1 + _turn_tokens(),
+    execution_plan = _compaction_plan(
+        trigger_history=1,
         # Holds the summary message.
-        limit_tokens=100 + _turn_tokens(),
-        summary_input_budget_tokens=16_000,
-        compaction_timeout_seconds=600.0,
+        limit_history=100,
+        summary_input_budget=16_000,
         compaction_fallback_model_name="fallback-model",
         compaction_fallback_summary_input_budget_tokens=16_000,
     )
@@ -1781,7 +1739,7 @@ async def test_prepare_history_for_run_context_window_guard_skips_system_prompts
         session=persisted,
         # The 40-token window minus its clamped 20-token reserve leaves 10 tokens of history beside this 10-token
         # system prompt and turn.
-        system_messages=(Message(role="system", content="s" * 28),),
+        system_prompt="s" * 28,
     )
 
     assert prepared.replay_plan is not None
@@ -1994,29 +1952,9 @@ class _AnswerHeavyModel(ScriptedModel):
         return super().request_tokens(request, start=start) + 700 * answers
 
 
-def _fake_model(counter: TokenCounter | None = None, identity: ModelIdentity = _FAKE) -> ScriptedModel:
+def _fake_model(counter: TokenCounter | None = None) -> ScriptedModel:
     """Return the reply's model, counting with ``counter``, a quarter token per character when it is None."""
-    return ScriptedModel([], identity=identity, token_counter=counter or fake_token_counter())
-
-
-def _native_fake_model(counter: TokenCounter | None = None) -> ScriptedModel:
-    """Return the reply's model on a route that compacts natively."""
-    return ScriptedModel(
-        [],
-        identity=_FAKE,
-        token_counter=counter or fake_token_counter(),
-        capabilities=Capabilities(native_compaction=True),
-        native_history_route=_NativeRoute(),
-    )
-
-
-def _reply_frame(system_prompt: str = _SYSTEM_PROMPT, turn: Message | None = None) -> RequestFrame:
-    """Return the frame of a reply under ``system_prompt`` whose turn is ``turn``, the ``Current prompt`` when None."""
-    return RequestFrame(
-        ModelRequest(messages=()),
-        (Message(role="system", content=system_prompt),),
-        TurnMessages(prompt=turn or Message(role="user", content=_PROMPT)),
-    )
+    return ScriptedModel([], identity=_FAKE, token_counter=counter or fake_token_counter())
 
 
 def _reported_run(
@@ -2026,12 +1964,11 @@ def _reported_run(
     identity: ModelIdentity = _FAKE,
     images: list[Image] | None = None,
     reasoning_tokens: int | None = None,
-    native_checkpoint: bool = False,
 ) -> RunRecord:
     """Return a completed run whose answer the model ``identity`` stamped with the request size its provider reported.
 
-    With ``native_checkpoint`` the answer holds a native compaction checkpoint. With ``reasoning_tokens`` the answer
-    also stores one encrypted reasoning item, as a Responses route records it, and reports that much reasoning.
+    With ``reasoning_tokens`` the answer also stores one encrypted reasoning item, as a Responses route records it,
+    and reports that much reasoning.
     """
     answer = Message(
         role="assistant",
@@ -2051,23 +1988,11 @@ def _reported_run(
                 },
             ],
         }
-    if native_checkpoint:
-        checkpoint = {"route": "test-endpoint", "items": [{"type": "compaction", "encrypted_content": "gAAAA"}]}
-        answer.provider_data = {**(answer.provider_data or {}), NATIVE_CHECKPOINT_KEY: checkpoint}
     stamp_model(answer, identity)
     run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
     run.model = identity.id
     run.model_provider = identity.provider
     return run
-
-
-def _stamp_request(run: RunRecord, model: ModelProvider, request: ModelRequest) -> None:
-    """Record on ``run``'s answer the identity of ``request``, the request it answered, as the model loop does."""
-    answer = run.messages[-1]
-    answer.provider_data = {
-        **(answer.provider_data or {}),
-        REQUEST_IDENTITY_KEY: RequestDigests(model).prefixes(request)[-1],
-    }
 
 
 async def _prepare_reply(
@@ -2084,8 +2009,8 @@ async def _prepare_reply(
 ) -> tuple[PreparedScopeHistory, list[ModelRequest]]:
     """Prepare a reply of ``model`` in ``session-1`` around ``frame``; return it and the requests it sized.
 
-    ``session`` is the scope's stored session, None before its first reply is saved; ``frame`` is ``_reply_frame()``
-    when None.
+    ``session`` is the scope's stored session, None before its first reply is saved; ``frame`` is
+    ``request_frame(system=_SYSTEM_PROMPT)`` when None.
     """
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
@@ -2111,7 +2036,7 @@ async def _prepare_reply(
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
             sizer=sizer,
-            frame=frame or _reply_frame(),
+            frame=frame or request_frame(system=_SYSTEM_PROMPT),
             resolved_inputs=resolved_inputs,
             runtime_paths=runtime_paths,
             config=config,
@@ -2139,16 +2064,15 @@ async def _prepare_with_reported_usage(
     system_prompt: str = _SYSTEM_PROMPT,
     runs_seen: int = 2,
     model: ModelProvider | None = None,
-    answering_model: ModelProvider | None = None,
     plan: ResolvedHistoryExecutionPlan = _REPORTED_USAGE_PLAN,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
     """Prepare a reply after three runs; return it, the estimate of its request, and the compaction notices.
 
-    ``latest`` configures the newest run, whose request ``answering_model`` (``model`` when None) prepared after the
-    first ``runs_seen`` runs under ``recorded_system_prompt`` and ``answered_history_settings`` (``history_settings``
-    when None), and whose answer records that request's identity, as
-    the model loop stamps it. A summary folding the first run is written ``before`` or ``after`` that request. This
-    reply's system prompt is ``system_prompt`` and its model ``model``, ``_fake_model()`` when None.
+    ``latest`` configures the newest run, whose request ``model`` prepared after the first ``runs_seen`` runs under
+    ``recorded_system_prompt`` and ``answered_history_settings`` (``history_settings`` when None), and whose answer
+    records that request's identity, as the model loop stamps it. A summary folding the first run is written
+    ``before`` or ``after`` that request. This reply's system prompt is ``system_prompt`` and its model ``model``,
+    ``_fake_model()`` when None.
     """
     config, runtime_paths = _make_config(
         tmp_path,
@@ -2156,13 +2080,12 @@ async def _prepare_with_reported_usage(
         context_window=64_000,
     )
     model = model or _fake_model()
-    answering_model = answering_model or model
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     earlier = [_reported_run("run-0", identity=model.identity), _reported_run("run-1", identity=model.identity)]
     session = seed_session(storage, _session("session-1", runs=earlier[:runs_seen]))
     if summary == "before":
         compact_runs(storage, session, ["run-0"], "Earlier summary")
-    newest = _reported_run("run-2", **{"identity": answering_model.identity, **latest})
+    newest = _reported_run("run-2", identity=model.identity, **latest)
     # The earlier reply only records the request it sent, so it compacts nothing.
     _answering, sized = await _prepare_reply(
         storage,
@@ -2170,11 +2093,11 @@ async def _prepare_with_reported_usage(
         config,
         runtime_paths,
         history_settings=answered_history_settings or history_settings,
-        model=answering_model,
-        frame=_reply_frame(recorded_system_prompt, turn=newest.messages[0]),
+        model=model,
+        frame=request_frame(system=recorded_system_prompt, turn=newest.messages[0]),
         plan=replace(plan, automatic_compaction=False),
     )
-    _stamp_request(newest, answering_model, sized[0])
+    stamp_request_identity(newest.messages[-1], model, sized[0])
     for run in [*earlier[runs_seen:], newest]:
         storage.save_run(session, run, record_usage=False)
     if summary == "after":
@@ -2184,7 +2107,7 @@ async def _prepare_with_reported_usage(
     # Off the event loop, as preparation counts.
     estimate = await asyncio.to_thread(
         model.request_tokens,
-        _reply_frame(system_prompt).request(
+        request_frame(system=system_prompt).request(
             summary=session.summary,
             history=prompt_visible_history(session, history_settings),
         ),
@@ -2197,7 +2120,7 @@ async def _prepare_with_reported_usage(
         runtime_paths,
         history_settings=history_settings,
         model=model,
-        frame=_reply_frame(system_prompt),
+        frame=request_frame(system=system_prompt),
         plan=plan,
         lifecycle=lifecycle,
     )
@@ -2262,7 +2185,11 @@ async def test_the_second_reply_sizes_its_history_by_the_first_reply_reported_si
     assert sized == []
     run = _reported_run("run-0", input_tokens=8_000)
     # The first reply's request held its system prompt and its turn.
-    _stamp_request(run, model, _reply_frame(turn=run.messages[0]).request(summary=None, history=()))
+    stamp_request_identity(
+        run.messages[-1],
+        model,
+        request_frame(system=_SYSTEM_PROMPT, turn=run.messages[0]).request(summary=None, history=()),
+    )
     seed_session(storage, _session("session-1", runs=[run]))
 
     prepared, _sized = await _prepare_reply(
@@ -2351,7 +2278,7 @@ def _finalize_with_history_budget(
     )
     return finalize_history_preparation(
         prepared_scope_history=replace(prepared, resolved_inputs=resolved_inputs),
-        frame=_reply_frame(),
+        frame=request_frame(system=_SYSTEM_PROMPT),
         pipeline_timing=None,
     )
 
@@ -2407,7 +2334,7 @@ async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
 
     state = finalize_history_preparation(
         prepared_scope_history=prepared,
-        frame=_reply_frame(system_prompt),
+        frame=request_frame(system=system_prompt),
         pipeline_timing=None,
     )
 
@@ -2490,18 +2417,6 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
             {"answered_history_settings": replace(_ALL_HISTORY_SETTINGS, policy=HistoryPolicy(mode="runs", limit=1))},
             id="partial-replay",
         ),
-        # Projection replaced the transcript before a native checkpoint, which the checkpoint's own size still describes.
-        pytest.param(
-            {"input_tokens": 8_000, "native_checkpoint": True},
-            {"model": "native", "plan": replace(_REPORTED_USAGE_PLAN, explicit_compaction_model=False)},
-            id="native-checkpoint",
-        ),
-        # Another model, such as a fallback, answered a request of its own.
-        pytest.param(
-            {"input_tokens": 8_000},
-            {"answering_model": _fake_model(identity=ModelIdentity(id="other-model", provider="fake"))},
-            id="another-model-answered",
-        ),
         # A system prompt changed since that request.
         pytest.param({"input_tokens": 8_000}, {"recorded_system_prompt": "edited"}, id="system-prompt-changed"),
         # A media item at a URL can change between requests unseen, and replay drops it.
@@ -2527,8 +2442,6 @@ async def test_history_keeps_its_estimate_without_a_usable_reported_size(
     latest: dict[str, object],
     setup: dict[str, object],
 ) -> None:
-    if setup.get("model") == "native":
-        setup = {**setup, "model": _native_fake_model()}
     prepared, estimate, lifecycle = await _prepare_with_reported_usage(tmp_path, latest, **setup)
 
     assert prepared.request_size == RequestSize(estimate, reported=False)

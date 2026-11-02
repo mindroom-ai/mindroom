@@ -29,14 +29,13 @@ from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
-from tests.history_helpers import _completed_run, _make_config, _session
+from tests.history_helpers import _completed_run, _make_config, _session, stamp_request_identity
 from tests.providers.golden_support import load_golden
 from tests.providers.openai_family_support import golden_provider
 
 if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider
 
-_MODEL = ModelIdentity(id="scripted-model", provider="Synthetic")
 _REPORTED = 1_000
 
 
@@ -47,14 +46,15 @@ def _config(tmp_path: Path) -> Config:
 
 def _answered(model: ScriptedModel, request: ModelRequest, content: str, *, reported: int = _REPORTED) -> Message:
     """Return the answer ``model`` gave ``request``, stamped as the loop stamps it."""
-    identity = RequestDigests(model).prefixes(request)[-1]
-    assert identity is not None
-    return Message(
+    answer = Message(
         role="assistant",
         content=content,
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=reported, output_tokens=5)),
-        provider_data={**model_provenance(_MODEL.id, _MODEL.provider), REQUEST_IDENTITY_KEY: identity},
+        provider_data=model_provenance(model.identity.id, model.identity.provider),
     )
+    stamp_request_identity(answer, model, request)
+    assert REQUEST_IDENTITY_KEY in (answer.provider_data or {})
+    return answer
 
 
 def _sized(tmp_path: Path, model: ScriptedModel, request: ModelRequest) -> RequestSize:
@@ -185,11 +185,9 @@ async def test_the_latest_answer_s_replayed_reasoning_counts_before_the_next_rep
         content="Pack a light rain jacket.",
         reasoning_content=_REASONING,
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=_REPORTED, output_tokens=40)),
-        provider_data={
-            **model_provenance(kimi.identity.id, kimi.identity.provider),
-            REQUEST_IDENTITY_KEY: RequestDigests(kimi).prefixes(answered)[-1],
-        },
+        provider_data=model_provenance(kimi.identity.id, kimi.identity.provider),
     )
+    stamp_request_identity(answer, kimi, answered)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1", messages=[question, answer])]))
 

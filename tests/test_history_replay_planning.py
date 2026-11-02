@@ -27,8 +27,7 @@ from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
     plan_replay_that_fits,
 )
-from mindroom.history.request_messages import TurnMessages
-from mindroom.history.request_size import RequestFrame, request_sizer
+from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -55,7 +54,13 @@ from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from mindroom.turn_model import ModelScope, resolve_turn_model
-from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    prepare_history_for_run_for_test,
+    request_frame,
+    seed_session,
+)
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import summary_model
 from tests.fakes.token_counter import quarter_tokens
@@ -1327,14 +1332,6 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     assert prepared.replays_persisted_history is False
 
 
-def _frame(system: str) -> RequestFrame:
-    return RequestFrame(
-        ModelRequest(messages=()),
-        (Message(role="system", content=system),),
-        TurnMessages(prompt=Message(role="user", content="Current prompt")),
-    )
-
-
 async def _prepare_then_finalize_with_a_larger_prompt(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1353,7 +1350,7 @@ async def _prepare_then_finalize_with_a_larger_prompt(
     prepared = await prepare_scope_history(
         sizer=request_sizer(estimate_only_model(), config, "default"),
         # The prompt compaction ran for left room for the summary.
-        frame=_frame("You are helpful."),
+        frame=request_frame(system="You are helpful."),
         resolved_inputs=resolved_inputs,
         runtime_paths=runtime_paths,
         config=config,
@@ -1363,7 +1360,7 @@ async def _prepare_then_finalize_with_a_larger_prompt(
         allow_native_compaction=True,
     )
     # The final request without history leaves one token of the limit: (characters + 14 prompt characters) / 4.
-    final_frame = _frame("s" * (4 * (limit - 1) - len("Current prompt")))
+    final_frame = request_frame(system="s" * (4 * (limit - 1) - len("Current prompt")))
     return finalize_history_preparation(prepared_scope_history=prepared, frame=final_frame, pipeline_timing=None)
 
 

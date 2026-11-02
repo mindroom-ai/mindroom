@@ -721,6 +721,23 @@ async def handle_card_response_for_test(manager: ApprovalManager, **response: An
     return await manager.handle_card_response(**(unset | response))
 
 
+def request_frame(
+    prompt: str = "Current prompt",
+    *,
+    system: str | None = None,
+    turn: Message | None = None,
+) -> RequestFrame:
+    """Return the frame of a reply without settings or tools around the scope's history.
+
+    Its system prompt is ``system``, none when None, and its turn is ``turn``, a user message of ``prompt`` when None.
+    """
+    return RequestFrame(
+        ModelRequest(messages=()),
+        () if system is None else (Message(role="system", content=system),),
+        TurnMessages(prompt=turn or Message(role="user", content=prompt)),
+    )
+
+
 async def prepare_history_for_run_for_test(
     *,
     agent_name: str,
@@ -735,14 +752,14 @@ async def prepare_history_for_run_for_test(
     history_settings: ResolvedHistorySettings | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
-    system_messages: Sequence[Message] = (),
+    system_prompt: str | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedHistoryState:
     """Compose the production history-preparation seams for one test run of an agent without tools.
 
-    The run's first request holds ``system_messages``, the scope's history, and ``full_prompt`` as its turn. ``model``
+    The run's first request holds ``system_prompt``, the scope's history, and ``full_prompt`` as its turn. ``model``
     is the provider the run's requests go to; without one, history is sized by estimate alone.
     """
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
@@ -757,11 +774,7 @@ async def prepare_history_for_run_for_test(
     )
     if execution_plan is not None:
         resolved_inputs = replace(resolved_inputs, execution_plan=execution_plan)
-    frame = RequestFrame(
-        ModelRequest(messages=()),
-        tuple(system_messages),
-        TurnMessages(prompt=Message(role="user", content=full_prompt)),
-    )
+    frame = request_frame(full_prompt, system=system_prompt)
     scope_history_kwargs = {
         "sizer": request_sizer(model, config, model_name),
         "frame": frame,

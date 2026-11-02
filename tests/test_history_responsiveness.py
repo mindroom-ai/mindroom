@@ -14,8 +14,7 @@ import pytest
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import _finalize_prepared_history
 from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
-from mindroom.history.request_messages import TurnMessages
-from mindroom.history.request_size import RequestFrame, request_sizer
+from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     _compact_before_reply,
@@ -29,12 +28,17 @@ from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.token_counting.counts import count
-from tests.conftest import install_model_providers, loop_runs_while_blocked, runtime_paths_for, seed_session
+from tests.conftest import (
+    install_model_providers,
+    loop_runs_while_blocked,
+    request_frame,
+    runtime_paths_for,
+    seed_session,
+)
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -55,6 +59,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.types import CompactionLifecycle
+    from mindroom.llm.provider import ModelRequest
 
 
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
@@ -68,13 +73,8 @@ def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     )
 
 
-def _frame(system: str = "You are helpful.") -> RequestFrame:
-    """Return the frame of a request that holds ``system`` as its system prompt and a short turn around its history."""
-    return RequestFrame(
-        ModelRequest(messages=()),
-        (Message(role="system", content=system),),
-        TurnMessages(prompt=Message(role="user", content="Current prompt")),
-    )
+# A request's frame around its history: a short system prompt and turn.
+_FRAME = request_frame(system="You are helpful.")
 
 
 def _holds_history(request: ModelRequest) -> bool:
@@ -92,7 +92,7 @@ async def _prepare(
 ) -> PreparedScopeHistory:
     return await prepare_scope_history(
         sizer=request_sizer(model, config, entity_model_name(config, "test_agent")),
-        frame=_frame(),
+        frame=_FRAME,
         resolved_inputs=_agent_inputs(config),
         runtime_paths=paths,
         config=config,
@@ -155,7 +155,7 @@ async def test_history_sizing_allows_loop_progress(
     if stage == "prepare":
         await prepare()
     elif stage == "finalize":
-        await _finalize_prepared_history(prepared_scope_history=prepared, frame=_frame())
+        await _finalize_prepared_history(prepared_scope_history=prepared, frame=_FRAME)
     else:
         monkeypatch.setattr(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -238,8 +238,8 @@ async def test_forced_compaction_reuses_canonical_history_count(
     seed_session(storage, session)
     # The history's share of the request: its size beyond the same request without the seeded run.
     history_tokens = model.request_tokens(
-        _frame().request(summary=None, history=session.runs[0].messages),
-    ) - model.request_tokens(_frame().request(summary=None, history=()))
+        _FRAME.request(summary=None, history=session.runs[0].messages),
+    ) - model.request_tokens(_FRAME.request(summary=None, history=()))
     counted_history: list[list[str]] = []
     request_tokens = ResponsesAdapter.request_tokens
 
@@ -402,7 +402,10 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
     async def finalize() -> None:
         async with ownership:
             # A system prompt over the replay limit sends planning on to trim the history.
-            await _finalize_prepared_history(prepared_scope_history=prepared, frame=_frame("word " * 100_000))
+            await _finalize_prepared_history(
+                prepared_scope_history=prepared,
+                frame=request_frame(system="word " * 100_000),
+            )
 
     async def reuse() -> None:
         reuse_attempted.set()

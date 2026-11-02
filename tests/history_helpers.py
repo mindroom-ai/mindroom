@@ -60,6 +60,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
@@ -166,6 +167,16 @@ def checkpointed_answer(item: dict[str, object], basis: str) -> Message:
             },
         },
     )
+
+
+def stamp_request_identity(answer: Message, model: ModelProvider, request: ModelRequest) -> None:
+    """Record on ``answer`` the identity of ``request``, the request ``model`` answered, as the model loop does.
+
+    A request without an identity, such as one holding media at a URL, leaves ``answer`` unstamped.
+    """
+    identity = RequestDigests(model).prefixes(request)[-1]
+    if identity is not None:
+        answer.provider_data = {**(answer.provider_data or {}), REQUEST_IDENTITY_KEY: identity}
 
 
 def record_native_checkpoint(

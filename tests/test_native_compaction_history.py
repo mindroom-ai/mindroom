@@ -17,8 +17,8 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, M
 from mindroom.config.resolution import entity_model_name
 from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
 from mindroom.history.replay import compaction_marker
-from mindroom.history.request_messages import TurnMessages, scope_history_messages
-from mindroom.history.request_size import RequestFrame, request_sizer
+from mindroom.history.request_messages import scope_history_messages
+from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     _ScopeCompactionLifecycleResult,
     finalize_history_preparation,
@@ -31,7 +31,6 @@ from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_summary, replay_basis
@@ -39,7 +38,7 @@ from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
-from tests.conftest import install_model_providers, runtime_paths_for, seed_session
+from tests.conftest import install_model_providers, request_frame, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _completed_run,
@@ -49,6 +48,7 @@ from tests.history_helpers import (
     _team_session,
     compact_runs,
     record_native_checkpoint,
+    stamp_request_identity,
 )
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
 from tests.providers.bare_adapter import bare_adapter
@@ -76,7 +76,7 @@ def _no_provider_environment() -> Iterator[None]:
 
 
 # The reply's first request around the scope's history: no system prompt or tools, and one prompt.
-_FRAME = RequestFrame(ModelRequest(messages=()), (), TurnMessages(prompt=Message(role="user", content="Continue")))
+_FRAME = request_frame("Continue")
 
 
 def _inputs(config: Config, entity: str = "test_agent") -> HistoryPreparationInputs:
@@ -114,14 +114,6 @@ async def _prepare(
 
 def _finalize(prepared: PreparedScopeHistory) -> PreparedHistoryState:
     return finalize_history_preparation(prepared_scope_history=prepared, frame=_FRAME, pipeline_timing=None)
-
-
-def _stamp(model: ModelProvider, answer: Message, request: ModelRequest) -> None:
-    """Record on ``answer`` that it answered ``request``, as the model loop does."""
-    answer.provider_data = {
-        **(answer.provider_data or {}),
-        REQUEST_IDENTITY_KEY: RequestDigests(model).prefixes(request)[-1],
-    }
 
 
 def _sent(adapter: ResponsesAdapter, messages: Sequence[Message], native: NativeHistory | None) -> dict[str, Any]:
@@ -310,7 +302,7 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         # Billed for the transcript the checkpoint replaced, over the request limit.
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=190000)),
     )
-    _stamp(model, answer, ModelRequest(messages=(transcript,), native_compaction=native))
+    stamp_request_identity(answer, model, ModelRequest(messages=(transcript,), native_compaction=native))
     record_native_checkpoint(answer, _CHECKPOINT, native)
     run = _completed_run("old", messages=[transcript, answer])
     run.model = model.identity.id
@@ -356,7 +348,7 @@ async def _prepare_after_native_answer(
     assert settings is not None
     transcript = Message(role="user", content="old transcript " * 20000)
     answer = Message(role="assistant", content="Ready", metrics=MessageMetrics(tokens=TokenCounts(input_tokens=30000)))
-    _stamp(model, answer, ModelRequest(messages=(transcript,), native_compaction=settings))
+    stamp_request_identity(answer, model, ModelRequest(messages=(transcript,), native_compaction=settings))
     record_native_checkpoint(answer, _CHECKPOINT if checkpoint else [], settings)
     stamp_model(answer, model.identity)
     run = _completed_run("old", messages=[transcript, answer])
@@ -437,7 +429,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     )
     latest = [Message(role="user", content="Keep the recent instruction"), answer]
     # The stored response's context outgrew what the replayed history shows, which its reported size keeps in view.
-    _stamp(model, answer, ModelRequest(messages=(old, latest[0])))
+    stamp_request_identity(answer, model, ModelRequest(messages=(old, latest[0])))
     stored_provider_data = dict(answer.provider_data or {})
     session = _session(
         "session",
