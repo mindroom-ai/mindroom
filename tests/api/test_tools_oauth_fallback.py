@@ -1,4 +1,4 @@
-"""Tests for manual credential fallbacks on OAuth-backed tools."""
+"""Tests for the dashboard status of OAuth-backed tools."""
 
 # ruff: noqa: D103
 
@@ -77,6 +77,19 @@ def _context(
     return _provider_context(github_oauth_provider(), runtime_paths, credentials_manager, worker_target)
 
 
+def _oauth_token(provider: OAuthProvider) -> dict[str, Any]:
+    return {
+        "token": "access-token",
+        "refresh_token": "refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "client-id",
+        "expires_at": 4_102_444_800.0,
+        "scopes": list(provider.scopes),
+        "_source": "oauth",
+        "_oauth_provider": provider.id,
+    }
+
+
 def _github_tool() -> dict[str, Any]:
     tool = export_tools_metadata({"github": builtin_tool_registry().entries["github"]})[0]
     assert tool["status"] == "requires_config"
@@ -116,22 +129,11 @@ async def test_requester_scope_status_reads_the_requesters_oauth_connection(tmp_
     runtime_paths = _runtime_paths(tmp_path)
     manager = get_runtime_credentials_manager(runtime_paths)
     provider = github_oauth_provider()
-    manager.save_credentials(
-        "github_oauth_client",
-        {"client_id": "github-client-id", "client_secret": "github-client-secret"},
-    )
+    manager.save_credentials("github_oauth_client", {"client_id": "client-id", "client_secret": "client-secret"})
     alice_target = _worker_target("@alice:example.test")
     publish_oauth_credentials(
         provider,
-        {
-            "token": "github-oauth-token",
-            "refresh_token": "github-refresh-token",
-            "client_id": "github-client-id",
-            "scopes": [],
-            "expires_at": 4_102_444_800.0,
-            "_source": "oauth",
-            "_oauth_provider": provider.id,
-        },
+        _oauth_token(provider),
         credentials_manager=manager,
         worker_target=resolve_worker_target("user", "code", execution_identity=alice_target.execution_identity),
     )
@@ -270,19 +272,6 @@ def _google_tool(tool_name: str) -> dict[str, Any]:
     return tool
 
 
-def _google_token(provider: OAuthProvider) -> dict[str, Any]:
-    return {
-        "token": "access-token",
-        "refresh_token": "refresh-token",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "client_id": "client-id",
-        "expires_at": 4_102_444_800.0,
-        "scopes": list(provider.scopes),
-        "_source": "oauth",
-        "_oauth_provider": provider.id,
-    }
-
-
 def _connect_google(
     provider: OAuthProvider,
     connection: str,
@@ -306,7 +295,7 @@ def _connect_google(
             "google_oauth_client",
             {"client_id": "client-id", "client_secret": "client-secret", "_source": "ui"},
         )
-        publish_oauth_credentials(provider, _google_token(provider), credentials_manager=manager, worker_target=target)
+        publish_oauth_credentials(provider, _oauth_token(provider), credentials_manager=manager, worker_target=target)
     return runtime_paths, manager
 
 
@@ -405,7 +394,7 @@ def _preview_context(
     execution_scope: WorkerScope | None,
     agent_name: str | None,
 ) -> tools_api._ResolvedToolAvailabilityContext:
-    """Return the context of a draft or requester-scope preview, which has no request target."""
+    """Return the context of a draft preview, which has no request target."""
     return tools_api._ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
         agent_name=agent_name,
@@ -460,7 +449,7 @@ async def test_preview_ignores_a_retired_oauth_json_file(tmp_path: Path) -> None
     manager.save_credentials("google_oauth_client", {"client_id": "client-id", "client_secret": "client-secret"})
     save_scoped_credentials(
         provider.credential_service,
-        _google_token(provider),
+        _oauth_token(provider),
         credentials_manager=manager,
         worker_target=None,
     )
