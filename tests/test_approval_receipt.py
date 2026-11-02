@@ -26,6 +26,7 @@ from mindroom.event_journal import (
 )
 from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request
 from mindroom.llm.messages import Message
+from mindroom.llm.request_identity import RequestDigests
 from mindroom.llm.runs import RunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -850,4 +851,5 @@ def _state_stub() -> object:
         request_index=0,
         loop_start_ids=frozenset(),
         request_template=EMPTY_REQUEST,
+        digests=RequestDigests(ScriptedModel([])),
     )

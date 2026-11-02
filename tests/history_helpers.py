@@ -82,6 +82,7 @@ from tests.conftest import (
     seed_session,
     seed_session_row,
 )
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.summary_model import summary_model
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 
@@ -672,7 +673,7 @@ class ToolLoopRequest:
     request: ModelRequest
 
 
-class ToolLoopModel:
+class ToolLoopModel(PlainRequestSizing):
     """Call ``probe`` for ``tool_rounds`` requests, then answer; record every request.
 
     Each finished turn is stamped with the model's identity, as every adapter stamps the turns it finishes.

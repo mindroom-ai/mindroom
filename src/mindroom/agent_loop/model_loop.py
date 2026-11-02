@@ -11,6 +11,7 @@ unresolved requirement on the record, as a team leader's delegation does for a p
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -26,8 +27,15 @@ from mindroom.agent_loop.tools import (
 )
 from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance, usage_sums_attempts
+from mindroom.llm.messages import (
+    AGGREGATE_USAGE_KEY,
+    REWRITTEN_ATTEMPT_KEY,
+    Message,
+    model_provenance,
+    usage_sums_attempts,
+)
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -62,7 +70,8 @@ class LoopState:
     review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions,
     paused ones included, the loop fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started
     with; ``request_template`` carries the per-run request settings, which a hook may replace for the rest of the run
-    (mid-turn compaction turning the provider's compaction off after it compacted as text).
+    (mid-turn compaction turning the provider's compaction off after it compacted as text); ``digests`` identifies
+    the loop's requests, so each answer records which request it answered (``llm.request_identity``).
     """
 
     messages: list[Message]
@@ -73,6 +82,7 @@ class LoopState:
     request_index: int
     loop_start_ids: frozenset[str]
     request_template: ModelRequest
+    digests: RequestDigests
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +199,7 @@ async def run_model_loop(
         request_index=0,
         loop_start_ids=frozenset(message.id for message in messages),
         request_template=request_template,
+        digests=RequestDigests(model),
     )
     max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
     # A resume continues its run, so the calls that run already made count toward its limit; the refusals that never
@@ -203,7 +214,7 @@ async def run_model_loop(
         request = replace(state.request_template, messages=tuple(state.messages), tools=state.tools)
         progress.last_request = request
         turn: TurnCompleted | None = None
-        events = _stream_turn(model, request, messages, metrics)
+        events = _stream_turn(model, request, messages, metrics, state.digests)
         async with closing_async_stream(events):
             async for event in events:
                 # No await or break between taking the turn and asking for the next event: _stream_turn settles
@@ -424,8 +435,12 @@ async def _stream_turn(
     request: ModelRequest,
     messages: list[Message],
     metrics: RunMetrics,
+    digests: RequestDigests,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
+
+    The finished turn records the identity of ``request`` (``llm.request_identity``), unless a pipeline stage answered
+    it with another request in its place (``REWRITTEN_ATTEMPT_KEY``).
 
     When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
     already reported is kept on an assistant message appended to ``messages`` and counted once in ``metrics``,
@@ -449,6 +464,11 @@ async def _stream_turn(
                     turn = event
         if turn is None:
             raise incomplete_stream_error(provider=identity.provider)
+        # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
+        request_identity = (await asyncio.to_thread(digests.prefixes, request))[-1]
+        answered = turn.message.provider_data or {}
+        if request_identity is not None and not answered.get(REWRITTEN_ATTEMPT_KEY):
+            turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}
         yield turn
         # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
         handed_off = True

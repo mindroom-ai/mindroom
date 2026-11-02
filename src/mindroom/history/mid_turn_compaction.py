@@ -22,7 +22,6 @@ from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.prompt_tokens import tool_definitions_text
 from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
-from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
     compact_scope_mid_turn,
     reported_context_tokens,
@@ -37,7 +36,7 @@ from mindroom.history.summary_message import (
     is_scope_summary,
     mark_summary_follows,
 )
-from mindroom.llm.messages import is_own_model_message
+from mindroom.llm.messages import is_own_model_message, is_queued_notice_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_items, native_replay_messages

@@ -27,12 +27,11 @@ from mindroom.history.request_messages import (
     filter_tool_calls,
     scope_history_messages,
 )
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, model_provenance
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs

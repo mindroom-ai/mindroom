@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -26,10 +28,18 @@ STORAGE_ONLY_MESSAGE_KEYS = frozenset(
 def turn_message(message: Message) -> dict[str, Any]:
     """Return ``message`` as the goldens record a provider-neutral turn.
 
-    That is its stored fields without the storage-only ones, in sorted order, each value as stored.
+    That is its stored fields without the storage-only ones, in sorted order, each value as stored. The identity of
+    the request an answer answered is storage-only too: it digests that whole request, so it would change with any
+    edit to it.
     """
     stored = message.to_dict()
-    return {key: stored[key] for key in sorted(stored) if key not in STORAGE_ONLY_MESSAGE_KEYS}
+    turn = {key: stored[key] for key in sorted(stored) if key not in STORAGE_ONLY_MESSAGE_KEYS}
+    provider_data = {key: value for key, value in turn.get("provider_data", {}).items() if key != REQUEST_IDENTITY_KEY}
+    if provider_data:
+        turn["provider_data"] = provider_data
+    else:
+        turn.pop("provider_data", None)
+    return turn
 
 
 def render(value: object) -> str:

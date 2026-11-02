@@ -47,7 +47,8 @@ if TYPE_CHECKING:
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
-    from mindroom.llm.provider import StopReason, StreamEvent, TokenCounter, ToolSpec
+    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, TokenCounter, ToolSpec
+    from mindroom.token_counting.requests import RequestParts
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
@@ -201,6 +202,32 @@ def estimate_replay_tokens(messages: Sequence[Message], *, counter: TokenCounter
                 structured.append({key: value for key, value in part.items() if key != "thought_signature"})
     sent = "".join(texts) + (stable_serialize(structured) if structured else "")
     return count(counter, sent) + reasoning_tokens
+
+
+def gemini_request_parts(request: ModelRequest, start: int, parts: RequestParts) -> None:
+    """Add what the contents and tools a request sends for ``request`` give the model, its messages from ``start`` on.
+
+    The system instruction and text parts count as the model reads them, without the escaping JSON adds; function
+    calls, function responses, and server-side tool parts count as serialized, the last as though the request asked
+    for them. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each reply that
+    replays one adds its reasoning tokens. From ``start`` 0 the function declarations count too.
+    """
+    messages = request.messages[start:]
+    if not start:
+        parts.text(system_text(messages))
+    for message in messages:
+        if message.role == "system":
+            continue
+        message_parts = _message_parts(message, _ROLE_MAP.get(message.role, message.role), server_tool_parts=True)
+        if any("thought_signature" in part for part in message_parts):
+            parts.cost(message.metrics.tokens.reasoning_tokens)
+        for part in message_parts:
+            if isinstance(part.get("text"), str):
+                parts.text(part["text"])
+            else:
+                parts.value({key: value for key, value in part.items() if key != "thought_signature"})
+    if not start:
+        parts.value(function_declarations(request.tools))
 
 
 def _is_tool_result(message: Message) -> bool:
@@ -668,6 +695,7 @@ __all__ = [
     "estimate_replay_tokens",
     "format_contents",
     "function_declarations",
+    "gemini_request_parts",
     "malformed_tool_call_error",
     "read_chunk",
     "rejected_media",

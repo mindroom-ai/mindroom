@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     type _Media = Image | Audio | Video | File
 
-__all__ = ["FALLBACK_MARKER", "media_fallback_stream"]
+__all__ = ["FALLBACK_MARKER", "media_fallback_inputs", "media_fallback_request", "media_fallback_stream"]
 
 logger = get_logger(__name__)
 
@@ -202,6 +202,27 @@ def _selective_removal(
     return removed, ids
 
 
+def _route(inner: ModelProvider) -> _Route:
+    identity = inner.identity
+    return _Route(provider=identity.provider.lower(), model_id=identity.id, endpoint=identity.endpoint)
+
+
+def _unsupported_kinds(inner: ModelProvider) -> frozenset[MediaKind]:
+    """Return the media kinds ``inner`` is never sent: those its route omits and those it learned the model rejects."""
+    return frozenset(_LEARNED_UNSUPPORTED.get(_route(inner), ())) | inner.capabilities.omitted_media
+
+
+def media_fallback_request(inner: ModelProvider, request: ModelRequest, *, fallback_prompt: str) -> ModelRequest:
+    """Return the first attempt the media fallback sends ``inner``: unsupported media replaced by the fallback note."""
+    known = _unsupported_kinds(inner) & _media_kinds(request.messages)
+    return replace(request, messages=_without_media(request.messages, known, frozenset(), fallback_prompt))
+
+
+def media_fallback_inputs(inner: ModelProvider, *, fallback_prompt: str) -> object:
+    """Return what ``media_fallback_request`` reads beside the request: the unsupported kinds and the note."""
+    return [sorted(_unsupported_kinds(inner)), fallback_prompt]
+
+
 async def media_fallback_stream(
     inner: ModelProvider,
     request: ModelRequest,
@@ -210,11 +231,11 @@ async def media_fallback_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with unsupported media replaced, retrying without what a rejection names, then media-free."""
     identity = inner.identity
-    route = _Route(provider=identity.provider.lower(), model_id=identity.id, endpoint=identity.endpoint)
+    route = _route(inner)
     present = _media_kinds(request.messages)
-    known = (frozenset(_LEARNED_UNSUPPORTED.get(route, ())) | inner.capabilities.omitted_media) & present
+    known = _unsupported_kinds(inner) & present
     remaining = present - known
-    first = replace(request, messages=_without_media(request.messages, known, frozenset(), fallback_prompt))
+    first = media_fallback_request(inner, request, fallback_prompt=fallback_prompt)
     sent = {item.id: kind for message in first.messages for kind, item in media_items(message)}
     failure: ProviderError | None = None
     sent_broad = False

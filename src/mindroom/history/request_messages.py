@@ -12,8 +12,9 @@ from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
-from mindroom.history.run_visibility import is_queued_notice_message, replays_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
+from mindroom.llm.messages import is_queued_notice_message
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence

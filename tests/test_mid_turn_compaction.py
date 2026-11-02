@@ -32,7 +32,6 @@ from mindroom.history.replay import (
     estimate_summary_text_tokens,
 )
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
 from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
@@ -53,6 +52,7 @@ from mindroom.hooks import (
 )
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File, Image
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,

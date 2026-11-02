@@ -269,6 +269,14 @@ class _RecordingAdapter:
         """The adapter's token counter."""
         return self.adapter.token_counter
 
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """The adapter's size of ``request``."""
+        return self.adapter.request_tokens(request, start=start)
+
+    def context_key(self, request: ModelRequest) -> str:
+        """The adapter's identity of ``request`` besides its messages."""
+        return self.adapter.context_key(request)
+
     @property
     def model_params(self) -> dict[str, Any]:
         """The adapter's recorded settings."""

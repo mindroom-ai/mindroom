@@ -1178,7 +1178,6 @@ visibility = [
 [[modules]]
 path = "mindroom.ai_runtime"
 depends_on = [
-    "mindroom.history.run_visibility",
     "mindroom.llm",
 ]
 visibility = [
@@ -1194,13 +1193,10 @@ path = "mindroom.history.run_visibility"
 depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.session_storage.schema",
-    "mindroom.ai_runtime",
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
-    "mindroom.history.interrupted_replay",
-    "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
 
@@ -2633,6 +2629,7 @@ depends_on = [
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.history.run_visibility",
+    "mindroom.llm",
 ]
 
 # The stored tool-call shapes earlier releases wrote, which the conversion to storage v2 stores in the current shape.
@@ -2855,7 +2852,6 @@ depends_on = []
 path = "mindroom.history.interrupted_replay"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.run_visibility",
     "mindroom.history.storage",
     "mindroom.history.summary_message",
     "mindroom.prompt_message_tags",
@@ -9347,7 +9343,6 @@ depends_on = [
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
     "mindroom.history.replay",
-    "mindroom.history.run_visibility",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.summary_message",

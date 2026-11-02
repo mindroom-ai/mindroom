@@ -394,6 +394,23 @@ class ModelProvider(Protocol):
         """The route's JSON-safe, non-secret settings, which the request log records."""
         ...
 
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate what ``request`` gives the route's model, rendered as the route sends it, never over the network.
+
+        From ``start`` 0 that is the whole model context: system prompt, the tool definitions it bills, what the
+        settings add, and every message; from another ``start``, which is an assistant answer, only what
+        ``request.messages[start:]`` add to the request that answer answered.
+        """
+        ...
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify what ``request`` gives the route's model besides its messages, as the route renders it.
+
+        Two requests with one key and the same messages give the model the same context, so a size the provider
+        reported for one describes the other.
+        """
+        ...
+
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one request and yield its events; ``TurnCompleted`` is the last one.
 

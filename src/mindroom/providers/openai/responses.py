@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import InvalidRequest
@@ -17,6 +17,7 @@ from mindroom.providers.openai.chat_wire import SDK_OPTION_KEYS
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
     estimate_responses_replay_tokens,
+    responses_body_parts,
     responses_replay_uses_visual_tokens,
 )
 from mindroom.providers.openai.responses_wire import (
@@ -30,6 +31,7 @@ from mindroom.providers.openai.responses_wire import (
     usage_report,
 )
 from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.requests import route_context_key, route_request_tokens
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
         TokenCounter,
     )
     from mindroom.providers.openai.settings import ResponsesSettings
+    from mindroom.token_counting.requests import RequestParts
 
 __all__ = ["ResponsesAdapter"]
 
@@ -126,6 +129,41 @@ class ResponsesAdapter:
             )
         except InvalidRequest:
             return None
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate the model context ``request`` gives the model, from the body ``stream`` would send to replay it whole.
+
+        A request that continues a stored response sends only what follows it, but the model reads the whole history.
+        """
+        return route_request_tokens(
+            self.token_counter,
+            request,
+            start,
+            self._parts,
+            keep_images=responses_replay_uses_visual_tokens(self.identity.id),
+        )
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the instructions, tools, and settings the body ``stream`` sends for ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, self._parts)
+
+    def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
+        # Each message replays as its own items, so the answer at ``start`` and what follows it render alone.
+        chained = request_replay(self.wire, request).previous_response_id is not None
+        rendered = replace(
+            request if not start else replace(request, messages=request.messages[start:], tools=(), output_schema=None),
+            portable_replay=True,
+        )
+        body = sdk_request_body(self._request_kwargs(rendered), SDK_OPTION_KEYS)
+        responses_body_parts(
+            body,
+            request_replay(self.wire, rendered).history,
+            parts,
+            model_id=self.identity.id,
+            chained=chained,
+            static=not start,
+        )
+        parts.flag(request.native_compaction.route if request.native_compaction is not None else None)
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         return responses_request_kwargs(

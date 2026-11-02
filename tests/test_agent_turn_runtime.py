@@ -34,7 +34,6 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, is_queued_notice_message
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import CompactionOutcome, HistoryScope
@@ -50,7 +49,7 @@ from mindroom.hooks import (
 )
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, RateLimited
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import Message, system_text
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, is_queued_notice_message, system_text
 from mindroom.llm.provider import (
     Capabilities,
     NativeCompactionReplay,

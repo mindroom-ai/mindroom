@@ -75,6 +75,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import delete_runs, install_model_providers, seed_session
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
@@ -109,7 +110,7 @@ _SCRIPTED = ModelIdentity(id="scripted", provider="test")
 
 
 @dataclass
-class _ScriptedModel:
+class _ScriptedModel(PlainRequestSizing):
     """Provider double that plays a fixed tool-call script, then answers, recording what each request sent.
 
     Like every adapter, it stamps each turn it finishes with its model.

@@ -46,6 +46,7 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.llm.events import ToolCallOrigin
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
+from mindroom.llm.request_identity import RequestDigests
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -1063,6 +1064,7 @@ async def _checkpointed_batch(
         request_index=1,
         loop_start_ids=frozenset(),
         request_template=EMPTY_REQUEST,
+        digests=RequestDigests(ScriptedModel([])),
     )
     await checkpoint.capture(state, planned)
     checkpoint.complete("call_completed", ToolOutcome(content="completed sibling result", images=(sibling_image,)))

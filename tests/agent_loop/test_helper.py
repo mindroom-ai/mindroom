@@ -27,6 +27,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from tests.agno_parity.golden_files import turn_message
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
@@ -40,7 +41,7 @@ _ANSWERED_AT = 1_790_000_000
 
 
 @dataclass
-class _RecordingProvider:
+class _RecordingProvider(PlainRequestSizing):
     """Answer every request with one canned turn, stamped as an adapter stamps it, and keep the requests."""
 
     answer: str

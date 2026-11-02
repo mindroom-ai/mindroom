@@ -37,6 +37,7 @@ from mindroom.providers.gemini.wire import (
     estimate_replay_tokens,
     format_contents,
     function_declarations,
+    gemini_request_parts,
     malformed_tool_call_error,
     read_chunk,
     rejected_media,
@@ -48,6 +49,7 @@ from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.identity import model_identity
 from mindroom.providers.tool_policy import disables_tools
 from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.requests import route_context_key, route_request_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping
@@ -96,6 +98,14 @@ class GeminiProvider:
     def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
         """Count the contents an explicitly replayed request sends for ``messages``, for history budgets."""
         return estimate_replay_tokens(messages, counter=self.token_counter)
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate what ``request`` gives the model, from the parts and declarations ``stream`` sends for it."""
+        return route_request_tokens(self.token_counter, request, start, gemini_request_parts)
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the function declarations ``stream`` sends for ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, gemini_request_parts)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.

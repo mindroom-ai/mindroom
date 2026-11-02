@@ -26,9 +26,10 @@ from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
 from mindroom.providers.media_files import read_media_bytes
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types import ToolUseBlock, Usage
@@ -339,6 +340,75 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
     return result
 
 
+# Block fields no model reads: ids, cache breakpoints, and ciphertext the provider decrypts.
+_TRANSPORT_BLOCK_FIELDS = frozenset(
+    {"id", "tool_use_id", "cache_control", "citations", "signature", "data", "encrypted_content", "encrypted_index"},
+)
+
+
+def claude_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts) -> None:
+    """Add what a Claude request body built from ``messages`` gives its model to ``parts``.
+
+    System and message text count as text, tool inputs, results, and definitions as JSON, and a deferred tool only
+    once a tool search in the request loaded it, as the API loads it then. A replayed ``thinking`` or
+    ``redacted_thinking`` block is ciphertext beside a summary, so each answer whose thinking the body replays counts
+    its reported output beyond its visible part, or its thinking text when that is larger.
+    """
+    system = body.get("system")
+    if isinstance(system, str):
+        parts.text(system)
+    for block in system if isinstance(system, list) else ():
+        parts.text(block.get("text"))
+    replayed: set[str] = set()
+    for turn in body.get("messages") or ():
+        for block in turn["content"]:
+            _block_parts(block, parts, replayed)
+    for message in messages:
+        if message.role == "assistant":
+            _thinking_parts(message, parts, replayed)
+    for tool in body.get("tools") or ():
+        if not tool.get("defer_loading"):
+            parts.value({key: value for key, value in tool.items() if key != "cache_control"})
+
+
+def _block_parts(block: Mapping[str, Any], parts: RequestParts, replayed: set[str]) -> None:
+    """Add one content block; the identity of a thinking block goes to ``replayed`` and its cost is the answer's."""
+    kind = block.get("type")
+    if kind in _THINKING_BLOCK_TYPES:
+        replayed.add(_thinking_identity(block))
+    elif kind == "text":
+        parts.text(block.get("text"))
+    elif kind in {"image", "document"}:
+        parts.cost(MEDIA_ALLOWANCE_TOKENS)
+    elif kind == "tool_result":
+        content = block.get("content")
+        if isinstance(content, str):
+            parts.text(content)
+        for nested in content if isinstance(content, list) else ():
+            _block_parts(nested, parts, replayed)
+    elif kind == "compaction":
+        parts.text(block.get("content"))
+    else:
+        parts.value({key: value for key, value in block.items() if key not in _TRANSPORT_BLOCK_FIELDS})
+
+
+def _thinking_identity(block: Mapping[str, Any]) -> str:
+    return str(block.get("signature") or block.get("data") or block.get("thinking") or "")
+
+
+def _thinking_parts(message: Message, parts: RequestParts, replayed: set[str]) -> None:
+    blocks = replayed_blocks(message)
+    thinking = [block for block in blocks if block.get("type") in _THINKING_BLOCK_TYPES]
+    if not any(_thinking_identity(block) in replayed for block in thinking):
+        return
+    visible = RequestParts(parts.counter)
+    for block in blocks:
+        if block.get("type") not in _THINKING_BLOCK_TYPES:
+            _block_parts(block, visible, set())
+    text = "".join(str(block.get("thinking") or "") for block in thinking)
+    parts.cost(max(parts.measure(text), message.metrics.tokens.output_tokens - visible.counted()))
+
+
 # Claude answers a tool whose ``input_schema`` has one of these at its root with a 400 ("input_schema does not support
 # oneOf, allOf, or anyOf at the top level"), as an MCP tool whose input is a union has.
 _TOP_LEVEL_UNSUPPORTED_SCHEMA_KEYS = frozenset({"anyOf", "allOf", "oneOf"})
@@ -457,6 +527,7 @@ __all__ = [
     "FormattedConversation",
     "assistant_message_from_response",
     "checks_thinking_prefix",
+    "claude_body_parts",
     "format_claude_messages",
     "format_claude_tools",
     "parse_claude_usage",

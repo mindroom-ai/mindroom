@@ -53,12 +53,12 @@ from mindroom.final_delivery import (
     TurnEnding,
 )
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.llm.messages import Message as OwnedMessage
+from mindroom.llm.messages import is_queued_notice_message
 from mindroom.llm.runs import AnyRunRecord, RunRecord
 from mindroom.llm.runs import RunStatus as OwnedRunStatus
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage

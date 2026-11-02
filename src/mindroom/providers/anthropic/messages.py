@@ -10,7 +10,7 @@ discovers once.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
@@ -38,6 +38,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     Capabilities,
+    DeferredTools,
     ModelIdentity,
     ModelRequest,
     NativeCompactionReplay,
@@ -63,7 +64,11 @@ from mindroom.providers.anthropic.native_compaction import (
     record_native_checkpoint_on,
     uses_compaction_edit,
 )
-from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
+from mindroom.providers.anthropic.prompt_cache import (
+    claude_loaded_tool_names,
+    native_tool_search_supported,
+    prepare_request_body,
+)
 from mindroom.providers.anthropic.settings import (
     ENDPOINT_VARIABLES,
     ClaudeRouteKind,
@@ -73,6 +78,7 @@ from mindroom.providers.anthropic.settings import (
 from mindroom.providers.anthropic.wire import (
     assistant_message_from_response,
     checks_thinking_prefix,
+    claude_body_parts,
     format_claude_messages,
     format_claude_tools,
     parse_claude_usage,
@@ -100,6 +106,7 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.requests import route_context_key, route_request_tokens
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -115,6 +122,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import MediaKind, NativeHistoryRoute, StructuredOutput, TokenCounter
+    from mindroom.token_counting.requests import RequestParts
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -185,6 +193,18 @@ def _route_client_kwargs(route: ClaudeRouteKind, settings: ClaudeSettings) -> di
             "base_url": settings.base_url,
         }
     return _bedrock_credentials(settings)
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestBody:
+    """One request's wire body, the messages it rendered after native projection, and how it rendered them."""
+
+    kwargs: dict[str, Any]
+    messages: Sequence[Message]
+    beta: bool
+    checkpoint_prefix: bool
+    # The settings that change how messages render: native route, manual thinking, trailing user turn, earlier thinking.
+    flags: tuple[object, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,15 +476,50 @@ class ClaudeProvider:
             params["output_config"] = {**(params.get("output_config") or {}), "format": output_format}
         return params
 
-    def _prepare(self, request: ModelRequest) -> _PreparedRequest:
-        """Build the SDK client and the wire body of one request."""
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate what ``request`` gives the model, from the body ``stream`` sends for it."""
+        return route_request_tokens(self.token_counter, request, start, self._parts)
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the system prompt, tools, and settings the body ``stream`` sends for ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, self._parts)
+
+    def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
+        """Add what the body for ``request`` gives the model, its messages from ``start`` on.
+
+        The answer at ``start`` and what follows it render without the messages before them, which merges no turn
+        across them and moves the earlier-thinking boundary no earlier; tool definitions their tool searches load
+        count as the tools of that rendering. A deferred tool the request loaded counts as an offered one.
+        """
+        deferred = request.deferred_tools.names
+        if start:
+            loaded = claude_loaded_tool_names(request.messages[start:]) - claude_loaded_tool_names(
+                request.messages[:start],
+            )
+            request = replace(
+                request,
+                messages=request.messages[start:],
+                tools=tuple(tool for tool in request.tools if tool.name in loaded & deferred),
+                deferred_tools=DeferredTools(),
+                output_schema=None,
+            )
+        elif deferred:
+            loaded = claude_loaded_tool_names(request.messages)
+            request = replace(request, deferred_tools=replace(request.deferred_tools, names=deferred - loaded))
+        body = self._request_body(request)
+        claude_body_parts(sdk_request_body(body.kwargs, _SDK_OPTION_KEYS), body.messages, parts)
+        parts.flag(body.flags)
+
+    def _request_body(self, request: ModelRequest) -> _RequestBody:
+        """Build the wire body of one request, without its client."""
         settings, overrides = self.settings, request.overrides
         replay = request.native_compaction
         route = replay.route if replay is not None else None
+        manual_thinking = (settings.effective_thinking() or {}).get("type") == "enabled"
         projected, replays_checkpoint = native_replay_messages_for_route(
             request.messages,
             route=route,
-            manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
+            manual_thinking=manual_thinking,
         )
         output_format = self._output_format(request.output_schema)
         output_tool = structured_output_tools(self.capabilities.structured_output, request.output_schema)
@@ -474,10 +529,12 @@ class ClaudeProvider:
         strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
         params = self._request_params(request, output_format, strict_tools=strict_tools)
         authors_thinking = settings.authors_thinking() and not overrides.omit_thinking_setting
+        trailing_user = not supports_prefill(self.identity.id) or authors_thinking
+        earlier_thinking = self._replays_earlier_thinking(params)
         conversation = format_claude_messages(
             projected,
-            append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
-            earlier_thinking=self._replays_earlier_thinking(params),
+            append_trailing_user_message=trailing_user,
+            earlier_thinking=earlier_thinking,
             provider=self.identity.provider,
         )
         body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
@@ -494,12 +551,23 @@ class ClaudeProvider:
         )
         if output_tool:
             body = {**body, "tool_choice": {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}}
-        return _PreparedRequest(
-            client=self._client(),
+        return _RequestBody(
             kwargs=body,
+            messages=projected,
             # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
             checkpoint_prefix=replays_checkpoint,
+            flags=(route, manual_thinking, trailing_user, earlier_thinking),
+        )
+
+    def _prepare(self, request: ModelRequest) -> _PreparedRequest:
+        """Build the SDK client and the wire body of one request."""
+        body = self._request_body(request)
+        return _PreparedRequest(
+            client=self._client(),
+            kwargs=body.kwargs,
+            beta=body.beta,
+            checkpoint_prefix=body.checkpoint_prefix,
         )
 
     def _authored_default_headers(self) -> Mapping[str, str] | None:

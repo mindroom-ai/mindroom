@@ -61,6 +61,7 @@ from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import Await, scripted_body
 from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import pipeline_provider
@@ -82,7 +83,7 @@ _CAPABILITIES = Capabilities()
 
 
 @dataclass
-class _ScriptedProvider:
+class _ScriptedProvider(PlainRequestSizing):
     """Answer each request with the next scripted attempt; an exception step raises, a float or ``Await`` step waits.
 
     Unless ``sends`` is off, each attempt first reports its ``scripted_body`` as sent, so a failing step fails a

@@ -7,7 +7,7 @@ settings come from ``extra_kwargs``.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import httpx2
@@ -22,18 +22,21 @@ from mindroom.providers.openai.chat_wire import (
     SDK_OPTION_KEYS,
     ChatStream,
     ChatWire,
+    chat_body_parts,
     chat_request_kwargs,
     chat_stop_reason,
 )
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
 from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.requests import route_context_key, route_request_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TokenCounter
     from mindroom.providers.openai.settings import ChatSettings
+    from mindroom.token_counting.requests import RequestParts
 
 __all__ = ["ChatAdapter"]
 
@@ -73,7 +76,7 @@ class ChatAdapter:
     wire: ChatWire
     settings: ChatSettings
     clients: SDKClients
-    # Chat Completions keeps no history of its own, and its replayed history is sized canonically.
+    # Chat Completions keeps no history of its own.
     native_history_route: ClassVar[None] = None
 
     @property
@@ -94,6 +97,22 @@ class ChatAdapter:
             or route == "azure"
             or (route == "openrouter" and self.identity.id.startswith("openai/")),
         )
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate what ``request`` gives the model, from the body ``stream`` sends for it."""
+        return route_request_tokens(self.token_counter, request, start, self._parts)
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the tool definitions and settings the body ``stream`` sends for ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, self._parts)
+
+    def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
+        # Each message renders alone, so the answer at ``start`` and what follows it render without the messages before
+        # them, and without the tools and output schema the request before them already sent.
+        rendered = (
+            replace(request, messages=request.messages[start:], tools=(), output_schema=None) if start else request
+        )
+        chat_body_parts(sdk_request_body(self._request_kwargs(rendered), SDK_OPTION_KEYS), rendered.messages, parts)
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = chat_request_kwargs(

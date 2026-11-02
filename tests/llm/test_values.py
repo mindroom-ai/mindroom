@@ -41,6 +41,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import TOKEN_FIELDS, MessageMetrics, RunMetrics, TokenCounts
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
@@ -301,7 +302,7 @@ def test_token_counts_dict_puts_the_first_names_first_and_keeps_every_other_coun
 # --- provider --------------------------------------------------------------------------------------------------
 
 
-class _ScriptedProvider:
+class _ScriptedProvider(PlainRequestSizing):
     identity = ModelIdentity(id="scripted", provider="Synthetic")
     capabilities = Capabilities()
     native_history_route = None

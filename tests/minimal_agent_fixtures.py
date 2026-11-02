@@ -21,9 +21,11 @@ from mindroom.agent_loop.tools import PlannedCall, PreparedTools
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelRequest
+from mindroom.llm.request_identity import RequestDigests
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_model_providers
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
 from tests.fakes.token_counter import fake_token_counter
 
@@ -160,6 +162,7 @@ async def capture_bash_batch(
         request_index=1,
         loop_start_ids=frozenset(),
         request_template=EMPTY_REQUEST,
+        digests=RequestDigests(ScriptedModel([])),
     )
     await owner.checkpoint.capture(state, planned)
 
@@ -204,7 +207,7 @@ type Step = str | list[tuple[str, dict[str, object]]]
 
 
 @dataclass
-class ScriptedProvider:
+class ScriptedProvider(PlainRequestSizing):
     """Answer each request with the next scripted step, recording every request as the loop sent it.
 
     A step is the reply text, or the ``(function, arguments)`` tool calls of one assistant message; once the script

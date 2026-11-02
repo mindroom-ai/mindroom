@@ -12,6 +12,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
 from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics
 
@@ -129,11 +130,18 @@ def as_stored[RecordT: AnyRunRecord](record: RecordT) -> RecordT:
 
 
 def settled[RecordT: AnyRunRecord](record: RecordT) -> RecordT:
-    """Return a copy of ``record`` whose random ids and clock readings are fixed, its member runs' too."""
+    """Return a copy of ``record`` whose random ids and clock readings are fixed, its member runs' too.
+
+    An answer's record of the request it answered digests that whole request, so it is left out too.
+    """
     copy = deepcopy(record)
     copy.created_at = 0
     for message in copy.messages:
         message.id, message.created_at = "", 0
+        if message.provider_data is not None and REQUEST_IDENTITY_KEY in message.provider_data:
+            message.provider_data = {
+                key: value for key, value in message.provider_data.items() if key != REQUEST_IDENTITY_KEY
+            }
     if copy.metrics is not None:
         copy.metrics.duration = copy.metrics.time_to_first_token = None
     if isinstance(copy, TeamRunRecord):

@@ -25,7 +25,6 @@ from mindroom.history.compaction import (
     summarize_runs,
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_text_tokens
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.storage import (
     append_compaction_chunk,
     read_scope_seen_event_ids,
@@ -55,7 +54,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
 from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
