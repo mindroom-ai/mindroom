@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import re
 
 import pytest
@@ -132,6 +133,33 @@ def test_config_service_wins_a_tie_with_a_user_service_whatever_their_names() ->
     route = route_request(_merged({"zeta": tied}, {"alpha": tied}), "api.example.com", 443, "/")
     assert route.match is not None
     assert route.match.service == "zeta"
+
+
+def test_a_request_routes_to_a_service_that_serves_its_agent() -> None:
+    """Services limited to different agents can share hosts: each agent's request takes a service that serves it.
+
+    That beats a more specific rule of a service that does not; with no serving service the best match stays, as
+    without `agents`, and the secret lookup refuses it.
+    """
+    config = EgressBrokerConfig(
+        services={
+            "team_a": EgressService(rules=[_rule("api.github.com")], agents=["agent_a"]),
+            "team_b": EgressService(rules=[_rule("api.github.com")], agents=["agent_b"]),
+            "docs_b": EgressService(rules=[_rule("api.github.com", "/repos/acme/docs")], agents=["agent_b"]),
+        },
+    )
+
+    def routed(agent_name: str, path: str = "/repos/acme/api") -> str:
+        match = route_request(EgressRules.from_config(config), "api.github.com", 443, path, agent_name=agent_name).match
+        assert match is not None
+        return match.service
+
+    assert routed("agent_a") == "team_a"
+    assert routed("agent_b") == "team_b"
+    assert routed("agent_a", "/repos/acme/docs") == "team_a"
+    assert routed("agent_b", "/repos/acme/docs") == "docs_b"
+    assert routed("agent_c") == "team_a"
+    assert routed("agent_c", "/repos/acme/docs") == "docs_b"
 
 
 def test_no_rule_returns_none_and_host_has_rules_false() -> None:
@@ -1152,38 +1180,39 @@ def test_keep_upgrade_preserves_websocket_handshake() -> None:
 
 _CALENDAR_READS = EgressReadOnly(post_paths=["/calendar/v3/freeBusy"])
 _EVENTS = "/calendar/v3/calendars/primary/events"
+_calendar = functools.partial(SecretRequest, host="www.googleapis.com")
 
 
 @pytest.mark.parametrize(
     ("read_only", "request_facts", "allowed"),
     [
-        (_CALENDAR_READS, SecretRequest(method="GET", path=_EVENTS), True),
-        (_CALENDAR_READS, SecretRequest(method="HEAD", path=_EVENTS), True),
-        (_CALENDAR_READS, SecretRequest(method="get", path=_EVENTS), True),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy"), True),
-        (_CALENDAR_READS, SecretRequest(method="post", path="/calendar/v3/freeBusy"), True),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/x"), True),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusyX"), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/batch"), False),
-        (_CALENDAR_READS, SecretRequest(method="PUT", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="PATCH", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="DELETE", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="OPTIONS", path=_EVENTS), False),
-        (_CALENDAR_READS, SecretRequest(method="GET", path="/ws", websocket=True), False),
-        (_CALENDAR_READS, SecretRequest(method="GET", path=_EVENTS, method_override=True), False),
+        (_CALENDAR_READS, _calendar(method="GET", path=_EVENTS), True),
+        (_CALENDAR_READS, _calendar(method="HEAD", path=_EVENTS), True),
+        (_CALENDAR_READS, _calendar(method="get", path=_EVENTS), True),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy"), True),
+        (_CALENDAR_READS, _calendar(method="post", path="/calendar/v3/freeBusy"), True),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy/x"), True),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusyX"), False),
+        (_CALENDAR_READS, _calendar(method="POST", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/batch"), False),
+        (_CALENDAR_READS, _calendar(method="PUT", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="PATCH", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="DELETE", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="OPTIONS", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="GET", path="/ws", websocket=True), False),
+        (_CALENDAR_READS, _calendar(method="GET", path=_EVENTS, method_override=True), False),
         (
             _CALENDAR_READS,
-            SecretRequest(method="POST", path="/calendar/v3/freeBusy", method_override=True),
+            _calendar(method="POST", path="/calendar/v3/freeBusy", method_override=True),
             False,
         ),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/../events"), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/%2e%2e/events"), False),
-        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy//x"), False),
-        (None, SecretRequest(method="GET", path=_EVENTS), False),
-        (None, SecretRequest(method="HEAD", path=_EVENTS), False),
-        (None, SecretRequest(method="POST", path="/calendar/v3/freeBusy"), False),
-        (None, SecretRequest(method="DELETE", path=_EVENTS), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy/../events"), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy/%2e%2e/events"), False),
+        (_CALENDAR_READS, _calendar(method="POST", path="/calendar/v3/freeBusy//x"), False),
+        (None, _calendar(method="GET", path=_EVENTS), False),
+        (None, _calendar(method="HEAD", path=_EVENTS), False),
+        (None, _calendar(method="POST", path="/calendar/v3/freeBusy"), False),
+        (None, _calendar(method="DELETE", path=_EVENTS), False),
     ],
 )
 def test_read_only_allows_matrix(

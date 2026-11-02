@@ -374,6 +374,40 @@ describe("egress service rows", () => {
   });
 });
 
+describe("GitHub App services", () => {
+  const app = (configured: boolean): EgressCredentialService => ({
+    ...github,
+    configured,
+    active_source: configured ? "github_app" : null,
+    rules: ruleSummaries([{ host: "api.github.com" }, { host: "github.com" }]),
+    github_app_repositories: { "acme/api": "read_write", "acme/docs": "read" },
+  });
+
+  it("names the App's repositories and offers no key", async () => {
+    renderRows([app(true)]);
+    const row_ = row("GitHub");
+    expect(within(row_).getByText("Using GitHub App")).toBeInTheDocument();
+    expect(
+      within(row_).getByText(
+        "GitHub App for acme/api (read and write) and acme/docs (read only)",
+      ),
+    ).toBeInTheDocument();
+    await expectNoAction(/key/i, row_);
+  });
+
+  it("says only an administrator can make an unstored App work", async () => {
+    renderRows([app(false)]);
+    const row_ = row("GitHub");
+    expect(within(row_).getByText("Not set")).toBeInTheDocument();
+    expect(
+      within(row_).getByText(
+        "Requests are refused until an administrator stores the GitHub App credential.",
+      ),
+    ).toBeInTheDocument();
+    await expectNoAction(/key/i, row_);
+  });
+});
+
 describe("connected accounts", () => {
   beforeEach(fakePopup);
 

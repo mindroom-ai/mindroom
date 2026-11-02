@@ -514,3 +514,37 @@ def test_a_service_limited_to_other_agents_says_who_can_change_that() -> None:
         "service": "search",
         "message": "This agent may not use Search API. Only an administrator can change which agents may use it.",
     }
+
+
+@pytest.mark.parametrize("values", [{}, {"shared": True, "managers": ["@alice:example.org"]}, {"personal_page": False}])
+def test_github_app_refusals_name_only_an_administrator(values: dict[str, object]) -> None:
+    """A GitHub App service's App and repositories are config only, so no scope's page is linked, whatever the scope."""
+    assert refusal_body(
+        "repository_not_allowed",
+        service="acme",
+        repository="acme/other",
+        manage_url=MANAGE_URL,
+        **values,
+    ) == {
+        "error": "repository_not_allowed",
+        "service": "acme",
+        "repository": "acme/other",
+        "message": "The acme GitHub App does not cover acme/other. Only an administrator can add repositories to it.",
+    }
+    assert refusal_body(
+        "credential_not_configured",
+        service="acme",
+        github_app=True,
+        manage_url=MANAGE_URL,
+        **values,
+    ) == {
+        "error": "credential_not_configured",
+        "service": "acme",
+        "message": "The acme GitHub App credential is not stored. Only an administrator can store it.",
+    }
+    assert refusal_body("github_app_token_failed", service="acme", manage_url=MANAGE_URL, **values) == {
+        "error": "github_app_token_failed",
+        "service": "acme",
+        "message": "GitHub did not issue a token for the acme GitHub App. "
+        "Retry in a minute; if it keeps failing, tell an administrator.",
+    }

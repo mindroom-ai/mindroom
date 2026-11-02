@@ -135,9 +135,16 @@ def test_oauth_on_shared_workers_stays_operator_only(manager: CredentialsManager
     assert load_user_services(manager, worker_target()) == {}
 
 
-@pytest.mark.parametrize(("field", "value"), [("admin_key", True), ("agents", ["coder"])])
-def test_admin_key_and_agents_stay_operator_only(manager: CredentialsManager, field: str, value: object) -> None:
-    """Only an administrator decides who sets a service's key and which agents get it."""
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("admin_key", True),
+        ("agents", ["coder"]),
+        ("github_app", {"credentials_service": "acme_app", "repositories": {"acme/api": "read"}}),
+    ],
+)
+def test_operator_fields_stay_operator_only(manager: CredentialsManager, field: str, value: object) -> None:
+    """Only an administrator decides who sets a service's key, which agents get it, and which App mints its tokens."""
     with pytest.raises(ValueError, match=f"{field} can only be set by an administrator in config.yaml"):
         _save(manager, worker_target(), "mine", _service(**{field: value}))
 

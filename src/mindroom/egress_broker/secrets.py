@@ -12,7 +12,7 @@ from mindroom.credentials.policy import egress_credential_service
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.config.egress_broker import EgressService
+    from mindroom.config.egress_broker import EgressGitHubApp, EgressService
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -23,10 +23,12 @@ __all__ = [
     "OAuthStatus",
     "OAuthStatusReader",
     "Secret",
+    "SecretGitHubAppUnavailable",
     "SecretMissing",
     "SecretNeedsReconnect",
     "SecretNotForAgent",
     "SecretReadOnly",
+    "SecretRepositoryNotAllowed",
     "SecretRequest",
     "SecretResult",
     "SecretServiceChanged",
@@ -35,6 +37,7 @@ __all__ = [
     "delete_secret",
     "is_personal_target",
     "load_egress_document",
+    "load_github_app_credentials",
     "load_secret",
     "save_egress_document",
     "save_secret",
@@ -130,6 +133,18 @@ def load_secret(
     return credentials.get("secret")
 
 
+def load_github_app_credentials(manager: CredentialsManager, app: EgressGitHubApp) -> dict[str, Any] | None:
+    """Load the App credential a `github_app` service names, from the store Git knowledge bases read it from.
+
+    None unless it is stored with `auth_type: github_app`. It holds the App's ids and the path of its private key, which
+    only the primary reads.
+    """
+    credentials = manager.shared_manager().load_credentials(app.credentials_service)
+    if credentials is None or credentials.get("auth_type") != "github_app":
+        return None
+    return credentials
+
+
 def save_secret(
     manager: CredentialsManager,
     target: ResolvedWorkerTarget | None,
@@ -198,11 +213,13 @@ def delete_secret(
 class SecretRequest:
     """What the broker knows about the request it resolves a secret for, which an access level can depend on.
 
-    `method` is the request's method as sent, `path` its path without the query, `websocket` whether it asks to switch
-    to a WebSocket, and `method_override` whether it carries a header that asks the server to read another method.
+    `method` is the request's method as sent, `host` the host it was routed to, `path` its path without the query,
+    `websocket` whether it asks to switch to a WebSocket, and `method_override` whether it carries a header that asks
+    the server to read another method.
     """
 
     method: str
+    host: str
     path: str
     websocket: bool = False
     method_override: bool = False
@@ -224,7 +241,8 @@ class SecretMissing:
     `reuse_off` means nobody allowed Agent Keys to use the `provider` account for this service, so it was not read
     and there is no link; `requester_owned` says the account is the requester's own, which only they can allow.
     `own_account` means the service's own account is not connected, or with `reuse_off` not allowed, which only its row
-    on the egress page does. `admin_key` means the service's one key is the administrator's, which nobody else sets.
+    on the egress page does. `admin_key` means the service's one key is the administrator's, which nobody else sets,
+    and `github_app` that the service's GitHub App credential is not stored, which only an administrator does.
     """
 
     provider: str | None = None
@@ -233,6 +251,7 @@ class SecretMissing:
     requester_owned: bool = False
     own_account: bool = False
     admin_key: bool = False
+    github_app: bool = False
 
 
 @dataclass(frozen=True)
@@ -273,6 +292,18 @@ class SecretReadOnly:
 
 
 @dataclass(frozen=True)
+class SecretRepositoryNotAllowed:
+    """The request names `repository` (`owner/repository`), which the service's GitHub App does not cover; no token."""
+
+    repository: str
+
+
+@dataclass(frozen=True)
+class SecretGitHubAppUnavailable:
+    """GitHub issued no token for the service's App, or its credential is unusable; the reason is only logged."""
+
+
+@dataclass(frozen=True)
 class SecretServiceChanged:
     """The service no longer has the definition whose rule routed the request, so its credential may be for other hosts.
 
@@ -288,6 +319,8 @@ type SecretResult = (
     | SecretReadOnly
     | SecretServiceChanged
     | SecretNotForAgent
+    | SecretRepositoryNotAllowed
+    | SecretGitHubAppUnavailable
 )
 
 
@@ -322,10 +355,13 @@ type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatu
 
 @dataclass(frozen=True)
 class EgressServiceStatus:
-    """Which secret source a service has in one scope; an explicit key wins over an OAuth connection it may use."""
+    """Which secret source a service has in one scope; an explicit key wins over an OAuth connection it may use.
+
+    A `github_app` service has only its App, which every scope shares.
+    """
 
     configured: bool
-    active_source: Literal["key", "oauth"] | None
+    active_source: Literal["key", "oauth", "github_app"] | None
     key_configured: bool
     key_updated_at: str | None
     oauth: OAuthStatus | None
@@ -344,15 +380,24 @@ def service_status(
     `oauth_status(provider_id, target)` reports the service's OAuth provider for the same target; it is not
     called for services without one. A service with its own account (`oauth_separate_account`) has no key, as the
     broker never uses one for it, and an `admin_key` service's key is its administrator key (`_key_location`).
-    Never returns a secret or token.
+    A `github_app` service is configured while its App credential is stored. Never returns a secret or token.
     """
+    if service.github_app is not None:
+        app_stored = load_github_app_credentials(manager, service.github_app) is not None
+        return EgressServiceStatus(
+            configured=app_stored,
+            active_source="github_app" if app_stored else None,
+            key_configured=False,
+            key_updated_at=None,
+            oauth=None,
+        )
     key = (
         None
         if service.oauth_separate_account
         else load_egress_document(manager, *_key_location(target, name, admin_key=service.admin_key))
     )
     oauth = oauth_status(service.oauth_provider, target) if service.oauth_provider is not None else None
-    active_source: Literal["key", "oauth"] | None = None
+    active_source: Literal["key", "oauth", "github_app"] | None = None
     if key is not None:
         active_source = "key"
     elif oauth is not None and oauth.connected and oauth.reuse_enabled:

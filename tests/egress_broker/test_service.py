@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import socket
 import ssl
 import stat
@@ -18,6 +19,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig
@@ -29,6 +31,7 @@ from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
+from mindroom.egress_broker.github_app import GITHUB_APP_PERMISSIONS
 from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
@@ -50,6 +53,7 @@ from mindroom.egress_broker.user_services import (
     delete_user_service,
     save_user_service,
 )
+from mindroom.github_app_auth import GitHubAppTokenProvider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
@@ -1684,6 +1688,125 @@ async def test_config_placeholders_win_over_user_placeholders(
     assert env["MINE_TOKEN"] == "mine-placeholder"  # noqa: S105 - a placeholder value, not a secret
 
 
+def _save_github_app(manager: CredentialsManager, key_file: Path) -> None:
+    """Store the App credential `acme_app` with a fresh RSA private key at `key_file`."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_file.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ),
+    )
+    manager.save_credentials(
+        "acme_app",
+        {"auth_type": "github_app", "app_id": 1, "installation_id": 2, "private_key_file": str(key_file)},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_github_app_service_injects_its_minted_token_and_never_a_stored_key(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    get_through: GetThrough,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The App's token reaches the upstream, minted once for both requests, and a key stored under the name is unused.
+
+    The placeholders reach the worker only once the App credential is stored.
+    """
+    mints: list[dict[str, object]] = []
+
+    async def token_endpoint(request: httpx.Request) -> httpx.Response:
+        assert request.url == "https://api.github.com/app/installations/2/access_tokens"
+        mints.append(json.loads(request.read()))
+        return httpx.Response(201, json={"token": "app-token", "expires_at": "2099-01-01T00:00:00Z"})
+
+    monkeypatch.setattr(
+        service,
+        "GitHubAppTokenProvider",
+        lambda: GitHubAppTokenProvider(client=httpx.AsyncClient(transport=httpx.MockTransport(token_endpoint))),
+    )
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    app = {"credentials_service": "acme_app", "repositories": {"acme/api": "read"}}
+    config = _config(github={**_GITHUB, "github_app": app})
+    target = _routable_target()
+    save_secret(manager, target, "github", "stored-key")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        unstored = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        _save_github_app(manager, tmp_path / "app.pem")
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        first = await get_through(env)
+        second = await get_through(env)
+
+    assert "GH_TOKEN" not in unstored
+    assert env["GH_TOKEN"] == _PLACEHOLDER
+    assert first.json()["headers"]["authorization"] == ["Bearer app-token"]
+    assert second.json()["headers"]["authorization"] == ["Bearer app-token"]
+    assert mints == [
+        {
+            "repositories": ["api"],
+            "permissions": dict(GITHUB_APP_PERMISSIONS["read"]),
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_github_app_services_limited_to_different_agents_each_serve_their_own(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    get_through: GetThrough,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two App services on the same hosts: each agent gets its own service's token, any other agent a refusal."""
+
+    async def token_endpoint(request: httpx.Request) -> httpx.Response:
+        repositories = json.loads(request.read())["repositories"]
+        return httpx.Response(
+            201,
+            json={"token": f"token-for-{'-'.join(repositories)}", "expires_at": "2099-01-01T00:00:00Z"},
+        )
+
+    monkeypatch.setattr(
+        service,
+        "GitHubAppTokenProvider",
+        lambda: GitHubAppTokenProvider(client=httpx.AsyncClient(transport=httpx.MockTransport(token_endpoint))),
+    )
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    agents = {name: AgentConfig(display_name=name.title()) for name in ("code", "general", "research")}
+
+    def team(agent: str, repository: str, access: str) -> dict[str, object]:
+        app = {"credentials_service": "acme_app", "repositories": {repository: access}}
+        return {**_GITHUB, "agents": [agent], "github_app": app}
+
+    services = {
+        "github_team_a": team("code", "acme/api", "read_write"),
+        "github_team_b": team("general", "acme/docs", "read"),
+    }
+    config = Config(agents=agents, egress_broker={"services": services})
+    _save_github_app(manager, tmp_path / "app.pem")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        envs = {
+            agent: execution_env_for_worker(
+                runtime_paths,
+                config=config,
+                worker_target=_routable_target("@alice:example.org", agent),
+            )
+            for agent in agents
+        }
+        responses = {agent: await get_through(env) for agent, env in envs.items()}
+
+    assert responses["code"].json()["headers"]["authorization"] == ["Bearer token-for-api"]
+    assert responses["general"].json()["headers"]["authorization"] == ["Bearer token-for-docs"]
+    assert responses["research"].status_code == 403
+    assert responses["research"].json()["error"] == "agent_not_allowed"
+    assert "GH_TOKEN" not in envs["research"]
+    assert len(tls_upstream.hits) == 2
+
+
 _DRIVE_PLACEHOLDER = "DRIVE_TOKEN"
 
 
@@ -1724,11 +1847,12 @@ async def _resolve_mine(config: Config, runtime_paths: RuntimePaths, manager: Cr
             claims,
             "mine",
             routed,
-            SecretRequest(method="GET", path="/drive/v3/files"),
+            SecretRequest(method="GET", host="www.googleapis.com", path="/drive/v3/files"),
             config=service._LastGoodConfig(lambda: config, manager, personal_page=True),
             runtime_paths=runtime_paths,
             credentials_manager=manager,
             oauth_executor=executor,
+            github_app_tokens=GitHubAppTokenProvider(),
         )
 
 

@@ -106,6 +106,8 @@ export function refusedReadOnly(service: EgressCredentialService): boolean {
 
 /** What the row's status label says about where the service's credential comes from. */
 export function statusLabel(service: EgressCredentialService): string {
+  if (service.github_app_repositories)
+    return service.configured ? "Using GitHub App" : "Not set";
   const oauth = service.oauth;
   if (oauth) {
     // An account that cannot be used here leaves the key as all there is to say.
@@ -177,6 +179,20 @@ export function adminKeyNote(service: EgressCredentialService): string | null {
     : "Your administrator sets this key for everyone who uses this service.";
 }
 
+/**
+ * "GitHub App for a/b (read and write) and a/c (read only)" for a service
+ * whose credential is a GitHub App; null for any other service.
+ */
+export function githubAppNote(service: EgressCredentialService): string | null {
+  const repositories = service.github_app_repositories;
+  if (!repositories) return null;
+  const covered = Object.entries(repositories).map(
+    ([repository, access]) =>
+      `${repository} (${access === "read" ? "read only" : "read and write"})`,
+  );
+  return `GitHub App for ${formatList(covered)}`;
+}
+
 /** The agents a service is limited to, which only the dashboard is told; null for a service of every agent. */
 export function agentsNote(service: EgressCredentialService): string | null {
   return service.agents ? `Only for ${formatList(service.agents)}` : null;
@@ -199,6 +215,8 @@ export function unsetNote(service: EgressCredentialService): string | null {
     return null;
   if (service.admin_key && !service.can_manage)
     return "Requests are refused until your administrator sets a key.";
+  if (service.github_app_repositories)
+    return "Requests are refused until an administrator stores the GitHub App credential.";
   const oauth = service.oauth;
   // A service with its own account takes no key, only that account.
   if (service.separate_account)

@@ -22,6 +22,7 @@ from mindroom.api.egress_status import (
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
+    GitHubAppRepositories,
     OAuthReuseRequest,
     PresetsResponse,
     PutSecretRequest,
@@ -29,6 +30,7 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    github_app_repositories,
     key_refusal,
     load_concurrently,
     oauth_provider_of_service,
@@ -67,7 +69,8 @@ class _ServiceStatus(EgressSourceStatus):
     service that only limits the paths of the other services on its hosts and never has a key or account.
     `read_only_supported` says whether its account can be allowed read-only. `admin_key` marks a service whose one key
     serves every scope, which this panel sets whichever scope is selected, and `agents` lists the agents the service
-    serves (null for every agent); the panel lists it for the other agents too.
+    serves (null for every agent); the panel lists it for the other agents too. `github_app_repositories` maps each
+    repository a `github_app` service's App covers to its access (null for any other service), which config.yaml sets.
     """
 
     name: str
@@ -79,6 +82,7 @@ class _ServiceStatus(EgressSourceStatus):
     read_only_supported: bool
     admin_key: bool
     agents: list[str] | None
+    github_app_repositories: GitHubAppRepositories | None
 
 
 class ServicesResponse(BaseModel):
@@ -140,6 +144,7 @@ async def _load_service_statuses_for_target(
             read_only_supported=service_config.read_only is not None,
             admin_key=service_config.admin_key,
             agents=service_config.agents,
+            github_app_repositories=github_app_repositories(service_config),
             **asdict(sources),
         )
 

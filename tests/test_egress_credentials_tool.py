@@ -885,6 +885,32 @@ def test_an_administrator_key_is_listed_as_set_and_marked_as_the_administrators(
     assert "`admin_key: true`" in payload["note"]
 
 
+def test_a_github_app_service_lists_its_repositories(tmp_path: Path) -> None:
+    """The agent learns which repositories the App covers and at what access, and that only an administrator changes it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "acme_app",
+        {"auth_type": "github_app", "app_id": 1, "installation_id": 2, "private_key_file": "/run/secrets/app.pem"},
+    )
+    repositories = {"acme/api": "read_write", "acme/docs": "read"}
+    app = {"credentials_service": "acme_app", "repositories": repositories}
+    services = {**_SERVICES, "github": {**_SERVICES["github"], "github_app": app}}
+
+    payload = _list(_tool(runtime_paths), _context(runtime_paths, services))
+
+    assert payload["services"][0] == {
+        "name": "github",
+        "display_name": "GitHub",
+        "source": "config",
+        "configured": True,
+        "active_source": "github_app",
+        "oauth_reuse": None,
+        "oauth_access": None,
+        "github_app_repositories": repositories,
+    }
+    assert "`github_app_repositories`" in payload["note"]
+
+
 def test_a_service_limited_to_other_agents_is_not_listed(tmp_path: Path) -> None:
     """The broker refuses this agent such a service, so it is not offered as one the user could fix."""
     runtime_paths = _runtime_paths(tmp_path)

@@ -1834,6 +1834,31 @@
       "title": "EgressBrokerConfig",
       "type": "object"
     },
+    "EgressGitHubApp": {
+      "additionalProperties": false,
+      "description": "A GitHub App installation whose short-lived tokens, limited to some repositories, are a service's credential.",
+      "properties": {
+        "credentials_service": {
+          "description": "Stored credential that holds the App, as Git knowledge bases use it: auth_type github_app, app_id, installation_id, and private_key_file",
+          "title": "Credentials Service",
+          "type": "string"
+        },
+        "repositories": {
+          "additionalProperties": {
+            "$ref": "#/$defs/GitHubRepositoryAccess"
+          },
+          "description": "Repositories the tokens cover, as owner/repository: read or read_write; all of one owner, the account the App is installed on",
+          "title": "Repositories",
+          "type": "object"
+        }
+      },
+      "required": [
+        "credentials_service",
+        "repositories"
+      ],
+      "title": "EgressGitHubApp",
+      "type": "object"
+    },
     "EgressReadOnly": {
       "additionalProperties": false,
       "description": "How a service's API reads: with `GET` and `HEAD`, and with `POST` only to `post_paths`.",
@@ -2023,8 +2048,20 @@
             }
           ],
           "default": null,
-          "description": "Agents whose requests get the service's credential; requests it matches from any other agent are refused (403 agent_not_allowed), and it is not offered to them. Omit to serve every agent that uses Agent Keys. Only config.yaml may set it, and presets never do",
+          "description": "Agents whose requests get the service's credential; a request of any other agent goes to a matching service that serves it, is refused (403 agent_not_allowed) when none does, and the service is not offered to that agent. Omit to serve every agent that uses Agent Keys. Only config.yaml may set it, and presets never do",
           "title": "Agents"
+        },
+        "github_app": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressGitHubApp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Send tokens that the broker mints from a GitHub App installation, limited to the listed repositories, instead of a key or connected account; a preset's oauth_provider and read_only are left out. Only config.yaml may set it, and presets never do"
         }
       },
       "title": "EgressService",
@@ -2304,6 +2341,13 @@
       },
       "title": "ExternalTriggerPolicyConfig",
       "type": "object"
+    },
+    "GitHubRepositoryAccess": {
+      "enum": [
+        "read",
+        "read_write"
+      ],
+      "type": "string"
     },
     "HookOverrideConfig": {
       "additionalProperties": false,

@@ -13,6 +13,7 @@ import {
   canEdit,
   adminKeyNote,
   agentsNote,
+  githubAppNote,
   limitedNote,
   limitOverlap,
   limitOf,
@@ -152,9 +153,12 @@ export function EgressServiceItem({
   const oauth = service.oauth;
   // Rows with an account keep the key behind a toggle until a key is set.
   const showKeyControls = !oauth || service.key_configured || editing;
-  // A service with its own account uses only that account, so it takes no key.
+  // A service with its own account or a GitHub App uses only that, so it takes no key.
   const canManageKey =
-    service.can_manage && !hideKeyActions && !service.separate_account;
+    service.can_manage &&
+    !hideKeyActions &&
+    !service.separate_account &&
+    !service.github_app_repositories;
   const keyInsteadLabel = oauth?.connected
     ? "Use an API key instead of the account"
     : "Use an API key instead";
@@ -208,6 +212,7 @@ export function EgressServiceItem({
   const limitedText = limitedNote(service);
   const unsetText = unsetNote(service);
   const adminKeyText = adminKeyNote(service);
+  const githubAppText = githubAppNote(service);
   const agentsText = agentsNote(service);
   const limitActions = useLimitActions(
     limit,
@@ -498,6 +503,9 @@ export function EgressServiceItem({
           )}
           {adminKeyText && (
             <p className="text-xs text-muted-foreground">{adminKeyText}</p>
+          )}
+          {githubAppText && (
+            <p className="text-xs text-muted-foreground">{githubAppText}</p>
           )}
           {agentsText && (
             <p className="text-xs text-muted-foreground">{agentsText}</p>
