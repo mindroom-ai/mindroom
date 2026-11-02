@@ -104,6 +104,9 @@ _ALLOWED_FORMATTED_BODY_ATTRIBUTES = {
 _VOID_FORMATTED_BODY_TAGS = frozenset({"br", "hr", "img"})
 _URL_ATTRIBUTES = frozenset({"href", "src"})
 _ALLOWED_URL_SCHEMES = frozenset({"", "http", "https", "mailto", "matrix", "mxc"})
+# Links also keep the app links MindRoom Chat allows by default
+# (`messageRendering.additionalAllowedUriSchemes`): Obsidian notes and Spark email backlinks.
+_ALLOWED_HREF_SCHEMES = _ALLOWED_URL_SCHEMES | {"obsidian", "readdlespark"}
 _ALLOWED_STYLE_PROPERTIES = frozenset(
     {
         "background",
@@ -231,7 +234,7 @@ def _escape_html_block_openers(text: str) -> str:
     return _transform_markdown_outside_fenced_code(text, _escape_html_block_openers_in_text)
 
 
-def _sanitize_url_attribute(value: str) -> str | None:
+def _sanitize_url_attribute(value: str, allowed_schemes: frozenset[str]) -> str | None:
     # TODO(ISSUE-084): split URL policy by tag and restrict img[src] to mxc:// only after the
     # formatted_body callers are audited for compatibility with existing content.
     candidate = unescape(value).strip()
@@ -244,7 +247,7 @@ def _sanitize_url_attribute(value: str) -> str | None:
         scheme = urlsplit(normalized).scheme.lower()
     except ValueError:
         return None
-    if scheme in _ALLOWED_URL_SCHEMES:
+    if scheme in allowed_schemes:
         return candidate
     if not scheme and ":" not in normalized:
         return candidate
@@ -329,7 +332,8 @@ def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | Non
             continue
         sanitized_value = attr_value
         if normalized_attr_name in _URL_ATTRIBUTES:
-            sanitized_url = _sanitize_url_attribute(attr_value)
+            allowed_schemes = _ALLOWED_HREF_SCHEMES if normalized_attr_name == "href" else _ALLOWED_URL_SCHEMES
+            sanitized_url = _sanitize_url_attribute(attr_value, allowed_schemes)
             if sanitized_url is None:
                 continue
             sanitized_value = sanitized_url

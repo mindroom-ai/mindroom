@@ -63,6 +63,8 @@ _GROQ_COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compo
 _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
 # Routes that stream usage in the last chunk unasked; Cerebras does not take the ``stream_options`` that ask for it.
 _UNASKED_STREAM_USAGE_ROUTES = frozenset({"groq", "cerebras"})
+# Routes whose thinking models need each assistant message's ``reasoning_content`` sent back, as their APIs document.
+_REASONING_CONTENT_ROUTES = frozenset({"deepseek", "kimi"})
 # The ``create`` arguments that are request options, not body fields; ``extra_body`` merges into the body.
 SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
 _CHAT_STOP_REASONS: dict[str, StopReason] = {
@@ -78,10 +80,10 @@ _CHAT_STOP_REASONS: dict[str, StopReason] = {
 class ChatWire:
     """How one route shapes Chat Completions requests and reads responses.
 
-    The route selects the rules its API differs by, such as ``deepseek`` and ``openrouter`` replaying their reasoning
-    fields and ``groq`` streaming its usage in its own chunk extension. ``system_role`` is the role the system prompt
-    goes as: ``developer`` to OpenAI's own API, ``system`` to every other endpoint, an OpenAI-compatible server behind
-    the ``openai`` route included.
+    The route selects the rules its API differs by, such as ``deepseek``, ``kimi``, and ``openrouter`` replaying their
+    reasoning fields and ``groq`` streaming its usage in its own chunk extension. ``system_role`` is the role the system
+    prompt goes as: ``developer`` to OpenAI's own API, ``system`` to every other endpoint, an OpenAI-compatible server
+    behind the ``openai`` route included.
     """
 
     route: str
@@ -131,7 +133,7 @@ def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, 
         "tool_call_id": message.tool_call_id,
         "tool_calls": [_chat_call(call) for call in message.tool_calls or ()] or None,
     }
-    if wire.route == "deepseek":
+    if wire.route in _REASONING_CONTENT_ROUTES:
         values["reasoning_content"] = message.reasoning_content
     formatted = {key: value for key, value in values.items() if value is not None}
     images = [part for image in message.images or () if (part := chat_image_part(image, provider=provider)) is not None]
@@ -446,7 +448,7 @@ def _reply_metadata(reply: ChatCompletionChunk) -> dict[str, Any]:
 
 
 def _reasoning_field(fields: Mapping[str, Any]) -> object:
-    """Return the reasoning text servers send as ``reasoning_content`` (DeepSeek) or ``reasoning``."""
+    """Return the reasoning text servers send as ``reasoning_content`` (DeepSeek, Kimi) or ``reasoning``."""
     reasoning = fields.get("reasoning_content")
     return fields.get("reasoning") if reasoning is None else reasoning
 
@@ -531,7 +533,8 @@ class ChatStream:
         """End the consumed stream and return the text it held back; ``parts`` then holds the finished turn."""
         events = self._add_text(self._think.finish())
         self.parts.content = "".join(self._content) or None
-        self.parts.reasoning = "".join(self._reasoning) or None
+        # An empty reasoning field means the model reasoned to nothing, which a route replaying reasoning sends back.
+        self.parts.reasoning = "".join(self._reasoning) if self._reasoning else None
         calls = [self._calls[index] for index in sorted(self._calls)]
         self.parts.tool_calls = _completed_tool_calls(calls)
         return events

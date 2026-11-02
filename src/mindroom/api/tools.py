@@ -23,7 +23,7 @@ from mindroom.credentials.manager import (
 from mindroom.mcp.registry import with_catalog_function_names
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
-    load_oauth_credentials_snapshot,
+    load_oauth_credentials_status,
     oauth_credentials_usable,
     resolve_oauth_credential_context,
 )
@@ -33,8 +33,8 @@ from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
+    build_requester_execution_identity,
     build_worker_target_from_runtime_env,
-    resolve_worker_target,
     unsupported_shared_only_integration_names,
 )
 
@@ -219,17 +219,51 @@ def _resolve_tool_availability_context(
     )
 
 
+def _status_worker_target(
+    context: _ResolvedToolAvailabilityContext,
+    *,
+    authoritative: bool,
+) -> ResolvedWorkerTarget | None:
+    """Return the target the runtime reads for this request, or the target of a preview without a requester.
+
+    Dashboard users are not the trusted requester of a live Matrix sender, so a preview reads only what the
+    requested scope, saved or draft, holds for no requester, and a service that lives only in a requester's store
+    previews as unconfigured.
+    """
+    if authoritative:
+        return context.worker_target
+    if context.execution_scope is None:
+        return None
+    identity = (
+        None
+        if context.agent_name is None
+        else build_requester_execution_identity(
+            agent_name=context.agent_name,
+            runtime_paths=context.runtime_paths,
+            requester_id=None,
+        )
+    )
+    return build_worker_target_from_runtime_env(
+        context.execution_scope,
+        context.agent_name,
+        execution_identity=identity,
+        runtime_paths=context.runtime_paths,
+    )
+
+
 async def _load_oauth_provider_credentials(
     provider: OAuthProvider,
     context: _ResolvedToolAvailabilityContext,
     cache: dict[tuple[str, str | None], dict[str, Any] | None],
+    *,
+    authoritative: bool,
 ) -> dict[str, Any] | None:
-    """Load one registered provider through the authoritative lifecycle owner."""
+    """Load one registered provider's connection from its lifecycle owner, or a preview of it without a requester."""
     credential_context = resolve_oauth_credential_context(
         provider,
         context.runtime_paths,
         context.credentials_manager,
-        context.worker_target,
+        _status_worker_target(context, authoritative=authoritative),
         config=context.oauth_config,
     )
     provider_target = credential_context.worker_target
@@ -241,8 +275,9 @@ async def _load_oauth_provider_credentials(
     )
     if cache_key not in cache:
         try:
-            cache[cache_key] = (await load_oauth_credentials_snapshot(credential_context)).credentials
-        except OAuthProviderError:
+            cache[cache_key] = (await load_oauth_credentials_status(credential_context, create_store=False)).credentials
+        except (OAuthProviderError, ValueError):
+            # A ValueError means a preview target lacks the requester or agent its store needs.
             cache[cache_key] = None
     return cache[cache_key]
 
@@ -253,19 +288,8 @@ def _tool_status_credentials(
     *,
     authoritative: bool,
 ) -> dict[str, Any] | None:
-    """Return the credentials the runtime would read for one service, or a preview of them without a requester.
-
-    Dashboard users are not the trusted requester of a live Matrix sender, so a preview reads only what the
-    requested scope, saved or draft, holds for no requester, and a service that lives only in a requester's store
-    previews as unconfigured.
-    """
-    worker_target = context.worker_target
-    if not authoritative:
-        worker_target = (
-            None
-            if context.execution_scope is None
-            else resolve_worker_target(context.execution_scope, context.agent_name, execution_identity=None)
-        )
+    """Return the credentials the runtime would read for one service, or a preview of them without a requester."""
+    worker_target = _status_worker_target(context, authoritative=authoritative)
     try:
         return load_scoped_credentials(
             service,
@@ -323,11 +347,15 @@ async def _update_tools_statuses(
                 tool["manual_auth_configured"] = manual_auth_configured
             environment_auth_configured = _check_environment_oauth_fallback_configured(tool, context.runtime_paths)
             tool["environment_auth_configured"] = environment_auth_configured
-            credential_service = provider.credential_service if provider is not None else auth_provider
             provider_creds = (
-                await _load_oauth_provider_credentials(provider, context, oauth_credentials_cache)
-                if provider is not None and (context.status_authoritative or use_request_target)
-                else get_credentials(credential_service, use_request_target=use_request_target)
+                get_credentials(auth_provider)
+                if provider is None
+                else await _load_oauth_provider_credentials(
+                    provider,
+                    context,
+                    oauth_credentials_cache,
+                    authoritative=context.status_authoritative or use_request_target,
+                )
             )
             auth_configured = (
                 manual_auth_configured
