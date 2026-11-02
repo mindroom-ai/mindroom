@@ -205,6 +205,19 @@ def _summarizer(
     )
 
 
+def _included_run_count(previous_summary: str | None, compacted_runs: Sequence[AnyRunRecord], budget: int) -> int:
+    """Return how many of ``compacted_runs`` one summary input of ``budget`` tokens holds."""
+    return len(
+        build_summary_input(
+            previous_summary=previous_summary,
+            compacted_runs=compacted_runs,
+            max_input_tokens=budget,
+            history_settings=_ALL_HISTORY_SETTINGS,
+            token_estimator=quarter_tokens,
+        )[1],
+    )
+
+
 async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
     """Stand in for the reply lifecycle's success report."""
     return outcome
@@ -724,11 +737,15 @@ class ToolLoopModel:
 
 @dataclass
 class SummaryCalls:
-    """A compaction summary call that records its inputs and reports usage; it can fail or be cancelled."""
+    """A compaction summary call that records its inputs and reports usage; it can fail or be cancelled.
+
+    Each call returns ``summary`` when set, else a short summary numbered by call.
+    """
 
     inputs: list[str] = field(default_factory=list)
     fail: bool = False
     cancel: bool = False
+    summary: str | None = None
 
     async def __call__(
         self,
@@ -747,7 +764,7 @@ class SummaryCalls:
         if self.fail:
             msg = "summary model unavailable"
             raise RuntimeError(msg)
-        return f"SUMMARY-{len(self.inputs)}"
+        return self.summary or f"SUMMARY-{len(self.inputs)}"
 
 
 def seeded_storage(config: Config, runtime_paths: RuntimePaths) -> ConversationStore:

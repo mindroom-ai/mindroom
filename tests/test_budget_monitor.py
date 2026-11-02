@@ -14,12 +14,20 @@ from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
-from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
+from mindroom.budgets.monitor import (
+    BudgetMonitor,
+    _budget_limit_usd,
+    _BudgetUserStatus,
+    _scan_fingerprint,
+    budget_model,
+    budget_user_id,
+)
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
@@ -283,7 +291,7 @@ async def test_refreshes_are_debounced_with_one_trailing_scan(tmp_path: Path, mo
     await _until(lambda: scans.calls == 1)
 
     for _ in range(5):
-        await monitor.sync(_config())
+        monitor.response_finished(ALICE, None, OCTOBER)
     scans.release.set()
     await _until(lambda: scans.calls == 2)
     await _quiet()
@@ -301,7 +309,7 @@ async def test_scan_failure_keeps_previous_snapshot_and_reply_costs(
     scans.error = RuntimeError("database locked")
     monitor.response_finished(ALICE, 1.0, OCTOBER)
 
-    await monitor.sync(_config())
+    monitor.response_finished(BOB, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
     await _quiet()
     monitor.response_finished(ALICE, 0.5, OCTOBER)
@@ -429,7 +437,7 @@ async def test_rescans_wait_for_the_minimum_interval(tmp_path: Path, monkeypatch
     )
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
-    await monitor.sync(_config())
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
 
     # Scans start in a worker thread after a dispatch delay that varies, so allow some slack below the interval.
@@ -459,7 +467,7 @@ async def test_slow_scans_are_spaced_by_their_duration(tmp_path: Path, monkeypat
     )
     await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
-    await monitor.sync(_config())
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
 
     # Five 0.1 s scan durations separate the two starts; allow slack for worker dispatch.
@@ -561,10 +569,12 @@ async def test_lower_spend_applies_even_while_some_stores_are_unread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Agents nobody has used yet have no store, so a price cut must still lower spend."""
-    monitor, scans, _current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
     scans.spend, scans.unavailable = {ALICE: 3.0}, 1
+    current[0] = _config()
+    current[0].models["astra"].pricing = ModelPricing(input=1, output=6)
 
-    await monitor.sync(_config())
+    await monitor.sync(current[0])
     await _until(lambda: monitor._spend_usd(ALICE) == 3.0)
     await monitor.stop()
 
@@ -642,7 +652,7 @@ async def test_a_rescan_replaces_the_costs_recorded_before_it_started_and_keeps_
     scans.release.clear()
     scans.spend = {ALICE: 6.5}
 
-    await monitor.sync(_config())
+    monitor.response_finished(BOB, None, OCTOBER)
     await _until(lambda: scans.calls == 2)
     monitor.response_finished(ALICE, 1.0, OCTOBER)
 
@@ -793,8 +803,119 @@ async def test_a_rescan_keeps_the_total_a_finished_reply_added(tmp_path: Path) -
     assert monitor._spend_usd(ALICE) == pytest.approx(8.0)
     first_scan = monitor.status().snapshot
 
-    await monitor.sync(config)
+    monitor.response_finished(ALICE, None, OCTOBER)
     await _until(lambda: monitor.status().snapshot is not first_scan)
 
     assert monitor._spend_usd(ALICE) == pytest.approx(8.0)
     await monitor.stop()
+
+
+def _edited(edit: str) -> Config:
+    """Return a config with one shared agent, changed as ``edit`` names."""
+    config = _config(
+        monthly_limit_usd=20 if edit == "limit" else 10,
+        fallback_model="local" if edit == "fallback_model" else "luna",
+    )
+    config.agents["code"] = AgentConfig(
+        display_name="Coder" if edit == "display_name" else "Code",
+        instructions=["Review code."] if edit == "prompt" else ["Write code."],
+        private=AgentPrivateConfig(per="user") if edit == "private_agent" else None,
+    )
+    if edit == "price":
+        config.models["luna"].pricing = ModelPricing(input=0.1, output=1)
+    elif edit == "agent_added":
+        config.agents["docs"] = AgentConfig(display_name="Docs")
+    elif edit == "team_added":
+        config.teams["engineering"] = TeamConfig(display_name="Engineering", role="Team", agents=["code"])
+    elif edit == "bot_account":
+        config.bot_accounts = [BRIDGE_BOT]
+    elif edit == "internal_user":
+        config.mindroom_user = MindRoomUserConfig(username="internal")
+    elif edit == "aliases":
+        config.authorization = AuthorizationConfig(aliases={BOB: [ALICE_BRIDGE]})
+    return config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("edit", "rescans"),
+    [
+        ("unchanged", False),
+        ("prompt", False),
+        ("display_name", False),
+        # Caps and the fallback model apply when spend is read, so they change nothing a scan counts.
+        ("limit", False),
+        ("fallback_model", False),
+        ("price", True),
+        ("agent_added", True),
+        ("private_agent", True),
+        ("team_added", True),
+        ("bot_account", True),
+        ("internal_user", True),
+        ("aliases", True),
+    ],
+)
+async def test_a_config_reload_rescans_only_when_it_changes_what_a_scan_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: str,
+    rescans: bool,
+) -> None:
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 9.0}, _edited("unchanged"))
+    assert scans.calls == 1
+    current[0] = _edited(edit)
+
+    await monitor.sync(current[0])
+    if rescans:
+        await _until(lambda: scans.calls == 2)
+    await _quiet()
+
+    assert scans.calls == 1 + rescans
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
+async def test_turning_budgets_off_and_on_again_rescans(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replies add nothing while budgets are off, so the spend counted before them is stale once budgets are back on."""
+    monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 9.0})
+    current[0] = _config().model_copy(update={"budgets": None})
+    await monitor.sync(current[0])
+    await _quiet()
+    assert scans.calls == 1
+
+    current[0] = _config()
+    await monitor.sync(current[0])
+
+    await _until(lambda: scans.calls == 2)
+    await monitor.stop()
+
+
+def test_the_scan_fingerprint_follows_what_a_scan_reads_not_how_the_config_is_written(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    config = _edited("team_added")
+    config.agents["docs"] = AgentConfig(display_name="Docs")
+    config.teams["research"] = TeamConfig(display_name="Research", role="Team", agents=["docs"])
+    config.bot_accounts = [BRIDGE_BOT, "@otherbot:example.test"]
+    config.authorization = AuthorizationConfig(
+        aliases={ALICE: [ALICE_BRIDGE, "@slack-alice:example.test"], BOB: ["@telegram-bob:example.test"]},
+    )
+    reordered = config.model_copy(
+        update={
+            "models": dict(reversed(config.models.items())),
+            "agents": dict(reversed(config.agents.items())),
+            "teams": dict(reversed(config.teams.items())),
+            "bot_accounts": list(reversed(config.bot_accounts)),
+            "authorization": AuthorizationConfig(
+                aliases={BOB: ["@telegram-bob:example.test"], ALICE: ["@slack-alice:example.test", ALICE_BRIDGE]},
+            ),
+        },
+    )
+    moved_sessions = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SESSION_STORAGE_PATH": str(tmp_path / "sessions")},
+    )
+
+    assert _scan_fingerprint(reordered, paths) == _scan_fingerprint(config, paths)
+    # A scan reads the sessions where they are stored.
+    assert _scan_fingerprint(config, moved_sessions) != _scan_fingerprint(config, paths)

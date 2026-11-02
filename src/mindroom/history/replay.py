@@ -190,7 +190,19 @@ def estimate_summary_tokens(session: ConversationSession, counter: TokenCounter)
     summary = current_summary_text(session)
     if summary is None:
         return 0
-    return count(counter, str(compaction_summary_message(summary, run_local=False).content))
+    return estimate_summary_text_tokens(summary, counter)
+
+
+def estimate_summary_text_tokens(summary: str, counter: TokenCounter, *, as_request: bool = False) -> int:
+    """Estimate the tokens the summary message holding ``summary`` adds to a request ``counter`` sizes.
+
+    Replay planning counts its text; ``as_request`` sizes it as a rewritten request's messages are sized, by the
+    route's request estimate, never below that count.
+    """
+    message = compaction_summary_message(summary, run_local=False)
+    if as_request:
+        return estimate_request_messages_tokens([message], counter=counter)
+    return count(counter, str(message.content))
 
 
 def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:

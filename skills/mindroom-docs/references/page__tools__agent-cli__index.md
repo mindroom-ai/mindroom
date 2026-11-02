@@ -167,7 +167,7 @@ Such an agent is already fully trusted, as described in [the security posture](h
 When the agent's shell runs in a worker, Bash runs in that same worker, which must use an image from the same MindRoom release.
 Worker shells can reach MindRoom's API, so the API must be locked down:
 
-- Set `MINDROOM_API_KEY`; `mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential, while an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
+- Set `MINDROOM_API_KEY`; `mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential, while an explicitly empty `MINDROOM_API_KEY=` in `.env` keeps open access and leaves minimal mode unavailable.
 - Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`.
 
 Workers call MindRoom at `MINDROOM_AGENT_CLI_PRIMARY_URL`, a plain `http(s)://host:port` origin, when it is set.

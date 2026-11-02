@@ -46,7 +46,7 @@ def egress_broker_enabled(runtime_paths: RuntimePaths) -> bool:
     Every Agent Keys surface (its API routes, pages, catalog fields, and tool) follows this, so with the port unset
     nothing of the feature shows or runs. A set but invalid port counts as enabled, so startup refuses it loudly.
     """
-    return bool((runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) or "").strip())
+    return runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) is not None
 
 
 def personal_page_served(runtime_paths: RuntimePaths) -> bool:

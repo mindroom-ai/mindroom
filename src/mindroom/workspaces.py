@@ -366,8 +366,9 @@ def ensure_workspace_knowledge_links(
 
 def runs_in_dedicated_worker(runtime_paths: RuntimePaths) -> bool:
     """Return whether this process is a sandbox runner pinned to one dedicated worker."""
-    return runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]) and bool(
-        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default=""),
+    return (
+        runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
+        and runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]) is not None
     )
 
 

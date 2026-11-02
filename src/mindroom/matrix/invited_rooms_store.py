@@ -30,6 +30,8 @@ _RECORDS_LOCK = threading.Lock()
 # file is unchanged: the store's own writes publish what they saved, and keying by the file's (mtime, size) makes a
 # write from anywhere else seen at the next read.
 _INVITED_ROOMS_BY_PATH: dict[Path, tuple[tuple[int, int], frozenset[str]]] = {}
+# Each agent's records directory by storage root, resolved once because resolving it takes several path lookups.
+_RECORDS_DIRECTORIES: dict[tuple[Path, str], Path] = {}
 
 
 def invited_rooms_path(runtime_paths: RuntimePaths, agent_name: str) -> Path:
@@ -43,7 +45,11 @@ def pending_room_invites_path(runtime_paths: RuntimePaths, agent_name: str) -> P
 
 
 def _records_dir(runtime_paths: RuntimePaths, agent_name: str) -> Path:
-    return primary_records_dir(agent_state_root_path(runtime_paths.storage_root, agent_name), runtime_paths)
+    key = (runtime_paths.storage_root, agent_name)
+    if (directory := _RECORDS_DIRECTORIES.get(key)) is None:
+        state_root = agent_state_root_path(runtime_paths.storage_root, agent_name)
+        directory = _RECORDS_DIRECTORIES[key] = primary_records_dir(state_root, runtime_paths)
+    return directory
 
 
 def load_invited_rooms(path: Path) -> set[str]:

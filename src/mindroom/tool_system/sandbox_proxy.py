@@ -150,14 +150,13 @@ class _SandboxProxyConfig:
 
 
 def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
-    value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"], default="") or "").strip()
-    if not value:
-        return None
-    return value.rstrip("/")
+    value = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"])
+    return None if value is None else value.strip().rstrip("/")
 
 
 def _read_proxy_token(runtime_paths: RuntimePaths) -> str | None:
-    return (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"], default="") or "").strip() or None
+    value = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"])
+    return None if value is None else value.strip()
 
 
 def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
@@ -166,14 +165,14 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
         default=str(_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS),
     )
     try:
-        return float(raw or _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS)
+        return float(raw)
     except ValueError:
         return _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS
 
 
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     """Return the hard cap for inline primary-to-worker attachment saves, by default the retained media limit."""
-    raw_value = runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV) or str(RETAINED_MEDIA_MAX_BYTES)
+    raw_value = runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV, default=str(RETAINED_MEDIA_MAX_BYTES))
     try:
         limit = int(raw_value)
     except ValueError:
@@ -201,7 +200,7 @@ def _read_credential_lease_ttl(runtime_paths: RuntimePaths) -> int:
         default=str(_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS),
     )
     try:
-        ttl_seconds = int(raw or _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS)
+        ttl_seconds = int(raw)
     except ValueError:
         ttl_seconds = _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS
     return max(1, min(_MAX_CREDENTIAL_LEASE_TTL_SECONDS, ttl_seconds))
@@ -223,7 +222,7 @@ def _read_proxy_tools(
         )
         else ""
     )
-    raw_value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default) or default).strip()
+    raw_value = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default).strip()
     if raw_value == "*":
         return None
     if not raw_value:
@@ -232,10 +231,8 @@ def _read_proxy_tools(
 
 
 def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
-    raw_policy = (
-        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["credential_policy_json"], default="") or ""
-    ).strip()
-    if not raw_policy:
+    raw_policy = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["credential_policy_json"])
+    if raw_policy is None:
         return {}
 
     try:

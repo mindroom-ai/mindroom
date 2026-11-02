@@ -146,7 +146,7 @@ def check_deps_installed(dependencies: list[str]) -> bool:
 
 def auto_install_enabled(runtime_paths: RuntimePaths) -> bool:
     """Return whether automatic tool dependency installation is enabled."""
-    raw = runtime_paths.env_value("MINDROOM_NO_AUTO_INSTALL_TOOLS", default="") or ""
+    raw = runtime_paths.env_value("MINDROOM_NO_AUTO_INSTALL_TOOLS", default="")
     return raw.lower() not in {"1", "true", "yes"}
 
 

@@ -1177,6 +1177,29 @@ def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
     assert config.host_config_path == host_config_path.resolve()
 
 
+def test_docker_worker_config_reads_the_env_file_under_blank_exports(tmp_path: Path) -> None:
+    """A blank export does not hide the `.env` worker settings, and an exported empty user still means the image's."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "MINDROOM_WORKER_BACKEND=docker\nMINDROOM_DOCKER_WORKER_IMAGE=ghcr.io/mindroom-ai/mindroom:env\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "",
+            "MINDROOM_DOCKER_WORKER_USER": "",
+        },
+    )
+
+    config = DockerWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert (config.image, config.user) == ("ghcr.io/mindroom-ai/mindroom:env", None)
+
+
 def test_docker_worker_host_config_path_rejects_directories(tmp_path: Path) -> None:
     """Docker host-config path must point at a file when explicitly configured."""
     config_path = tmp_path / "config.yaml"

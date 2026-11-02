@@ -1488,6 +1488,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `room_models` | Map of room key or Matrix room ID to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room key, Matrix room ID, or agent or team name to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
+| `server_emoji` | Room whose emoji packs every MindRoom Chat user on the homeserver can use | [Custom Emoji](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](https://docs.mindroom.chat/tools/slack/#slack-configuration) |
@@ -1607,6 +1608,7 @@ Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CAL
 ## Environment Variables
 
 Set variables in the process environment or in the `.env` file next to `config.yaml`; the process environment wins.
+A blank value, or an unedited placeholder from the starter `.env`, counts as unset in either place unless a variable's description gives an empty value its own meaning, and an exported one never hides the `.env` value, so a container passthrough of a variable the host leaves unset keeps the `.env` setting.
 `MINDROOM_CONFIG_PATH`, `LOG_LEVEL`, `MINDROOM_LOGGER_LEVELS`, `MINDROOM_LOG_FORMAT`, `NO_COLOR`, and [`MINDROOM_TIMING`](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging) are read only from the process environment, so the `.env` file does not set them.
 Container `env_file`/`--env-file` injection sets process variables and therefore works.
 
@@ -2181,7 +2183,7 @@ ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
 This works for every model provider key and every endpoint, project, region, Azure, and CLI login home variable MindRoom reads for model providers, every variable a tool's settings read, `TYPESAFE_API_KEY`, and the variables a skill's `requires.env` names (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, `TAVILY_API_KEY_FILE`).
-The plain variable wins when the process environment or the `.env` beside `config.yaml` sets it, and a blank value or an unedited starter-template placeholder counts as unset, so an exported blank variable does not hide the `.env` value.
+The plain variable wins when the process environment or the `.env` beside `config.yaml` [sets it](https://docs.mindroom.chat/configuration/#environment-variables).
 
 ## OpenAI API Models
 
@@ -3159,9 +3161,9 @@ A long reply, for example a tool loop that keeps reading files, can outgrow the 
 Before each model request, MindRoom checks whether the request would exceed the replay window minus `reserve_tokens`; if it would, it compacts first and the reply continues.
 After that compaction the model sees its system prompt, the user's current message, the current turn's context, and a summary that records the progress made so far; earlier conversation and the reply's own earlier tool calls and results are replaced by that summary.
 The tool calls still appear in the reply.
-If the summary and the current message together exceed the model's `context_window` minus `reserve_tokens`, the reply fails with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
-If the summary model fails, the reply continues without compacting and may then fail with a provider error.
 A reply that restarts after such a compaction, for example after a crash, continues from the summary, so it knows which tool calls already ran.
+If the summary model fails, or its summary would not fit beside the system prompt, tools, current message, and current turn's context in the replay window minus `reserve_tokens`, nothing is saved and the reply continues without compacting; it may then fail with a provider error.
+For team members, workflow participants, and scheduled tasks with a `history_limit` of `0`, a summary that does not fit beside the system prompt, tools, current message, and current turn's context in the model's `context_window` minus `reserve_tokens` fails the reply with `Saved conversation summary exceeds the available history budget` (see [Compacted history and redaction](#compacted-history-and-redaction)).
 With compaction disabled, or with a summary model too small to compact, nothing bounds the requests of a reply, and one that outgrows the model's window fails with a provider error.
 
 A compaction leaves the system prompt and tools unchanged, so provider prompt caching keeps working after it.
@@ -5175,6 +5177,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
+| `Done.` | The agent finished without writing an answer of its own, for example after tool calls hidden by `show_tool_calls: false` or after a tool posted its answer; those tool calls still ran. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
 The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
@@ -6339,6 +6342,208 @@ mindroom debug-report mindroom-bug-report-<time>.json --output backend-report.js
 Enable `debug.log_llm_requests` in advance if you also want full model requests and successful tool calls in it.
 See [`mindroom debug-report`](https://docs.mindroom.chat/cli/#debug-report) for every option and data source.
 
+# Custom Emoji
+
+A custom emoji that someone adds in MindRoom Chat is saved to their own account, so only they can use it.
+Everyone else sees the picture in messages and reactions but cannot pick it.
+Sharing a whole pack by hand means every person has to find it and turn it on for themselves.
+
+Server custom emoji remove those steps.
+Someone adds an emoji once.
+Everyone with an account on the same homeserver can use it right away.
+It appears in the reaction picker, the composer's emoji board, and `:` autocomplete, in every room including direct messages, with nothing to set up.
+
+The emoji belong to one homeserver.
+People on other homeservers cannot pick them, but MindRoom Chat shows them the picture in messages and reactions.
+
+## How it works
+
+1. The homeserver's `/.well-known/matrix/client` file names one room with the key `io.mindroom.emoji`.
+2. After its first sync, MindRoom Chat joins that room by itself, so nobody accepts an invite.
+3. MindRoom Chat hides the room from room lists, search, and room mentions.
+4. The room's emoji packs appear in the emoji board and `:` autocomplete of every room, next to that room's own packs and the user's personal one.
+5. To add an emoji, a user presses **+** (**Add custom emoji**) in the emoji board, picks an image, gives it a shortcode, and presses **Add**.
+   An image larger than 128 pixels is shrunk to 128 pixels before upload, and a GIF is kept as it is so it keeps animating, up to 256 KB.
+   A shortcode that is already taken is refused with "That name is taken. Pick another."
+6. When the user may add to the room, MindRoom Chat saves the emoji to its pack, and each member's next sync delivers it.
+
+The room is an ordinary Matrix room, and its packs are ordinary [MSC2545](https://github.com/matrix-org/matrix-spec-proposals/pull/2545) image packs (`im.ponies.room_emotes` state events).
+A client that supports image packs can join the room and use them like the packs of any room.
+
+## Let MindRoom create the room
+
+When MindRoom runs against the homeserver, as in a Kubernetes deployment of the MindRoom runtime, the easiest path is to let MindRoom create and maintain the room, with no access token and no script.
+Turn it on in `config.yaml`:
+
+```yaml
+server_emoji:
+  enabled: true
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Create and maintain the emoji room |
+| `name` | string | `"Emoji"` | Name of the room and of its first emoji pack when MindRoom creates them; cannot be empty |
+| `moderators_only` | bool | `false` | Let only moderators add, rename, or remove emoji |
+
+MindRoom creates the room `#emoji:<server name>`, or `#emoji_<namespace>:<server name>` when `MINDROOM_NAMESPACE` is set, with the same settings as the script below.
+On every start it logs `server_emoji_room_ready` with the room's alias and ID.
+Publish that alias with the `io.mindroom.emoji` key as described in [Enable it](#enable-it); with the `mindroom-client` Helm chart, set `serverEmoji.room: "#emoji:example.com"`.
+
+On every start, and on a config reload that changes `server_emoji` or `room_defaults`, MindRoom sets who may add emoji from `moderators_only`, keeps members from posting, gives the users in `room_defaults.admins` administrator power in the room, and publishes the alias again if someone deleted it.
+Changing `name` later renames neither the room nor its pack; rename the pack in MindRoom Chat.
+Setting `enabled: false` leaves the room as it is.
+If the alias already names another room, MindRoom logs `server_emoji_room_alias_taken`, leaves that room alone, and creates no room.
+If you made that room with the script, keep publishing it and turn `server_emoji` off.
+Otherwise, delete the alias and restart MindRoom, which then creates the room.
+Do not publish a room you did not make: on a homeserver with open registration, anyone can create a room under a free alias.
+On a homeserver without MindRoom, create the room with the script.
+
+## Enable it
+
+Create the room once, with an operator's access token, from the root of a MindRoom checkout:
+
+```bash
+MATRIX_ACCESS_TOKEN=... uv run python -m scripts.utilities.create_server_emoji_room \
+  --homeserver https://matrix.example.com --name "Example"
+```
+
+The script creates a room of the type `io.mindroom.emoji`, which is what makes MindRoom Chat hide it.
+The room does not federate, local users can join it without an invite, and it stays out of the public room directory.
+It holds one empty emoji pack named after `--name`, and the account behind the token owns it.
+
+| Flag | Meaning |
+| --- | --- |
+| `--homeserver` | Base URL of the homeserver. Required. |
+| `--name` | Name of the room and of its first emoji pack. Required. |
+| `--alias` | Local part of the room alias, `emoji` by default. The full alias is `#<alias>:<server name>`, with the server name of the account behind the token. |
+| `--moderators-only` | Let only moderators add, rename, or remove emoji. |
+
+The script prints the room ID and the key that names the room:
+
+```text
+Room ID: !sXYnTpwnpR9fs3ppoN2Y4nSUwVEGenUhG2FCZ8W5ALs
+Add to /.well-known/matrix/client: {"io.mindroom.emoji": {"room": "#emoji:example.com"}}
+```
+
+Add that key to the homeserver's `/.well-known/matrix/client` file:
+
+```json
+{
+  "m.homeserver": { "base_url": "https://matrix.example.com" },
+  "io.mindroom.emoji": { "room": "#emoji:example.com" }
+}
+```
+
+`room` takes the alias the script printed, or the room ID.
+With the `mindroom-client` Helm chart, set `serverEmoji.room` to the same value and the chart serves `/.well-known/matrix/client` with the key; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#server-custom-emoji).
+Quote the value in the values file, as in `room: "#emoji:example.com"`: unquoted, `#` starts a YAML comment and `!` a YAML tag, and the chart then publishes nothing.
+Tuwunel's own `[global.well_known]` section has no setting for extra keys, so when Tuwunel answers that path, serve the file from your reverse proxy or the client chart instead.
+With the script, nothing changes in `config.yaml`.
+Without the key, custom emoji stay personal to each user.
+
+## If the script stops early
+
+When a call fails, the script prints `Room creation stopped:` and the reason, such as Matrix's own error, and exits with status 1.
+`M_ROOM_IN_USE` means the alias is taken, so pick another `--alias`.
+
+If the script stops after it created the room, for example while setting the power levels, the room stays with the server's default levels, where only moderators may add emoji and every member may post messages, and no key is printed.
+Publish `#<alias>:<server name>` as the key yourself after you [set who may add emoji](#who-may-add-emoji) and [stop members from posting](#moderate-the-room), or run the script again with another `--alias`.
+
+## Check that it works
+
+MindRoom Chat reads the well-known file when it loads, so open tabs pick up a new key on reload.
+Open the emoji board in any room, press **+**, and pick an image.
+The form says where the emoji will go.
+
+- "Everyone on example.com can use it in every room." means MindRoom Chat found the room and the user may add to it.
+- "It is saved to your Personal Pack, so you can use it in every room." means the emoji stays personal.
+  The key is missing or malformed, MindRoom Chat could not join the room, or the user may not add.
+
+A failed join is logged once in the browser console as `[server-emoji] could not join the server emoji room`, and it is not tried again until the page reloads.
+
+## Import emoji from Slack
+
+A team that moves from Slack would otherwise add every custom emoji again by hand.
+One command copies all custom emoji of a Slack workspace into the room's packs, each under its Slack name.
+Run it from the root of a MindRoom checkout, with two tokens in the environment:
+
+- `SLACK_TOKEN`: a Slack bot or user token with the `emoji:read` scope.
+  The **Bot User OAuth Token** of the MindRoom Slack app from [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) works once you add `emoji:read` to the app's bot scopes and reinstall the app.
+- `MATRIX_ACCESS_TOKEN`: the access token of an account that may [add emoji](#who-may-add-emoji) to the room.
+
+Start with `--dry-run`, which joins the room to read its packs and reports what a run would import, without uploading anything or changing the packs:
+
+```bash
+SLACK_TOKEN=xoxb-... MATRIX_ACCESS_TOKEN=... uv run python -m scripts.utilities.import_slack_emoji \
+  --homeserver https://matrix.example.com --dry-run
+```
+
+```text
+Would import 412 emoji and 37 aliases; skipped 3 taken, 2 unusable.
+```
+
+Then run the same command without `--dry-run` to import them.
+By default the emoji go to `#emoji:<server name>`, with the server name of the account behind the token.
+Pass another alias or the room ID with `--room`, such as `#emoji_<namespace>:<server name>` for a room MindRoom created with `MINDROOM_NAMESPACE` set.
+
+- Each emoji keeps its Slack name and its image as Slack serves it, and a Slack alias becomes another name for the same image.
+- A name the packs already have is never overwritten and counts as taken.
+  A later run imports every Slack emoji whose name no pack has, so an emoji removed or renamed in the room since an earlier run comes back under its Slack name.
+- An alias of a standard emoji, such as `alias:+1`, and a name with a space or `:`, which MindRoom Chat cannot insert, count as unusable.
+- An image that cannot be downloaded, read, or uploaded counts as failed and is named in an error line; the next run tries it again.
+- When no pack has room for an emoji, the script opens another pack with the same name.
+
+Deleting or renaming an emoji in Slack changes nothing in the room, and a later run imports a renamed emoji again under its new name.
+
+## Who may add emoji
+
+The room's power level for `im.ponies.room_emotes` decides who may add emoji.
+The script sets it to `0` so every member may add, and to `50` with `--moderators-only` so only moderators may.
+The same level lets someone rename or remove emoji, because a pack is a single Matrix state event.
+
+A user who may not add still sees **+**.
+Their emoji goes to their own Personal Pack, and the form says so.
+To change the rule later, set **Manage Emojis & Stickers** in the room's permissions; for a room MindRoom maintains, set `server_emoji.moderators_only` instead.
+
+In MindRoom Chat, the **Server Emoji** section of **Settings → Emojis & Stickers** lists the server's packs.
+Opening a pack shows its emoji.
+Users who may change the pack can rename or delete them there.
+Users who may change power levels also get a **Permissions** button that opens the room's permissions.
+Simple Mode (**Settings → General → Interface**) hides the Emojis & Stickers page, so turn it off to manage the packs.
+
+## Moderate the room
+
+Members cannot post messages in the room.
+A message there would notify everyone on the server, and MindRoom Chat gives users no way to mute a room it hides.
+The script raises the room's `events_default` power level to at least `50` for this, and any explicit `m.room.message` or `m.room.encrypted` level below that.
+If you create the room by hand, raise it too.
+MindRoom Chat also mutes the room when it joins it, so a mention hidden in a pack event notifies no one.
+
+- A kick does not last, because MindRoom Chat joins the room again by itself.
+  Ban someone to keep them out.
+- At the default power level `0`, any member may also create more packs, each up to about 64 KB that every member syncs.
+  A server with open registration should use `--moderators-only`, or `server_emoji.moderators_only: true` for a room MindRoom maintains.
+- A room made by hand and published by alias needs that alias as its canonical alias and `m.federate: false` in its creation content: MindRoom Chat only trusts a local-only room carrying the alias, because another server can set any alias in its own rooms. Publish the room ID instead if the room is federated.
+- To replace the room, tombstone the old one or remove its canonical alias, then publish the new one.
+
+## Limits
+
+- Two people adding to the same pack at the same moment can lose one emoji, because the last write wins.
+  MindRoom Chat reads the pack right before it writes, so the window is short.
+  The person whose emoji vanished adds it again.
+- Whoever may add may also rename or remove any server emoji.
+  Limit adding to moderators if that is too open.
+- A pack is one Matrix event, which has a size limit.
+  When a pack is full, MindRoom Chat opens another pack in the same room with the same name.
+- Leaving the room does not opt a user out, because MindRoom Chat joins it again.
+- Every account that runs MindRoom Chat becomes a member of the room, so its member list names all of them.
+  Only MindRoom Chat hides the room, so other clients logged in to the same account list it like any other room.
+- Other Matrix clients do not join the room or add to its packs by themselves.
+- Custom emoji a user picks appear under Recent, in the `:` autocomplete list and in the quick reactions, ranked by use like Unicode emoji.
+- The shrinking, the GIF limit and the taken-name check apply to **Add custom emoji** in the emoji board; the pack editor under **Settings → Emojis & Stickers**, which also serves sticker packs, uploads images as they are and numbers duplicate names.
+- Emoji show no "added by", and existing personal emoji do not move to the server, so add them again to share them.
+
 # Usage Tracking
 
 MindRoom records content-free token usage for agent and team replies, realtime voice calls, and the [helper and internal AI work](#token-usage) listed below, plus call duration for GPT-Live voice calls.
@@ -6662,7 +6867,7 @@ Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
 A completed agent or team reply's cost counts as soon as the reply finishes, in chat and on the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
 A reply that is stopped, fails, or finishes after a tool approval counts once spend is recounted from recorded usage, which such a reply starts soon after it ends.
-Other usage, such as delegated agents, voice calls, and helper work, counts at the next recount: at startup, after a config change, when the month starts, and about every six hours.
+Other usage, such as delegated agents, voice calls, and helper work, counts at the next recount: at startup, about every six hours, when the month starts, when budgets are turned on, and after a config change that adds or removes agents or teams, makes an agent private or shared, or changes model prices, bot accounts, the internal user, or bridge aliases.
 A reply that already started finishes on its model, so the reply that reaches the cap still uses its model and the user's next reply uses the fallback.
 
 ## Over-Budget Replies
@@ -8330,7 +8535,7 @@ Such an agent is already fully trusted, as described in [the security posture](h
 When the agent's shell runs in a worker, Bash runs in that same worker, which must use an image from the same MindRoom release.
 Worker shells can reach MindRoom's API, so the API must be locked down:
 
-- Set `MINDROOM_API_KEY`; `mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential, while an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
+- Set `MINDROOM_API_KEY`; `mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential, while an explicitly empty `MINDROOM_API_KEY=` in `.env` keeps open access and leaves minimal mode unavailable.
 - Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`.
 
 Workers call MindRoom at `MINDROOM_AGENT_CLI_PRIMARY_URL`, a plain `http(s)://host:port` origin, when it is set.
@@ -10088,7 +10293,7 @@ agents:
 | --- | --- |
 | `google_drive_list_files()` | Lists recently modified files. |
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Workspace files as text, and plain-text files up to `max_read_size`; PDFs and Office files need a download and a reader for that format. |
+| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`; PDFs, Office files, and Drawings need a download and a reader for that format. |
 | `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
 | `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
 | `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
@@ -10096,7 +10301,7 @@ agents:
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
-Non-Workspace files over `max_read_size` return an error suggesting `google_drive_download_file` instead.
+When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, a name containing `/`, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
@@ -14739,6 +14944,7 @@ The tool exposes `claude_start_session()`, `claude_send()`, `claude_session_stat
 `claude_send()` creates the session if needed, so `claude_start_session()` is optional.
 Each agent gets one session per conversation, and a `session_label` opens additional independent sessions in the same conversation.
 Calls to the same session run one after another.
+When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_send()` reply.
 `resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_end_session()` first.
 `claude_session_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
 Errors from the Claude SDK include the last lines of Claude CLI stderr to help debug gateway or CLI problems.
@@ -14758,7 +14964,7 @@ Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests 
 | `disallowed_tools` | text | `null` | Comma-separated Claude Code tool names to deny. |
 | `max_turns` | number | `null` | Maximum Claude turns per query; minimum 1. |
 | `system_prompt` | text | `null` | Extra system prompt passed to Claude. |
-| `cli_path` | text | `null` | Path to the Claude CLI executable. |
+| `cli_path` | text | `null` | Path to the Claude CLI executable, Claude Code 2.1.124 or later. |
 | `session_ttl_minutes` | number | `60` | Idle sessions close after this many minutes; minimum 1. |
 | `max_sessions` | number | `200` | Maximum live sessions per agent; at the limit, the least recently used idle session closes. Minimum 1. |
 
@@ -17748,6 +17954,7 @@ Custom events default to 1000 ms.
   The hook can run more than once for the same occurrence, so side-effecting hooks should use `ctx.correlation_id`, which is stable per occurrence, as an idempotency key.
 - **Room membership**: both events exclude configured agents, the internal `mindroom_user`, and `bot_accounts`.
   `room:member_joined` fires only for live joins, not for members already present at startup or for profile changes; `room:member_left` fires when a joined user leaves on their own, not when they are kicked or banned.
+  Once MindRoom has created the [server emoji room](https://docs.mindroom.chat/custom-emoji/#let-mindroom-create-the-room), `room:member_joined` also fires when MindRoom Chat joins a user to it, even after `server_emoji` is turned off, so filter on `ctx.room_id` if a handler should only react to joins in certain rooms.
   `room:member_left` reports the `display_name` and `avatar_url` the user had while joined.
   Either event can be delivered more than once for the same join or leave after a restart, so handlers that create rooms, send invites, or write state must be idempotent.
 
@@ -19804,7 +20011,7 @@ Each worker gets a read-only copy of the [live config snapshot](#live-config-sna
 Agent-scoped workers get only their agent and its assigned knowledge bases, while `worker_scope: user` workers get every agent that shares them.
 Workers never see `~/.mindroom` or the config-adjacent `.env`.
 The called tool's own inline overrides still reach the worker, but if it needs a secret from `.env` or from elsewhere in `config.yaml`, provide it through a [credential lease](#credential-leases), [environment passthrough](#shell-environment-and-path), or `MINDROOM_DOCKER_WORKER_ENV_JSON` instead.
-Because worker code can reach the host network, `mindroom run` adds a generated `MINDROOM_API_KEY` to `.env` when a dedicated worker backend is configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access.
+Because worker code can reach the host network, `mindroom run` adds a generated `MINDROOM_API_KEY` to `.env` when a dedicated worker backend is configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` in `.env` keeps open access.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -21228,7 +21435,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 | 4 | Everything else, including `/.well-known/matrix/client`, `/livekit/jwt/`, and `/livekit/sfu/` | MindRoom Chat |
 
 The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
-The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
+The client chart serves `/.well-known/matrix/client` only with MatrixRTC, bug reports, or a [server emoji room](https://docs.mindroom.chat/custom-emoji/) enabled; otherwise send it to Tuwunel as well.
 Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), [Slack events](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host), behind the same first rule.
 
@@ -21344,7 +21551,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](https://docs.mindroom.chat/deployment/egress-broker/#resetting-broker-state))
 - `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
-- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, and the space room ID
+- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, router, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, the space room ID, and the server emoji room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 - `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 

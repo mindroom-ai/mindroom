@@ -383,6 +383,7 @@ matrixRTC:
   enabled: true
   livekitServiceUrl: https://chat.example.com/livekit/jwt
 """
+_EMOJI_ROOM_ERROR = "serverEmoji.room must be a room alias such as #emoji:example.com or a room ID"
 
 
 def _matrix_client_well_known(tmp_path: Path, values: str) -> dict[str, Any] | None:
@@ -426,7 +427,40 @@ def test_client_chart_publishes_bug_report_admins_in_matrix_client_discovery(
     assert well_known.get("io.mindroom.bug_reports") == ({"admins": _BUG_REPORT_ADMINS} if admins else None)
 
 
-def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_bug_report_admins(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rtc", [False, True], ids=["no-rtc", "rtc"])
+@pytest.mark.parametrize(
+    "room",
+    ["", "#emoji:chat.example.com", "#emoji:chat.example.com:8448", "!Zk3vQ9mT1nXb7YpLhR2sWc5dEoA8jUfGiN4tBqHyV-w"],
+    ids=["no-room", "alias", "alias-port", "room-id"],
+)
+def test_client_chart_publishes_the_server_emoji_room_in_matrix_client_discovery(
+    tmp_path: Path,
+    *,
+    rtc: bool,
+    room: str,
+) -> None:
+    """MindRoom Chat finds the server's custom emoji room through the well-known of its homeserver.
+
+    The room ID has no server part, as room version 12 IDs do.
+    """
+    values = "matrix:\n  homeserverUrl: https://chat.example.com\n"
+    if rtc:
+        values += _MATRIX_RTC
+    if room:
+        values += f"serverEmoji:\n  room: {json.dumps(room)}\n"
+
+    well_known = _matrix_client_well_known(tmp_path, values)
+
+    if not (rtc or room):
+        assert well_known is None
+        return
+    assert well_known is not None
+    assert well_known["m.homeserver"] == {"base_url": "https://chat.example.com"}
+    assert ("org.matrix.msc4143.rtc_foci" in well_known) is rtc
+    assert well_known.get("io.mindroom.emoji") == ({"room": room} if room else None)
+
+
+def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_other_discovery_values(tmp_path: Path) -> None:
     """Deployments that publish only MatrixRTC keep the same nginx config, so its checksum triggers no rollout."""
     docs = _render_chart(
         Path("cluster/k8s/client"),
@@ -440,6 +474,7 @@ def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_bug_report_ad
         "  location = /.well-known/matrix/client {\n"
     ) in nginx_conf
     assert "Bug-report" not in nginx_conf
+    assert "Server custom emoji" not in nginx_conf
 
 
 @pytest.mark.parametrize(
@@ -464,6 +499,20 @@ def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_bug_report_ad
             'nginx:\n  existingConfigMap: client-nginx\nbugReports:\n  admins: ["@admin:chat.example.com"]\n',
             "bugReports.admins requires the chart-managed nginx config",
         ),
+        ("serverEmoji:\n  room: emoji\n", _EMOJI_ROOM_ERROR),
+        ('serverEmoji:\n  room: "#emoji chat:example.com"\n', _EMOJI_ROOM_ERROR),
+        ('serverEmoji:\n  room: "#a\\x85b:chat.example.com"\n', _EMOJI_ROOM_ERROR),
+        ('serverEmoji:\n  room: "#a\'b:chat.example.com"\n', _EMOJI_ROOM_ERROR),
+        ('serverEmoji:\n  room: "#emoji:chat$host"\n', _EMOJI_ROOM_ERROR),
+        ('serverEmoji:\n  room: "#emoji:example.com/path"\n', _EMOJI_ROOM_ERROR),
+        (
+            'matrix:\n  homeserverUrl: ""\n  defaultServerName: chat.example.com\nserverEmoji:\n  room: "#emoji:chat.example.com"\n',
+            "matrix.homeserverUrl is required when serverEmoji.room is set",
+        ),
+        (
+            'nginx:\n  existingConfigMap: client-nginx\nserverEmoji:\n  room: "#emoji:chat.example.com"\n',
+            "serverEmoji.room requires the chart-managed nginx config",
+        ),
     ],
     ids=[
         "not-a-list",
@@ -476,10 +525,18 @@ def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_bug_report_ad
         "dollar",
         "no-homeserver-url",
         "existing-nginx",
+        "emoji-no-sigil",
+        "emoji-whitespace",
+        "emoji-control",
+        "emoji-quote",
+        "emoji-dollar",
+        "emoji-path",
+        "emoji-no-homeserver-url",
+        "emoji-existing-nginx",
     ],
 )
-def test_client_chart_rejects_bug_report_admins_it_cannot_publish(tmp_path: Path, values: str, error: str) -> None:
-    """Administrators that cannot be published intact fail the render instead of silently disabling reports."""
+def test_client_chart_rejects_discovery_values_it_cannot_publish(tmp_path: Path, values: str, error: str) -> None:
+    """Values that cannot be published intact fail the render instead of silently disabling the feature."""
     completed = _run_helm_template(
         Path("cluster/k8s/client"),
         release_name="mindroom-client",

@@ -10,7 +10,7 @@ import nio
 
 from mindroom.api.app_state import ensure_app_state
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import ROUTER_AGENT_NAME, runtime_env_flag
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
@@ -160,7 +160,7 @@ class ComputerRuntimeCoordinator:
         """Capture live clients within the orchestrator; routes never receive bots."""
         if not self.api_enabled:
             return
-        if not runtime_env_flag(WORKER_COMPUTER_ENABLED_ENV, runtime_paths=self.runtime_paths):
+        if not self.runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
             self.unbind()
             return
         router_bot = bots.get(ROUTER_AGENT_NAME)

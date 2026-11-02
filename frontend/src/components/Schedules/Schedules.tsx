@@ -11,6 +11,7 @@ import {
   Timer,
 } from "lucide-react";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import {
   cancelSchedule,
   listSchedules,
@@ -249,7 +250,8 @@ export function Schedules() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ScheduleDraft | null>(null);
   const [roomFilter, setRoomFilter] = useState<string>("all");
-  const [isDirty, setIsDirty] = useState(false);
+  // The selected schedule as saved, which the draft is compared against.
+  const [savedDraft, setSavedDraft] = useState<ScheduleDraft | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -311,8 +313,9 @@ export function Schedules() {
   }, [load]);
 
   useEffect(() => {
-    setDraft(selectedTask ? toDraft(selectedTask, timezone) : null);
-    setIsDirty(false);
+    const saved = selectedTask ? toDraft(selectedTask, timezone) : null;
+    setDraft(saved);
+    setSavedDraft(saved);
   }, [selectedTask, timezone]);
 
   useEffect(() => {
@@ -323,8 +326,24 @@ export function Schedules() {
     }
   }, [roomFilter, selectedTaskId, visibleTasks]);
 
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(savedDraft);
+  const confirmDiscard = useUnsavedDraft(isDirty);
+
+  // Selecting another schedule, or none, replaces the draft.
+  const handleSelect = (taskId: string | null) => {
+    if (taskId !== selectedTaskId && confirmDiscard()) {
+      setSelectedTaskId(taskId);
+    }
+  };
+
+  // A filter that hides the selected schedule deselects it.
+  const handleRoomFilterChange = (filter: string) => {
+    const hidesSelected = filter !== "all" && selectedTask?.room_id !== filter;
+    if (!hidesSelected || confirmDiscard()) setRoomFilter(filter);
+  };
+
   useSwipeBack({
-    onSwipeBack: () => setSelectedTaskId(null),
+    onSwipeBack: () => handleSelect(null),
     enabled: !!selectedTaskId && window.innerWidth < 1024,
   });
 
@@ -344,7 +363,6 @@ export function Schedules() {
   ) => {
     if (!draft) return;
     setDraft({ ...draft, [field]: value });
-    setIsDirty(true);
   };
 
   const handleSave = async () => {
@@ -397,12 +415,15 @@ export function Schedules() {
     setIsSaving(true);
     try {
       await updateSchedule(selectedTask.task_id, payload);
+      // The saved draft is the baseline only while its schedule is still open.
+      setSavedDraft((current) =>
+        current?.task_id === draft.task_id ? draft : current,
+      );
       await load(true);
       toast({
         title: "Schedule updated",
         description: `Task ${selectedTask.task_id} has been updated.`,
       });
-      setIsDirty(false);
     } catch (e) {
       toast({
         title: "Failed to update schedule",
@@ -475,7 +496,7 @@ export function Schedules() {
         title={item.description || item.message}
         description={item.message}
         isSelected={isSelected}
-        onClick={setSelectedTaskId}
+        onClick={handleSelect}
         badges={badges}
       >
         <p className="mt-2 text-xs text-muted-foreground font-mono">
@@ -504,7 +525,7 @@ export function Schedules() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <Select value={roomFilter} onValueChange={setRoomFilter}>
+              <Select value={roomFilter} onValueChange={handleRoomFilterChange}>
                 <SelectTrigger className="w-[200px]">
                   <SelectValue placeholder="Filter by room" />
                 </SelectTrigger>
@@ -520,7 +541,10 @@ export function Schedules() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void load(true)}
+                // Reloading replaces the selected schedule's draft.
+                onClick={() => {
+                  if (confirmDiscard()) void load(true);
+                }}
                 disabled={isRefreshing || isLoading}
               >
                 {isRefreshing ? (
@@ -609,7 +633,7 @@ export function Schedules() {
               isDirty={isDirty}
               onSave={() => void handleSave()}
               onDelete={() => void handleCancelTask()}
-              onBack={() => setSelectedTaskId(null)}
+              onBack={() => handleSelect(null)}
               disableSave={isSaving}
               disableDelete={isSaving}
             >

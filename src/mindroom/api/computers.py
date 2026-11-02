@@ -18,7 +18,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
 from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
 from mindroom.origins import allowed_client_origins
@@ -33,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.worker_computer.protocol import ComputerStatus
     from mindroom.workers.models import WorkerHandle
 
@@ -100,10 +100,7 @@ def _runtime(connection: Request | WebSocket) -> ComputerRuntime:
     state = config_lifecycle.app_state(connection.app)
     snapshot = config_lifecycle.require_api_state(connection.app).snapshot
     runtime = state.computer_runtime
-    if runtime is None or not runtime_env_flag(
-        WORKER_COMPUTER_ENABLED_ENV,
-        runtime_paths=snapshot.runtime_paths,
-    ):
+    if runtime is None or not snapshot.runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
         raise ComputerError(503, "Computer authorization runtime is unavailable.")
     if (
         runtime.config_generation != snapshot.generation

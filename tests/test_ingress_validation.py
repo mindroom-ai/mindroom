@@ -288,6 +288,22 @@ def test_classification_keeps_the_four_identities_apart(tmp_path: Path) -> None:
     assert human_relay.origin.intent is TurnIntent.ROUTER_HANDOFF
 
 
+def test_a_room_level_router_handoff_names_the_human_message_it_relays(tmp_path: Path) -> None:
+    """A room-mode handoff, which clients do not show as a reply, still aliases the human message it relays."""
+    validator, ids = _validator(tmp_path)
+    relay = _text(
+        ids["router"].full_id,
+        "@general could you help with this?",
+        **{
+            ORIGINAL_SENDER_KEY: "@user:localhost",
+            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            "m.relates_to": {"io.mindroom.in_reply_to": {"event_id": "$human"}},
+        },
+    )
+
+    assert validator.classify(relay).discovery_event_id == "$human"
+
+
 def _entity_final_reply_with_tool_markers(validator: IngressValidator, sender: str) -> nio.RoomMessageFormatted:
     """Return an entity's completed reply, delivered as an edit of its placeholder, whose text follows tool markers."""
     body = "🔧 `search` [1]\n\n!help"

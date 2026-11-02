@@ -1,6 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, useLocation } from "react-router-dom";
+import {
+  createBrowserRouter,
+  RouterProvider,
+  useBlocker,
+  useLocation,
+} from "react-router-dom";
 import { useConfigStore } from "@/store/configStore";
 import { AgentList } from "@/components/AgentList/AgentList";
 import { AgentEditor } from "@/components/AgentEditor/AgentEditor";
@@ -31,6 +36,10 @@ import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { ThemeToggle } from "@/components/ThemeToggle/ThemeToggle";
 import { showSaveFailureToastIfNeeded } from "@/components/shared";
+import {
+  confirmLeavingUnsavedDrafts,
+  useBeforeUnloadPrompt,
+} from "@/hooks/useUnsavedDraft";
 import {
   getConfigValidationIssues,
   getGlobalConfigDiagnostics,
@@ -109,6 +118,17 @@ function AppContent() {
     selectedRoomId,
   } = useConfigStore();
   const location = useLocation();
+  // Leaving a tab unmounts its page, so ask before an unsaved draft goes with it.
+  // A declined navigation leaves the blocker blocked until the next one, which
+  // the router allows, so nothing needs to reset it.
+  useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      getNavigationValue(currentLocation.pathname) !==
+        getNavigationValue(nextLocation.pathname) &&
+      !confirmLeavingUnsavedDrafts(),
+  );
+  // Configuration edits outlive a tab switch in the store, but not a reload.
+  useBeforeUnloadPrompt(isDirty);
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = getNavigationValue(location.pathname);
@@ -351,6 +371,12 @@ function AppContent() {
     <div className="relative flex h-screen overflow-hidden">
       <a
         href="#main-content"
+        // Focus without following the fragment: a fragment adds a history entry
+        // the router cannot hold back, so Back into it would drop a draft.
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById("main-content")?.focus();
+        }}
         className="fixed left-3 top-3 z-[100] -translate-y-16 rounded-md bg-card px-3 py-2 text-sm font-medium focus:translate-y-0 focus:shadow-lg"
       >
         Skip to content
@@ -655,15 +681,16 @@ function AppContent() {
   );
 }
 
+// A data router, because only it can hold back a navigation that would drop a draft.
+const router = createBrowserRouter([{ path: "*", element: <AppContent /> }]);
+
 export default function App() {
   return (
-    <BrowserRouter>
-      <QueryClientProvider client={queryClient}>
-        <ThemeProvider>
-          <AppContent />
-          <Toaster />
-        </ThemeProvider>
-      </QueryClientProvider>
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <RouterProvider router={router} />
+        <Toaster />
+      </ThemeProvider>
+    </QueryClientProvider>
   );
 }

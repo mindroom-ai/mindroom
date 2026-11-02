@@ -930,6 +930,14 @@ class _NotedEnd:
     note: Segment
 
 
+# The note of each failure whose kind, not an error text, says what failed.
+_FAILURE_NOTES = {
+    FailureCause.APPROVAL_NOT_STARTED: NoteKind.APPROVAL_FAILED,
+    FailureCause.DELIVERY_FAILED: NoteKind.DELIVERY_FAILED,
+    FailureCause.NOTHING_TO_SHOW: NoteKind.NOTHING_TO_SHOW,
+}
+
+
 def _interruption_note(cancel_source: CancelSource) -> NoteKind:
     """Return the note a reply shows below what it showed when a restart or another cancellation cut it short."""
     return NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED
@@ -954,10 +962,8 @@ def interrupted_end(
     if reply.unapplied_stop:
         return _NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))
     if isinstance(ending, Failed):
-        if ending.cause is FailureCause.APPROVAL_NOT_STARTED:
-            return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.APPROVAL_FAILED))
-        if ending.cause is FailureCause.DELIVERY_FAILED:
-            return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.DELIVERY_FAILED))
+        if (kind := _FAILURE_NOTES.get(ending.cause)) is not None:
+            return _NotedEnd(rl.ReplyState.FAILED, note_segment(kind))
         detail = "" if ending.detail is None else redact_sensitive_text(ending.detail)
         return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.ERROR, format_error_note(detail)))
     if reply.event_id is None:

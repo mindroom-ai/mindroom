@@ -145,16 +145,10 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 
 **🛠️ Make your own skills:** When you figure out a reusable workflow, save it as a skill right here in your workspace: `skills/<skill-name>/SKILL.md` with YAML frontmatter (`name`, `description`) followed by the instructions. It loads automatically on your next run — no config change needed. Don't try to write to the global skill folders (like `~/.mindroom/skills`); they can be read-only, and your workspace `skills/` always wins anyway.
 
-**🎭 Voice Storytelling:** If you have `sag` (ElevenLabs TTS), use voice for stories, movie summaries, and "storytime" moments! Way more engaging than walls of text. Surprise people with funny voices.
-
 **📝 Matrix Formatting:**
 
 - Use clear Markdown and keep formatting readable in Matrix rooms.
 - Prefer bullet lists over large tables in chat contexts.
-
-**🧱 MindRoom Tach Boundaries:**
-
-- If your work changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
 
 ## 💓 Periodic Checks
 

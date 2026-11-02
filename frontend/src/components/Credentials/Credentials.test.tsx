@@ -6,6 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 import { Credentials } from "./Credentials";
 
 const mockToast = vi.fn();
@@ -504,10 +505,11 @@ describe("Credentials", () => {
     });
     expect(screen.getAllByText("anthropic").length).toBeGreaterThan(0);
     expect(screen.queryByText("ANTHROPIC_API_KEY")).toBeNull();
-    const requestedUrls = (global.fetch as any).mock.calls.map(
-      ([url]: [string]) => url,
-    );
-    expect(requestedUrls).toContain("/api/credentials/anthropic");
+    // Selecting the canonical service loads its credentials in an effect,
+    // which can still be pending once the save's own updates are on screen.
+    await waitFor(() => {
+      expect(readsOf("/api/credentials/anthropic")).toBeGreaterThan(0);
+    });
   });
 
   it("shows error and does not save when JSON is invalid", async () => {
@@ -962,11 +964,24 @@ describe("Credentials", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^service_b/ }));
 
-    expect(confirmSpy).toHaveBeenCalledWith(
-      "Discard unsaved changes for 'service_a'?",
-    );
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
     expect(readsOf("/api/credentials/service_b")).toBe(0);
     expect(editor.value).toBe('{"token":"draft"}');
+  });
+
+  it("asks before leaving the page drops unsaved changes", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    serveServices(["service_a"], () => undefined);
+    renderOpen();
+    await showsTokenOf("service_a");
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+
+    fireEvent.change(screen.getByPlaceholderText('{"api_key":"..."}'), {
+      target: { value: '{"token":"draft"}' },
+    });
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
   });
 
   it("prompts before Add discards unsaved changes, and keeps them when declined", async () => {
@@ -978,9 +993,7 @@ describe("Credentials", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
 
     addService("service_b");
-    expect(confirmSpy).toHaveBeenLastCalledWith(
-      "Discard unsaved changes for 'service_a'?",
-    );
+    expect(confirmSpy).toHaveBeenLastCalledWith("Discard unsaved changes?");
     expect(screen.getByText("Active: service_a")).toBeInTheDocument();
     expect(editor.value).toBe('{"token":"draft"}');
 
@@ -1002,9 +1015,7 @@ describe("Credentials", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith(
-      "Discard unsaved changes for 'service_a'?",
-    );
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
     // Refresh reads the service's credentials first, so a reload would show here at once.
     expect(readsOf("/api/credentials/service_a")).toBe(1);
     expect(editor.value).toBe('{"token":"draft"}');

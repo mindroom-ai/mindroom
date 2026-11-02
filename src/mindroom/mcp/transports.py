@@ -70,7 +70,7 @@ class _MCPHTTPAuthorizationTracker:
 
 def _interpolate_value(value: str, runtime_paths: RuntimePaths) -> str:
     def replace(match: re.Match[str]) -> str:
-        return runtime_paths.env_value(match.group(1), default="") or ""
+        return runtime_paths.env_value(match.group(1), default="")
 
     return _ENV_REFERENCE_PATTERN.sub(replace, value)
 

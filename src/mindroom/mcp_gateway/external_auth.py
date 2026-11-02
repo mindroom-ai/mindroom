@@ -113,7 +113,7 @@ class ExternalAuthSettings:
             raise ValueError(msg)
 
         def value(name: str, default: str | None = None) -> str | None:
-            return paths.env_value(f"MINDROOM_MCP_EXTERNAL_{name}", default=default) or None
+            return paths.env_value(f"MINDROOM_MCP_EXTERNAL_{name}", default=default)
 
         return cls(
             authorization_server=_text(value("AUTHORIZATION_SERVER")),

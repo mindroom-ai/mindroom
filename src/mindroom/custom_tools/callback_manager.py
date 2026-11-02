@@ -40,10 +40,8 @@ _CALLBACKS_DIR = Path(".mindroom/callbacks")
 
 
 def _callback_base_url(context: ToolRuntimeContext) -> str:
-    configured_url = context.runtime_paths.env_value("MINDROOM_URL")
-    base_url = configured_url.strip() if configured_url is not None else ""
-    if base_url:
-        return base_url.rstrip("/")
+    if (configured_url := context.runtime_paths.env_value("MINDROOM_URL")) is not None:
+        return configured_url.strip().rstrip("/")
     api_address = get_api_server_address()
     if api_address is not None:
         return api_address.base_url

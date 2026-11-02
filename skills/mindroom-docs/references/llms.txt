@@ -33,6 +33,7 @@
 - [Interactive Canvases](https://docs.mindroom.chat/canvases/)
 - [Thread Exports](https://docs.mindroom.chat/thread-exports/)
 - [Bug Reports](https://docs.mindroom.chat/bug-reports/)
+- [Custom Emoji](https://docs.mindroom.chat/custom-emoji/)
 - [Usage Tracking](https://docs.mindroom.chat/usage/)
 - [Budgets](https://docs.mindroom.chat/budgets/)
 - [Matrix Integration](https://docs.mindroom.chat/matrix/)

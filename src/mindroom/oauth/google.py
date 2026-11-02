@@ -14,7 +14,11 @@ import httpx
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.matrix.provisioning_env import local_client_headers
+from mindroom.matrix.provisioning_env import (
+    local_client_headers,
+    local_provisioning_client_credentials_from_env,
+    provisioning_url_from_env,
+)
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClaimValidationError,
@@ -127,17 +131,16 @@ def _google_runtime_endpoints() -> OAuthRuntimeEndpoints:
 
 
 def _provisioning_client_credentials(runtime_paths: RuntimePaths) -> tuple[str, str, str] | None:
-    """Return the paired provisioning endpoint and local client credentials."""
-    provisioning_url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip().rstrip("/")
-    client_id = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") or "").strip()
-    client_secret = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_SECRET") or "").strip()
-    if not client_id and not client_secret:
+    """Return the paired provisioning endpoint and local client credentials, read as Matrix registration reads them."""
+    try:
+        credentials = local_provisioning_client_credentials_from_env(runtime_paths)
+    except ValueError as exc:
+        raise OAuthProviderError(str(exc)) from exc
+    if credentials is None:
         return None
-    if not provisioning_url or not client_id or not client_secret:
-        msg = (
-            "Google OAuth bootstrap requires MINDROOM_PROVISIONING_URL, MINDROOM_LOCAL_CLIENT_ID, "
-            "and MINDROOM_LOCAL_CLIENT_SECRET. Run `mindroom connect` to restore pairing."
-        )
+    provisioning_url = provisioning_url_from_env(runtime_paths)
+    if provisioning_url is None:
+        msg = "Google OAuth bootstrap requires MINDROOM_PROVISIONING_URL. Run `mindroom connect` to restore pairing."
         raise OAuthProviderError(msg)
     parsed_url = httpx.URL(provisioning_url)
     if parsed_url.scheme != "https" and not (
@@ -145,7 +148,7 @@ def _provisioning_client_credentials(runtime_paths: RuntimePaths) -> tuple[str, 
     ):
         msg = "MINDROOM_PROVISIONING_URL must use HTTPS, except for localhost development."
         raise OAuthProviderError(msg)
-    return provisioning_url, client_id, client_secret
+    return provisioning_url, *credentials
 
 
 def _valid_provisioned_google_client(payload: object) -> tuple[str, str] | None:

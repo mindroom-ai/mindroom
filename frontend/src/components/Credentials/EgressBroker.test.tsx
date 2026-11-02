@@ -25,6 +25,7 @@ import {
   pressInDialog,
   rowAction,
 } from "@/test/egressServiceTestKit";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 import { EgressBroker } from "./EgressBroker";
 
 const NOT_RUNNING =
@@ -1930,6 +1931,43 @@ describe("egress broker service editor", () => {
       await screen.findByRole("form", { name: "Edit openai" }),
     ).toBeInTheDocument();
     expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
+  });
+
+  it("asks before leaving the page drops an editor with unsaved changes", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await openEdit("GitHub");
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+
+    openMoreOptions();
+    fill("Description", "typed but not saved");
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+  });
+
+  it("asks before changing Keys for drops an editor with unsaved changes", async () => {
+    keyAgents = { shared_agents: ["coder"], has_unscoped_agents: true };
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await openEdit("GitHub");
+    openMoreOptions();
+    fill("Description", "typed but not saved");
+
+    selectTarget("");
+
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    expect(screen.getByLabelText("Keys for")).toHaveValue("coder");
+    expect(screen.getByLabelText("Description")).toHaveValue(
+      "typed but not saved",
+    );
+
+    confirmSpy.mockReturnValue(true);
+    selectTarget("");
+
+    expect(screen.getByLabelText("Keys for")).toHaveValue("");
+    await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
   });
 
   it("opens another service straight away when nothing was changed", async () => {

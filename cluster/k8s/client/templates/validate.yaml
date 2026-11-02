@@ -89,6 +89,18 @@
 {{- if and .Values.bugReports.admins (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
 {{- fail "bugReports.admins requires the chart-managed nginx config" -}}
 {{- end -}}
+{{- with .Values.serverEmoji.room -}}
+{{- /* An alias's server is a host name or IP literal with an optional port; quotes, backslashes, $, <, > and & would break the nginx return body or its JSON. */ -}}
+{{- if or (not (regexMatch `^(#[^\s:'"\\$<>&]+:([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?|![^\s'"\\$<>&]+)$` (toString .))) (regexMatch `\p{Cc}` (toString .)) -}}
+{{- fail (printf "serverEmoji.room must be a room alias such as #emoji:example.com or a room ID, without whitespace, quotes, backslashes, $, <, > or &; got %q" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.serverEmoji.room (not .Values.matrix.homeserverUrl) -}}
+{{- fail "matrix.homeserverUrl is required when serverEmoji.room is set" -}}
+{{- end -}}
+{{- if and .Values.serverEmoji.room (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
+{{- fail "serverEmoji.room requires the chart-managed nginx config" -}}
+{{- end -}}
 {{- if and .Values.matrixRTC.proxy.enabled (not .Values.matrixRTC.enabled) -}}
 {{- fail "matrixRTC.proxy.enabled requires matrixRTC.enabled=true" -}}
 {{- end -}}
