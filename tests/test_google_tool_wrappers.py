@@ -40,7 +40,7 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.custom_tools.google_tasks import GoogleTasksTools
 from mindroom.oauth import client as oauth_client_module
-from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     OAuthCredentialsRefreshResult,
@@ -57,12 +57,17 @@ from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_nam
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
+from tests.oauth_test_utils import (
+    corrupt_oauth_credential_payload,
+    hold_stored_google_credentials,
+    publish_oauth_credentials,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
+    from mindroom.oauth.client import ScopedOAuthClientMixin
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -774,6 +779,7 @@ def test_google_authorized_http_lazy_refresh_uses_bounded_provider_request(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    hold_stored_google_credentials(tool)
     captured_timeouts: list[object] = []
 
     class _BoundedRequest:
@@ -1008,6 +1014,7 @@ def test_google_docs_partial_create_401_preserves_non_retryable_result(
         credentials_manager=credentials_manager,
         worker_target=None,
     )
+    hold_stored_google_credentials(tool)
     tracked_http = tool._google_authorized_http(tool.creds)
     sentinel = b'{"error":{"message":"provider-controlled-partial-write-secret"}}'
     rejected_response = SimpleNamespace(status=401, reason="Unauthorized")
@@ -1257,6 +1264,7 @@ def test_google_refresh_rejects_access_only_snapshot(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    hold_stored_google_credentials(tool)
 
     with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
         tool.creds.refresh(object())
@@ -1337,6 +1345,7 @@ def test_google_forced_refresh_rejects_unchanged_readonly_bearer(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    hold_stored_google_credentials(tool)
 
     with pytest.raises(RefreshError, match="OAuth credential refresh failed"):
         tool.creds.refresh(object())
@@ -1438,6 +1447,8 @@ def test_google_lazy_refresh_reuses_rotation_committed_for_a_stale_client(
         )
         for _ in range(2)
     ]
+    for tool in tools:
+        hold_stored_google_credentials(tool)
     provider_calls = 0
     rotated_access = "rotated-access-token"
 
@@ -1502,6 +1513,7 @@ def test_google_lazy_refresh_serializes_local_snapshot_publication(  # noqa: PLR
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    hold_stored_google_credentials(tool)
     provider_calls = 0
     provider_calls_lock = threading.Lock()
 
@@ -1601,6 +1613,7 @@ def test_google_before_request_serializes_validity_check_with_refresh(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    hold_stored_google_credentials(tool)
     provider_entered = threading.Event()
     release_provider = threading.Event()
     delayed_observed_expired = threading.Event()
@@ -1695,6 +1708,7 @@ def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_succe
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    hold_stored_google_credentials(tool)
     credentials = tool.creds
     credentials.refresh(object())
     assert provider_calls == 1
@@ -1731,7 +1745,7 @@ def test_google_forced_refresh_waiting_on_valid_request_does_not_reuse_old_succe
 def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Toolkit construction must own alias resolution without an ambient call context."""
+    """A toolkit must own alias resolution without an ambient call context."""
     alias = "@telegram_alice:example.org"
     canonical = "@alice:example.org"
     canonical_access_token = "canonical-access-token"  # noqa: S105
@@ -1776,6 +1790,8 @@ def test_google_wrapper_constructor_canonicalizes_alias_without_runtime_context(
         worker_target=raw_target,
         runtime_config=config,
     )
+
+    tool._authenticate()
 
     assert tool.creds.token == canonical_access_token
     assert tool._oauth_credential_context().worker_target == canonical_target
@@ -1887,6 +1903,7 @@ async def test_google_lazy_refresh_cannot_adopt_reconnected_account(runtime_path
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
+    hold_stored_google_credentials(tool)
     retained_account_a = tool.creds
 
     def exchange_account_b(*_args: object) -> OAuthTokenResult:
@@ -2263,14 +2280,67 @@ def test_google_wrapper_reports_missing_connection_after_terminal_deletion(
     assert "reason" not in second_payload
 
 
+def _forbid_oauth_credential_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail on any read or write of an OAuth credential store."""
+
+    def fail_store_access() -> None:
+        raise AssertionError
+
+    monkeypatch.setattr(credential_lifecycle, "_get_oauth_transaction_loop", fail_store_access)
+
+
 @pytest.fixture
 def forbid_stored_oauth_credential_loads(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail the test if a toolkit loads stored user OAuth credentials."""
+    _forbid_oauth_credential_store(monkeypatch)
 
-    def fail_load_stored_credentials(_self: ScopedOAuthClientMixin) -> None:
-        raise AssertionError
 
-    monkeypatch.setattr(ScopedOAuthClientMixin, "_load_stored_credentials", fail_load_stored_credentials)
+@pytest.mark.parametrize(
+    "tool_class",
+    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools, GoogleTasksTools],
+)
+def test_google_wrapper_reads_stored_credentials_only_in_a_calling_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    tool_class: type[ScopedOAuthClientMixin],
+) -> None:
+    """Every reply builds its toolkits, so building one reads no store; the thread that calls it authenticates."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    worker_target = _alice_user_agent_target()
+    provider = tool_class._oauth_provider
+    _save_scoped_oauth_credentials(
+        provider.credential_service,
+        {
+            "token": "stored-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=worker_target,
+    )
+    with monkeypatch.context() as no_store:
+        _forbid_oauth_credential_store(no_store)
+        tool = cast("Any", tool_class)(
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+        )
+    assert tool.creds is None
+
+    def authenticated_token() -> str:
+        tool._authenticate()
+        return tool.creds.token
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        token = executor.submit(authenticated_token).result()
+
+    assert token == "stored-access-token"  # noqa: S105
+    assert tool.creds is None
 
 
 @pytest.mark.usefixtures("forbid_stored_oauth_credential_loads")
