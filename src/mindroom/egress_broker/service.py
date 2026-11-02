@@ -264,10 +264,9 @@ def _routed_key(
 
     An `admin_key` service's key is its administrator key. None without a key, for a service with its own account
     (`oauth_separate_account`), which uses only that account, and for a `github_app` service, which uses only its
-    App. Under `consistent_read` no user-service write lands
-    during the read and the check. A config change does not take that lock, so the check reads the current config
-    after the key: a key saved after the config moved `name` to other hosts is only read once the new config is
-    current, and the check then refuses it.
+    App. Under `consistent_read` no user-service write lands during the read and the check. A config change does not
+    take that lock, so the check reads the current config after the key: a key saved after the config moved `name` to
+    other hosts is only read once the new config is current, and the check then refuses it.
     """
     with consistent_read():
         key = (

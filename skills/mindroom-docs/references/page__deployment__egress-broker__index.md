@@ -431,11 +431,21 @@ egress_broker:
 - Pushing changes to workflow files under `.github/workflows` needs a permission the tokens do not ask for, so GitHub refuses such pushes.
 - `gh pr view` also fails on a pull request with a team review request, which needs the organization's Members permission, and `gh pr status` on a branch with a classic protection rule, which needs Administration; the tokens ask for neither, so use `gh pr view --json <fields>` without `reviewRequests`, or `gh api`, there.
 - A request for a repository the service does not list, a public one included, gets 403 `repository_not_allowed` and no token.
-  To let agents fetch other public repositories, such as a `pip install git+https://github.com/<owner>/<repository>` dependency, keep `preset: github` and set the service's `rules` yourself, which replace the preset's, limited to the App's owner (`path_prefix: /repos/acme/` on `api.github.com` and `uploads.github.com`, `/acme/` on `github.com`, plus `/graphql` on `api.github.com`, each with `auth: {type: bearer}` on the API hosts and `auth: {type: basic, username: x-access-token}` on `github.com`), so other repositories match no rule and go out without credentials.
+  To let agents fetch other public repositories, such as a `pip install git+https://github.com/<owner>/<repository>` dependency, keep `preset: github` and set the service's `rules` yourself, which replace the preset's, limited to the App's owner, so REST and git requests for other repositories match no rule and go out without credentials (GraphQL still gets the App's token, as below):
+
+  ```yaml
+  rules:
+    - { host: api.github.com, path_prefix: /repos/acme/, auth: { type: bearer } }
+    - { host: api.github.com, path_prefix: /graphql, auth: { type: bearer } }
+    - { host: uploads.github.com, path_prefix: /repos/acme/, auth: { type: bearer } }
+    - { host: github.com, path_prefix: /acme/, auth: { type: basic, username: x-access-token } }
+    - { host: github.com, path_prefix: /user-attachments/, auth: { type: basic, username: x-access-token } }
+  ```
+
 - A request that names no repository in its path, such as GraphQL, which `gh pr create` and `gh pr view` use, gets read access to every listed repository, or read and write when every listed repository is `read_write`.
   In a service that mixes the two, `gh` commands that write through GraphQL therefore fail; `gh api repos/<owner>/<repository>/...` and git work at each repository's own access.
   Prefer one access level per service, as in the example below.
-- GitHub refuses a token anything private outside its repositories and anything its permissions do not allow, so that holds even for requests whose path names no repository.
+- GitHub refuses the token for anything private outside its repositories and for anything its permissions do not allow, even when the path names no repository.
 - The service uses no key or connected account: a preset's account login is left out, setting `oauth_provider`, `read_only`, `oauth_on_shared_workers`, or `admin_key` next to `github_app` is an error, and the egress pages offer no key for it.
 - Every agent the service serves shares the App, whatever its worker scope.
   Combine it with [`agents`](#limiting-a-service-to-some-agents) to choose which agents get it.
