@@ -473,7 +473,6 @@ class ReplyRuntime:
     async def claim(
         self,
         *,
-        delivery_id: str,
         sources: ResponseSources,
         room_id: str,
         thread_id: str | None,
@@ -483,10 +482,10 @@ class ReplyRuntime:
         existing_event_id: str | None = None,
         interactive_span_id: str | None = None,
     ) -> SpanHandle | ClaimRefused:
-        """Claim the reply one span answers, or say why no span opened."""
+        """Claim the reply one span answers, its rows named by its sources, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
         request = await self._new_request(
-            delivery_id=delivery_id,
+            delivery_id=sources.delivery_id,
             sources=sources,
             room_id=room_id,
             thread_id=thread_id,
@@ -617,7 +616,6 @@ class ReplyRuntime:
     async def acknowledgement(
         self,
         *,
-        delivery_id: str,
         pending: tuple[str, ...],
         logical: tuple[str, ...],
         discovery: tuple[str, ...],
@@ -629,9 +627,10 @@ class ReplyRuntime:
 
         No task runs for its span until the selection's answer claims it, which a Stop or departure before then refuses.
         """
+        sources = ResponseSources(pending, logical, discovery)
         claim = await self._new_request(
-            delivery_id=delivery_id,
-            sources=ResponseSources(pending, logical, discovery),
+            delivery_id=sources.delivery_id,
+            sources=sources,
             room_id=room_id,
             thread_id=thread_id,
             empty=Presentation(),
