@@ -20816,7 +20816,7 @@ egress_broker:
 - Pushing changes to workflow files under `.github/workflows` needs a permission the tokens do not ask for, so GitHub refuses such pushes.
 - `gh pr view` also fails on a pull request with a team review request, which needs the organization's Members permission, and `gh pr status` on a branch with a classic protection rule, which needs Administration; the tokens ask for neither, so use `gh pr view --json <fields>` without `reviewRequests`, or `gh api`, there.
 - A request for a repository the service does not list, a public one included, gets 403 `repository_not_allowed` and no token.
-  To let agents fetch other public repositories, such as a `pip install git+https://github.com/<owner>/<repository>` dependency, keep `preset: github` and set the service's `rules` yourself, which replace the preset's, limited to the App's owner (`path_prefix: /repos/acme/` on `api.github.com` and `uploads.github.com`, `/acme/` on `github.com`, plus `/graphql` on `api.github.com`), so other repositories match no rule and go out without credentials.
+  To let agents fetch other public repositories, such as a `pip install git+https://github.com/<owner>/<repository>` dependency, keep `preset: github` and set the service's `rules` yourself, which replace the preset's, limited to the App's owner (`path_prefix: /repos/acme/` on `api.github.com` and `uploads.github.com`, `/acme/` on `github.com`, plus `/graphql` on `api.github.com`, each with `auth: {type: bearer}` on the API hosts and `auth: {type: basic, username: x-access-token}` on `github.com`), so other repositories match no rule and go out without credentials.
 - A request that names no repository in its path, such as GraphQL, which `gh pr create` and `gh pr view` use, gets read access to every listed repository, or read and write when every listed repository is `read_write`.
   In a service that mixes the two, `gh` commands that write through GraphQL therefore fail; `gh api repos/<owner>/<repository>/...` and git work at each repository's own access.
   Prefer one access level per service, as in the example below.
@@ -20847,6 +20847,7 @@ egress_broker:
 
 Each agent's requests then use its own team's service; an agent in neither list gets 403 `agent_not_allowed`.
 Two services that serve the same agent on the same hosts do not combine: the one whose name sorts first takes every request, so list all of an agent's repositories in one service.
+That includes a service without `agents`, which serves every agent: next to team services, give it an `agents` list that leaves the teams' agents out, or remove it.
 
 Until the credential is stored, the service shows as not set, its placeholder variables are not added, and requests get 403 `credential_not_configured`.
 When GitHub issues no token, for example because the App lacks a permission or an installation does not include a listed repository, requests get 503 `github_app_token_failed` and the primary logs `egress_broker_github_app_token_failed` with GitHub's HTTP status.
