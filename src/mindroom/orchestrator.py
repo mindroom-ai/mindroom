@@ -1649,7 +1649,6 @@ async def _wait_for_runtime_completion(
         shutdown_wait_task=shutdown_wait_task,
         api_task=api_task,
         shutdown_requested=shutdown_requested,
-        api_server=api_server,
     )
 
     if shutdown_wait_task in done:
@@ -1671,27 +1670,17 @@ async def _consume_completed_runtime_tasks(
     shutdown_wait_task: asyncio.Task[bool],
     api_task: asyncio.Task[None] | None,
     shutdown_requested: asyncio.Event,
-    api_server: _EmbeddedApiServerContext,
 ) -> None:
-    """Consume completed runtime tasks and raise the first non-cancellation failure, which `_run_runtime` logs."""
+    """Consume completed runtime tasks and raise the first non-cancellation failure, which `_run_runtime` logs.
+
+    The API task raises by itself when it returns while no shutdown was requested, so only the orchestrator's is checked.
+    """
     failure: Exception | None = None
     for task in (orchestrator_task, api_task, shutdown_wait_task):
         if task is None or task not in done:
             continue
         try:
             task_name = task.get_name()
-            if api_task is not None and task is api_task:
-                await _await_api_task_completion(
-                    api_task,
-                    shutdown_requested=shutdown_requested,
-                    api_server=api_server,
-                )
-                logger.info(
-                    "runtime_task_completed",
-                    task_name=task_name,
-                    shutdown_requested=shutdown_requested.is_set(),
-                )
-                continue
             await task
             if task is orchestrator_task:
                 if shutdown_requested.is_set():
@@ -1721,23 +1710,6 @@ async def _consume_completed_runtime_tasks(
         raise failure
 
 
-async def _await_api_task_completion(
-    api_task: asyncio.Task[None],
-    *,
-    shutdown_requested: asyncio.Event,
-    api_server: _EmbeddedApiServerContext,
-) -> None:
-    """Await the API task and classify normal shutdown versus unexpected exit."""
-    await api_task
-    if shutdown_requested.is_set():
-        logger.info("embedded_api_server_requested_application_shutdown", **api_server.log_context())
-        return
-    _raise_embedded_api_server_exit(
-        api_server,
-        reason="API task finished while application shutdown was not requested",
-    )
-
-
 async def _await_api_task_graceful_shutdown(
     api_task: asyncio.Task[None],
     *,
@@ -1764,7 +1736,6 @@ async def _await_api_task_graceful_shutdown(
                 shutdown_wait_task=shutdown_wait_task,
                 api_task=api_task,
                 shutdown_requested=shutdown_requested,
-                api_server=api_server,
             )
             if api_task in done:
                 return
