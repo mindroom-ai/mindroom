@@ -23,6 +23,7 @@ async def test_progress_sink_drops_events_after_shutdown() -> None:
     pump.shutdown.set()
     sink = _make_progress_sink(
         pump,
+        pipeline_timing=None,
         tool_name="shell",
         function_name="run",
     )
@@ -58,6 +59,7 @@ async def test_progress_sink_drops_loop_close_race() -> None:
     )
     sink = _make_progress_sink(
         pump,
+        pipeline_timing=None,
         tool_name="shell",
         function_name="run",
     )

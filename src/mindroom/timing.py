@@ -190,6 +190,24 @@ class DispatchPipelineTiming:
         logger.info("Dispatch pipeline timing", **summary)
 
 
+_REPLY_PIPELINE_TIMING: ContextVar[DispatchPipelineTiming | None] = ContextVar("reply_pipeline_timing", default=None)
+
+
+@contextmanager
+def bind_reply_pipeline_timing(timing: DispatchPipelineTiming | None) -> Iterator[None]:
+    """Bind ``timing`` as the tracker of the reply whose turn runs in this block, streamed or delivered whole."""
+    token = _REPLY_PIPELINE_TIMING.set(timing)
+    try:
+        yield
+    finally:
+        _REPLY_PIPELINE_TIMING.reset(token)
+
+
+def reply_pipeline_timing() -> DispatchPipelineTiming | None:
+    """Return the tracker of the reply whose turn runs here, None when timing is off or no reply runs."""
+    return _REPLY_PIPELINE_TIMING.get()
+
+
 def create_dispatch_pipeline_timing(*, event_id: str, room_id: str) -> DispatchPipelineTiming | None:
     """Return a new tracker when timing instrumentation is enabled."""
     if not _is_enabled():
