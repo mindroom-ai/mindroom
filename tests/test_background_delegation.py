@@ -1453,16 +1453,26 @@ async def test_child_failure_remains_primary_when_terminal_receipt_fails(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("depth", "agent_mode", "offered"),
-    [(0, "standard", True), (1, "standard", False), (0, "minimal", False)],
+    ("depth", "agent_mode", "excluded", "offered"),
+    [
+        (0, "standard", False, True),
+        (1, "standard", False, False),
+        (0, "minimal", False, False),
+        (0, "standard", True, False),
+    ],
 )
 async def test_only_a_build_whose_subagent_calls_become_jobs_offers_background_waits(
     tmp_path: Path,
     depth: int,
     agent_mode: AgentMode,
+    excluded: bool,
     offered: bool,
 ) -> None:
-    """A nested subagent's calls run inside its parent's job and a minimal agent's return to its CLI command."""
+    """Only calls that can become jobs are offered a background wait.
+
+    A nested subagent's calls run inside its parent's job, a minimal agent's return to the CLI command that made them,
+    and an excluded toolkit's keep their native wait.
+    """
     paths = _runtime_paths(tmp_path)
     config = Config(
         agents={
@@ -1472,8 +1482,8 @@ async def test_only_a_build_whose_subagent_calls_become_jobs_offers_background_w
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         models={"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        background_tool_jobs={"enabled": True, "exclude_toolkits": ["delegate"] if excluded else []},
     )
-    config.background_tool_jobs.enabled = True
     persist_entity_accounts(config, paths)
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
     runtime = await tool_job_runtime(tmp_path)
