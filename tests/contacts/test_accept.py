@@ -16,6 +16,7 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
 from mindroom.contacts.store import _contacts_path, contact_room_ids
+from mindroom.contacts.turns import _ContactAdmission, contact_admission, contact_room
 from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
@@ -54,6 +55,7 @@ ROOM_STATE = [
 ]
 NOT_PENDING = r"^Only a pending contact can be accepted$"
 REMOVED_ROOM = "!removed:localhost"
+FAILED_ROOM = "!failed:localhost"
 ADHOC_ROOM = "!adhoc:localhost"
 
 
@@ -421,7 +423,8 @@ async def test_an_acceptance_that_cannot_be_stored_leaves_the_room(tmp_path: Pat
 
     with (
         _matrix(),
-        patch("mindroom.contacts.flow.update_contacts", side_effect=OSError("disk full")),
+        # The write naming the room passes, and the one activating the contact fails.
+        patch("mindroom.contacts.flow.update_contacts", side_effect=[None, OSError("disk full")]),
         pytest.raises(OSError, match=r"^disk full$"),
     ):
         await _accept(config, paths, runtime, record.id)
@@ -429,6 +432,32 @@ async def test_an_acceptance_that_cannot_be_stored_leaves_the_room(tmp_path: Pat
     assert _joined(runtime) == _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert [stored.status for stored in _stored(paths)] == ["pending"]
     runtime.sent("mind_alice").assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_contact_names_its_room_before_anyone_is_invited(tmp_path: Path) -> None:
+    """The room refuses every turn while it is set up, and the next acceptance replaces a room that failed."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    admissions = []
+
+    async def invite(_client: object, room_id: str, user_id: str) -> bool:
+        admissions.append(
+            contact_admission(config, paths, room_id=room_id, agent_name="mind_bob", sender_ids=[user_id]),
+        )
+        return True
+
+    with _matrix(FAILED_ROOM, invited=False), pytest.raises(ValueError, match=r"could not be invited"):
+        await _accept(config, paths, runtime, record.id)
+    with _matrix() as matrix:
+        matrix.invite.side_effect = invite
+        accepted = await _accept(config, paths, runtime, record.id)
+
+    assert admissions
+    assert set(admissions) == {_ContactAdmission(None)}
+    assert accepted.room_id == CONTACT_ROOM
+    assert contact_room(config, paths, FAILED_ROOM, "mind_bob") is None
 
 
 @pytest.mark.asyncio
@@ -457,8 +486,10 @@ async def test_a_cancellation_during_the_store_write_keeps_the_contact_it_activa
     store = flow.update_contacts
 
     def slow_update(runtime_paths: RuntimePaths, change: Callable[[Any], Any]) -> Any:  # noqa: ANN401
-        writing.set()
-        release.wait(timeout=10)
+        # The write that activates the contact comes once the room is named.
+        if _stored(runtime_paths)[0].room_id is not None:
+            writing.set()
+            release.wait(timeout=10)
         return store(runtime_paths, change)
 
     with _matrix(), patch("mindroom.contacts.flow.update_contacts", side_effect=slow_update):

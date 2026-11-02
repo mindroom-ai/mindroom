@@ -426,7 +426,8 @@ async def accept_contact(
     """Accept a pending request for its target owner: open the contact room, seat both parties, and tell the requester.
 
     The target side keeps any rules or tools left out. Both agent parties keep the room while the contact is active.
-    A room that cannot be fully set up is left again and the request stays pending.
+    The pending contact names the room before anyone is invited, so the room refuses every turn until it is active.
+    A room that cannot be fully set up is left again and the request stays pending, to be replaced by the next room.
     """
     config, paths = context.current_config, context.runtime_paths
     record = await _pending_request(context, agent_name, contact_id, "accept")
@@ -442,19 +443,26 @@ async def accept_contact(
         msg = "The contact room could not be created; accept again to retry"
         raise ValueError(msg)
 
-    def activate(book: ContactBook) -> ContactRecord:
+    def register(book: ContactBook) -> None:
         current = _by_id(book, contact_id)
         if current.status != "pending":
             raise ValueError(_NOT_PENDING["accept"])
-        current.status = "active"
         current.room_id = room_id
+
+    def activate(book: ContactBook) -> ContactRecord:
+        current = _by_id(book, contact_id)
+        # Another acceptance that registered its own room meanwhile wins, and this one leaves its room.
+        if current.status != "pending" or current.room_id != room_id:
+            raise ValueError(_NOT_PENDING["accept"])
+        current.status = "active"
         _change_side(current.target_side, rules, checked)
         return current.model_copy(deep=True)
 
     try:
+        await run_blocking_until_complete(update_contacts, paths, register)
         await _seat_parties(context, record, room_id, agents)
         accepted = await run_blocking_until_complete(update_contacts, paths, activate)
-    # Any failure, a cancellation included, leaves the room unless the store already made it the contact's room:
+    # Any failure, a cancellation included, leaves the room unless the store already made it the active contact's:
     # the store write finishes before a cancellation propagates, and agents never rejoin a contact room on their own.
     except BaseException:
         current = _by_id(await run_blocking_until_complete(read_contacts, paths), contact_id)
