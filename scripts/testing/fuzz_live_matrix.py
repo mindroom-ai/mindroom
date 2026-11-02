@@ -4815,14 +4815,11 @@ def _declined_edits(
     )
 
 
-_SUPERSESSION_GUARD_MESSAGES = (
-    "Skipping older message — newer unresponded message from same sender in thread",
-    "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
-)
+_SUPERSESSION_GUARD_MESSAGE = "Skipping older message — newer unresponded message from same sender in thread"
 
 
 def _supersession_decisions(log_path: Path | None) -> dict[str, tuple[_SupersessionDecision, ...]]:
-    """Retain distinct positive guard candidates across retries, rejecting malformed log records."""
+    """Retain each distinct logged skip of an older message, rejecting malformed log records."""
     if log_path is None or not log_path.exists():
         return {}
     decisions: dict[str, list[_SupersessionDecision]] = defaultdict(list)
@@ -4830,14 +4827,14 @@ def _supersession_decisions(log_path: Path | None) -> dict[str, tuple[_Supersess
         if not line.endswith("\n"):
             continue
         match = re.fullmatch(
-            r"(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+)?(?:\[info\s*\]\s+)?("
-            + "|".join(map(re.escape, _SUPERSESSION_GUARD_MESSAGES))
-            + r")\s+\[mindroom\.bot\]\s+(.*)",
+            r"(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+)?(?:\[info\s*\]\s+)?"
+            + re.escape(_SUPERSESSION_GUARD_MESSAGE)
+            + r"\s+\[mindroom\.bot\]\s+(.*)",
             line.rstrip("\r\n"),
         )
         if match is None:
             continue
-        fields = match[2].split()
+        fields = match[1].split()
         pairs = [field.split("=", 1) for field in fields]
         if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
             continue
@@ -4846,9 +4843,7 @@ def _supersession_decisions(log_path: Path | None) -> dict[str, tuple[_Supersess
         if values.get("agent") != AGENT_NAME or not old.startswith("$") or not newer.startswith("$"):
             continue
         thread_id = values.get("thread_id")
-        if (thread_id is not None and not thread_id.startswith("$")) or (
-            match[1] == _SUPERSESSION_GUARD_MESSAGES[1] and thread_id is None
-        ):
+        if thread_id is not None and not thread_id.startswith("$"):
             continue
         decision = _SupersessionDecision(newer, thread_id)
         if decision not in decisions[old]:
@@ -5968,7 +5963,7 @@ class FinalStateAuditor:
         for chain in self.oracle.chains.values():
             for index in range(len(chain) - 1, -1, -1):
                 source = chain[index]
-                # A process may stop after logging its guard but before settlement.
+                # MindRoom logs a skip only once it settled the skipped turn, so a process killed in between logs none.
                 # Prefer the latest observation that independently proves a link.
                 for decision in reversed(decisions.get(source, ())):
                     if decision.newer_event_id not in chain[index + 1 :]:

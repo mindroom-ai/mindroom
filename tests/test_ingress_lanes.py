@@ -834,7 +834,7 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
     with (
         patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value=None),
         patch(
             "mindroom.response_runner.ResponseRunner._run_locked_turn",
             new=fake_run_locked_turn,
@@ -1040,7 +1040,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
     with (
         patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value=None),
         patch.object(
             bot._turn_ingress.deps.normalizer,
             "prepare_voice_event",
@@ -1135,7 +1135,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
         with (
             patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-            patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
+            patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value=None),
             patch.object(bot._delivery_gateway, "send_text", new=AsyncMock(side_effect=fake_send_text)),
             patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
             patch(
@@ -1331,7 +1331,7 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
     with (
         patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
-        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_dispatcher, "_newer_unresponded_in_thread", return_value=None),
         patch(
             "mindroom.response_runner.ResponseRunner._run_locked_turn",
             new=fake_run_locked_turn,

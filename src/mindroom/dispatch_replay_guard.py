@@ -24,7 +24,7 @@ type _HandledLookup = Callable[[Collection[str]], Awaitable[frozenset[str]]]
 type _ForAnotherParticipant = Callable[[str, Mapping[str, object]], Awaitable[bool]]
 
 
-async def has_newer_unresponded_in_thread(
+async def newer_unresponded_in_thread(
     event: PreparedIngress,
     requester_user_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -34,19 +34,18 @@ async def has_newer_unresponded_in_thread(
     classify: _Classify,
     is_handled: _HandledLookup,
     for_another_participant: _ForAnotherParticipant,
-    logger: structlog.stdlib.BoundLogger,
-) -> bool:
-    """Return True when full thread history proves a newer unhandled requester turn exists.
+) -> str | None:
+    """Return the event ID of a newer unhandled requester turn that full thread history proves exists, or None.
 
     Only a message the journal still owes work can become that turn: one this
     agent already settled without answering, such as a voice note it ignored as
     addressed to another agent, never will.
     """
     if not may_be_superseded_by_newer_requester_turn:
-        return False
+        return None
     event_ts = event.server_timestamp
     if event_ts is None or not thread_history:
-        return False
+        return None
     newer = [
         message
         for message in thread_history
@@ -56,7 +55,7 @@ async def has_newer_unresponded_in_thread(
     newer = [message for message in newer if message.event_id in pending]
     handled = await is_handled([message.event_id for message in newer]) if newer else frozenset()
     for message in newer:
-        if not await _is_unresponded_requester_event(
+        if await _is_unresponded_requester_event(
             message,
             source={"content": message.content},
             body=message.body,
@@ -65,14 +64,8 @@ async def has_newer_unresponded_in_thread(
             handled=handled,
             for_another_participant=for_another_participant,
         ):
-            continue
-        logger.info(
-            "Skipping older message — newer unresponded message from same sender in thread",
-            skipped_event_id=event.event_id,
-            newer_event_id=message.event_id,
-        )
-        return True
-    return False
+            return message.event_id
+    return None
 
 
 async def _is_unresponded_requester_event(
@@ -116,7 +109,7 @@ async def _is_unresponded_requester_event(
     return command_for(facts, command_text) is None
 
 
-async def has_newer_unresponded_journal_thread_event(
+async def newer_unresponded_journal_thread_event(
     *,
     room_id: str,
     event: PreparedIngress,
@@ -128,16 +121,16 @@ async def has_newer_unresponded_journal_thread_event(
     is_handled: _HandledLookup,
     for_another_participant: _ForAnotherParticipant,
     logger: structlog.stdlib.BoundLogger,
-) -> bool:
-    """Return positive journal proof of a newer requester turn for degraded replay history.
+) -> str | None:
+    """Return the event ID of a newer requester turn the journal proves exists for degraded replay history, or None.
 
-    The negative-proof sibling of ``has_newer_unresponded_in_thread``, for
+    The negative-proof sibling of ``newer_unresponded_in_thread``, for
     turns whose thread history could not be read. It acts only on proof, so
     every way of not knowing -- an unreadable journal included -- means the
     older turn runs.
     """
     if thread_id is None or event.server_timestamp is None or not may_be_superseded_by_newer_requester_turn:
-        return False
+        return None
     try:
         candidates = await pending_turns.pending_thread_events_after(
             room_id=room_id,
@@ -154,7 +147,7 @@ async def has_newer_unresponded_journal_thread_event(
             thread_id=thread_id,
             error=str(exc),
         )
-        return False
+        return None
 
     for candidate in candidates:
         content = candidate.source.get("content")
@@ -179,11 +172,24 @@ async def has_newer_unresponded_journal_thread_event(
             )
             continue
         if unresponded:
-            logger.info(
-                "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",
-                skipped_event_id=event.event_id,
-                newer_event_id=candidate.event_id,
-                thread_id=thread_id,
-            )
-            return True
-    return False
+            return candidate.event_id
+    return None
+
+
+def log_superseded_turn(
+    logger: structlog.stdlib.BoundLogger,
+    *,
+    skipped_event_id: str,
+    newer_event_id: str,
+    thread_id: str | None,
+) -> None:
+    """Log a turn that a newer requester turn superseded, once the turn was discarded.
+
+    The live Matrix fuzz harness (``scripts/testing/fuzz_live_matrix.py``) parses this line.
+    """
+    logger.info(
+        "Skipping older message — newer unresponded message from same sender in thread",
+        skipped_event_id=skipped_event_id,
+        newer_event_id=newer_event_id,
+        thread_id=thread_id,
+    )

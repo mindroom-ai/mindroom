@@ -23,7 +23,11 @@ from mindroom.cli import main as cli_main
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread, has_newer_unresponded_journal_thread_event
+from mindroom.dispatch_replay_guard import (
+    log_superseded_turn,
+    newer_unresponded_in_thread,
+    newer_unresponded_journal_thread_event,
+)
 from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
@@ -105,7 +109,7 @@ async def _observe_guard_decision(
     use_history: bool,
     handled: frozenset[str] = frozenset(),
 ) -> None:
-    """Capture actual replay-guard decisions across initial admission and retries."""
+    """Log the skip a real replay-guard decision leads to, as the dispatcher does once it discards the older turn."""
     logger = cast(
         "structlog.stdlib.BoundLogger",
         structlog.wrap_logger(
@@ -125,7 +129,7 @@ async def _observe_guard_decision(
         return frozenset(sources) & handled
 
     if use_history:
-        skipped = await has_newer_unresponded_in_thread(
+        newer_event_id = await newer_unresponded_in_thread(
             prepared,
             event["sender"],
             [
@@ -145,10 +149,9 @@ async def _observe_guard_decision(
             classify=lambda sender, _source: make_ingress_facts(sender),
             is_handled=is_handled,
             for_another_participant=AsyncMock(return_value=False),
-            logger=logger,
         )
     else:
-        skipped = await has_newer_unresponded_journal_thread_event(
+        newer_event_id = await newer_unresponded_journal_thread_event(
             room_id=event["room_id"],
             event=prepared,
             requester_user_id=event["sender"],
@@ -160,7 +163,8 @@ async def _observe_guard_decision(
             for_another_participant=AsyncMock(return_value=False),
             logger=logger,
         )
-    assert skipped
+    assert newer_event_id is not None
+    log_superseded_turn(logger, skipped_event_id=event["event_id"], newer_event_id=newer_event_id, thread_id="$root")
 
 
 async def _supersession_case(
@@ -1379,7 +1383,7 @@ async def test_supersession_forward_chain_requires_every_exact_link(tmp_path: Pa
         structlog.PrintLogger(file=output),
         processors=[structlog.dev.ConsoleRenderer(colors=True)],
     ).bind(agent="general", logger="mindroom.bot")
-    assert await has_newer_unresponded_in_thread(
+    newer_event_id = await newer_unresponded_in_thread(
         PreparedIngress("@user:example", "$new", "new", case.events["$new"], server_timestamp=20),
         "@user:example",
         [
@@ -1398,7 +1402,13 @@ async def test_supersession_forward_chain_requires_every_exact_link(tmp_path: Pa
         classify=lambda sender, _source: make_ingress_facts(sender),
         is_handled=AsyncMock(return_value=frozenset()),
         for_another_participant=AsyncMock(return_value=False),
-        logger=cast("structlog.stdlib.BoundLogger", logger),
+    )
+    assert newer_event_id == "$last"
+    log_superseded_turn(
+        cast("structlog.stdlib.BoundLogger", logger),
+        skipped_event_id="$new",
+        newer_event_id=newer_event_id,
+        thread_id="$root",
     )
     await JournalDispatcher(
         principal,
