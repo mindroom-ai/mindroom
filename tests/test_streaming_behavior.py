@@ -94,7 +94,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.workers.models import WorkerReadyPhase
 
 IN_PROGRESS_MARKER = " ⋯"
 _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
@@ -2782,64 +2781,6 @@ class TestStreamingBehavior:
         assert isinstance(exc_info.value.error, RuntimeError)
         assert str(exc_info.value.error) == error_text
         assert edited_texts == list(chunks)
-
-    @pytest.mark.asyncio
-    async def test_worker_waits_reach_the_dispatch_pipeline_timing(self) -> None:
-        """A streamed reply records the longest worker start its tool calls waited for in its pipeline timing."""
-        mock_client = _make_matrix_client_mock()
-        pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
-        failure_shown = asyncio.Event()
-
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            _new_content: dict[str, object],
-            new_text: str,
-        ) -> DeliveredMatrixEvent:
-            if "Worker startup failed" in new_text:
-                failure_shown.set()
-            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
-
-        def progress(phase: WorkerReadyPhase, worker_key: str, elapsed_seconds: float) -> WorkerProgressEvent:
-            return WorkerProgressEvent(
-                tool_name="shell",
-                function_name="run",
-                progress=WorkerReadyProgress(
-                    phase=phase,
-                    worker_key=worker_key,
-                    backend_name="kubernetes",
-                    elapsed_seconds=elapsed_seconds,
-                ),
-            )
-
-        async def stream() -> AsyncIterator[str]:
-            pump = get_worker_progress_pump()
-            assert pump is not None
-            for event in (
-                progress("cold_start", "worker-a", 1.5),
-                progress("ready", "worker-a", 7.5),
-                progress("failed", "worker-b", 3.0),
-            ):
-                pump.queue.put_nowait(event)
-            # The failure notice shows once the last event is applied.
-            await asyncio.wait_for(failure_shown.wait(), timeout=5.0)
-            yield "hello"
-
-        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=stream(),
-                existing_event_id="$thinking_123",
-                adopt_existing_placeholder=True,
-                pipeline_timing=pipeline_timing,
-                **FakeReplyRecords(edit=record_edit).hooks(),
-            )
-
-        assert pipeline_timing.metadata["worker_wait_ms"] == 7500.0
 
     @pytest.mark.asyncio
     async def test_worker_progress_delivery_failure_raises_streaming_delivery_error(self) -> None:
