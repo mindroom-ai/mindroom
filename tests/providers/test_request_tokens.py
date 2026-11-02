@@ -20,7 +20,7 @@ from mindroom.llm.provider import ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_items
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import provider_for
@@ -293,6 +293,25 @@ def test_claude_counts_replayed_thinking_by_its_answer_s_hidden_output(tmp_path:
         _claude_answer(route, text, metrics=metrics),
     )
     assert added == 3_000 - visible
+
+
+def test_claude_counts_a_web_search_result_s_page_ciphertext_a_quarter_token_per_character(tmp_path: Path) -> None:
+    """A server tool's result replays its page encrypted; the model reads it decrypted, which its length bounds."""
+    route = _route("anthropic", tmp_path)
+    search = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "Paris weather"}}
+    text = {"type": "text", "text": "Pack a light rain jacket."}
+
+    def answer(page: str) -> Message:
+        result = {
+            "type": "web_search_result",
+            "url": "https://example.org/paris",
+            "title": "Paris",
+            "encrypted_content": page,
+        }
+        found = {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [result]}
+        return _claude_answer(route, search, found, text)
+
+    assert _difference(route, answer("Q" * 8_000), answer("Q" * 4)) == opaque_tokens(8_000) - opaque_tokens(4)
 
 
 def test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks(tmp_path: Path) -> None:

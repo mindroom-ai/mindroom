@@ -26,7 +26,7 @@ from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
 from mindroom.providers.media_files import read_media_bytes
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
 
 if TYPE_CHECKING:
@@ -342,7 +342,8 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
     return result
 
 
-# Block fields no model reads: ids, cache breakpoints, and ciphertext the provider decrypts.
+# Block fields no model reads as sent, at any depth: ids, cache breakpoints, signatures, and ciphertext the provider
+# decrypts, such as a web search result's page (``_readable``).
 _TRANSPORT_BLOCK_FIELDS = frozenset(
     {"id", "tool_use_id", "cache_control", "citations", "signature", "data", "encrypted_content", "encrypted_index"},
 )
@@ -391,7 +392,18 @@ def _block_parts(block: Mapping[str, Any], parts: RequestParts, replayed: set[st
     elif kind == "compaction":
         parts.text(block.get("content"))
     else:
-        parts.value({key: value for key, value in block.items() if key not in _TRANSPORT_BLOCK_FIELDS})
+        parts.value(_readable(block, parts))
+
+
+def _readable(value: Any, parts: RequestParts) -> Any:  # noqa: ANN401 - any JSON value of a block
+    """Return ``value`` without its transport fields; ciphertext the model reads decrypted costs ``opaque_tokens``."""
+    if isinstance(value, dict):
+        if isinstance(ciphertext := value.get("encrypted_content"), str):
+            parts.cost(opaque_tokens(len(ciphertext)))
+        return {key: _readable(item, parts) for key, item in value.items() if key not in _TRANSPORT_BLOCK_FIELDS}
+    if isinstance(value, list):
+        return [_readable(item, parts) for item in value]
+    return value
 
 
 def _thinking_identity(block: Mapping[str, Any]) -> str:
