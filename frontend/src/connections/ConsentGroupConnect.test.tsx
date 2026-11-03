@@ -199,6 +199,26 @@ describe("Connect all", () => {
     ).toBeVisible();
   });
 
+  it("shows a logo only on the button of a built-in group", () => {
+    const plugin = { key: "acme", display_name: "Acme" };
+    const agent = agentWith([
+      service("google_drive"),
+      service("google_sheets"),
+      service("acme_files", plugin),
+      service("acme_notes", plugin),
+    ]);
+    renderGroup(
+      agent,
+      statusesFor("google_drive", "google_sheets", "acme_files", "acme_notes"),
+    );
+    expect(within(connectAll()).getByTestId("group-logo")).toBeTruthy();
+    expect(
+      within(
+        screen.getByRole("button", { name: "Connect all Acme services" }),
+      ).queryByTestId("group-logo"),
+    ).toBeNull();
+  });
+
   it("starts the group sign-in and reloads statuses", async () => {
     const window_ = popup();
     const open = vi

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FaGoogle, FaMicrosoft } from "react-icons/fa";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
@@ -15,6 +16,19 @@ interface ConnectableGroup {
   group: ConnectionConsentGroup;
   /** In the agent's service order, so the first is the one whose callback the server finishes. */
   candidates: ConnectionService[];
+}
+
+/** The logo of a built-in group: Google, each additional Google workspace, or Microsoft 365; none for a plugin's. */
+function GroupLogo({ groupKey }: { groupKey: string }) {
+  const props = {
+    "aria-hidden": true,
+    "data-testid": "group-logo",
+    className: "mr-2 h-4 w-4",
+  };
+  if (groupKey === "google" || groupKey.startsWith("google_"))
+    return <FaGoogle {...props} />;
+  if (groupKey === "microsoft") return <FaMicrosoft {...props} />;
+  return null;
 }
 
 /** The groups with two or more services this user can connect with one sign-in, in the order they first appear. */
@@ -115,6 +129,7 @@ function ConsentGroupRow({
                 : void connect()
             }
           >
+            <GroupLogo groupKey={group.key} />
             {busy
               ? "Connecting…"
               : `Connect all ${group.display_name} services`}
