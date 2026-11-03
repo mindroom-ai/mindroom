@@ -1014,7 +1014,8 @@ async def test_a_text_file_declared_as_audio_or_video_reaches_claude_as_text(tmp
     assert await attachments_module.wait_for_attachment_cleanup_tasks()
 
     assert [record.mime_type if record else None for record in records] == ["text/plain", declared]
-    _, _, files, _ = attachment_records_to_media([records[0]] if records[0] else [])
+    assert records[0] is not None
+    _, _, files, _ = attachment_records_to_media([records[0]])
     wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
     await claude_turn(
         route_provider("anthropic", tmp_path, wire),
