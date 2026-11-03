@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -55,7 +56,6 @@ from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from mindroom.cancellation import TaskCancelSource
     from mindroom.event_journal import EventJournalStore
@@ -1534,14 +1534,13 @@ async def test_retention_chooses_replies_on_a_read_and_keeps_one_written_since(
     assert await principal.replies.load(reply.reply_id) is not None
 
 
-async def test_retention_rechecks_a_chosen_reply_by_its_key(tmp_path: Path) -> None:
+async def test_retention_rechecks_a_chosen_reply_by_its_key() -> None:
     """The writer re-checks a chosen reply by its key instead of walking every finished reply again."""
-    database = sqlite3.connect(tmp_path / "forget-plan.db")
-    for statement in schema_statements(SQLITE_DIALECT):
-        database.execute(statement)
     sql = reply_messages._STILL_FORGETTABLE
-
-    plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
+    with closing(sqlite3.connect(":memory:")) as database:
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
 
     assert "SEARCH reply USING INDEX sqlite_autoindex_reply_messages_1 (principal_id=? AND reply_id=?)" in plan, plan
 
