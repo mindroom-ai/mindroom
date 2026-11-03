@@ -156,6 +156,11 @@ def checkpoint_summary(message: Message, basis: str) -> str | None:
     return content if isinstance(content, str) else None
 
 
+def checkpoint_tail(messages: Sequence[Message], checkpoint: int) -> list[Message]:
+    """Return what replaying the checkpoint on ``messages[checkpoint]`` keeps: it, its tail, and the system messages."""
+    return [message for index, message in enumerate(messages) if index >= checkpoint or message.role == "system"]
+
+
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:
     """Project the latest checkpoint plus tail, retaining current system messages."""
     last = next(
@@ -164,4 +169,4 @@ def native_replay_messages(messages: Sequence[Message], route: str | None) -> li
     )
     if last is None:
         return list(messages)
-    return [message for index, message in enumerate(messages) if index >= last or message.role == "system"]
+    return checkpoint_tail(messages, last)
