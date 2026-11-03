@@ -67,6 +67,15 @@ def test_unmapped_ids_estimate_with_their_family_margin() -> None:
     assert other.estimate(text) == math.ceil(_o200k(text) * 1.25)
 
 
+def test_a_gemini_model_prices_pdf_pages_low_on_any_route() -> None:
+    """Gemini charges at most 1,120 tokens for a PDF page, also behind OpenRouter; other models keep the allowance."""
+    routed = counter_for_model(ModelIdentity(id="google/gemini-3.8-flash", provider="openrouter"))
+    native = counter_for_model(ModelIdentity(id="models/default", provider="gemini"), family="gemini")
+    claude = counter_for_model(ModelIdentity(id="anthropic/claude-opus-5.5", provider="openrouter"))
+    assert routed.pdf_page_tokens == native.pdf_page_tokens == 1_120
+    assert claude.pdf_page_tokens is None
+
+
 def test_estimates_wait_for_the_encoder_without_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
     release = threading.Event()
     real_get_encoding = tiktoken.get_encoding

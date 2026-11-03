@@ -623,6 +623,8 @@ def test_an_attached_pdf_counts_its_pages(tmp_path: Path, family: str, page_toke
     assert counted(_pdf(80, delete=79)) == page_tokens
     # A PDF the parser cannot read, or whose page tree declares no page count, counts one page.
     assert counted(b"%PDF-1.7\ndamaged") == page_tokens
+    # A cross-reference table cut off before its trailer, which pypdf before 6.21.4 read forever.
+    assert counted(b"%PDF-1.4\nstartxref\n28\n%%EOF\nxref\n1 0\naaa") == page_tokens
     assert counted(_pdf(1).replace(b"/Count 1", b"/Count /X")) == page_tokens
     assert counted(_pdf(1).replace(b"/Count 1", b"/Count -7")) == page_tokens
 

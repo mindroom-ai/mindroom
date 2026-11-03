@@ -35,7 +35,8 @@ __all__ = [
 ]
 
 # What one media item counts while its real cost is unknown: an image, audio clip, video, or file a request sends, and
-# by default each page of a PDF, which Claude reads as 1,500 to 3,000 tokens of text beside the page's image.
+# each page of a PDF on a model that does not price pages lower (``TokenCounter.pdf_page_tokens``); Claude reads a
+# page as 1,500 to 3,000 tokens of text beside the page's image.
 MEDIA_ALLOWANCE_TOKENS = 5_000
 
 
@@ -108,8 +109,8 @@ def _pdf_pages(data: bytes) -> int:
     return max(pages, 1) if isinstance(pages, int) else 1
 
 
-def _file_tokens(counter: TokenCounter, file: File, page_tokens: int) -> int:
-    """Return what ``file`` counts: a PDF ``page_tokens`` per page, UTF-8 text its text, and any other file the allowance.
+def _file_tokens(counter: TokenCounter, file: File) -> int:
+    """Return what ``file`` counts: a PDF the model's page price per page, UTF-8 text its text, any other the allowance.
 
     Claude, Gemini, and OpenAI's Responses API read a text file as its text.
     """
@@ -117,20 +118,20 @@ def _file_tokens(counter: TokenCounter, file: File, page_tokens: int) -> int:
     if data is None:
         return MEDIA_ALLOWANCE_TOKENS
     if data.startswith(b"%PDF-"):
-        return _pdf_pages(data) * page_tokens
+        return _pdf_pages(data) * (counter.pdf_page_tokens or MEDIA_ALLOWANCE_TOKENS)
     try:
         return count(counter, data.decode("utf-8"))
     except UnicodeDecodeError:
         return MEDIA_ALLOWANCE_TOKENS
 
 
-def _media_tokens(counter: TokenCounter, messages: Sequence[Message], *, keep_images: bool, page_tokens: int) -> int:
+def _media_tokens(counter: TokenCounter, messages: Sequence[Message], *, keep_images: bool) -> int:
     """Return what the media ``messages`` carry count: a file by its bytes, any other item the allowance.
 
     Images are left out when the route prices them itself.
     """
     return sum(
-        _file_tokens(counter, item, page_tokens) if isinstance(item, File) else MEDIA_ALLOWANCE_TOKENS
+        _file_tokens(counter, item) if isinstance(item, File) else MEDIA_ALLOWANCE_TOKENS
         for message in messages
         for kind, item in media_items(message)
         if not (keep_images and kind == "image")
@@ -162,18 +163,16 @@ def route_request_tokens(
     parts_of: _PartsOf,
     *,
     keep_images: bool = False,
-    page_tokens: int = MEDIA_ALLOWANCE_TOKENS,
 ) -> int:
     """Return what ``request`` gives the route's model from message ``start`` on, as ``parts_of`` renders it.
 
     Media are priced by ``_media_tokens``, for the messages the request sends after its latest native checkpoint
-    replaced what precedes it; ``keep_images`` leaves the images to a route that prices them itself, and
-    ``page_tokens`` is what the route's model charges at most for a PDF page.
+    replaced what precedes it; ``keep_images`` leaves the images to a route that prices them itself.
     """
     parts = RequestParts(counter)
     route = request.native_compaction.route if request.native_compaction is not None else None
     sent = native_replay_messages(request.messages[start:], route)
-    parts.cost(_media_tokens(counter, sent, keep_images=keep_images, page_tokens=page_tokens))
+    parts.cost(_media_tokens(counter, sent, keep_images=keep_images))
     parts_of(replace(request, messages=_without_media(request.messages, keep_images=keep_images)), start, parts)
     return parts.counted()
 

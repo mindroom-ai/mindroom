@@ -610,8 +610,8 @@ def finalize_history_preparation(
         request_size = prepared_scope_history.request_size
         estimated: int | None = None
         if request_size is not None:
-            # The final request holds the prepared one's history beside what the final frame holds, such as the
-            # prompt's attachments.
+            # The final request holds the prepared one's history beside what the final frame holds, whose turn can
+            # hold unseen thread context the provisional turn did not.
             request_tokens = request_size.tokens + static_tokens - prepared_scope_history.static_tokens
         else:
             # Only a required compaction leaves no size, and it turned native compaction off.
