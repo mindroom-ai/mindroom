@@ -125,6 +125,7 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
         "application/x-yaml": b"key: value\n",
         "text/x-log": b"12:00 ERROR crashed\n",
         "text/plain; charset=utf-8": b"Plain notes.",
+        "application/json; charset=utf-8": b'{"key": "value"}',
     }
     turn = Message(
         role="user",
