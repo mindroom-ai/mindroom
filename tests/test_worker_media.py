@@ -15,6 +15,7 @@ from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.media import Audio as OwnedAudio
+from mindroom.llm.media import File as OwnedFile
 from mindroom.llm.messages import Message
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, responses_file_part
@@ -105,6 +106,22 @@ def test_worker_text_file_preserves_utf8_content(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(media_transport, "MAX_MEDIA_BYTES", 5)
     with pytest.raises(ValueError, match="byte limit"):
         serialize_worker_tool_result(result)
+
+
+def test_a_worker_returns_a_file_of_any_document_type_and_nothing_else() -> None:
+    """Any text type, such as YAML, crosses the worker boundary as a file; a type no document has never does."""
+    files = tuple(
+        OwnedFile(content=b"a: 1\n", mime_type=mime_type, filename="settings.yaml")
+        for mime_type in ("application/x-yaml", "application/ld+json")
+    )
+
+    decoded = decode_media_result(serialize_worker_tool_result(ToolValue(content="Files", files=files)))
+
+    assert isinstance(decoded, ToolValue)
+    assert [file.mime_type for file in decoded.files] == ["application/x-yaml", "application/ld+json"]
+    archive = ToolValue(content="Archive", files=(OwnedFile(content=b"tar", mime_type="application/x-tar"),))
+    with pytest.raises(ValueError, match="Invalid worker tool result envelope"):
+        serialize_worker_tool_result(archive)
 
 
 @pytest.mark.parametrize("source", ["file", "url"])

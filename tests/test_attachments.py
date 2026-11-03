@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import urlsplit
 
 import nio
 import pytest
@@ -41,6 +42,7 @@ from mindroom.attachments.storage import (
     resolve_attachments,
     resolve_thread_attachment_ids,
 )
+from mindroom.llm.media import canonical_mime_type, is_text_mime_type
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import bound_log_context
@@ -899,6 +901,81 @@ async def test_a_text_attachment_whose_mime_type_has_parameters_reaches_claude_a
         {"type": "text", "media_type": "text/plain", "data": "Plain notes."},
     ]
     assert [(item.mime_type, item.local_path.suffix) for item in resolved] == [("text/plain", ".txt")]
+
+
+def _file_event(event_id: str, filename: str, info: dict[str, object] | None) -> nio.RoomMessageFile:
+    content: dict[str, object] = {"msgtype": "m.file", "body": filename, "url": f"mxc://localhost/{filename}"}
+    if info is not None:
+        content["info"] = info
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1780736400000,
+            "type": "m.room.message",
+            "content": content,
+        },
+    )
+    assert isinstance(event, nio.RoomMessageFile)
+    return event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("info", [None, {"mimetype": ""}, {"mimetype": "application/octet-stream"}])
+async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
+    tmp_path: Path,
+    info: dict[str, object] | None,
+) -> None:
+    """A file whose client declares no type takes its name's type, else plain text for UTF-8 text, else none.
+
+    Its retained copy carries that type's suffix, and a text file reaches Claude as the text document Claude reads.
+    """
+    payloads = {
+        "config.yaml": b"replicas: 3\n",
+        "Dockerfile": b"FROM python:3.13\n",
+        "report.pdf": b"%PDF-1.7\n",
+        "blob": b"\x00\x01\xffbinary",
+        "notes.txt.gz": b"\x1f\x8b\x08\x00binary",
+    }
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            payloads[urlsplit(path).path.rsplit("/", 1)[-1]],
+        ),
+    )
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$file{index}", filename, info),
+        )
+        for index, filename in enumerate(payloads)
+    ]
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    typed = {record.filename: record for record in records if record is not None}
+    # Whether a file name such as ``config.yaml`` names a type depends on the host's MIME table.
+    assert is_text_mime_type(typed["config.yaml"].mime_type)
+    declared = canonical_mime_type((info or {}).get("mimetype"))
+    assert [(typed[name].mime_type, typed[name].local_path.suffix) for name in payloads if name != "config.yaml"] == [
+        ("text/plain", ".txt"),
+        ("application/pdf", ".pdf"),
+        (declared, ".bin"),
+        (declared, ".bin"),
+    ]
+    _, _, files, _ = attachment_records_to_media([typed["config.yaml"], typed["Dockerfile"]])
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
+    await claude_turn(
+        route_provider("anthropic", tmp_path, wire),
+        ModelRequest(messages=[Message(role="user", content="Summarize.", files=files)]),
+    )
+    (user,) = wire.body()["messages"]
+    assert [block["source"] for block in user["content"] if block["type"] == "document"] == [
+        {"type": "text", "media_type": "text/plain", "data": "replicas: 3\n"},
+        {"type": "text", "media_type": "text/plain", "data": "FROM python:3.13\n"},
+    ]
 
 
 def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:

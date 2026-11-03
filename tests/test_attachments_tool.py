@@ -301,9 +301,15 @@ async def test_get_attachment_view_returns_other_media(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("filename", "data"), [("empty.pdf", b""), ("archive.tar", b"tar archive bytes")])
+@pytest.mark.parametrize(
+    ("filename", "data"),
+    [("empty.pdf", b""), ("archive.tar", b"tar archive bytes"), ("rows.csv.gz", b"\x1f\x8b\x08\x00gzip")],
+)
 async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, filename: str, data: bytes) -> None:
-    """Empty and unsupported documents give a recoverable tool error, not an exception."""
+    """Empty and unsupported documents give a recoverable tool error, not an exception.
+
+    A compressed name such as ``rows.csv.gz`` names no type: its bytes are not CSV.
+    """
     (tmp_path / filename).write_bytes(data)
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
@@ -312,6 +318,34 @@ async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, fi
 
     assert isinstance(result, str)
     assert json.loads(result)["status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "mime_type", "data"),
+    [
+        ("config.yaml", "application/x-yaml", b"replicas: 3\n"),
+        ("rows.tsv", "text/tab-separated-values", b"a\tb\n"),
+        ("server.log", "text/x-log", b"12:00 ERROR crashed\n"),
+        ("feed.xml", "application/xml", b"<feed/>"),
+    ],
+)
+async def test_get_attachment_view_returns_every_text_type(
+    tmp_path: Path,
+    filename: str,
+    mime_type: str,
+    data: bytes,
+) -> None:
+    """An earlier message's text file of any text type reopens as a file the model reads."""
+    local_path = tmp_path / filename
+    local_path.write_bytes(data)
+    attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type=mime_type)
+    assert attachment is not None
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+        result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
+
+    assert isinstance(result, ToolValue)
+    assert [(file.content, file.mime_type, file.filename) for file in result.files] == [(data, mime_type, filename)]
 
 
 @pytest.mark.asyncio
