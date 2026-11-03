@@ -12,12 +12,14 @@ import httpx
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
-from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools import smartsheet as smartsheet_tools
 from mindroom.custom_tools.smartsheet import SmartsheetTools
 from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON
 from mindroom.oauth.smartsheet import smartsheet_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.atlassian_test_support import grant, runtime_paths, worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -27,7 +29,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
 
 _TARGET = object()
 _API_TOKEN = "api-token"  # noqa: S105
@@ -632,3 +633,59 @@ def test_registered_metadata_matches_the_toolkit(tmp_path: Path) -> None:
     assert [(field.name, field.env) for field in metadata.config_fields or []] == [
         ("access_token", ("SMARTSHEET_ACCESS_TOKEN",)),
     ]
+
+
+def _built_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    process_env: dict[str, str],
+    saved: dict[str, object] | None = None,
+) -> SmartsheetTools:
+    """Build `smartsheet` the way a bare `mindroom run` does, with the given environment and saved settings."""
+    monkeypatch.delenv("SMARTSHEET_ACCESS_TOKEN", raising=False)
+    (tmp_path / "config.yaml").write_text("agents: {}\n")
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", **process_env},
+    )
+    credentials = CredentialsManager(tmp_path / "credentials")
+    if saved is not None:
+        credentials.save_credentials("smartsheet", saved)
+    tool = get_tool_by_name(
+        "smartsheet",
+        paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=credentials,
+        runs_in_worker=False,
+        worker_target=None,
+    )
+    assert isinstance(tool, SmartsheetTools)
+    return tool
+
+
+@pytest.mark.asyncio
+async def test_environment_access_token_reaches_the_toolkit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`SMARTSHEET_ACCESS_TOKEN` alone authenticates the tool."""
+    tool = _built_tool(tmp_path, monkeypatch, process_env={"SMARTSHEET_ACCESS_TOKEN": "env-token"})
+    requests = _serve(monkeypatch, _json(200, {"data": []}))
+
+    await tool.list_sheets()
+
+    assert requests[0].headers["authorization"] == "Bearer env-token"
+
+
+@pytest.mark.asyncio
+async def test_saved_access_token_wins_over_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A saved access token takes precedence over `SMARTSHEET_ACCESS_TOKEN`."""
+    tool = _built_tool(
+        tmp_path,
+        monkeypatch,
+        process_env={"SMARTSHEET_ACCESS_TOKEN": "env-token"},
+        saved={"access_token": "saved-token"},
+    )
+    requests = _serve(monkeypatch, _json(200, {"data": []}))
+
+    await tool.list_sheets()
+
+    assert requests[0].headers["authorization"] == "Bearer saved-token"

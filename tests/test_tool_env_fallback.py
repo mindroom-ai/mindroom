@@ -92,13 +92,17 @@ def _agno_modules(tool_name: str) -> set[str]:
 
 @pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
+    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read.
+
+    A toolkit built on no Agno module reads no variable itself; MindRoom passes each declared one to its field.
+    """
     modules = _agno_modules(tool_name)
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
     declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
+    never_read = declared - reads if modules else set()
 
-    assert {"undeclared": reads - allowlisted - declared, "never read": declared - reads} == {
+    assert {"undeclared": reads - allowlisted - declared, "never read": never_read} == {
         "undeclared": set(),
         "never read": set(),
     }
