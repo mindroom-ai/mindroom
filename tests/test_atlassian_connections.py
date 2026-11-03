@@ -489,7 +489,7 @@ async def test_shared_connection_follows_the_agent_worker_scope(
             tools=plugins.tools,
         )
         assert isinstance(tool, AtlassianToolkit)
-        assert "currentUser() in JQL or CQL is that account" in (tool.instructions or "")
+        assert ("currentUser() in JQL or CQL is that account" in (tool.instructions or "")) is bob_served
         result = await _call(tool, "team_confluence_search", cql="type = page")
         if result.get("oauth_connection_required"):
             return False

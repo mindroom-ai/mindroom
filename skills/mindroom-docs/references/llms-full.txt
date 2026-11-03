@@ -13164,9 +13164,9 @@ agents:
 | `jira_spaces` | `string[]` | `null` | Keys of the only Jira spaces (formerly projects), such as `ENG`, the agent may use; `[]` removes the Jira functions. |
 | `confluence_spaces` | `string[]` | `null` | Keys of the only Confluence spaces, such as `DOCS`, the agent may use; `[]` removes the Confluence functions. |
 
-- An unset space list allows every space the requester can reach.
+- An unset space list allows every space the requester (or the [shared account](#share-one-account)) can reach.
 - With a list, searches return only results in those spaces, and reads, downloads, and writes of anything elsewhere return `space_not_allowed` and change nothing.
-- The agent still acts as the requester, so it reaches only spaces that are both listed and open to that requester in Atlassian.
+- The agent still acts as the requester (or the shared account), so it reaches only spaces that are both listed and open to that account in Atlassian.
 - A space key is the part after `/spaces/` in a space's URL, such as `DOCS` in `https://example.atlassian.net/wiki/spaces/DOCS`, and every Jira issue key starts with its space key.
 - Config validation rejects an entry that cannot be a space key, such as a name with spaces in it.
 - An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, searches can select allowed issues by such relations, and creating or updating an issue can set a parent in another space.
@@ -13282,7 +13282,7 @@ With `requester_scoped=False`, a connection's tokens follow the agent's effectiv
 
 - On a `shared` agent, one account serves every requester of that agent. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
 - On a `user` or `user_agent` agent, each requester still connects their own account.
-- Without an effective worker scope, one installation-level connection serves every unscoped agent that lists the tool, and a credential manager of any of them can replace it, as described in [Where Connections Are Stored](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored). Give each agent `worker_scope: shared` so it gets its own.
+- Without an effective worker scope, one installation-level connection serves every unscoped agent that lists the tool, and a credential manager of any of them can replace it, as described in [Where Connections Are Stored](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored). Give each agent `worker_scope: shared` so it gets its own; that also moves the agent's other agent-scoped credentials, such as Google connections and egress keys, to a per-agent store, where they are connected again.
 
 Everyone who may use the agent then reads what that account can see, so connect a dedicated account, not a person's.
 Set `write=False` on the connection before anyone connects it, so the account is authorized with read scopes only and Atlassian itself refuses writes.
@@ -13312,7 +13312,7 @@ agents:
 
 The credential manager connects the account from the Connections page, signed in to Atlassian as the dedicated account.
 A connect link the agent replies with also works, but on a shared agent whoever opens it first connects their account, so a credential manager should ask for it in a direct message with the agent and open it right away.
-The toolkit tells the model that `currentUser()` in JQL or CQL is the shared account, not the requester.
+On a `shared` or unscoped agent, the toolkit tells the model that `currentUser()` in JQL or CQL is the shared account, not the requester.
 The built-in `atlassian` tool always stays requester-scoped.
 
 ## Approvals For Writes
@@ -20965,9 +20965,9 @@ When GitHub issues no token, for example because the App lacks a permission or a
 
 On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
 A row whose account Agent Keys uses shows "Using connected account" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Stop using <provider> account** and **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
-In a shared sandbox, GitHub and Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
+In a shared sandbox, GitHub and requester-scoped Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 
-**Shared accounts.** Where connecting an account makes everyone who uses the agent act as it, which is an agent-scoped account (the Google providers) on a shared or unscoped agent, **Connect** first asks for confirmation that says so.
+**Shared accounts.** Where connecting an account makes everyone who uses the agent act as it, which is an agent-scoped account (the Google providers, or an Atlassian connection with `requester_scoped=False`) on a shared or unscoped agent, **Connect** first asks for confirmation that says so.
 Every user of the agent, not only its managers, sees which account is connected, because they all act as it.
 Only administrators and credential managers can connect, allow, or disconnect it.
 
