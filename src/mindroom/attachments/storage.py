@@ -928,13 +928,13 @@ def _is_utf8_text(data: bytes | None) -> bool:
 
 
 def _received_file_type(declared: str | None, filename: str | None, data: bytes | None) -> str | None:
-    """Return a received file's type: the declared one, else its filename's, and ``text/plain`` for text of no text type.
+    """Return a received file's type: the declared one, except ``text/plain`` for text whose candidate is not text.
 
-    Clients leave the type out, or declare ``application/octet-stream``, for an extension the browser cannot type,
-    such as ``.yaml``, so the filename decides; a declared audio or video type does not stand either, because browsers
-    type a TypeScript file (``.ts``) as an MPEG transport stream. Of those, UTF-8 text without NULs whose type is not
-    a text type is ``text/plain``, since a host's MIME table may give a text file's name another type, such as
-    ``model/vnd.mts`` for ``.mts``. A binary file whose type stays unknown keeps the declared one.
+    The candidate is a declared audio or video type, because browsers type a TypeScript file (``.ts``) as an MPEG
+    transport stream, or, for a file declared with no type or ``application/octet-stream``, as clients do for an
+    extension the browser cannot type, its filename's type, which a host's MIME table may make a non-text type such as
+    ``model/vnd.mts`` for ``.mts``. UTF-8 text without NULs whose candidate is not a text type is ``text/plain``; a
+    binary file keeps its candidate, else the declared type. Any other declared type stands.
     """
     declared_type = canonical_mime_type(declared)
     if declared_type is None or declared_type == "application/octet-stream":
