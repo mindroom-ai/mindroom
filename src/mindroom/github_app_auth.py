@@ -1,13 +1,14 @@
-"""Short-lived GitHub App credentials for Git knowledge sources."""
+"""Short-lived GitHub App installation tokens for Git knowledge sources and Agent Keys services."""
 
 from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -18,6 +19,8 @@ _GITHUB_API_ROOT = "https://api.github.com"
 _GITHUB_API_VERSION = "2022-11-28"
 _TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 _REPOSITORY_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+# A knowledge source only clones and fetches.
+_KNOWLEDGE_PERMISSIONS: Mapping[str, str] = MappingProxyType({"contents": "read"})
 
 
 @dataclass(frozen=True)
@@ -46,16 +49,24 @@ class GitHubAppTokenBinding:
     private_key_file: str
 
 
-_TokenCacheKey = tuple[int, int, str, str, Path]
+# App, installation, owner, repositories, permissions, and key file: one token serves exactly one such scope.
+_TokenCacheKey = tuple[int, int, str, frozenset[str], frozenset[tuple[str, str]], Path]
 
 
-def _token_cache_key(binding: GitHubAppTokenBinding) -> _TokenCacheKey:
+def _token_cache_key(
+    credentials: _GitHubAppCredentials,
+    *,
+    owner: str,
+    repositories: Collection[str],
+    permissions: Mapping[str, str],
+) -> _TokenCacheKey:
     return (
-        binding.app_id,
-        binding.installation_id,
-        binding.owner.casefold(),
-        binding.repository.casefold(),
-        Path(binding.private_key_file),
+        credentials.app_id,
+        credentials.installation_id,
+        owner.casefold(),
+        frozenset(repository.casefold() for repository in repositories),
+        frozenset(permissions.items()),
+        credentials.private_key_file,
     )
 
 
@@ -146,7 +157,10 @@ def _parse_expiry(value: object) -> datetime:
 
 
 class GitHubAppTokenProvider:
-    """Mint and cache repository-scoped GitHub App installation tokens."""
+    """Mint and cache repository-scoped GitHub App installation tokens.
+
+    One provider serves one event loop, since its refresh lock does.
+    """
 
     def __init__(
         self,
@@ -177,10 +191,35 @@ class GitHubAppTokenProvider:
         )
 
     async def resolve_token(self, repo_url: str, credentials: Mapping[str, Any]) -> _GitHubAppToken:
-        """Return one cached or newly minted installation token."""
+        """Return one cached or newly minted installation token that reads one knowledge source's repository."""
+        owner, repository = _github_repository(repo_url)
+        return await self.resolve_installation_token(
+            credentials,
+            owner=owner,
+            repositories=(repository,),
+            permissions=_KNOWLEDGE_PERMISSIONS,
+        )
+
+    async def resolve_installation_token(
+        self,
+        credentials: Mapping[str, Any],
+        *,
+        owner: str,
+        repositories: Collection[str],
+        permissions: Mapping[str, str],
+    ) -> _GitHubAppToken:
+        """Return a cached or newly minted token for `repositories` (names without `owner`) with `permissions`.
+
+        A cached token is reused until five minutes before it expires. Raises ValueError for invalid credentials or
+        an unusable private key, and RuntimeError when GitHub issues no token; neither message holds a secret.
+        """
         parsed_credentials = _parse_credentials(credentials)
-        binding = self.binding_for(repo_url, credentials)
-        cache_key = _token_cache_key(binding)
+        cache_key = _token_cache_key(
+            parsed_credentials,
+            owner=owner,
+            repositories=repositories,
+            permissions=permissions,
+        )
         cached = self._cache.get(cache_key)
         now = self._now().astimezone(UTC)
         if cached is not None and now < cached.expires_at - _TOKEN_REFRESH_MARGIN:
@@ -193,7 +232,7 @@ class GitHubAppTokenProvider:
                 return cached
             minted = await self._mint_token(
                 parsed_credentials,
-                repository=binding.repository,
+                payload={"repositories": list(repositories), "permissions": dict(permissions)},
                 now=now,
             )
             self._cache[cache_key] = minted
@@ -214,8 +253,13 @@ class GitHubAppTokenProvider:
         if expires_at.tzinfo is None:
             msg = "GitHub App installation token expiry must include a timezone"
             raise ValueError(msg)
-        binding = self.binding_for(repo_url, credentials)
-        cache_key = _token_cache_key(binding)
+        owner, repository = _github_repository(repo_url)
+        cache_key = _token_cache_key(
+            _parse_credentials(credentials),
+            owner=owner,
+            repositories=(repository,),
+            permissions=_KNOWLEDGE_PERMISSIONS,
+        )
         self._cache[cache_key] = _GitHubAppToken(
             token=token,
             expires_at=expires_at.astimezone(UTC),
@@ -225,7 +269,7 @@ class GitHubAppTokenProvider:
         self,
         credentials: _GitHubAppCredentials,
         *,
-        repository: str,
+        payload: dict[str, object],
         now: datetime,
     ) -> _GitHubAppToken:
         try:
@@ -253,10 +297,6 @@ class GitHubAppTokenProvider:
             "Authorization": f"Bearer {app_jwt}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": _GITHUB_API_VERSION,
-        }
-        payload = {
-            "repositories": [repository],
-            "permissions": {"contents": "read"},
         }
         if self._client is not None:
             response = await self._client.post(url, headers=headers, json=payload)

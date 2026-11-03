@@ -194,7 +194,7 @@ def _resolve(
         runtime_paths=runtime_paths,
         credentials_manager=manager,
         worker_target=target,
-        request=request or SecretRequest(method="GET", path="/"),
+        request=request or SecretRequest(method="GET", host="api.github.com", path="/"),
         read_only=read_only,
         separate_account=separate_account,
     )
@@ -1108,8 +1108,8 @@ def test_changing_access_keeps_other_entries(
     assert oauth_reuse_access(context, "github-work", "github", separate_account=False) == "read"
 
 
-_POST = SecretRequest(method="POST", path="/repos/o/r/issues")
-_GET = SecretRequest(method="GET", path="/repos/o/r/issues")
+_POST = SecretRequest(method="POST", host="api.github.com", path="/repos/o/r/issues")
+_GET = SecretRequest(method="GET", host="api.github.com", path="/repos/o/r/issues")
 
 
 def test_read_only_refusal_never_reads_the_connection(
@@ -1158,8 +1158,8 @@ def test_read_write_entry_ignores_method(
     alice = _broker_target("@alice:example.org")
     context = _alice_reuse_context(config, runtime_paths, manager)
     set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read_write")
-    override = SecretRequest(method="GET", path="/", method_override=True)
-    websocket = SecretRequest(method="GET", path="/", websocket=True)
+    override = SecretRequest(method="GET", host="api.github.com", path="/", method_override=True)
+    websocket = SecretRequest(method="GET", host="api.github.com", path="/", websocket=True)
 
     results = [
         _resolve(config, runtime_paths, manager, alice, request=request) for request in (_POST, override, websocket)

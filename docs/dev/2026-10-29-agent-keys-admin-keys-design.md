@@ -37,5 +37,6 @@ The administrator also wanted to limit such a key to some agents instead of ever
 
 - An agent list decides which agents get the key, not which code can reach it, where agents share a sandbox: on the static runner every agent's calls share one process, and a requester's `user` agents share one worker, so code there can use another call's proxy token until it expires.
 - A user's own service on the hosts of a service limited to other agents loses the tie to it, so an unlisted agent's request uses it only when it names it with `X-Agent-Keys-Service`; this follows from refusing instead of leaving the service out of routing.
+  Lifted on 2026-11-02: routing now prefers a matching service that serves the requesting agent (see [Egress Broker Design Decisions](../architecture/egress-broker-design.md)).
 - Anyone who can edit the config can still point an `admin_key` service at another host and receive the key, as with every config service.
 - Every user of a listed agent spends the administrator's key; there is no per-user quota, and the request log records who made each call.

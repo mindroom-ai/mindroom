@@ -1463,7 +1463,7 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
         runtime_paths=portal["paths"],
         credentials_manager=get_runtime_credentials_manager(portal["paths"]),
         worker_target=build_connection_agent_target(config, portal["paths"], "@alice:example.org", "personal"),
-        request=secrets.SecretRequest(method="GET", path="/"),
+        request=secrets.SecretRequest(method="GET", host="api.github.com", path="/"),
         read_only=None,
         separate_account=False,
     )
@@ -1897,7 +1897,7 @@ def _broker_reads(
         runtime_paths=portal["paths"],
         credentials_manager=manager,
         worker_target=target,
-        request=secrets.SecretRequest(method=method, path="/"),
+        request=secrets.SecretRequest(method=method, host="api.github.com", path="/"),
         read_only=definition.read_only,
         separate_account=definition.oauth_separate_account,
     )
@@ -3878,6 +3878,38 @@ def test_an_administrator_key_shows_set_but_this_page_never_changes_it(egress_po
             assert response.json()["detail"] == "Only an administrator sets this service's key, on the dashboard"
     assert secrets.load_secret(manager, None, "search", admin_key=True) == "admin-key"
     assert _egress_row(portal, "alice", "personal", "github")["admin_key"] is False
+
+
+_GITHUB_APP = {"credentials_service": "acme_app", "repositories": {"acme/api": "read_write", "acme/docs": "read"}}
+_GITHUB_APP_CREDENTIAL = {
+    "auth_type": "github_app",
+    "app_id": 1,
+    "installation_id": 2,
+    "private_key_file": "/run/secrets/app.pem",
+}
+
+
+def test_a_github_app_service_shows_its_repositories_and_takes_no_key(egress_portal: dict[str, Any]) -> None:
+    """Users see the App's repositories and whether its credential is stored, and cannot store a key for it."""
+    portal = egress_portal
+    portal["payload"]["egress_broker"]["services"]["acme"] = {"preset": "github", "github_app": _GITHUB_APP}
+    _republish(portal)
+    manager = get_runtime_credentials_manager(portal["paths"])
+
+    unstored = _egress_row(portal, "alice", "personal", "acme")
+    manager.save_credentials("acme_app", _GITHUB_APP_CREDENTIAL)
+    stored = _egress_row(portal, "bob", "shared_dev", "acme")
+
+    assert (unstored["configured"], unstored["active_source"]) == (False, None)
+    assert (stored["configured"], stored["active_source"], stored["key_configured"]) == (True, "github_app", False)
+    assert stored["oauth"] is None
+    assert stored["github_app_repositories"] == {"acme/api": "read_write", "acme/docs": "read"}
+    assert _egress_row(portal, "alice", "personal", "github")["github_app_repositories"] is None
+    response = _put_key(portal, "bob", "shared_dev", "acme")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "This service uses only its GitHub App and never sends a key, so it cannot store one"
+    )
 
 
 def test_a_service_limited_to_other_agents_is_not_offered_for_them(egress_portal: dict[str, Any]) -> None:

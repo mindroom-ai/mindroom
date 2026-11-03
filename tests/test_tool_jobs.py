@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
@@ -1140,6 +1141,70 @@ async def test_a_job_change_keeps_the_mid_turn_judgment_its_wait_awaits(tmp_path
         assert result.job.status == "awaiting_approval"
         assert judgments == 1
     finally:
+        proceed.set()
+        answer.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_message_waiter_whose_judgment_absorbed_its_cancellation_ends_instead_of_waiting_again(
+    tmp_path: Path,
+) -> None:
+    """A cancelled message waiter ends once its judgment returns, so it is never left pending for the GC to destroy."""
+    runtime = await tool_job_runtime(tmp_path)
+    state = _QueuedMessageState()
+    proceed, judging, absorbed, answer = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    reported: list[str] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(context["message"]))
+
+    async def evaluate(_request: JudgmentRequest) -> bool:
+        judging.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # An HTTP client whose own timeout fires with the cancellation takes it for that timeout (anyio does),
+            # and the judgment then answers that the message can wait.
+            absorbed.set()
+            await answer.wait()
+        return True
+
+    async def operation() -> BackgroundOutcome:
+        await proceed.wait()
+        return BackgroundOutcome("completed", "done")
+
+    def message_waiters() -> list[asyncio.Task[object]]:
+        return [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ == "_QueuedMessageState.wait"]
+
+    state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
+    try:
+        job = await start_job(
+            runtime,
+            "work",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        with pending_human_messages_context(state):
+            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
+        state.add_waiting_human_message("$thanks", text="Thanks")
+        await asyncio.wait_for(judging.wait(), JOB_TEST_TIMEOUT)
+        proceed.set()
+        assert (await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)).job.result == "done"
+        await asyncio.wait_for(absorbed.wait(), JOB_TEST_TIMEOUT)
+        left = message_waiters()
+        answer.set()
+
+        await asyncio.wait_for(asyncio.gather(*left, return_exceptions=True), JOB_TEST_TIMEOUT)
+        assert message_waiters() == []
+        # The conversation's queue state goes once it is idle, as the coordinator evicts it.
+        del waiter, state
+        gc.collect()
+        assert reported == []
+    finally:
+        loop.set_exception_handler(None)
         proceed.set()
         answer.set()
         await runtime.shutdown()

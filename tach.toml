@@ -5388,6 +5388,7 @@ depends_on = [
     "mindroom.config.egress_broker",
     "mindroom.constants",
     "mindroom.credentials.policy",
+    "mindroom.github_app_auth",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
@@ -6123,7 +6124,7 @@ path = "mindroom.knowledge.git_source"
 depends_on = [
     "mindroom.git_invocation",
     "mindroom.knowledge.file_listing",
-    "mindroom.knowledge.github_app_auth",
+    "mindroom.github_app_auth",
     "mindroom.knowledge.legacy_git_checkout",
     "mindroom.knowledge.redaction",
     "mindroom.tool_system.worker_routing",
@@ -6136,9 +6137,10 @@ depends_on = ["mindroom.git_invocation"]
 visibility = ["mindroom.knowledge.git_source"]
 
 [[modules]]
-path = "mindroom.knowledge.github_app_auth"
+path = "mindroom.github_app_auth"
 depends_on = []
 visibility = [
+    "mindroom.egress_broker",
     "mindroom.knowledge.git_source",
     "mindroom.knowledge.refresh_runner",
 ]
@@ -6242,7 +6244,7 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.config.main",
     "mindroom.constants",
-    "mindroom.knowledge.github_app_auth",
+    "mindroom.github_app_auth",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",

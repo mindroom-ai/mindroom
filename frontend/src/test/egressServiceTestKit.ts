@@ -133,6 +133,7 @@ export const credentialService = (
   key_updated_at: null,
   oauth: null,
   admin_key: false,
+  github_app_repositories: null,
   ...changes,
 });
 

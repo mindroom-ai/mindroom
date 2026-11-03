@@ -27,6 +27,13 @@ _MESSAGES = {
     ),
     "path_not_allowed": _PATH_OUTSIDE + "Ask the user to add it at manage_url if the agent needs it.",
     "agent_not_allowed": "This agent may not use {service}. Only an administrator can change which agents may use it.",
+    "repository_not_allowed": (
+        "The {service} GitHub App does not cover {repository}. Only an administrator can add repositories to it."
+    ),
+    "github_app_token_failed": (
+        "GitHub did not issue a token for the {service} GitHub App. Retry in a minute; if it keeps failing, tell an "
+        "administrator."
+    ),
     "service_not_matched": (
         "The X-Agent-Keys-Service header names {service}, but no service of your own by that name has a rule for "
         "{host}{path}. Name one of your own services that covers it, or leave the header out."
@@ -63,6 +70,8 @@ _RECONNECT_SHARED_WITHOUT_MANAGERS = (
 )
 # One key an administrator sets for every agent of the service, on the dashboard only, so no scope's page is linked.
 _ADMIN_KEY_MISSING = "No {service} key is set. Only an administrator can set it, on the dashboard."
+# A GitHub App credential, which only an administrator stores, so no scope's page is linked either.
+_GITHUB_APP_MISSING = "The {service} GitHub App credential is not stored. Only an administrator can store it."
 # A service's own account, which only the service's row on the egress page connects, so there is no connect link.
 _OWN_ACCOUNT_MISSING = (
     "No {service} account is connected for this agent. "
@@ -183,9 +192,12 @@ def _template(  # noqa: C901, PLR0911, PLR0912 - one text per case, checked in o
     own_account: bool,
     service_header: bool,
     admin_key: bool,
+    github_app: bool,
 ) -> str:
     if code == "credential_not_configured" and admin_key:
         return _ADMIN_KEY_MISSING
+    if code == "credential_not_configured" and github_app:
+        return _GITHUB_APP_MISSING
     without_page = not (shared or personal_page)
     if code == "credential_not_configured" and own_account and not without_page:
         return _OWN_ACCOUNT_OFF if reuse_off else _OWN_ACCOUNT_MISSING
@@ -249,6 +261,7 @@ def refusal_body(
     service: str | None = None,
     service_label: str | None = None,
     provider: str | None = None,
+    repository: str | None = None,
     managers: Sequence[str] | None = None,
     shared: bool = False,
     personal_page: bool = True,
@@ -259,9 +272,10 @@ def refusal_body(
     service_header: bool = False,
     own_account: bool = False,
     admin_key: bool = False,
+    github_app: bool = False,
     **extra: object,
 ) -> dict[str, object]:
-    """Return the JSON body for a refusal: its `error` code, `message`, `service` and `provider` when given, and `extra`.
+    """Return a refusal's JSON body: `error`, `message`, `extra`, and `service`, `provider`, `repository` when given.
 
     `host`, `path`, `service_label`, and `managers` only fill in the message; `path` is cut at its query, which could
     hold a secret, and `service_label` (a display name) names the service there instead of `service`.
@@ -274,7 +288,8 @@ def refusal_body(
     requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
     writes the same way. `own_account` (the service's own account is not connected, or with `reuse_off` not allowed)
     asks the user to connect it, or to connect and allow it, at `manage_url`. A `credential_not_configured` for an
-    `admin_key` service names an administrator and the dashboard, whatever the scope, and links no page. An
+    `admin_key` service names an administrator and the dashboard, whatever the scope, and links no page, and one for a
+    `github_app` service whose App credential is not stored (`github_app`) names an administrator. An
     `oauth_connection_required` without a connect link names only `manage_url`, and on a `shared` agent its `managers`
     (or an administrator) as the ones who can reconnect, unless the account is `requester_owned`.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
@@ -297,6 +312,7 @@ def refusal_body(
         own_account=own_account,
         service_header=service_header,
         admin_key=admin_key,
+        github_app=github_app,
     )
     if "manage_url" not in template:
         # A body carries the manage link only where its text names it.
@@ -306,6 +322,7 @@ def refusal_body(
         "path": None if path is None else path.split("?", 1)[0],
         "service": service_label or service,
         "provider": provider,
+        "repository": repository,
         "managers": ", ".join(managers or ()),
     }
     message = template.format_map({name: value for name, value in values.items() if value is not None})
@@ -314,6 +331,8 @@ def refusal_body(
         body["service"] = service
     if provider is not None:
         body["provider"] = provider
+    if repository is not None:
+        body["repository"] = repository
     if reuse_off:
         body["oauth_reuse"] = "off"
     return {**body, **extra, "message": message}

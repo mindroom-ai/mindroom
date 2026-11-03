@@ -67,6 +67,7 @@ from mindroom.embeddings import embedder_health
 from mindroom.embeddings.batching import RefreshEmbedder
 from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
+from mindroom.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.collections import (
     CollectionSpace,
@@ -88,7 +89,6 @@ from mindroom.knowledge.file_memory_knowledge import (
     resolve_file_memory_knowledge,
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
-from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.index_metadata import (
     Publication,
     RefreshStatus,
@@ -6230,11 +6230,11 @@ async def test_scheduled_refreshes_reuse_parent_github_app_token(
         _self: GitHubAppTokenProvider,
         _credentials: object,
         *,
-        repository: str,
+        payload: dict[str, object],
         now: datetime,
     ) -> object:
         nonlocal mint_count
-        assert repository == "private"
+        assert payload == {"repositories": ["private"], "permissions": {"contents": "read"}}
         assert now.tzinfo is not None
         mint_count += 1
         return SimpleNamespace(
@@ -6330,11 +6330,11 @@ async def test_subprocess_refresh_primes_parent_github_app_token(
         _self: GitHubAppTokenProvider,
         _credentials: object,
         *,
-        repository: str,
+        payload: dict[str, object],
         now: datetime,
     ) -> object:
         nonlocal mint_count
-        assert repository == "private"
+        assert payload == {"repositories": ["private"], "permissions": {"contents": "read"}}
         assert now.tzinfo is not None
         mint_count += 1
         return SimpleNamespace(
@@ -6425,11 +6425,11 @@ async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
         _self: GitHubAppTokenProvider,
         _credentials: object,
         *,
-        repository: str,
+        payload: dict[str, object],
         now: datetime,
     ) -> object:
         nonlocal mint_count
-        assert repository == "private"
+        assert payload == {"repositories": ["private"], "permissions": {"contents": "read"}}
         assert now.tzinfo is not None
         mint_count += 1
         return SimpleNamespace(
