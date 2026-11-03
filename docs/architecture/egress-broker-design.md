@@ -103,7 +103,7 @@ An `agents` list keeps the service in every agent's routing and refuses the othe
 Routing prefers a service that serves the requesting agent before rule specificity, so per-team services on the same hosts (one GitHub App service per team, replacing per-person tokens) each serve their own agents; the refusal remains for an agent no matching service serves.
 The record is [Administrator Keys and Agent Lists for Agent Keys Services](../dev/2026-10-29-agent-keys-admin-keys-design.md).
 
-**Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
+**Requester-scoped accounts (GitHub, built-in Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
 A shared sandbox can opt in with `oauth_on_shared_workers`, which only administrators can set.
 Even a personal worker shares the workspace folder on a non-private agent, so personal accounts and keys are only isolated on `private` agents.

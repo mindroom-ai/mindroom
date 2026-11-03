@@ -291,59 +291,70 @@ def take_deletion_endings(transaction: Transaction, principal_id: str) -> tuple[
     return tuple(sorted(endings, key=lambda ending: ending.reply_id))
 
 
-def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: int, limit: int) -> int:
-    """Delete up to ``limit`` finished replies unchanged since ``before_ns``, with their spans; return how many.
+# Whether the finished reply `reply` is forgettable; the one parameter is ``before_ns``.
+_FORGETTABLE = """
+    reply.state IN ('completed', 'cancelled', 'failed', 'gone')
+      AND reply.updated_at_ns < ?
+      AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM approval_continuations AS continuation
+        JOIN reply_spans AS named ON named.principal_id = continuation.principal_id AND named.span_id = continuation.span_id
+        WHERE named.principal_id = reply.principal_id AND named.reply_id = reply.reply_id
+      )
+      AND (reply.stop_receipt_order IS NULL OR reply.stop_applied_receipt_order >= reply.stop_receipt_order)
+      AND NOT EXISTS (
+        SELECT 1 FROM matrix_delivery_outbox AS row
+        WHERE row.principal_id = reply.principal_id AND row.reply_id = reply.reply_id
+          AND row.acknowledged_event_id IS NULL AND row.retired = 0 AND row.permanent_failure_reason IS NULL
+      )
+"""
+
+
+def forgettable_replies(transaction: Transaction, principal_id: str, *, before_ns: int) -> tuple[str, ...]:
+    """Return the finished replies unchanged since ``before_ns`` that owe nothing.
 
     Only replies that owe nothing: no redaction, note, unsent row, or Stop still
     to apply, and that no continuation names, superseded or not: its cleanup
-    reads the reply. Pending Stops that old are dropped too.
+    reads the reply.
     """
     rows = transaction.fetchall(
-        """
-        SELECT reply.reply_id FROM reply_messages AS reply
-        WHERE reply.principal_id = ? AND reply.state IN ('completed', 'cancelled', 'failed', 'gone')
-          AND reply.updated_at_ns < ?
-          AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM approval_continuations AS continuation
-            JOIN reply_spans AS named ON named.principal_id = continuation.principal_id AND named.span_id = continuation.span_id
-            WHERE named.principal_id = reply.principal_id AND named.reply_id = reply.reply_id
-          )
-          AND (reply.stop_receipt_order IS NULL OR reply.stop_applied_receipt_order >= reply.stop_receipt_order)
-          AND NOT EXISTS (
-            SELECT 1 FROM matrix_delivery_outbox AS row
-            WHERE row.principal_id = reply.principal_id AND row.reply_id = reply.reply_id
-              AND row.acknowledged_event_id IS NULL AND row.retired = 0 AND row.permanent_failure_reason IS NULL
-          )
-        LIMIT ?
-        """,
-        (principal_id, before_ns, limit),
+        f"SELECT reply.reply_id FROM reply_messages AS reply WHERE reply.principal_id = ? AND {_FORGETTABLE}",  # noqa: S608
+        (principal_id, before_ns),
     )
-    reply_ids = tuple(str(row["reply_id"]) for row in rows)
-    if reply_ids:
-        placeholders = ", ".join("?" for _ in reply_ids)
-        for table in ("reply_span_sources", "reply_tool_calls"):
-            transaction.execute(
-                f"""
-                DELETE FROM {table} WHERE principal_id = ? AND span_id IN (
-                    SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})
-                )
-                """,  # noqa: S608 - fixed table names and placeholders
-                (principal_id, principal_id, *reply_ids),
+    return tuple(str(row["reply_id"]) for row in rows)
+
+
+# Whether one reply, by key, is still forgettable: a lookup by its primary key, never a walk of the finished replies.
+_STILL_FORGETTABLE = (
+    "SELECT 1 FROM reply_messages AS reply "  # noqa: S608 - a fixed predicate
+    f"WHERE reply.principal_id = ? AND reply.reply_id = ? AND {_FORGETTABLE}"
+)
+
+
+def forget_reply(transaction: Transaction, principal_id: str, *, before_ns: int, reply_id: str) -> bool:
+    """Delete one reply with its spans if it is still forgettable; return whether it went."""
+    if transaction.fetchone(_STILL_FORGETTABLE, (principal_id, reply_id, before_ns)) is None:
+        return False
+    for table in ("reply_span_sources", "reply_tool_calls"):
+        transaction.execute(
+            f"""
+            DELETE FROM {table} WHERE principal_id = ? AND span_id IN (
+                SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id = ?
             )
-        transaction.execute(
-            f"DELETE FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
-            (principal_id, *reply_ids),
+            """,  # noqa: S608 - fixed table names
+            (principal_id, principal_id, reply_id),
         )
-        transaction.execute(
-            f"DELETE FROM reply_messages WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
-            (principal_id, *reply_ids),
-        )
+    transaction.execute("DELETE FROM reply_spans WHERE principal_id = ? AND reply_id = ?", (principal_id, reply_id))
+    transaction.execute("DELETE FROM reply_messages WHERE principal_id = ? AND reply_id = ?", (principal_id, reply_id))
+    return True
+
+
+def forget_pending_stops(transaction: Transaction, principal_id: str, *, before_ns: int) -> None:
+    """Drop Stops that have waited since before ``before_ns`` for a reply to bind their event."""
     transaction.execute(
         "DELETE FROM pending_reply_stops WHERE principal_id = ? AND created_at_ns < ?",
         (principal_id, before_ns),
     )
-    return len(reply_ids)
 
 
 def spans_in_room(

@@ -122,6 +122,7 @@ See [Authorization](authorization.md#platform-and-credential-authority) for admi
 ### Where Connections Are Stored
 
 Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+An Atlassian connection registered with `requester_scoped=False` is the exception ([Share One Account](tools/atlassian.md#share-one-account)).
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
