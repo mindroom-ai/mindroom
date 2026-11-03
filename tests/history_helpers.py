@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import re
 import sqlite3
@@ -14,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
+
+from pypdf import PdfWriter
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -761,6 +764,23 @@ class SummaryCalls:
             msg = "summary model unavailable"
             raise RuntimeError(msg)
         return self.summary or f"SUMMARY-{len(self.inputs)}"
+
+
+def blank_pdf(pages: int, *, delete: int = 0) -> bytes:
+    """Return a PDF of ``pages`` blank pages, then an incremental save that deletes the last ``delete`` of them."""
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=612, height=792)
+    written = io.BytesIO()
+    writer.write(written)
+    if not delete:
+        return written.getvalue()
+    edited = PdfWriter(io.BytesIO(written.getvalue()), incremental=True)
+    for _ in range(delete):
+        del edited.pages[-1]
+    saved = io.BytesIO()
+    edited.write(saved)
+    return saved.getvalue()
 
 
 def seeded_storage(config: Config, runtime_paths: RuntimePaths) -> ConversationStore:

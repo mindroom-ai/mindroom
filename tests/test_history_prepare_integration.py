@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import io
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -13,7 +12,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pypdf import PdfWriter
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
@@ -62,6 +60,7 @@ from tests.history_helpers import (
     _make_config,
     _runtime_paths,
     _session,
+    blank_pdf,
     seed_summary,
     stored_turn,
 )
@@ -724,12 +723,7 @@ async def test_attachments_estimated_past_the_limit_leave_the_summarized_history
     seed_session(storage, session)
     # About 5,000 tokens, which the limit holds beside the turn but not beside the turn and the report's 10,000 too.
     seed_summary(storage, session, _SCOPE, "stored summary " * 1_300)
-    writer = PdfWriter()
-    for _ in range(2):
-        writer.add_blank_page(width=612, height=792)
-    pages = io.BytesIO()
-    writer.write(pages)
-    report = File(content=pages.getvalue(), mime_type="application/pdf", filename="report.pdf")
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
 
     with _no_memory():
         response = await ai_response(

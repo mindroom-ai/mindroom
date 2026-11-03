@@ -6,7 +6,6 @@ so whatever a route sends for a message, a tool, or a setting is what its size c
 
 from __future__ import annotations
 
-import io
 import json
 import os
 from dataclasses import replace
@@ -15,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import httpx2
 import pytest
-from pypdf import PdfWriter
 
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message, model_provenance, stable_serialize
@@ -28,7 +26,7 @@ from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
 from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import quarter_tokens
-from tests.history_helpers import record_native_checkpoint
+from tests.history_helpers import blank_pdf, record_native_checkpoint
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
 from tests.providers.gemini_ollama_support import FAMILIES as GEMINI_OLLAMA_FAMILIES
@@ -560,23 +558,6 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     assert model.request_tokens(ModelRequest(messages=(message,))) < 10_000
 
 
-def _pdf(pages: int, *, delete: int = 0) -> bytes:
-    """Return a PDF of ``pages`` blank pages, then an incremental save that deletes the last ``delete`` of them."""
-    writer = PdfWriter()
-    for _ in range(pages):
-        writer.add_blank_page(width=612, height=792)
-    written = io.BytesIO()
-    writer.write(written)
-    if not delete:
-        return written.getvalue()
-    edited = PdfWriter(io.BytesIO(written.getvalue()), incremental=True)
-    for _ in range(delete):
-        del edited.pages[-1]
-    saved = io.BytesIO()
-    edited.write(saved)
-    return saved.getvalue()
-
-
 def _with_file(route: ModelProvider, file: File | None) -> int:
     """Return the size of a request whose prompt carries ``file``."""
     files = [file] if file is not None else None
@@ -617,16 +598,16 @@ def test_an_attached_pdf_counts_its_pages(tmp_path: Path, family: str, page_toke
     def counted(content: bytes) -> int:
         return _with_file(route, File(content=content, mime_type="application/pdf", filename="report.pdf")) - without
 
-    assert counted(_pdf(1)) == page_tokens
-    assert counted(_pdf(80)) == 80 * page_tokens
+    assert counted(blank_pdf(1)) == page_tokens
+    assert counted(blank_pdf(80)) == 80 * page_tokens
     # An incremental save that deleted pages keeps their objects, which the latest page tree no longer counts.
-    assert counted(_pdf(80, delete=79)) == page_tokens
+    assert counted(blank_pdf(80, delete=79)) == page_tokens
     # A PDF the parser cannot read, or whose page tree declares no page count, counts one page.
     assert counted(b"%PDF-1.7\ndamaged") == page_tokens
     # A cross-reference table cut off before its trailer, which pypdf before 6.21.4 read forever.
     assert counted(b"%PDF-1.4\nstartxref\n28\n%%EOF\nxref\n1 0\naaa") == page_tokens
-    assert counted(_pdf(1).replace(b"/Count 1", b"/Count /X")) == page_tokens
-    assert counted(_pdf(1).replace(b"/Count 1", b"/Count -7")) == page_tokens
+    assert counted(blank_pdf(1).replace(b"/Count 1", b"/Count /X")) == page_tokens
+    assert counted(blank_pdf(1).replace(b"/Count 1", b"/Count -7")) == page_tokens
 
 
 def test_an_attached_path_that_is_not_a_regular_file_is_never_read(tmp_path: Path) -> None:
