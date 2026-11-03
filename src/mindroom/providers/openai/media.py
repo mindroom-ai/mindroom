@@ -14,7 +14,7 @@ import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.media import image_mime_type
+from mindroom.llm.media import image_mime_type, named_mime_type
 from mindroom.providers.media_files import read_media_bytes
 
 if TYPE_CHECKING:
@@ -28,14 +28,6 @@ __all__ = [
     "responses_file_part",
     "responses_image_part",
 ]
-
-# Python's MIME database lacks or misnames these supported formats; host /etc/mime.types must not decide.
-_FILE_MIME_TYPES = {
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".sh": "text/x-sh",
-}
 
 
 def _image_url(image: Image, provider: str) -> str | None:
@@ -116,9 +108,7 @@ def _file_part_data_url(file: File, name: str, data: bytes) -> str:
     mime_type = file.mime_type if file.mime_type and file.mime_type != "application/octet-stream" else None
     display_name = file.filename or file.name
     if mime_type is None and display_name:
-        guessed, encoding = mimetypes.guess_type(display_name)
-        guessed = _FILE_MIME_TYPES.get(Path(display_name).suffix.lower(), guessed)
-        mime_type = guessed if encoding is None else None
+        mime_type = named_mime_type(display_name)
     if mime_type is None:
         guessed, encoding = mimetypes.guess_type(file.filepath or name)
         mime_type = guessed if guessed and encoding is None else "application/octet-stream"
