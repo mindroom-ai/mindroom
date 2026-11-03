@@ -363,7 +363,7 @@ class SmartsheetTools(Toolkit):
 
     @tool
     async def search_sheets(self, query: str) -> str:
-        """Search every sheet the connected account can open for text in sheet names, rows, and attachments.
+        """Search the names and contents of every sheet the connected account can open.
 
         Args:
             query: Text to search for.

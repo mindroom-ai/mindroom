@@ -12669,6 +12669,7 @@ Use it to choose a tool, connect its account, and understand its limits.
 - [`todo`] - Per-thread MindRoom work plans with priorities, dependencies, assignments, templates, and automatic nudges for idle agents.
 - [`bitbucket`] - One Bitbucket repository's details, commits, pull requests, and issues.
 - [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
+- [`smartsheet`] - Smartsheet sheet search and reads, and row adds, updates, and deletes, as each requester or with one API access token.
 - [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs with one shared account.
 - [`linear`] - Linear teams, issues, and issue updates.
 - [`clickup`] - ClickUp spaces, lists, and tasks.
@@ -12681,9 +12682,9 @@ Use it to choose a tool, connect its account, and understand its limits.
 ## Setup
 
 `todo` works without credentials.
-The dashboard shows every other tool on this page as needing configuration until its credentials are saved, except that `github` is also ready when `GITHUB_ACCESS_TOKEN` is set.
+The dashboard shows every other tool on this page as needing configuration until its credentials are saved, except that `github` is also ready when `GITHUB_ACCESS_TOKEN` is set and `smartsheet` when `SMARTSHEET_ACCESS_TOKEN` is set.
 Most tools also read the environment variables named in their sections.
-Connect GitHub per requester through OAuth, and use [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) for per-requester Jira and Confluence Cloud access.
+Connect GitHub and Smartsheet per requester through OAuth, and use [`atlassian`](https://docs.mindroom.chat/tools/atlassian/) for per-requester Jira and Confluence Cloud access.
 The other tools use one shared set of credentials, saved on the dashboard's Tools page or in the credential store rather than as inline YAML.
 Missing Python dependencies are installed at first use, as described in [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
 
@@ -12714,6 +12715,33 @@ Until a requester connects, `github` calls return an `OAuthConnectionRequired` r
 
 To use one token for everyone instead, choose **Use access token** and save it, or set `GITHUB_ACCESS_TOKEN` in the runtime environment.
 A saved `access_token` wins over `GITHUB_ACCESS_TOKEN`, which wins over a requester's OAuth connection, and blank or whitespace-only values count as unset.
+
+## [`smartsheet`]
+
+`smartsheet` finds, reads, and edits Smartsheet sheets, naming cells by column title.
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `access_token` | `password` | `no` | `null` | Smartsheet API access token for everyone; takes precedence over OAuth. |
+
+- `list_sheets()` lists the sheets the account can open, and `search_sheets()` searches their names and contents.
+- `get_sheet()` returns a sheet's columns and rows, with each row's non-empty cells keyed by column title, 100 rows per page by default and at most 500.
+- `add_rows()` and `update_rows()` take cells keyed by column title, refuse a title the sheet lacks before writing anything, and write every row or none.
+- `delete_rows()` deletes nothing if any of its rows is missing.
+- `get_sheet()` and `delete_rows()` take at most 100 row IDs per call.
+- Only smartsheet.com accounts work; Smartsheet Regions Europe, Australia, and Gov accounts are not supported.
+
+### Smartsheet OAuth Setup
+
+Choose **Connect with Smartsheet** on the Tools dashboard to connect your own Smartsheet account.
+For a self-hosted installation, create an app in Smartsheet's Developer Tools, set its App redirect URL to `/api/oauth/smartsheet/callback` on the installation's public URL, and save the app's client ID and client secret under the `smartsheet_oauth_client` credential service.
+MindRoom requests the `READ_SHEETS` and `WRITE_SHEETS` scopes; the account's Smartsheet sharing permissions still decide which sheets it can open and change.
+Each requester's Smartsheet connection is their own, regardless of the agent's worker scope, and `smartsheet` always runs in the primary MindRoom runtime.
+Until a requester connects, `smartsheet` calls return `oauth_connection_required: true` with that requester's `connect_url`, and a token Smartsheet rejects returns the same with `reason: access_rejected`.
+
+To use one token for everyone instead, choose **Use access token** and save a Smartsheet API access token, or set `SMARTSHEET_ACCESS_TOKEN` in the runtime environment.
+A saved `access_token` wins over `SMARTSHEET_ACCESS_TOKEN`, which wins over a requester's OAuth connection, and blank or whitespace-only values count as unset.
+A token Smartsheet rejects returns `code: access_token_rejected`.
 
 ## [`todo`]
 
@@ -15894,7 +15922,7 @@ See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-crede
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, Slack, and Smartsheet, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -15905,7 +15933,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, Slack, and Spotify OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, Slack, Smartsheet, and Spotify OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -15913,6 +15941,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | --- | --- |
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](https://docs.mindroom.chat/tools/project-management/#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
+| Smartsheet | [Smartsheet OAuth Setup](https://docs.mindroom.chat/tools/project-management/#smartsheet-oauth-setup) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Slack (each person's own Slack account) | [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) |

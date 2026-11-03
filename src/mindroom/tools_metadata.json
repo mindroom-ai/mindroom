@@ -9976,6 +9976,56 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "smartsheet",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": false,
+          "default": null,
+          "description": "Smartsheet API access token for everyone; takes precedence over OAuth.",
+          "env": [
+            "SMARTSHEET_ACCESS_TOKEN"
+          ],
+          "label": "Access Token",
+          "name": "access_token",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Find, read, and edit Smartsheet sheets and rows",
+      "display_name": "Smartsheet",
+      "docs_url": "https://docs.mindroom.chat/tools/project-management/#smartsheet",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "list_sheets",
+        "search_sheets",
+        "get_sheet",
+        "add_rows",
+        "update_rows",
+        "delete_rows"
+      ],
+      "helper_text": "Each user connects their own Smartsheet account, or save one API access token for everyone. Store the Smartsheet developer app client ID and secret in the smartsheet_oauth_client credential service.",
+      "icon": "Sheet",
+      "icon_color": "text-blue-700",
+      "name": "smartsheet",
+      "oauth_fallback_fields": [
+        "access_token"
+      ],
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [

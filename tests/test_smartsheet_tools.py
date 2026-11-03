@@ -17,6 +17,8 @@ from mindroom.custom_tools import smartsheet as smartsheet_tools
 from mindroom.custom_tools.smartsheet import SmartsheetTools
 from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON
 from mindroom.oauth.smartsheet import smartsheet_oauth_provider
+from mindroom.tool_system.declarations import SetupType, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.atlassian_test_support import grant, runtime_paths, worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -606,3 +608,27 @@ async def test_delete_more_than_100_rows_sends_nothing(tmp_path: Path, monkeypat
 
     assert result["code"] == "invalid_argument"
     assert requests == []
+
+
+def test_registered_metadata_matches_the_toolkit(tmp_path: Path) -> None:
+    """The catalog advertises the toolkit's functions as a primary-runtime OAuth tool with an API token fallback."""
+    paths, manager = _runtime(tmp_path)
+    metadata = builtin_tool_registry().entries["smartsheet"]
+
+    assert metadata.function_names == tuple(_tools(paths, manager).functions)
+    assert metadata.function_names == (
+        "list_sheets",
+        "search_sheets",
+        "get_sheet",
+        "add_rows",
+        "update_rows",
+        "delete_rows",
+    )
+    assert metadata.setup_type is SetupType.OAUTH
+    assert metadata.auth_provider == "smartsheet"
+    assert metadata.requires_primary_runtime is True
+    assert metadata.file_access is ToolFileAccess.NONE
+    assert metadata.oauth_fallback_fields == ("access_token",)
+    assert [(field.name, field.env) for field in metadata.config_fields or []] == [
+        ("access_token", ("SMARTSHEET_ACCESS_TOKEN",)),
+    ]
