@@ -1511,16 +1511,20 @@ def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: s
             "data:text/csv;base64," + base64.b64encode("1;Müller GmbH;3 €\n".encode()).decode(),
         ),
         (
+            File(content="1;Müller GmbH\n".encode("latin-1"), mime_type="text/csv; charset=iso-8859-1"),
+            "data:text/csv;base64," + base64.b64encode("1;Müller GmbH\n".encode()).decode(),
+        ),
+        (
             File(content=b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", mime_type="application/pdf", filename="a.pdf"),
             "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n").decode(),
         ),
     ],
-    ids=["windows-1252-csv", "pdf"],
+    ids=["windows-1252-csv", "latin-1-charset-csv", "pdf"],
 )
 def test_chat_and_responses_send_a_text_file_as_its_text_in_utf8(file: File, sent: str) -> None:
     """A Windows-1252 CSV goes as the UTF-8 of the text it holds, the text Claude and request sizing read.
 
-    Any other file goes as its own bytes.
+    Its type goes without the charset its bytes no longer have, and any other file goes as its own bytes.
     """
     chat = chat_file_part(file, provider="OpenAI Chat")
     responses = responses_file_part(file, provider="OpenAI Responses")
