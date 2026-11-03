@@ -17,6 +17,7 @@ from urllib import error, parse, request
 
 from mindroom.config.resolution import agent_policy
 from mindroom.egress.policy import (
+    EgressGrantSubject,
     canonical_hostname,
     is_hostname_allowed,
     load_static_allowlist,
@@ -35,6 +36,12 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.worker_routing import (
+    build_agent_toolkit_worker_target,
+    resolve_unscoped_worker_key,
+    subagent_worker_key,
+)
+from mindroom.workers.placements import placement_for_session
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -42,7 +49,6 @@ if TYPE_CHECKING:
     from typing import IO
 
     from mindroom.constants import RuntimePaths
-    from mindroom.egress.policy import EgressGrantSubject
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -201,7 +207,27 @@ def _effective_ttl_seconds(runtime_paths: RuntimePaths, requested_ttl_seconds: i
 
 def _grant_subject(context: ToolRuntimeContext) -> EgressGrantSubject:
     agent_name = context.agent_name
-    scope = agent_policy(context.config, agent_name).effective_execution_scope
+    policy = agent_policy(context.config, agent_name)
+    scope = policy.effective_execution_scope
+    placement = placement_for_session(context.session_id)
+    if placement is not None:
+        # A subagent with a worker of its own reaches the network from that worker, which the proxy knows by its key.
+        target = build_agent_toolkit_worker_target(
+            scope,
+            agent_name,
+            is_private=policy.is_private,
+            execution_identity=context.execution_identity,
+            runtime_paths=context.runtime_paths,
+        )
+        normal_key = target.worker_key or resolve_unscoped_worker_key(
+            agent_name,
+            tenant_id=target.tenant_id,
+            account_id=target.account_id,
+        )
+        return EgressGrantSubject(
+            subject_type="worker_key",
+            subject=subagent_worker_key(normal_key, placement.subagent_id),
+        )
     execution_identity = context.execution_identity if scope == "user_agent" else None
     return resolve_grant_subject(
         agent_name=agent_name,

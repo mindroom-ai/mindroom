@@ -64,6 +64,8 @@ Who a grant covers depends on the agent's effective [worker scope](sandbox-proxy
 | `shared` or unset | That agent's worker |
 | `user` | Not supported; the request fails with `approved egress is not supported for worker_scope=user` |
 
+A grant that a subagent running in a [dedicated worker](../tools/agent-orchestration.md#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope.
+
 ### Temporary Full Access
 
 The `allow_full_access` tool option defaults to `false`.
