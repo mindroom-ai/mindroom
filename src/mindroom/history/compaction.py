@@ -222,7 +222,11 @@ def scope_usage_recorder(
 
 @dataclass(frozen=True)
 class _SummarySource:
-    """What a summary input builds on: the previous summary and the runs after it, plus the runs it folds unread."""
+    """What a summary input builds on: the previous summary and the runs after it, plus the runs it folds unread.
+
+    When the previous summary is a native checkpoint's text, the first of ``runs`` is a copy of the checkpoint's run
+    that starts at the checkpoint; the fold takes the stored run.
+    """
 
     unread_runs: list[AnyRunRecord]
     previous_summary: str | None
@@ -803,6 +807,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
             "scope": summarizer.scope.key,
             "model_name": summary_model.name,
             "attempt": attempt,
+            "native_checkpoint": source is not original,
             "native_checkpoint_runs": len(source.unread_runs),
             "candidate_runs": len(source.runs),
             "included_runs": len(included_runs),
