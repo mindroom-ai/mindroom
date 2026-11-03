@@ -38,7 +38,7 @@ from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
-    resolve_unscoped_worker_key,
+    normal_worker_key,
     subagent_worker_key,
 )
 from mindroom.workers.placements import placement_for_session
@@ -219,11 +219,10 @@ def _grant_subject(context: ToolRuntimeContext) -> EgressGrantSubject:
             execution_identity=context.execution_identity,
             runtime_paths=context.runtime_paths,
         )
-        normal_key = target.worker_key or resolve_unscoped_worker_key(
-            agent_name,
-            tenant_id=target.tenant_id,
-            account_id=target.account_id,
-        )
+        normal_key = normal_worker_key(target)
+        if normal_key is None:
+            msg = "could not resolve the worker of this subagent for this request"
+            raise RuntimeError(msg)
         return EgressGrantSubject(
             subject_type="worker_key",
             subject=subagent_worker_key(normal_key, placement.subagent_id),

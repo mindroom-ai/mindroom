@@ -47,7 +47,7 @@ from mindroom.tool_system.worker_proxy_client import (
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    resolve_unscoped_worker_key,
+    normal_worker_key,
     serialize_tool_execution_identity,
     subagent_worker_key,
 )
@@ -310,19 +310,14 @@ def _worker_route(
     spec: WorkerSpec | None = None
     if worker_scope is None:
         if worker_backend_kind(runtime_paths).dedicated:
-            if worker_target is None or routing_agent_name is None:
+            unscoped_key = normal_worker_key(worker_target) if worker_target is not None else None
+            if unscoped_key is None:
                 msg = (
                     f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
                     "when using a dedicated worker backend."
                 )
                 raise RuntimeError(msg)
-            spec = WorkerSpec(
-                resolve_unscoped_worker_key(
-                    agent_name=routing_agent_name,
-                    tenant_id=worker_target.tenant_id,
-                    account_id=worker_target.account_id,
-                ),
-            )
+            spec = WorkerSpec(unscoped_key)
         else:
             # The shared runner is the only backend that is not dedicated, and an unscoped call reaches it without a
             # worker handle, so its protocol check happens here.

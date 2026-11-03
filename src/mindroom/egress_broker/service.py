@@ -49,7 +49,7 @@ from mindroom.runtime_env_policy import (
     EGRESS_BROKER_ENV_BY_KEY,
     credentials_encryption_key_value,
 )
-from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key
+from mindroom.tool_system.worker_routing import normal_worker_key
 from mindroom.worker_computer.browser_proxy import browser_egress, proxy_env_setting
 
 if TYPE_CHECKING:
@@ -504,18 +504,8 @@ def _signable_target(worker_target: ResolvedWorkerTarget) -> ResolvedWorkerTarge
     """Give an unscoped target, which has no worker key of its own, the unscoped key a dedicated backend routes it by."""
     if worker_target.worker_scope is not None or worker_target.worker_key is not None:
         return worker_target
-    worker_key = _unscoped_worker_key(worker_target)
+    worker_key = normal_worker_key(worker_target)
     return worker_target if worker_key is None else replace(worker_target, worker_key=worker_key)
-
-
-def _unscoped_worker_key(worker_target: ResolvedWorkerTarget) -> str | None:
-    if worker_target.routing_agent_name is None:
-        return None
-    return resolve_unscoped_worker_key(
-        agent_name=worker_target.routing_agent_name,
-        tenant_id=worker_target.tenant_id,
-        account_id=worker_target.account_id,
-    )
 
 
 def execution_env_for_worker(

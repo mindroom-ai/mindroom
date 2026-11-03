@@ -3319,6 +3319,30 @@ def test_docker_cleanup_removes_an_expired_subagent_worker(
     assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
 
 
+def test_docker_cleanup_removes_a_failed_subagent_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed subagent worker whose container still runs is stopped once expired and removed on the next pass."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    base_key = "v1:t:user_agent:alice:watcher"
+    subagent_key = subagent_worker_key(base_key, "d" * 32)
+    subagent = backend.ensure_worker(
+        _spec(backend, subagent_key, private_agent_names=frozenset(), state_scope_worker_key=base_key),
+        now=0.0,
+    )
+    backend.record_failure(subagent_key, "boom", now=1.0)
+    container = fake_client.containers.by_name[subagent.worker_id]
+    container.status = "running"
+    stopped_before = container.stopped
+
+    assert [worker.worker_key for worker in backend.cleanup_idle_workers(now=100.0)] == [subagent_key]
+    assert (container.stopped - stopped_before, container.removed) == (1, 0)
+    assert [worker.worker_key for worker in backend.cleanup_idle_workers(now=101.0)] == [subagent_key]
+    assert container.removed == 1
+    assert worker_root_path(tmp_path, subagent_key).exists() is False
+
+
 def test_docker_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

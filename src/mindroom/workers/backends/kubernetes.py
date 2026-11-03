@@ -436,7 +436,7 @@ class KubernetesWorkerBackend:
         return filter_and_sort_worker_handles(handles, include_idle)
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
-        """Scale idle workers to zero while retaining their state."""
+        """Scale idle workers to zero while retaining their state, and remove expired subagent workers with theirs."""
         timestamp = time.time() if now is None else now
         return self._cleanup_idle_deployments(self._resources.list_deployments(), now=timestamp)
 
@@ -452,7 +452,11 @@ class KubernetesWorkerBackend:
         if not state_parts:
             msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
             raise WorkerBackendError(msg)
-        deployment = self._resources.read_deployment(worker_id)
+        try:
+            deployment = self._resources.read_deployment(worker_id)
+        except self._resources.api_error() as exc:
+            msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
+            raise WorkerBackendError(msg) from exc
         if deployment is not None:
             annotations = dict(deployment.metadata.annotations or {})
             if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:

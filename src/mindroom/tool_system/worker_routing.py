@@ -414,6 +414,22 @@ def subagent_worker_state_scope_key(worker_key: str) -> str | None:
     return state_scope_worker_key if resolved_worker_key_scope(state_scope_worker_key) is not None else None
 
 
+def normal_worker_key(worker_target: ResolvedWorkerTarget) -> str | None:
+    """Return the key of the worker a target's calls reach on a dedicated backend, or None when none resolves.
+
+    A scoped target names its key; an unscoped one gets its agent's unscoped key.
+    """
+    if worker_target.worker_scope is not None:
+        return worker_target.worker_key
+    if worker_target.routing_agent_name is None:
+        return None
+    return resolve_unscoped_worker_key(
+        agent_name=worker_target.routing_agent_name,
+        tenant_id=worker_target.tenant_id,
+        account_id=worker_target.account_id,
+    )
+
+
 def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     """Return the parsed scope discriminator for one resolved worker key."""
     parts = worker_key.split(":")

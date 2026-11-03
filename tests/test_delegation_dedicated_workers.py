@@ -21,7 +21,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import current_execution_identity, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from mindroom.workers.placements import DedicatedWorkerPlacement, placement_for_session
+from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement, placement_for_session
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.access_schema_support import with_responder_access
 from tests.agent_tool_helpers import toolkit_offers
@@ -285,8 +285,11 @@ def test_a_dedicated_child_records_its_choice_and_its_follow_ups_keep_it(tmp_pat
     assert (follow_up.dedicated_worker, follow_up.worker_resource_profile) == (True, "large")
     assert follow_up.subagent_id == child.subagent_id
     assert child_placement(child, config, paths) == DedicatedWorkerPlacement(child.subagent_id, "large")
-    assert child_placement(grandchild, config, paths) is None
-    assert grandchild.session_id != child.session_id
+    # The grandchild's calls name its own session, so they stay on its normal worker inside the child's attempt too.
+    with dedicated_worker_placement(child.session_id, child_placement(child, config, paths)):
+        assert placement_for_session(grandchild.session_id) is None
+        with dedicated_worker_placement(grandchild.session_id, child_placement(grandchild, config, paths)):
+            assert placement_for_session(grandchild.session_id) is None
 
 
 def test_a_child_whose_caller_lost_the_setting_runs_on_its_normal_worker(tmp_path: Path) -> None:

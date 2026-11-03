@@ -6875,6 +6875,7 @@ from = ["mindroom.thread_export"]
 
 [[interfaces]]
 expose = [
+    "normal_worker_key",
     "normalize_worker_key_part",
     "SHARED_DIRECTORIES_DIRNAME",
     "ResolvedWorkerTarget",

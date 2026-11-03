@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import threading
 import time
 from contextlib import contextmanager
@@ -223,7 +224,8 @@ def worker_cleanup_interval_seconds(runtime_paths: RuntimePaths) -> float:
         interval = float(raw)
     except ValueError:
         return 0.0
-    return max(0.0, interval)
+    # An infinite interval would make the cleanup loop wait forever while it counts as running.
+    return interval if math.isfinite(interval) and interval > 0 else 0.0
 
 
 @contextmanager

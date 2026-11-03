@@ -3901,6 +3901,25 @@ def test_kubernetes_cleanup_retries_a_subagent_worker_whose_removal_failed_midwa
     assert subagent_root.exists() is False
 
 
+def test_kubernetes_cleanup_stops_then_removes_a_failed_subagent_worker(tmp_path: Path) -> None:
+    """A subagent worker whose start failed is stopped once expired and removed on the next pass."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    deployment = apps_api.deployments[subagent.worker_id]
+    deployment.metadata.annotations["mindroom.ai/last-used-at"] = "0.0"
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "failed"
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [subagent_key]
+    assert apps_api.deployments[subagent.worker_id].spec.replicas == 0
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=11.0)] == [subagent_key]
+    assert subagent.worker_id not in apps_api.deployments
+
+
 def test_kubernetes_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(tmp_path: Path) -> None:
     """A subagent's own worker used within the idle timeout keeps running."""
     runtime_paths = resolve_primary_runtime_paths(

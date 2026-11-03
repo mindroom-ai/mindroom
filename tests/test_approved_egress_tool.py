@@ -334,7 +334,12 @@ def test_request_network_access_posts_worker_key_grant(
 
 @pytest.mark.parametrize(
     ("worker_scope", "normal_key"),
-    [("shared", "v1:default:shared:assistant"), (None, "v1:default:unscoped:assistant")],
+    [
+        ("shared", "v1:default:shared:assistant"),
+        (None, "v1:default:unscoped:assistant"),
+        ("user", "v1:default:user:~@user:server"),
+        ("user_agent", "v1:default:user_agent:~@user:server:assistant"),
+    ],
 )
 def test_a_subagent_with_its_own_worker_is_granted_access_for_that_worker(
     tmp_path: Path,
@@ -367,7 +372,12 @@ def test_a_subagent_with_its_own_worker_is_granted_access_for_that_worker(
         subject_type="worker_key",
         subject=subagent_worker_key(normal_key, subagent_id),
     )
-    assert approved_egress_module._grant_subject(context).subject_type == "agent"
+    # Outside the subagent's attempt the agent's own rule applies, which refuses a user-scope worker.
+    if worker_scope == "user":
+        with pytest.raises(RuntimeError, match="not supported for worker_scope=user"):
+            approved_egress_module._grant_subject(context)
+    else:
+        assert approved_egress_module._grant_subject(context) != subject
 
 
 def test_a_bare_run_reads_the_policy_settings_from_the_env_file(

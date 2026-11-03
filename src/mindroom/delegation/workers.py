@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 from mindroom.workers.placements import DedicatedWorkerPlacement
@@ -16,20 +15,12 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
 
 
-def _backend_kind(runtime_paths: RuntimePaths) -> WorkerBackendKind | None:
-    try:
-        return worker_backend_kind(runtime_paths)
-    except WorkerBackendError:
-        return None
-
-
 def _dedicated_workers_available(runtime_paths: RuntimePaths) -> bool:
     """Return whether this runtime can give a subagent a worker of its own.
 
     Each such worker serves one subagent, so they are only offered where idle cleanup removes them again.
     """
-    kind = _backend_kind(runtime_paths)
-    return kind is not None and kind.dedicated and idle_worker_cleanup_runs(runtime_paths)
+    return worker_backend_kind(runtime_paths).dedicated and idle_worker_cleanup_runs(runtime_paths)
 
 
 def resource_profiles_available(runtime_paths: RuntimePaths) -> bool:
@@ -37,7 +28,7 @@ def resource_profiles_available(runtime_paths: RuntimePaths) -> bool:
 
     Callers check ``_dedicated_workers_available`` first, so this asks only for the backend.
     """
-    return _backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES
+    return worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES
 
 
 def dedicated_worker_refusal(

@@ -58,7 +58,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
-from mindroom.workers.runtime import idle_worker_cleanup_runs
+from mindroom.workers.runtime import idle_worker_cleanup_runs, worker_cleanup_interval_seconds
 from tests.api.conftest import (
     PLATFORM_SSO_SECRET,
     login_with_api_key,
@@ -756,6 +756,20 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     )
 
     assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("30", 30.0), ("0", 0.0), ("-5", 0.0), ("inf", 0.0), ("nan", 0.0), ("x", 0.0)],
+)
+def test_worker_cleanup_interval_counts_only_finite_positive_values(tmp_path: Path, raw: str, expected: float) -> None:
+    """An infinite interval would make the cleanup loop wait forever, so it means no cleanup."""
+    runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": raw},
+    )
+
+    assert worker_cleanup_interval_seconds(runtime) == expected
 
 
 @pytest.mark.asyncio

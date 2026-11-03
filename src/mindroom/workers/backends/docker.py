@@ -643,7 +643,7 @@ class DockerWorkerBackend:
         return filter_and_sort_worker_handles(handles, include_idle)
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
-        """Stop idle containers while retaining worker-owned state."""
+        """Stop idle containers while retaining worker-owned state, and remove expired subagent workers with theirs."""
         timestamp = time.time() if now is None else now
         cleaned: list[WorkerHandle] = []
         for paths in self._metadata_paths():
