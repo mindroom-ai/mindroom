@@ -254,14 +254,16 @@ Each connection has its own card on the Integrations page and its own connect li
 ### Share One Account
 
 By default every requester connects their own Atlassian account.
-With `requester_scoped=False`, a connection's tokens follow the agent's [worker scope](../configuration/agents.md) instead, like Google's:
+With `requester_scoped=False`, a connection's tokens follow the agent's effective worker scope instead (`private.per`, then the agent's `worker_scope`, then `defaults.worker_scope`), like Google's:
 
-- On an agent with `worker_scope: shared`, one account serves every requester. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
-- On an agent with `worker_scope: user` or `user_agent`, each requester still connects their own account.
-- On an agent without a `worker_scope`, one installation-level connection serves every requester, as described in [Where Connections Are Stored](../oauth-framework.md#where-connections-are-stored).
+- On a `shared` agent, one account serves every requester of that agent. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
+- On a `user` or `user_agent` agent, each requester still connects their own account.
+- Without an effective worker scope, one installation-level connection serves every unscoped agent that lists the tool, and a credential manager of any of them can replace it, as described in [Where Connections Are Stored](../oauth-framework.md#where-connections-are-stored). Give each agent `worker_scope: shared` so it gets its own.
 
 Everyone who may use the agent then reads what that account can see, so connect a dedicated account, not a person's.
-Set `write=False` on the connection, so the app requests only read scopes and Atlassian itself refuses writes, and limit the agent's tool entry to the spaces it needs:
+Set `write=False` on the connection before anyone connects it, so the account is authorized with read scopes only and Atlassian itself refuses writes.
+An account connected while `write` was `True` keeps its write scopes until it is disconnected and connected again.
+Limit the agent's tool entry to the spaces it needs:
 
 ```python
 AtlassianConnectionConfig(
@@ -284,7 +286,9 @@ agents:
           confluence_spaces: [DOCS]
 ```
 
-The credential manager connects the account from the Connections page, or opens the connect link the agent replies with, signed in to Atlassian as the dedicated account.
+The credential manager connects the account from the Connections page, signed in to Atlassian as the dedicated account.
+A connect link the agent replies with also works, but on a shared agent whoever opens it first connects their account, so a credential manager should ask for it in a direct message with the agent and open it right away.
+The toolkit tells the model that `currentUser()` in JQL or CQL is the shared account, not the requester.
 The built-in `atlassian` tool always stays requester-scoped.
 
 ## Approvals For Writes

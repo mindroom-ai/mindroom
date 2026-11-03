@@ -169,8 +169,13 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
         managed_init_args=base.managed_init_args,
         docs_url=base.docs_url,
         helper_text=(
-            f"Each user connects their own {connection.display_name} account. "
-            f"Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in {connection.oauth_client_service}."
+            (
+                f"Each user connects their own {connection.display_name} account. "
+                if connection.requester_scoped
+                else f"The {connection.display_name} account follows the agent's worker scope; "
+                "on a shared agent, its credential managers connect one account for every requester. "
+            )
+            + f"Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in {connection.oauth_client_service}."
         ),
         function_names=atlassian_function_names(
             connection.products,

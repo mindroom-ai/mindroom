@@ -276,6 +276,7 @@ The matched rule's auth type then formats the token like any other secret, so a 
 
 - The account follows the provider's own credential policy.
   GitHub and Atlassian are requester-scoped: the broker uses the requester named in the worker's verified token, so each user's requests use that user's own account.
+  An Atlassian connection registered with `requester_scoped=False` follows the worker scope like the Google providers ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
   In shared sandboxes the broker does not use them by default; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 - The Google providers follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
 - A call without a requester has no requester-scoped account (GitHub or Atlassian) to use.
@@ -316,7 +317,7 @@ A file one requester leaves there, such as `.mindroom/worker-env.sh`, can run in
 So another requester's code can use that requester's connected accounts and personal keys, but not read them, as long as none of the hosts those services reach echo requests (see [Hosts that echo requests](#what-the-broker-cannot-protect-against)).
 When requesters need to be kept apart, make the agent `private`, so that each requester gets a workspace root of their own.
 Set `private.per` to `user` or `user_agent` instead of `worker_scope`, because the two cannot both be set (see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances)).
-Connected accounts and personal keys belong to the requester, not to one agent: GitHub and Atlassian accounts are stored at scope `user` whichever agent uses them, and `user` keys are shared by all of that requester's `user` agents.
+Connected accounts and personal keys belong to the requester, not to one agent: GitHub and requester-scoped Atlassian accounts are stored at scope `user` whichever agent uses them, and `user` keys are shared by all of that requester's `user` agents.
 So every personal (`user` or `user_agent`) agent that other requesters can use must be `private` for those accounts to stay out of other requesters' code, not only the agent that seems most sensitive.
 
 ## Secret management
@@ -494,7 +495,7 @@ Every service of the agent that uses the provider and the provider's tools stop 
 A connection that everyone using an agent shares never gets a link; connect it at `manage_url` instead.
 
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
-On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects and allows their own account.
+On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and requester-scoped Atlassian connections under `oauth_on_shared_workers` are the exception, where each user connects and allows their own account.
 
 The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) or from [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/).
 With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no trusted upstream auth, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.

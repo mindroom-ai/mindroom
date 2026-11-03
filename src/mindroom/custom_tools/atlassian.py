@@ -436,7 +436,15 @@ class AtlassianToolkit(Toolkit):
         self._config = runtime_config
         # An empty space list leaves the agent no space of that product, so none of its functions are offered.
         enabled_products = tuple(product for product in products if self._spaces.keys(product) != ())
-        super().__init__(name=provider.id, instructions=self._spaces.instructions(enabled_products, function_prefix))
+        instructions = self._spaces.instructions(enabled_products, function_prefix)
+        if not provider.requester_scoped_credentials and enabled_products:
+            subjects = " and ".join(f"`{function_prefix}{product}_*`" for product in enabled_products)
+            shared = (
+                f"The {subjects} functions may act as one Atlassian account shared by every requester, "
+                "so currentUser() in JQL or CQL is that account, not the requester."
+            )
+            instructions = f"{instructions} {shared}" if instructions else shared
+        super().__init__(name=provider.id, instructions=instructions)
         functions = {
             "jira_search_issues": self.jira_search_issues,
             "jira_get_issue": self.jira_get_issue,
@@ -482,7 +490,7 @@ class AtlassianToolkit(Toolkit):
         """Return a current access token for the requester, refreshing it when it is about to expire."""
         context = self._credential_context()
         if context.worker_target is None:
-            # Without a worker target, no store matches this call, so never fall back to a global one.
+            # Without a worker target there is no agent or requester to bind, so never use the global store.
             raise await self._connection_required(context)
         try:
             refreshed = await refresh_oauth_credentials_with_result(context)

@@ -13,6 +13,8 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.custom_tools.atlassian import AtlassianToolkit
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
+from mindroom.oauth.credential_binding import oauth_credential_binding
+from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.atlassian_connections import (
@@ -53,7 +55,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.plugins import ConfigPlugins
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 DEFAULT_TOKEN = "default-connection-token"  # noqa: S105
 PARTNER_TOKEN = "partner-connection-token"  # noqa: S105
@@ -452,11 +454,21 @@ def test_only_an_opted_out_connection_follows_the_agent_worker_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shared_connection_serves_every_requester_of_a_shared_agent(
+@pytest.mark.parametrize(
+    ("scope", "bob_served", "other_agent_served"),
+    [("shared", True, False), ("user", False, False), ("user_agent", False, False), (None, True, True)],
+)
+async def test_shared_connection_follows_the_agent_worker_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    scope: WorkerScope | None,
+    bob_served: bool,
+    other_agent_served: bool,
 ) -> None:
-    """One grant stored for a shared agent answers every requester of that agent, and only that agent."""
+    """Alice's grant serves Bob only on a shared or unscoped agent, and another agent only when both are unscoped.
+
+    Connecting or resetting a binding that is not requester-owned needs an administrator or credential manager.
+    """
     config, paths = _plugin(tmp_path, SHARED_CONNECTION)
     manager = save_client_config(paths)
     gateway = FakeGateway(sites_by_token={PARTNER_TOKEN: [site(OTHER_CLOUD_ID, OTHER_SITE_URL)]}).install(monkeypatch)
@@ -464,32 +476,35 @@ async def test_shared_connection_serves_every_requester_of_a_shared_agent(
     plugins = publish_test_plugins(config, paths)
     provider = plugins.oauth_providers["team_atlassian"]
 
-    def shared(requester_id: str, agent_name: str = "assistant") -> ResolvedWorkerTarget:
+    def target(requester_id: str, agent_name: str = "assistant") -> ResolvedWorkerTarget:
         identity = replace(execution_identity(requester_id), agent_name=agent_name)
-        return resolve_worker_target("shared", agent_name, execution_identity=identity)
+        return resolve_worker_target(scope, agent_name, execution_identity=identity)
 
-    def build(target: ResolvedWorkerTarget) -> AtlassianToolkit:
+    async def served(requester_id: str, agent_name: str = "assistant") -> bool:
         tool = get_tool_by_name(
             "team_atlassian",
             paths,
-            worker_target=target,
+            worker_target=target(requester_id, agent_name),
             runs_in_worker=False,
             tools=plugins.tools,
         )
         assert isinstance(tool, AtlassianToolkit)
-        return tool
+        assert "currentUser() in JQL or CQL is that account" in (tool.instructions or "")
+        result = await _call(tool, "team_confluence_search", cql="type = page")
+        if result.get("oauth_connection_required"):
+            return False
+        assert result["site"]["cloud_id"] == OTHER_CLOUD_ID
+        return True
 
     publish_oauth_credentials(
         provider,
         grant(PARTNER_TOKEN, provider),
         credentials_manager=manager,
-        worker_target=shared(ALICE),
+        worker_target=target(ALICE),
     )
-    results = [
-        await _call(build(shared(requester)), "team_confluence_search", cql="type = page") for requester in (ALICE, BOB)
-    ]
-    other_agent = await _call(build(shared(BOB, agent_name="other")), "team_confluence_search", cql="type = page")
 
-    assert [result["site"]["cloud_id"] for result in results] == [OTHER_CLOUD_ID, OTHER_CLOUD_ID]
-    assert other_agent["oauth_connection_required"] is True
-    assert [bearer(request) for request in gateway.product_requests()] == [PARTNER_TOKEN, PARTNER_TOKEN]
+    credential_target = oauth_credentials_worker_target(provider, paths, target(ALICE))
+    assert oauth_credential_binding(provider, credential_target).requester_owned is (not bob_served)
+    assert await served(ALICE) is True
+    assert await served(BOB) is bob_served
+    assert await served(BOB, agent_name="other") is other_agent_served
