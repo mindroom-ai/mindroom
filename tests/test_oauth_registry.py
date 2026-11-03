@@ -64,6 +64,7 @@ def test_builtin_oauth_registry_lists_every_builtin_provider_once_in_order() -> 
         "microsoft_onenote",
         "microsoft_people",
         "slack",
+        "smartsheet",
         "spotify",
     ]
 
