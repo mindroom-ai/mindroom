@@ -265,7 +265,7 @@ agents:
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
 Use `google_drive_read_file` to read a document or text file, and `google_drive_download_file` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
-Binary files are never returned as text.
+Files with binary content, such as audio, video, images, PDFs, archives, and Office files, are never returned as text.
 When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
 Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
