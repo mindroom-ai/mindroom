@@ -64,6 +64,8 @@ logger = get_logger(__name__)
 
 _RUN_FALLBACK = timedelta(hours=1)
 _MAX_SLEEP_SECONDS = 60.0
+# Every thread an automation starts carries this tag, so its runs can be found and filtered.
+_AUTOMATION_THREAD_TAG = "automation"
 
 
 @dataclass(frozen=True)
@@ -386,7 +388,7 @@ class AutomationRunner:
                     step.on_loop()
                 await self._notify(bot, chain, pending.thread_id, step.notice)
                 for thread_id in step.resolve:
-                    await self._resolve_thread(bot, chain, thread_id)
+                    await self._tag_thread(bot, chain, thread_id, RESOLVED_THREAD_TAG)
                 return
             posted = await self._post(config, bot, chain, pending.thread_id, step, timedelta(0))
         finally:
@@ -432,6 +434,7 @@ class AutomationRunner:
                     requester=chain.requester_id,
                     error=str(exc),
                 )
+            await self._tag_thread(bot, chain, event_id, _AUTOMATION_THREAD_TAG)
         if ask.summary is not None:
             await self._set_summary(config, bot, chain, thread, ask.summary)
         logger.info(
@@ -467,23 +470,18 @@ class AutomationRunner:
                 error=str(exc),
             )
 
-    async def _resolve_thread(self, bot: AgentBot, chain: _Chain, thread_id: str) -> None:
-        """Mark a finished chain's thread as resolved."""
+    async def _tag_thread(self, bot: AgentBot, chain: _Chain, thread_id: str, tag: str) -> None:
+        """Add ``tag`` to one of a chain's threads."""
         if bot.client is None:
             return
         try:
-            await set_thread_tag(
-                bot.client,
-                chain.room_id,
-                thread_id,
-                RESOLVED_THREAD_TAG,
-                set_by=bot.client.user_id,
-            )
+            await set_thread_tag(bot.client, chain.room_id, thread_id, tag, set_by=bot.client.user_id)
         except ThreadTagsError as exc:
             logger.warning(
-                "Automation could not resolve its thread",
+                "Automation could not tag its thread",
                 agent=chain.agent_name,
                 requester=chain.requester_id,
+                tag=tag,
                 error=str(exc),
             )
 

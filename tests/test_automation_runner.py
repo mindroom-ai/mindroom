@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 import tiktoken
@@ -72,6 +72,14 @@ def _fake_agent_model_counter(monkeypatch: pytest.MonkeyPatch) -> None:
         "mindroom.automations.prompt_curation.model_token_counter",
         lambda *_args, **_kwargs: fake_token_counter(),
     )
+
+
+@pytest.fixture(autouse=True)
+def set_tag(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Thread tags are room state, so every test records the runner's tag writes instead."""
+    recorder = AsyncMock()
+    monkeypatch.setattr(runner_module, "set_thread_tag", recorder)
+    return recorder
 
 
 @dataclass
@@ -323,48 +331,45 @@ async def _finish_run(runner: AutomationRunner, config: Config, paths: RuntimePa
 
 
 @pytest.mark.asyncio
-async def test_a_run_within_the_bounds_resolves_its_thread(tmp_path: Path) -> None:
-    """The bot tags the prompt's thread resolved after the plain notice."""
+async def test_a_run_within_the_bounds_resolves_its_thread(tmp_path: Path, set_tag: AsyncMock) -> None:
+    """The bot tags the prompt's thread as an automation's when it starts, and resolved after the plain notice."""
     config, paths, runner, bot = _setup(tmp_path)
-    set_tag = AsyncMock()
-    with patch.object(runner_module, "set_thread_tag", set_tag):
-        await _finish_run(runner, config, paths, CONDENSED)
+    await _finish_run(runner, config, paths, CONDENSED)
 
     assert bot.sent[1]["body"].startswith("✅ Prompt files condensed from 1286 to ")
-    set_tag.assert_awaited_once_with(bot.client, ROOM, "$event1", "resolved", set_by="@mindroom_mind:example.test")
+    assert set_tag.await_args_list == [
+        call(bot.client, ROOM, "$event1", tag, set_by="@mindroom_mind:example.test")
+        for tag in ("automation", "resolved")
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("memory", [None, "# Memory\n"], ids=["unchanged", "recheck"])
-async def test_an_unchanged_run_or_a_recheck_leaves_the_thread_open(tmp_path: Path, memory: str | None) -> None:
+async def test_an_unchanged_run_or_a_recheck_leaves_the_thread_open(
+    tmp_path: Path,
+    memory: str | None,
+    set_tag: AsyncMock,
+) -> None:
     """Only a run that changed the files within the bounds resolves its thread."""
     config, paths, runner, _bot = _setup(tmp_path)
-    set_tag = AsyncMock()
-    with patch.object(runner_module, "set_thread_tag", set_tag):
-        await _finish_run(runner, config, paths, memory)
+    await _finish_run(runner, config, paths, memory)
 
-    set_tag.assert_not_awaited()
+    assert [tag_call.args[3] for tag_call in set_tag.await_args_list] == ["automation"]
 
 
 @pytest.mark.asyncio
-async def test_a_thread_the_bot_cannot_tag_still_gets_its_notice(tmp_path: Path) -> None:
+async def test_a_thread_the_bot_cannot_tag_still_gets_its_notice(tmp_path: Path, set_tag: AsyncMock) -> None:
     """A missing power level for thread tags is logged, not raised."""
     config, paths, runner, bot = _setup(tmp_path)
-    set_tag = AsyncMock(side_effect=ThreadTagsError("power too low"))
-    with (
-        patch.object(runner_module, "set_thread_tag", set_tag),
-        patch.object(runner_module.logger, "warning") as warning,
-    ):
+    set_tag.side_effect = ThreadTagsError("power too low")
+    with patch.object(runner_module.logger, "warning") as warning:
         await _finish_run(runner, config, paths, CONDENSED)
 
-    set_tag.assert_awaited_once()
     assert bot.sent[1]["body"].startswith("✅ ")
-    warning.assert_called_once_with(
-        "Automation could not resolve its thread",
-        agent="mind",
-        requester=None,
-        error="power too low",
-    )
+    assert warning.call_args_list == [
+        call("Automation could not tag its thread", agent="mind", requester=None, tag=tag, error="power too low")
+        for tag in ("automation", "resolved")
+    ]
 
 
 @pytest.mark.asyncio
@@ -609,7 +614,12 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
         ("@mind Review it", None),
         ("All done", "$event2"),
     ]
-    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    assert [tag_call.args[2:4] for tag_call in set_tag.await_args_list] == [
+        ("$event1", "automation"),
+        ("$event2", "automation"),
+        ("$event1", "resolved"),
+        ("$event2", "resolved"),
+    ]
     assert loops == [asyncio.get_running_loop()]
 
 
@@ -688,7 +698,12 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
     assert notice["body"] == "✅ Dreaming applied the reviewed proposal (files written: 1, removed: 0)."
     assert [message["thread_id"] for message in bot.sent] == [None, None, "$event2"]
     assert (root / "memory" / "people.md").read_text(encoding="utf-8") == "- Sam lives in Utrecht.\n"
-    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    assert [tag_call.args[2:4] for tag_call in set_tag.await_args_list] == [
+        ("$event1", "automation"),
+        ("$event2", "automation"),
+        ("$event1", "resolved"),
+        ("$event2", "resolved"),
+    ]
     threads = json.loads((tmp_path / "tracking/automations/threads.json").read_text(encoding="utf-8"))
     assert threads == ["$event1", "$event2"]
     assert ("mind", None) not in runner._active
@@ -765,7 +780,10 @@ async def test_a_plugin_automation_runs_its_chain_through_the_runner(tmp_path: P
         ("@mind Write the digest", "automation/weekly_digest"),
         ("Digest written", "automation/weekly_digest"),
     ]
-    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1"]
+    assert [tag_call.args[2:4] for tag_call in set_tag.await_args_list] == [
+        ("$event1", "automation"),
+        ("$event1", "resolved"),
+    ]
     assert ("mind", None) not in runner._active
 
 
