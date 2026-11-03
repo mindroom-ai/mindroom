@@ -3920,6 +3920,31 @@ def test_kubernetes_cleanup_stops_then_removes_a_failed_subagent_worker(tmp_path
     assert subagent.worker_id not in apps_api.deployments
 
 
+def test_kubernetes_cleanup_removes_a_subagent_worker_with_read_only_directories(tmp_path: Path) -> None:
+    """Read-only directories a tool left in a worker's files, such as Go's module cache, do not block its removal."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    _expire(apps_api, subagent.worker_id, replicas=0)
+    locked = backend.storage_root / backend._state_subpath(subagent_key) / "cache" / "readonly"
+    locked.mkdir(parents=True)
+    (locked / "module.go").write_text("package m\n", encoding="utf-8")
+    locked.chmod(0o555)
+    subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
+    try:
+        assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [subagent_key]
+    finally:
+        if locked.exists():
+            locked.chmod(0o755)
+
+    assert subagent.worker_id not in apps_api.deployments
+    assert subagent_root.exists() is False
+
+
 def test_kubernetes_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(tmp_path: Path) -> None:
     """A subagent's own worker used within the idle timeout keeps running."""
     runtime_paths = resolve_primary_runtime_paths(

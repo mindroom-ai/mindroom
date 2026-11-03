@@ -7,7 +7,7 @@ Each turn runs independently and returns its response as the tool result.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
@@ -26,6 +26,7 @@ from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import current_budget_monitor, current_execution_identity
 from mindroom.tool_system.tool_schema import closed_parameters
+from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -227,7 +228,7 @@ class DelegateTools(Toolkit):
         knowledge: list[str] | None = None,
         profile: str | None = None,
         dedicated_worker: bool = False,
-        resource_profile: Literal["small", "standard", "large"] | None = None,
+        resource_profile: ScriptResourceProfileName | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 

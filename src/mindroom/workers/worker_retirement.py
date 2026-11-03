@@ -172,7 +172,7 @@ class _BoundWorkerStateRoot:
 
         assert self.parent_fd is not None
         _require_current_directory(self.parent_fd, self.worker_name, self.worker_fd)
-        shutil.rmtree(self.worker_name, dir_fd=self.parent_fd)
+        _remove_tree(self.parent_fd, self.worker_name)
 
 
 def remove_directory_tree_at(parent_fd: int, name: str) -> None:
@@ -180,10 +180,19 @@ def remove_directory_tree_at(parent_fd: int, name: str) -> None:
     descriptor = _open_directory_at(parent_fd, name)
     try:
         _require_current_directory(parent_fd, name, descriptor)
-        shutil.rmtree(name, dir_fd=parent_fd)
+        _remove_tree(parent_fd, name)
     finally:
         with suppress(OSError):
             os.close(descriptor)
+
+
+def _remove_tree(parent_fd: int, name: str) -> None:
+    """Remove one child tree, first letting its owner change read-only directories such as Go's module cache."""
+    for _path, _dirnames, _filenames, directory_fd in os.fwalk(name, dir_fd=parent_fd, follow_symlinks=False):
+        mode = stat.S_IMODE(os.fstat(directory_fd).st_mode)
+        if mode & stat.S_IRWXU != stat.S_IRWXU:
+            os.fchmod(directory_fd, mode | stat.S_IRWXU)
+    shutil.rmtree(name, dir_fd=parent_fd)
 
 
 @contextmanager

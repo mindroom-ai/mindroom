@@ -453,19 +453,7 @@ class KubernetesWorkerBackend:
             msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
             raise WorkerBackendError(msg)
         try:
-            deployment = self._resources.read_deployment(worker_id)
-        except self._resources.api_error() as exc:
-            msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
-            raise WorkerBackendError(msg) from exc
-        if deployment is not None:
-            annotations = dict(deployment.metadata.annotations or {})
-            if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
-                msg = f"Kubernetes worker Deployment does not match retirement key '{worker_log_id(worker_key)}'."
-                raise WorkerBackendError(msg)
-            if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
-                msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_log_id(worker_key)}'."
-                raise WorkerBackendError(msg)
-        try:
+            self._require_retirement_deployment(worker_id, worker_key, state_subpath)
             with open_worker_state_root(
                 self.storage_root,
                 workers_subpath=state_parts[:-1],
@@ -493,6 +481,19 @@ class KubernetesWorkerBackend:
         except (OSError, RecursionError, TypeError, ValueError, self._resources.api_error()) as exc:
             msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
             raise WorkerBackendError(msg) from exc
+
+    def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:
+        """Refuse a retirement whose Deployment belongs to another worker or state."""
+        deployment = self._resources.read_deployment(worker_id)
+        if deployment is None:
+            return
+        annotations = dict(deployment.metadata.annotations or {})
+        if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
+            msg = f"Kubernetes worker Deployment does not match retirement key '{worker_log_id(worker_key)}'."
+            raise WorkerBackendError(msg)
+        if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
+            msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_log_id(worker_key)}'."
+            raise WorkerBackendError(msg)
 
     def _cleanup_idle_deployments(
         self,
