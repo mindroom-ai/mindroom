@@ -570,7 +570,7 @@ def put_user_service(
     409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
     an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider,
     one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, a service's own account of a
-    requester-scoped provider (GitHub, Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
+    requester-scoped provider (GitHub, built-in Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
     """
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)

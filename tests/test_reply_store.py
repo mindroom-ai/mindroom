@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -31,6 +33,7 @@ from mindroom.event_journal.replies import (
     ReplyRowRequest,
     WakeApproval,
 )
+from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
 from mindroom.reply_lifecycle import (
     ApprovalFailureKind,
     ClaimContext,
@@ -52,6 +55,8 @@ from tests.reply_span_helpers import paused_for_approval, reply_shown_for_approv
 from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.cancellation import TaskCancelSource
     from mindroom.event_journal import EventJournalStore
 
@@ -1383,7 +1388,7 @@ async def test_retention_keeps_a_reply_a_continuation_still_names(journal_store:
     # The entity left the configuration: its reply ends while the unavailable-owner cleanup still has to discard it.
     assert await journal_store.end_entity_replies(lambda _name: True, now_ns=10) == 1
 
-    assert await alice.replies.forget_finished(before_ns=10**18, limit=10) == 0
+    assert await alice.replies.forget_finished(before_ns=10**18) == 0
     assert await alice.approvals.approval_continuation("approval-1") is not None
 
 
@@ -1488,15 +1493,56 @@ async def test_finished_replies_that_owe_nothing_are_forgotten_with_age(journal_
     assert ended.reply is not None
     assert ended.reply.owed_write is not None
 
-    assert await principal.replies.forget_finished(before_ns=1_000, limit=10) == 0
+    assert await principal.replies.forget_finished(before_ns=1_000) == 0
     await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(ended.reply, owed_write=None)))
-    assert await principal.replies.forget_finished(before_ns=50, limit=10) == 0
-    assert await principal.replies.forget_finished(before_ns=1_000, limit=10) == 1
+    assert await principal.replies.forget_finished(before_ns=50) == 0
+    assert await principal.replies.forget_finished(before_ns=1_000) == 1
 
     assert await principal.replies.load(reply.reply_id) is None
     assert await principal.replies.span(span.span_id) is None
     assert await principal.replies.tool_calls((span.span_id,)) == ()
     assert await principal.replies.for_sources(("$source",)) is None
+
+
+async def test_retention_chooses_replies_on_a_read_and_keeps_one_written_since(
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Which replies to forget is read without holding the writer; a reply written after that read stays."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, span = await _claimed(principal)
+    ended = rl.sources_settled_without_reply(replace(reply, event_id="$reply"), span, now_ns=100)
+    await _apply(journal_store, ended)
+    assert ended.reply is not None
+    await _apply(journal_store, rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(ended.reply, owed_write=None)))
+    read = journal_store.backend.read
+
+    async def read_then_touch(operation: Callable[..., object]) -> object:
+        chosen = await read(operation)
+        await journal_store.backend.write(
+            lambda tx: tx.execute(
+                "UPDATE reply_messages SET updated_at_ns = 2000 WHERE principal_id = ? AND reply_id = ?",
+                (PRINCIPAL, reply.reply_id),
+            ),
+        )
+        return chosen
+
+    monkeypatch.setattr(journal_store.backend, "read", read_then_touch)
+
+    assert await principal.replies.forget_finished(before_ns=1_000) == 0
+    monkeypatch.undo()
+    assert await principal.replies.load(reply.reply_id) is not None
+
+
+async def test_retention_rechecks_a_chosen_reply_by_its_key() -> None:
+    """The writer re-checks a chosen reply by its key instead of walking every finished reply again."""
+    sql = reply_messages._STILL_FORGETTABLE
+    with closing(sqlite3.connect(":memory:")) as database:
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
+
+    assert "SEARCH reply USING INDEX sqlite_autoindex_reply_messages_1 (principal_id=? AND reply_id=?)" in plan, plan
 
 
 async def _stop_waiting_for_the_create(journal_store: EventJournalStore, stop_room: str = ROOM) -> PrincipalStore:

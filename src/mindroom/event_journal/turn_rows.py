@@ -44,7 +44,7 @@ from mindroom.turn_record import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
     from typing import Concatenate
 
     from .backend import Backend, Row, Transaction
@@ -1586,7 +1586,7 @@ def record_redaction(transaction: Transaction, agent_name: str, *, room_id: str,
 
 @dataclass(frozen=True, slots=True)
 class TurnRecordStore:
-    """One agent's turn rows, each call one transaction on the journal's database."""
+    """One agent's turn rows; each ``read`` or ``write`` is one transaction on the journal's database."""
 
     backend: Backend
     agent_name: str
@@ -1613,6 +1613,38 @@ class TurnRecordStore:
     ) -> T:
         """Run one statement function of this module for this agent on the writer, ordered after every queued write."""
         return await self.backend.write(lambda transaction: operation(transaction, self.agent_name, *args, **kwargs))
+
+    async def retain(
+        self,
+        *,
+        now: float,
+        max_age_seconds: float,
+        max_turns: int,
+        unsettled_event_ids: Collection[str],
+    ) -> RetentionResult:
+        """Drop turns past the age limit or beyond the count cap that own no unfinished work, then old plaintext.
+
+        Choosing reads every turn the agent has, so it runs on a reader: on the
+        single writer, that scan would hold every other journal write, and with
+        it all ingestion, for as long as a large journal takes to read from a
+        cold cache. Each write then applies one bounded batch, re-checked against
+        the rows it touches, so a turn written since the snapshot waits for the
+        next pass instead of being dropped on what the snapshot saw.
+        """
+        unsettled = frozenset(unsettled_event_ids)
+        plan = await self.read(
+            _plan_retention,
+            now=now,
+            max_age_seconds=max_age_seconds,
+            max_turns=max_turns,
+            unsettled=unsettled,
+        )
+        dropped = cleared = 0
+        for batch in batched(plan.dropped.items(), _CHUNK, strict=False):
+            dropped += await self.write(_drop_unchanged, dict(batch), unsettled=unsettled)
+        for batch in batched(plan.cleared.items(), _CHUNK, strict=False):
+            cleared += await self.write(_clear_settled_voice, dict(batch), unsettled=unsettled)
+        return RetentionResult(dropped_turn_count=dropped, cleared_voice_turn_count=cleared)
 
 
 # Retention.
@@ -1650,32 +1682,20 @@ def _has_response_intent(turn: _Turn) -> bool:
     return turn.response_owner is not None and turn.conversation_target_json is not None
 
 
-def retain(
+def _required(
     transaction: Transaction,
     agent_name: str,
-    *,
-    now: float,
-    max_age_seconds: float,
-    max_turns: int,
-    unsettled_event_ids: Collection[str],
-) -> RetentionResult:
-    """Drop turns past the age limit or beyond the count cap that own no unfinished work, then old plaintext.
+    loaded: Iterable[_Rows],
+    unsettled: frozenset[str],
+) -> frozenset[str]:
+    """Return which of these turns are kept regardless of age, as owners of unfinished work.
 
-    Kept regardless of age: a turn any of whose sources, aliases, or revisions
-    the journal still has unsettled, and an unfinished turn with a source left
-    to replay, unless it is only a voice checkpoint. Every other candidate
-    goes with its rows. Separately, a kept unfinished turn none of whose sources
-    is unsettled and that no response intends to answer loses its voice
-    checkpoints, keeping its echo ids for publication readers.
+    That is a turn any of whose sources, aliases, or revisions the journal
+    still has unsettled, and an unfinished turn with a source left to replay,
+    unless it is only a voice checkpoint.
     """
-    unsettled = frozenset(unsettled_event_ids)
-    keys = [
-        str(row["turn_key"])
-        for row in transaction.fetchall("SELECT turn_key FROM turns WHERE agent_name = ?", (agent_name,))
-    ]
-    loaded = _load_rows(transaction, agent_name, keys)
     by_room: dict[str | None, list[_Rows]] = {}
-    for rows in loaded.values():
+    for rows in loaded:
         by_room.setdefault(rows.turn.room_id, []).append(rows)
     redacted: dict[str | None, frozenset[str]] = {
         room_id: frozenset()
@@ -1707,27 +1727,96 @@ def retain(
             not rows.turn.completed and replayable(rows) and not _pure_voice_checkpoint(rows)
         )
 
+    return frozenset(rows.turn.turn_key for room_rows in by_room.values() for rows in room_rows if required(rows))
+
+
+def _clearable(rows: _Rows, unsettled: frozenset[str]) -> bool:
+    """Whether a kept turn loses its voice checkpoints: unfinished, unsettled nowhere, and no response intends to answer it."""
+    return (
+        not rows.turn.completed
+        and not _has_response_intent(rows.turn)
+        and unsettled.isdisjoint(source.event_id for source in rows.sources)
+        and any(source.prepared_voice_json is not None for source in rows.sources)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RetentionPlan:
+    """What one snapshot decided: each turn to drop and each turn to clear, with the ``updated_at`` it had then."""
+
+    dropped: dict[str, float]
+    cleared: dict[str, float]
+
+
+def _plan_retention(
+    transaction: Transaction,
+    agent_name: str,
+    *,
+    now: float,
+    max_age_seconds: float,
+    max_turns: int,
+    unsettled: frozenset[str],
+) -> _RetentionPlan:
+    """Choose the turns past the age limit or beyond the count cap that own no unfinished work, and old plaintext.
+
+    Every candidate goes with its rows. Separately, a kept unfinished turn none
+    of whose sources is unsettled and that no response intends to answer loses
+    its voice checkpoints, keeping its echo ids for publication readers.
+    """
+    keys = [
+        str(row["turn_key"])
+        for row in transaction.fetchall("SELECT turn_key FROM turns WHERE agent_name = ?", (agent_name,))
+    ]
+    loaded = _load_rows(transaction, agent_name, keys)
+    needed = _required(transaction, agent_name, loaded.values(), unsettled)
     ordered = sorted(loaded.values(), key=lambda rows: (rows.turn.updated_at, rows.turn.turn_key))
-    needed = {rows.turn.turn_key for rows in ordered if required(rows)}
     fresh = [rows for rows in ordered if rows.turn.turn_key in needed or now - rows.turn.updated_at < max_age_seconds]
     if len(fresh) > max_turns:
         ordinary = [rows for rows in fresh if rows.turn.turn_key not in needed]
         kept_ordinary = ordinary[-max_turns:] if max_turns else []
         fresh = [rows for rows in fresh if rows.turn.turn_key in needed] + kept_ordinary
     kept = {rows.turn.turn_key for rows in fresh}
-    dropped = [key for key in keys if key not in kept]
+    return _RetentionPlan(
+        dropped={key: loaded[key].turn.updated_at for key in keys if key not in kept},
+        cleared={rows.turn.turn_key: rows.turn.updated_at for rows in fresh if _clearable(rows, unsettled)},
+    )
+
+
+def _unchanged(transaction: Transaction, agent_name: str, planned: Mapping[str, float]) -> list[_Rows]:
+    """Load the planned turns still at the ``updated_at`` their plan read; any write since moves it."""
+    loaded = _load_rows(transaction, agent_name, planned)
+    return [rows for key, rows in loaded.items() if rows.turn.updated_at == planned[key]]
+
+
+def _drop_unchanged(
+    transaction: Transaction,
+    agent_name: str,
+    planned: Mapping[str, float],
+    *,
+    unsettled: frozenset[str],
+) -> int:
+    """Drop each planned turn unchanged since its plan and still owning no unfinished work."""
+    unchanged = _unchanged(transaction, agent_name, planned)
+    needed = _required(transaction, agent_name, unchanged, unsettled)
+    dropped = [rows.turn.turn_key for rows in unchanged if rows.turn.turn_key not in needed]
     for batch in batched(dropped, _CHUNK, strict=False):
         transaction.execute(
             f"DELETE FROM turns WHERE agent_name = ? AND turn_key IN ({_placeholders(batch)})",  # noqa: S608
             (agent_name, *batch),
         )
+    return len(dropped)
+
+
+def _clear_settled_voice(
+    transaction: Transaction,
+    agent_name: str,
+    planned: Mapping[str, float],
+    *,
+    unsettled: frozenset[str],
+) -> int:
+    """Clear the voice checkpoints of each planned turn unchanged since its plan and still qualifying."""
     cleared = [
-        rows.turn.turn_key
-        for rows in fresh
-        if not rows.turn.completed
-        and not _has_response_intent(rows.turn)
-        and unsettled.isdisjoint(source.event_id for source in rows.sources)
-        and any(source.prepared_voice_json is not None for source in rows.sources)
+        rows.turn.turn_key for rows in _unchanged(transaction, agent_name, planned) if _clearable(rows, unsettled)
     ]
     for batch in batched(cleared, _CHUNK, strict=False):
         transaction.execute(
@@ -1735,7 +1824,7 @@ def retain(
             f"WHERE agent_name = ? AND turn_key IN ({_placeholders(batch)})",
             (agent_name, *batch),
         )
-    return RetentionResult(dropped_turn_count=len(dropped), cleared_voice_turn_count=len(cleared))
+    return len(cleared)
 
 
 __all__ = [
@@ -1771,7 +1860,6 @@ __all__ = [
     "record_turn",
     "record_visible_echo",
     "redacted_events",
-    "retain",
     "sources_deleted_by",
     "turn_for_response_event",
     "visible_echo",

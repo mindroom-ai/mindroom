@@ -978,9 +978,22 @@ class ReplyStore(PrincipalRows):
             return frozenset()
         return await self._read(reply_messages.event_ids_of_spans, room_id, tuple(sorted(span_ids)))
 
-    async def forget_finished(self, *, before_ns: int, limit: int) -> int:
-        """Delete up to ``limit`` finished replies that owe nothing and are older than ``before_ns``."""
-        return await self._write(reply_messages.forget_finished, before_ns=before_ns, limit=limit)
+    async def forget_finished(self, *, before_ns: int) -> int:
+        """Delete the finished replies that owe nothing and are older than ``before_ns``; return how many.
+
+        Finding them reads every finished reply the principal has, so that runs
+        on a reader rather than holding the single writer, and every other
+        journal write, for the whole scan. Each reply then goes in its own write
+        that re-checks it, so a reply written since the scan stays. One at a
+        time because deleting a reply reads back all its spans and tool calls:
+        batched, those costs add up into one long hold of the writer.
+        """
+        candidates = await self._read(reply_messages.forgettable_replies, before_ns=before_ns)
+        forgotten = 0
+        for reply_id in candidates:
+            forgotten += await self._write(reply_messages.forget_reply, before_ns=before_ns, reply_id=reply_id)
+        await self._write(reply_messages.forget_pending_stops, before_ns=before_ns)
+        return forgotten
 
     async def take_deletion_endings(self) -> tuple[reply_messages.DeletionEnding, ...]:
         """Remove and return the replies source deletions ended, with the spans they cancelled."""

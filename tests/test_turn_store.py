@@ -2776,8 +2776,7 @@ async def test_prepared_voice_checkpoint_retention_follows_unsettled_sources(
         await store.record_pending_turn(
             _in_room(TurnRecord.create(["$voice"], completed=False, command_execution_started=True)),
         )
-    await store.deps.turn_records.write(
-        turn_rows.retain,
+    await store.deps.turn_records.retain(
         now=time.time() + 1,
         max_age_seconds=0,
         max_turns=0,
