@@ -1795,6 +1795,165 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     assert bob_pending == []
 
 
+@pytest.mark.asyncio
+async def test_a_bare_mention_from_the_requester_nudges_its_running_reply(tmp_path: Path) -> None:
+    """The requester's bare mention of the agent answering them neither stops that reply nor starts another.
+
+    Queued as a newer message, it would cut the reply short after its next tool batch and then get a reply of its own.
+    """
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    install_direct_response_admission(bot)
+    room = _make_room()
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = MessageTarget.resolve(room.room_id, "$thread", "$request")
+    queued_signal = response_runner.lifecycle_coordinator._get_or_create_queued_signal(target)
+    request = _text_event(event_id="$request", body="summarize the report", server_timestamp=1001, thread_id="$thread")
+    nudge = _text_event(event_id="$nudge", body=bot.matrix_id.full_id, server_timestamp=1002, thread_id="$thread")
+    prompts: list[str] = []
+    nudge_outcomes: list[TurnDispatchOutcome] = []
+    waiting_after_nudge: list[bool] = []
+
+    async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        prompts.append(ctx.prompt)
+        if ctx.prompt == "summarize the report":
+            nudge_outcomes.append(await bot._turn_ingress.handle_text_event(room, nudge))
+            waiting_after_nudge.append(queued_signal.has_pending_human_messages())
+        return "ok"
+
+    with (
+        patch(
+            "mindroom.response_runner.stream_agent_response",
+            new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch.object(
+            unwrap_extracted_collaborator(bot._conversation_resolver),
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+        ),
+    ):
+        await bot._turn_ingress.handle_text_event(room, request)
+        await _wait_for(lambda: bool(nudge_outcomes))
+        await bot._coalescing_gate.drain_all()
+        await response_runner.inbox.drain_inbox_responses()
+
+    assert nudge_outcomes == [TurnDispatchOutcome.INTENTIONALLY_IGNORED]
+    assert waiting_after_nudge == [False]
+    assert prompts == ["summarize the report"]
+    # Once that reply ends, a bare mention starts a reply again.
+    assert response_runner.running_reply_requester(target) is None
+
+
+@pytest.mark.asyncio
+async def test_a_bare_mention_while_the_reply_is_still_being_planned_nudges_it(tmp_path: Path) -> None:
+    """A bare mention that arrives before the reply takes its conversation's lock is absorbed once the reply runs."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    install_direct_response_admission(bot)
+    room = _make_room()
+    response_runner = unwrap_extracted_collaborator(bot._response_runner)
+    queued_signal = response_runner.lifecycle_coordinator._get_or_create_queued_signal(
+        MessageTarget.resolve(room.room_id, "$thread", "$request"),
+    )
+    request = _text_event(event_id="$request", body="summarize the report", server_timestamp=1001, thread_id="$thread")
+    nudge = _text_event(event_id="$nudge", body=bot.matrix_id.full_id, server_timestamp=1002, thread_id="$thread")
+    policy = bot._turn_dispatcher.deps.turn_policy
+    plan_turn = policy.plan_turn
+    prompts: list[str] = []
+    nudge_outcomes: list[TurnDispatchOutcome] = []
+    waiting_during_reply: list[bool] = []
+
+    async def plan_turn_while_nudged(room: nio.MatrixRoom, event: PreparedIngress, *args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+        if event.event_id == "$request":
+            nudge_outcomes.append(await bot._turn_ingress.handle_text_event(room, nudge))
+        return await plan_turn(room, event, *args, **kwargs)
+
+    async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        prompts.append(ctx.prompt)
+        if ctx.prompt == "summarize the report":
+            # Queued as a turn of its own, the nudge would wait on this reply's lock as a newer message.
+            await _wait_for(
+                lambda: (
+                    queued_signal.has_pending_human_messages()
+                    or not bot._coalescing_gate.has_pending_source_event("$nudge")
+                ),
+            )
+            waiting_during_reply.append(queued_signal.has_pending_human_messages())
+        return "ok"
+
+    with (
+        patch.object(policy, "plan_turn", new=plan_turn_while_nudged),
+        patch(
+            "mindroom.response_runner.stream_agent_response",
+            new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+        ),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch.object(
+            unwrap_extracted_collaborator(bot._conversation_resolver),
+            "fetch_thread_history",
+            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+        ),
+    ):
+        await bot._turn_ingress.handle_text_event(room, request)
+        await _wait_for(lambda: bool(waiting_during_reply))
+        await bot._coalescing_gate.drain_all()
+        await response_runner.inbox.drain_inbox_responses()
+
+    # Ingress saw no running reply yet, so the nudge queued and dispatch absorbed it.
+    assert nudge_outcomes == [TurnDispatchOutcome.DEFERRED]
+    assert waiting_during_reply == [False]
+    assert prompts == ["summarize the report"]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_mention_after_an_upload_captions_it_while_a_reply_runs(tmp_path: Path) -> None:
+    """A bare mention right after its sender's upload is that upload's caption, not a nudge of the running reply."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
+    target = MessageTarget.resolve(room.room_id, "$thread", "$response")
+    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
+    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    upload = _image_event(event_id="$img", server_timestamp=1001, thread_id="$thread")
+    caption = _text_event(event_id="$caption", body=bot.matrix_id.full_id, server_timestamp=1002, thread_id="$thread")
+    batches: list[list[str]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        **_metadata: object,
+    ) -> None:
+        batches.append(_handled_turn_source_event_ids(handled_turn))
+
+    # A reply for the same person runs in the thread.
+    await lifecycle_lock.acquire()
+    queued_signal.begin_response_turn()
+    queued_signal.running_requester_id = "@user:localhost"
+    try:
+        with patch.object(
+            TurnDispatcher,
+            "dispatch_turn",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ):
+            await bot._turn_ingress.handle_media_event(room, upload)
+            assert await bot._turn_ingress.handle_text_event(room, caption) is TurnDispatchOutcome.DEFERRED
+            backlog = active_follow_up_coalescing_key(room.room_id, "$thread")
+            await _wait_for(lambda: len(bot._coalescing_gate.queued_pending_events(backlog)) == 2)
+            queued_signal.running_requester_id = None
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+            await bot._coalescing_gate.drain_all()
+    finally:
+        if lifecycle_lock.locked():
+            queued_signal.running_requester_id = None
+            queued_signal.finish_response_turn()
+            lifecycle_lock.release()
+
+    assert batches == [["$img", "$caption"]]
+
+
 @pytest.mark.parametrize(
     ("dispatched_count", "answered_count"),
     [

@@ -35,6 +35,7 @@ from .batch import (
     is_active_follow_up_coalescing_key,
     pending_event_addressing,
     pending_event_run_identity,
+    requester_coalescing_key,
 )
 from .cleanup import (
     ClaimedSegmentOwner,
@@ -307,6 +308,13 @@ class CoalescingGate:
     def has_pending_work(self, key: CoalescingKey) -> bool:
         """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
         return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
+
+    def has_pending_work_from(self, room_id: str, thread_id: str | None, requester_user_id: str) -> bool:
+        """Return whether a lane, the requester's own queue, or the follow-up backlog still holds their unclaimed work."""
+        return self.has_pending_work(requester_coalescing_key(room_id, thread_id, requester_user_id)) or any(
+            pending_event.facts.lane_requester_id == requester_user_id
+            for pending_event in self.queued_pending_events(active_follow_up_coalescing_key(room_id, thread_id))
+        )
 
     def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
         """Return whether a queue still holds a run other than this requester's own messages for this agent."""

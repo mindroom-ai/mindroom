@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -17,6 +19,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
+from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import filter_materializable_responders
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
@@ -41,6 +44,7 @@ from mindroom.thread_utils import (
     thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import timed
+from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -112,6 +116,11 @@ _ROUTER_ONLY_MENTION_GUIDANCE = (
     "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
     "agent you can tag directly."
 )
+
+
+def _is_punctuation_only(text: str) -> bool:
+    """Return whether text holds nothing but whitespace and punctuation."""
+    return all(char.isspace() or unicodedata.category(char).startswith("P") for char in text)
 
 
 @dataclass(frozen=True)
@@ -549,6 +558,54 @@ class TurnPolicy:
         )
         mention = self._router_mention(mentioned_agents, has_non_agent_mentions=has_non_agent_mentions)
         return None if mention is None else mention == "addressed_elsewhere"
+
+    def nudges_running_reply(
+        self,
+        room: nio.MatrixRoom,
+        event: PreparedIngress,
+        envelope: MessageEnvelope,
+        *,
+        running_reply_requester_id: str | None,
+    ) -> bool:
+        """Return whether a message only nudges the reply this agent is already running for its sender.
+
+        A nudge is a person's own text message to the conversation this agent is answering them in that mentions
+        only this agent and holds nothing else: no other text, mention, or attachment, such as a bare `@agent` sent
+        because no progress is visible yet. Requester IDs are alias-resolved at ingress, so a bridge alias of the
+        requester is the requester here too.
+        """
+        content = event.source.get("content")
+        if (
+            running_reply_requester_id is None
+            or envelope.requester_id != running_reply_requester_id
+            or envelope.origin.intent is not TurnIntent.USER_MESSAGE
+            or envelope.attachment_ids
+            or not isinstance(content, dict)
+            or content.get("msgtype") != "m.text"
+        ):
+            return False
+        config = self.deps.runtime.config
+        mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+            event.source,
+            self.deps.matrix_id,
+            config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        if has_non_agent_mentions or set(mentioned_agents) != {self.deps.matrix_id}:
+            return False
+        # A pill puts the agent's display name in the plain body, which is a mention only as the whole body: the
+        # same word after a mention is text.
+        pill = re.fullmatch(
+            rf"(.*?){re.escape(config.entity_display_name(self.deps.agent_name))}(.*)",
+            event.body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if pill is not None and _is_punctuation_only(pill[1]) and _is_punctuation_only(pill[2]):
+            return True
+        # A typed mention, as the agent's Matrix ID or its `@name`, parses to the Matrix ID.
+        text, _mentioned_user_ids, _markdown = parse_mentions_in_text(event.body, config, self.deps.runtime_paths)
+        return _is_punctuation_only(text.replace(self.deps.matrix_id.full_id, ""))
 
     async def router_thread_skips(
         self,

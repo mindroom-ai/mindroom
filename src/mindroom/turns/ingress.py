@@ -386,6 +386,20 @@ class TurnIngress:
                 coalescing_thread_id=coalescing_thread_id,
                 ticket=ticket,
             )
+        if self.deps.turn_policy.nudges_running_reply(
+            room,
+            prepared_event,
+            envelope,
+            running_reply_requester_id=self.deps.response_runner.running_reply_requester(target),
+        ) and not self.deps.coalescing_gate.has_pending_work_from(
+            room.room_id,
+            coalescing_thread_id,
+            facts.lane_requester_id,
+        ):
+            # Queued, it would cut the running reply short and then start a second one. A message of the same
+            # person still waiting in the gate, such as an upload, takes it as its caption instead.
+            self.deps.logger.info("Absorbing nudge of the running reply", event_id=prepared_event.event_id)
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         await self._enqueue_prepared_ingress(
             room,
             prepared_event,
@@ -584,6 +598,9 @@ class TurnIngress:
             or key.thread_id is None
             or facts.source_kind != MESSAGE_SOURCE_KIND
             or not facts.origin.may_answer_interactive_prompt
+            # A message that mentions an agent never selects participation, so it reads no context: a reply that
+            # started during that read would let a nudge checked before it queue behind that reply.
+            or self.deps.resolver.pre_hydration_mentions(room=room, event=event)[0]
         ):
             return 0.0
         context = await self.deps.resolver.extract_dispatch_context(room, event, thread_id=key.thread_id)

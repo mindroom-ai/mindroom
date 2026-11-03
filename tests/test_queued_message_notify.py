@@ -39,6 +39,7 @@ from mindroom.dispatch_source import (
     HOOK_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
@@ -309,6 +310,36 @@ def test_response_lifecycle_rejects_mismatched_reservation_target() -> None:
             target=mismatched_target,
             response_envelope=envelope,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_kind", "running_requester"),
+    [
+        (MESSAGE_SOURCE_KIND, "@user:localhost"),
+        (SCHEDULED_SOURCE_KIND, None),
+        (SILENT_SCHEDULE_SOURCE_KIND, None),
+    ],
+)
+async def test_only_a_reply_to_a_live_message_can_be_nudged(source_kind: str, running_requester: str | None) -> None:
+    """A scheduled run's requester is its creator, whose bare mention during that run must still start a reply."""
+    lifecycle = ResponseLifecycleCoordinator()
+    envelope = _envelope(source_kind=source_kind)
+    seen: list[str | None] = []
+
+    async def locked_operation(target: MessageTarget) -> SourceFate:
+        seen.append(lifecycle.running_reply_requester(target))
+        return Owned()
+
+    await lifecycle.run_locked_response(
+        target=envelope.target,
+        response_envelope=envelope,
+        pipeline_timing=None,
+        locked_operation=locked_operation,
+    )
+
+    assert seen == [running_requester]
+    assert lifecycle.running_reply_requester(envelope.target) is None
 
 
 @pytest.mark.asyncio
