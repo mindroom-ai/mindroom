@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import enum
-import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -15,6 +14,7 @@ from nio import crypto
 from nio.api import Api
 from nio.exceptions import OlmTrustError
 
+from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
@@ -508,11 +508,6 @@ async def send_message_result(
     return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
 
-def _guess_mimetype(file_path: Path) -> str:
-    guessed_mimetype, _ = mimetypes.guess_type(file_path.name)
-    return guessed_mimetype or "application/octet-stream"
-
-
 async def _upload_file_as_mxc(
     client: nio.AsyncClient,
     room_id: str,
@@ -701,7 +696,7 @@ async def send_file_message(
         return None
 
     display_name = filename or resolved_path.name
-    mimetype = mimetype or _guess_mimetype(resolved_path)
+    mimetype = mimetype or named_mime_type(resolved_path.name) or "application/octet-stream"
     mxc_uri, upload_payload = await _upload_file_as_mxc(
         client,
         room_id,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import mimetypes
 import re
 import unicodedata
 from datetime import datetime
@@ -35,6 +34,7 @@ from mindroom.custom_tools.microsoft_graph import (
     time_zone_name,
 )
 from mindroom.file_access import checked_upload_source, read_upload_source
+from mindroom.llm.media import named_mime_type
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
 
@@ -396,7 +396,7 @@ class OutlookMailTools(Toolkit):
             {
                 "@odata.type": "#microsoft.graph.fileAttachment",
                 "name": name,
-                "contentType": mimetypes.guess_type(name)[0] or "application/octet-stream",
+                "contentType": named_mime_type(name) or "application/octet-stream",
                 "contentBytes": base64.b64encode(content).decode("ascii"),
             }
             for name, content in files

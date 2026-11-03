@@ -341,6 +341,24 @@ class TestSendFileMessage:
         assert client.upload.await_args.kwargs["filename"] == "data.xml"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("name", "mimetype"),
+        [
+            ("report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            ("rows.csv.gz", "application/octet-stream"),
+        ],
+    )
+    async def test_an_untyped_upload_is_typed_by_its_name(self, tmp_path: Path, name: str, mimetype: str) -> None:
+        """A Word file is typed as Word on every host, and a compressed file by no type its inner name names."""
+        client = _delivering_client(encrypted=False)
+        file = tmp_path / name
+        file.write_bytes(b"PK\x03\x04")
+
+        await send_file_message(client, "!room:localhost", file)
+
+        assert _wire_content(client)["info"] == {"size": 4, "mimetype": mimetype}
+
+    @pytest.mark.asyncio
     async def test_threaded_send_requires_precomputed_latest_thread_event_id(self, tmp_path: Path) -> None:
         """Threaded file sends should require fallback resolution from the conversation-cache seam."""
         client = _delivering_client(encrypted=False)
