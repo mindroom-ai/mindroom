@@ -689,20 +689,22 @@ def _frame_holding_attachments(
     limit: int | None,
     scope_context: ScopeSessionContext | None,
 ) -> Callable[[TurnMessages], RequestFrame]:
-    """Return ``frame`` with ``media`` on the prompt when a request holding them and ``turn`` fits beside the summary.
+    """Return ``frame`` with ``media`` on the prompt when a request holding them fits beside what no trim removes.
 
-    Attachments estimated past ``limit`` even beside nothing but the scope's summary are left to the media fallback,
-    which drops them if the provider refuses, so an estimate that runs high trims the history but never fails the reply.
-    A scope without a session has no summary to keep and nothing to compact, so its attachments always count, and the
-    thread history that stands in for its replay is fitted beside them.
+    That is ``turn`` and the scope's summary; a scope without a session has no summary, and the thread history in its
+    turn stands in for a replay that is fitted beside the attachments later, so only the rest of the turn counts.
+    Attachments estimated past ``limit`` beside it are left to the media fallback, which drops them if the provider
+    refuses, so an estimate that runs high trims the history but never fails the reply or drops what it would keep.
     """
     if not media.has_any():
         return frame
     media_frame = partial(_frame_with_media, frame, media)
-    session = scope_context.session if scope_context is not None else None
-    if session is None or limit is None:
+    if limit is None:
         return media_frame
-    if model.request_tokens(media_frame(turn).request(summary=session.summary)) <= limit:
+    session = scope_context.session if scope_context is not None else None
+    kept = turn if session is not None else replace(turn, context=())
+    summary = session.summary if session is not None else None
+    if model.request_tokens(media_frame(kept).request(summary=summary)) <= limit:
         return media_frame
     return frame
 

@@ -682,6 +682,40 @@ async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attach
 
 
 @pytest.mark.asyncio
+async def test_a_first_reply_whose_attachment_cannot_fit_keeps_its_thread(tmp_path: Path, provider: _Provider) -> None:
+    """An attachment estimated past the limit on its own leaves the thread fallback as it was without it."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=12_000,
+    )
+    thread_history = [
+        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 400, event_id=f"$note-{index}")
+        for index in range(5)
+    ]
+    current = make_visible_message(sender="@alice:localhost", body="Read the report.", event_id="$current")
+    # Three pages count 15,000 tokens, over the 11,500-token limit.
+    report = File(content=blank_pdf(3), mime_type="application/pdf", filename="report.pdf")
+
+    with _no_memory():
+        await ai_response(
+            replace(
+                make_turn_context("test_agent", session_id="fresh", reply_to_event_id="$current"),
+                prompt="Read the report.",
+                thread_history=[*thread_history, current],
+                media=MediaInputs(files=(report,)),
+            ),
+            runtime_paths,
+            config,
+        )
+
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (report,)
+    sent = render_prepared_messages_text(request.messages)
+    assert all(f"note-{index}" in sent for index in range(5))
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("provider")
 async def test_without_a_context_window_the_prepared_size_holds_the_attachments(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=None)
