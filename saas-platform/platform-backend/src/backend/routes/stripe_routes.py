@@ -84,13 +84,17 @@ def _plan_change_portal_options(subscription: Any, tier: str, price_id: str) -> 
     """Return portal session options that open the confirmation of an upgrade to `price_id`.
 
     A subscription that is not active or trialing, or is set to cancel, gets none and opens on the portal home, where
-    it can be paid or renewed first. So does a move to a plan that does not cost more: a downgrade would credit the
-    unused time of a plan whose AI budget may already be spent.
+    it can be paid or renewed first; so does one the portal cannot update (a schedule, invoices paid by hand, several
+    items). So does a move to a plan that does not cost more: a downgrade would credit the unused time of a plan whose
+    AI budget may already be spent.
     """
     if (
         subscription["status"] not in {"active", "trialing"}
         or subscription.get("cancel_at")
         or subscription.get("cancel_at_period_end")
+        or subscription.get("schedule")
+        or subscription.get("collection_method") == "send_invoice"
+        or len(subscription["items"]["data"]) != 1
     ):
         return {}
     item = subscription["items"]["data"][0]

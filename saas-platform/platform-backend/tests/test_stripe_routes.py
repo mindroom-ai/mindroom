@@ -287,6 +287,7 @@ class TestStripeRoutesEndpoints:
             mock_stripe.billing_portal.Session.create.assert_not_called()
             assert response.json()["url"] == "https://checkout.stripe.com/pay/cs_test_123"
 
+    @pytest.mark.parametrize("status", ["trialing", "active"])
     @pytest.mark.parametrize("configuration_exists", [True, False])
     def test_checkout_opens_the_upgrade_confirmation_for_a_subscriber(
         self,
@@ -295,6 +296,7 @@ class TestStripeRoutesEndpoints:
         mock_stripe: Mock,
         mock_verify_user: Mock,
         configuration_exists: bool,
+        status: str,
     ):
         """A subscriber choosing a larger plan confirms the switch in a portal configuration offering only that plan."""
         hobby, pro, pro_yearly = (
@@ -306,7 +308,7 @@ class TestStripeRoutesEndpoints:
             data={"stripe_customer_id": "cus_test_123"}
         )
         mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
-            _subscription("sub_existing", "trialing", hobby)
+            _subscription("sub_existing", status, hobby)
         ]
         other = Mock(id="bpc_other", metadata={"mindroom_upgrade_prices": "price_a,price_b"})
         existing = Mock(id="bpc_pro", metadata={"mindroom_upgrade_prices": f"{pro},{pro_yearly}"})
@@ -328,6 +330,10 @@ class TestStripeRoutesEndpoints:
         assert session["flow_data"]["subscription_update_confirm"] == {
             "subscription": "sub_existing",
             "items": [{"id": "si_existing", "price": pro, "quantity": 1}],
+        }
+        assert session["flow_data"]["after_completion"] == {
+            "type": "redirect",
+            "redirect": {"return_url": "https://app.mindroom.chat/dashboard/billing"},
         }
         if configuration_exists:
             mock_stripe.billing_portal.Configuration.create.assert_not_called()
@@ -352,6 +358,15 @@ class TestStripeRoutesEndpoints:
             ("past_due", {}, "hobby", "pro", "monthly"),
             ("active", {"cancel_at": 1_800_000_000}, "hobby", "pro", "monthly"),
             ("active", {"cancel_at_period_end": True}, "hobby", "pro", "monthly"),
+            ("active", {"schedule": "sub_sched_1"}, "hobby", "pro", "monthly"),
+            ("active", {"collection_method": "send_invoice"}, "hobby", "pro", "monthly"),
+            (
+                "active",
+                {"items": {"data": [{"id": "si_1", "price": {"id": "x"}}, {"id": "si_2", "price": {"id": "y"}}]}},
+                "hobby",
+                "pro",
+                "monthly",
+            ),
             ("active", {}, "pro", "hobby", "monthly"),
             ("trialing", {}, "hobby", "byok", "monthly"),
             ("active", {}, "hobby", "hobby", "yearly"),
@@ -438,6 +453,8 @@ def _subscription(subscription_id: str, status: str, price_id: str | None, **fie
             "trial_start": None,
             "cancel_at": None,
             "cancel_at_period_end": False,
+            "schedule": None,
+            "collection_method": "charge_automatically",
             "items": {"data": [{"id": "si_existing", "price": {"id": price_id}}]},
             **fields,
         },
