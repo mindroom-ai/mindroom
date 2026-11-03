@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
-from itertools import batched
 from typing import TYPE_CHECKING
 
 from mindroom import reply_lifecycle as rl
@@ -37,9 +36,6 @@ if TYPE_CHECKING:
 
     from .backend import Transaction
     from .models import MatrixDelivery
-
-# Bounds one write of reply retention, so a backlog of old replies never holds the writer long.
-_FORGET_BATCH = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -987,13 +983,15 @@ class ReplyStore(PrincipalRows):
 
         Finding them reads every finished reply the principal has, so that runs
         on a reader rather than holding the single writer, and every other
-        journal write, for the whole scan. Each write then deletes one bounded
-        batch and re-checks it, so a reply written since the scan stays.
+        journal write, for the whole scan. Each reply then goes in its own write
+        that re-checks it, so a reply written since the scan stays. One at a
+        time because deleting a reply reads back all its spans and tool calls:
+        batched, those costs add up into one long hold of the writer.
         """
         candidates = await self._read(reply_messages.forgettable_replies, before_ns=before_ns)
         forgotten = 0
-        for batch in batched(candidates, _FORGET_BATCH, strict=False):
-            forgotten += await self._write(reply_messages.forget_replies, before_ns=before_ns, reply_ids=batch)
+        for reply_id in candidates:
+            forgotten += await self._write(reply_messages.forget_reply, before_ns=before_ns, reply_id=reply_id)
         await self._write(reply_messages.forget_pending_stops, before_ns=before_ns)
         return forgotten
 

@@ -1534,12 +1534,12 @@ async def test_retention_chooses_replies_on_a_read_and_keeps_one_written_since(
     assert await principal.replies.load(reply.reply_id) is not None
 
 
-async def test_a_full_retention_batch_looks_each_reply_up_by_key(tmp_path: Path) -> None:
-    """A batch of chosen replies is re-checked one key lookup each, not by walking every finished reply again."""
+async def test_retention_rechecks_a_chosen_reply_by_its_key(tmp_path: Path) -> None:
+    """The writer re-checks a chosen reply by its key instead of walking every finished reply again."""
     database = sqlite3.connect(tmp_path / "forget-plan.db")
     for statement in schema_statements(SQLITE_DIALECT):
         database.execute(statement)
-    sql = reply_messages._forgettable_among(500)
+    sql = reply_messages._STILL_FORGETTABLE
 
     plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
 

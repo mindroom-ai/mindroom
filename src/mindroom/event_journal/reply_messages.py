@@ -324,46 +324,29 @@ def forgettable_replies(transaction: Transaction, principal_id: str, *, before_n
     return tuple(str(row["reply_id"]) for row in rows)
 
 
-def _forgettable_among(count: int) -> str:
-    """Select which of ``count`` chosen replies are still forgettable, one key lookup each.
-
-    Given the ids as an ``IN`` list as long as a batch, SQLite prefers
-    ``reply_messages_state`` and tests every finished reply of the principal,
-    on the writer, before it reaches the list. ``CROSS JOIN`` keeps the chosen
-    ids as SQLite's outer loop.
-    """
-    chosen = ", ".join("(?)" for _ in range(count))
-    return (
-        f"WITH chosen (reply_id) AS (VALUES {chosen}) "  # noqa: S608 - fixed predicate and placeholders
-        "SELECT reply.reply_id FROM chosen CROSS JOIN reply_messages AS reply "
-        f"WHERE reply.principal_id = ? AND reply.reply_id = chosen.reply_id AND {_FORGETTABLE}"
-    )
+# Whether one reply, by key, is still forgettable: a lookup by its primary key, never a walk of the finished replies.
+_STILL_FORGETTABLE = (
+    "SELECT 1 FROM reply_messages AS reply "  # noqa: S608 - a fixed predicate
+    f"WHERE reply.principal_id = ? AND reply.reply_id = ? AND {_FORGETTABLE}"
+)
 
 
-def forget_replies(transaction: Transaction, principal_id: str, *, before_ns: int, reply_ids: tuple[str, ...]) -> int:
-    """Delete those of ``reply_ids`` that are still forgettable, with their spans; return how many."""
-    rows = transaction.fetchall(_forgettable_among(len(reply_ids)), (*reply_ids, principal_id, before_ns))
-    forgettable = tuple(str(row["reply_id"]) for row in rows)
-    if forgettable:
-        placeholders = ", ".join("?" for _ in forgettable)
-        for table in ("reply_span_sources", "reply_tool_calls"):
-            transaction.execute(
-                f"""
-                DELETE FROM {table} WHERE principal_id = ? AND span_id IN (
-                    SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})
-                )
-                """,  # noqa: S608 - fixed table names and placeholders
-                (principal_id, principal_id, *forgettable),
+def forget_reply(transaction: Transaction, principal_id: str, *, before_ns: int, reply_id: str) -> bool:
+    """Delete one reply with its spans if it is still forgettable; return whether it went."""
+    if transaction.fetchone(_STILL_FORGETTABLE, (principal_id, reply_id, before_ns)) is None:
+        return False
+    for table in ("reply_span_sources", "reply_tool_calls"):
+        transaction.execute(
+            f"""
+            DELETE FROM {table} WHERE principal_id = ? AND span_id IN (
+                SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id = ?
             )
-        transaction.execute(
-            f"DELETE FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
-            (principal_id, *forgettable),
+            """,  # noqa: S608 - fixed table names
+            (principal_id, principal_id, reply_id),
         )
-        transaction.execute(
-            f"DELETE FROM reply_messages WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
-            (principal_id, *forgettable),
-        )
-    return len(forgettable)
+    transaction.execute("DELETE FROM reply_spans WHERE principal_id = ? AND reply_id = ?", (principal_id, reply_id))
+    transaction.execute("DELETE FROM reply_messages WHERE principal_id = ? AND reply_id = ?", (principal_id, reply_id))
+    return True
 
 
 def forget_pending_stops(transaction: Transaction, principal_id: str, *, before_ns: int) -> None:
