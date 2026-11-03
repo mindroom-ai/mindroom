@@ -6,6 +6,7 @@ import asyncio
 import errno
 import hashlib
 import json
+import mimetypes
 import os
 import threading
 from datetime import UTC, datetime, timedelta
@@ -914,7 +915,7 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
         "config.yaml": b"replicas: 3\n",
         "Dockerfile": b"FROM python:3.13\n",
         "setup.sh": b"echo hi\n",
-        "report.pdf": b"%PDF-1.7\n",
+        "report.pdf": b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
         "blob": b"\x00\x01binary",
         "image": b"\x89\xff\xfebinary",
         "notes.txt.gz": b"\x1f\x8b\x08\x00binary",
@@ -985,15 +986,23 @@ async def test_a_declared_type_stands_over_the_file_name(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("declared", ["video/mp2t", "video/vnd.dlna.mpeg-tts", "audio/mpeg"])
-async def test_a_text_file_declared_as_audio_or_video_reaches_claude_as_text(tmp_path: Path, declared: str) -> None:
-    """A browser types a TypeScript file as an MPEG transport stream; its UTF-8 text makes it a text file instead.
+@pytest.mark.parametrize(
+    ("declared", "filename"),
+    [("video/mp2t", "index.ts"), ("video/vnd.dlna.mpeg-tts", "vite.config.mts"), ("audio/mpeg", "notes.txt")],
+)
+async def test_a_text_file_declared_as_audio_or_video_reaches_claude_as_text(
+    tmp_path: Path,
+    declared: str,
+    filename: str,
+) -> None:
+    """A browser types a TypeScript file as an MPEG transport stream; its UTF-8 text makes it a plain text file instead.
 
-    The same holds for any audio or video type, and a real stream declared so keeps its declared type.
+    The same holds for any audio or video type, whatever type the host's MIME table gives the file's name, and a real
+    stream declared so keeps its declared type.
     """
     payloads = {
-        "index.ts": b"export const answer: number = 42;\n",
-        "clip.ts": b"\x47\x40\x00\x10\x00\x00\xb0\x0d\x00\x01",
+        filename: b"export const answer: number = 42;\n",
+        f"clip{Path(filename).suffix}": b"\x47\x40\x00\x10\x00\x00\xb0\x0d\x00\x01",
     }
     client = make_matrix_client_mock()
     client.send = AsyncMock(
@@ -1025,6 +1034,42 @@ async def test_a_text_file_declared_as_audio_or_video_reaches_claude_as_text(tmp
     assert [block["source"] for block in user["content"] if block["type"] == "document"] == [
         {"type": "text", "media_type": "text/plain", "data": "export const answer: number = 42;\n"},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("info", [None, {"mimetype": "application/octet-stream"}])
+async def test_an_untyped_text_file_is_plain_text_whatever_the_host_names_its_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    info: dict[str, object] | None,
+) -> None:
+    """Debian's MIME table names ``.mts`` a 3D model type; a TypeScript module's UTF-8 text is still plain text.
+
+    A binary file of that name keeps the type its name gives.
+    """
+    table = mimetypes.MimeTypes()
+    table.add_type("model/vnd.mts", ".mts")
+    monkeypatch.setattr(mimetypes, "guess_type", table.guess_type)
+    payloads = {"vite.config.mts": b"export default { root: 'src' };\n", "scene.mts": b"\x00\x01\x02model"}
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            payloads[urlsplit(path).path.rsplit("/", 1)[-1]],
+        ),
+    )
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$file{index}", filename, info),
+        )
+        for index, filename in enumerate(payloads)
+    ]
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    assert [record.mime_type if record else None for record in records] == ["text/plain", "model/vnd.mts"]
 
 
 def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:

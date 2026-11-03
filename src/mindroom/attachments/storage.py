@@ -25,7 +25,7 @@ import nio
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.llm.media import canonical_mime_type, named_mime_type, rendered_label
+from mindroom.llm.media import canonical_mime_type, is_text_mime_type, named_mime_type, rendered_label
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -928,18 +928,24 @@ def _is_utf8_text(data: bytes | None) -> bool:
 
 
 def _received_file_type(declared: str | None, filename: str | None, data: bytes | None) -> str | None:
-    """Return a received file's type: the declared one, else its filename's, else ``text/plain`` for UTF-8 text.
+    """Return a received file's type: the declared one, else its filename's, and ``text/plain`` for text of no text type.
 
     Clients leave the type out, or declare ``application/octet-stream``, for an extension the browser cannot type,
-    such as ``.yaml``, so that type names none. An audio or video type names none for UTF-8 text, which no audio or
-    video file is, because browsers type a TypeScript file (``.ts``) as an MPEG transport stream. A file whose type
-    stays unknown keeps the declared one.
+    such as ``.yaml``, so the filename decides; a declared audio or video type does not stand either, because browsers
+    type a TypeScript file (``.ts``) as an MPEG transport stream. Of those, UTF-8 text without NULs whose type is not
+    a text type is ``text/plain``, since a host's MIME table may give a text file's name another type, such as
+    ``model/vnd.mts`` for ``.mts``. A binary file whose type stays unknown keeps the declared one.
     """
-    for candidate in (canonical_mime_type(declared), named_mime_type(filename or "")):
-        media = candidate is not None and candidate.startswith(("audio/", "video/"))
-        if candidate not in {None, "application/octet-stream"} and not (media and _is_utf8_text(data)):
-            return candidate
-    return "text/plain" if _is_utf8_text(data) else declared
+    declared_type = canonical_mime_type(declared)
+    if declared_type is None or declared_type == "application/octet-stream":
+        candidate = named_mime_type(filename or "")
+    elif declared_type.startswith(("audio/", "video/")):
+        candidate = declared_type
+    else:
+        return declared_type
+    if not is_text_mime_type(candidate) and _is_utf8_text(data):
+        return "text/plain"
+    return candidate if candidate not in {None, "application/octet-stream"} else declared
 
 
 async def _register_file_or_video_attachment(
