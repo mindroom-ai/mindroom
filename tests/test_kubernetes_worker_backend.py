@@ -3869,7 +3869,7 @@ def test_kubernetes_cleanup_retries_a_subagent_worker_whose_removal_failed_midwa
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A removal that fails after it started keeps the Deployment, so the next pass removes the rest."""
+    """A removal the cluster refuses midway keeps the Deployment, the pass goes on, and the next pass removes the rest."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
@@ -3879,16 +3879,20 @@ def test_kubernetes_cleanup_retries_a_subagent_worker_whose_removal_failed_midwa
     subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
     _expire(apps_api, subagent.worker_id, replicas=0)
     subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
-    delete_secret = backend._resources.delete_secret
+    normal = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
+    _expire(apps_api, normal.worker_id, replicas=1)
+    delete_deployment = apps_api.delete_namespaced_deployment
 
-    def fail_once(worker_id: str) -> None:
-        monkeypatch.setattr(backend._resources, "delete_secret", delete_secret)
-        msg = f"secret of {worker_id} not deleted"
-        raise WorkerBackendError(msg)
+    def unavailable_once(name: str, namespace: str, **kwargs: object) -> None:
+        # The cluster answers 503 once, as an API server under load does.
+        monkeypatch.setattr(apps_api, "delete_namespaced_deployment", delete_deployment)
+        del name, namespace, kwargs
+        raise _FakeApiError(503)
 
-    monkeypatch.setattr(backend._resources, "delete_secret", fail_once)
+    monkeypatch.setattr(apps_api, "delete_namespaced_deployment", unavailable_once)
 
-    assert backend.cleanup_idle_workers(now=10.0) == []
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [_TEST_SCOPED_WORKER_KEY_B]
+    assert apps_api.deployments[normal.worker_id].spec.replicas == 0
     assert subagent.worker_id in apps_api.deployments
     assert subagent_root.is_dir()
 

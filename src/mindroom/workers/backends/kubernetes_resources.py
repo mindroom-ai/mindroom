@@ -674,6 +674,10 @@ class KubernetesResourceManager:
         """Return the loaded apps and core API clients."""
         return self._apps, self._core
 
+    def api_error(self) -> type[_ApiStatusError]:
+        """Return the exception type the loaded API clients raise for a failed request."""
+        return self._api_exception
+
     def list_deployments(self, *, request_timeout: float | None = None) -> list[KubernetesDeployment]:
         """List lightweight worker snapshots without Kubernetes model deserialization."""
         response = self._apps.list_namespaced_deployment(

@@ -486,7 +486,7 @@ class KubernetesWorkerBackend:
                 state.remove()
         except WorkerBackendError:
             raise
-        except (OSError, RecursionError, TypeError, ValueError) as exc:
+        except (OSError, RecursionError, TypeError, ValueError, self._resources.api_error()) as exc:
             msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
             raise WorkerBackendError(msg) from exc
 
