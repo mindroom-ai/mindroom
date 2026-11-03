@@ -271,8 +271,8 @@ def file_text(data: bytes) -> str:
     """Return the text a text file's bytes hold: UTF-16 or UTF-8 by their byte-order mark, else UTF-8, else Windows-1252.
 
     Bytes that are not all UTF-8 still read as UTF-8 when they hold at least as many multibyte UTF-8 characters as
-    bytes that do not decode, as a log cut mid-character does; Windows-1252 text forms such a character only by
-    chance. Bytes that do not decode become replacement characters.
+    the replacement characters the decode leaves, as a non-ASCII log cut mid-character does; Windows-1252 text forms
+    such a character only by chance. Bytes that do not decode become replacement characters.
     """
     if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return data.decode("utf-16", errors="replace")
