@@ -49,7 +49,7 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
         None,
     )
     all_matches = [message for run in runs for message in _notices(run, turn)]
-    if not all_matches and destination is None:
+    if not all_matches:
         return []
     matches = _notices(destination, turn) if destination is not None else []
     text = next(
@@ -83,8 +83,6 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
             edited[id(run)] = copy
     if destination is None or text is None:
         return list(edited.values())
-    if id(destination) not in edited:
-        edited[id(destination)] = deepcopy(destination)
     copy = edited[id(destination)]
     persisted = Message(
         role="user",
