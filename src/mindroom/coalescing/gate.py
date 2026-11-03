@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping
 
     from mindroom.turn_store import TurnClaim
+    from mindroom.turns.facts import RunIdentity
 
     from .ingress_lanes import LaneDelivery
 
@@ -307,10 +308,10 @@ class CoalescingGate:
         """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
         return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
 
-    def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
-        """Return whether a queue still holds a run other than this requester's own messages for this agent."""
+    def queues_other_run(self, key: CoalescingKey, run_identity: RunIdentity) -> bool:
+        """Return whether a queue still holds a run other than this run identity's own messages for this agent."""
         return any(
-            pending_event.facts.run_identity != (requester_user_id, None) or pending_event.event.for_another_participant
+            pending_event.facts.run_identity != run_identity or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
 

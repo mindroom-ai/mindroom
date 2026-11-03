@@ -21,10 +21,10 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turns.dispatch import TurnDispatcher
-    from mindroom.turns.facts import IngressFacts
+    from mindroom.turns.facts import IngressFacts, RunIdentity
 
 
-def nothing_else_queued(_requester_user_id: str) -> bool:
+def nothing_else_queued(_run_identity: RunIdentity) -> bool:
     """Stand in for the queue of a turn built outside the gate: it holds no other run."""
     return False
 

@@ -412,7 +412,7 @@ class TurnDispatcher:
             # letting it absorb this turn would answer out of receipt order or not at all.
             # The guards below judge whom a message addresses themselves, but only the
             # queue sees an edit that readdresses a queued message after their history was read.
-            and not prepared.turn.queues_other_run(requester_user_id)
+            and not prepared.turn.queues_other_run(prepared.turn.facts.run_identity)
         )
         thread_history = prepared.dispatch.context.thread_history
         thread_id = prepared.dispatch.target.resolved_thread_id
