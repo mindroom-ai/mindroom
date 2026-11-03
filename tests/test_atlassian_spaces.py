@@ -200,22 +200,25 @@ def test_space_limits_are_set_per_agent_only() -> None:
 
 
 @pytest.mark.parametrize(
-    ("value", "accepted"),
+    ("value", "accepted", "error"),
     [
-        (["ENG", " ops "], ["ENG", "ops"]),
-        ("ENG, OPS", ["ENG", "OPS"]),
-        (["Team Docs"], None),
-        (["ENG-1"], None),
+        (["ENG", " ops "], ["ENG", "ops"], None),
+        ("ENG, OPS", ["ENG", "OPS"], None),
+        (["Team Docs"], None, r"'Team Docs' is not a valid Jira Spaces entry; for example ENG\."),
+        (["ENG-1"], None, r"'ENG-1' is not a valid Jira Spaces entry"),
+        ("", None, r"expected a list of Jira Spaces entries; use \[\] for none\."),
+        (" , ", None, r"expected a list of Jira Spaces entries"),
     ],
 )
-def test_space_keys_are_checked_when_the_config_loads(value: object, accepted: list[str] | None) -> None:
-    """A space name or an issue key in a space list fails config validation instead of dropping the tool."""
+def test_space_keys_are_checked_when_the_config_loads(
+    value: object,
+    accepted: list[str] | None,
+    error: str | None,
+) -> None:
+    """A space name, an issue key, or a blank string in a space list fails config validation, never lifting the limit."""
     entries = builtin_tool_registry().entries
-    if accepted is None:
-        with pytest.raises(
-            ToolConfigOverrideError,
-            match=r"agents\.helper\.tools\.atlassian\.jira_spaces: .* is not a valid .* such as ENG\.",
-        ):
+    if error is not None:
+        with pytest.raises(ToolConfigOverrideError, match=r"^agents\.helper\.tools\.atlassian\.jira_spaces: " + error):
             validate_authored_tool_entry_overrides(
                 "atlassian",
                 {"jira_spaces": value},
@@ -329,6 +332,38 @@ async def test_jira_issue_read_returns_only_issues_in_allowed_spaces(
         "message": "This agent may use only these Jira spaces: ENG.",
         "allowed_spaces": ["ENG"],
     }
+
+
+@pytest.mark.asyncio
+async def test_items_without_a_reported_space_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An issue whose reply names no space, as with fields ["*all", "-project"], and a page search cannot find are refused."""
+    tool, gateway = _connected(tmp_path, monkeypatch, jira_spaces=["ENG"], confluence_spaces=["DOCS"])
+    gateway.route(
+        "GET",
+        gateway_url("jira", "/rest/api/3/issue/OPS-1"),
+        {"key": "OPS-1", "fields": {"summary": "Secret"}},
+    )
+    gateway.route("GET", CONTENT_SEARCH, {"results": []})
+
+    issue = await _call(tool, "jira_get_issue", issue_key="OPS-1", fields=["*all", "-project"])
+    with tool_runtime_context(tool_context(runtime_paths(tmp_path), tmp_path / "storage")):
+        pages = [
+            await _call(tool, "confluence_download_attachment", page_id="123", attachment_id="att456"),
+            await _call(
+                tool,
+                "confluence_update_page",
+                page_id="123",
+                title="T",
+                body_storage="<p>x</p>",
+                version_number=2,
+            ),
+            await _call(tool, "confluence_add_comment", page_id="123", body_storage="<p>x</p>"),
+        ]
+
+    assert issue["code"] == "space_not_allowed"
+    assert "Secret" not in json.dumps(issue)
+    assert [page["code"] for page in pages] == ["page_not_found"] * 3
+    assert {request.url.path.rsplit("/", 1)[-1] for request in gateway.product_requests()} == {"OPS-1", "search"}
 
 
 @pytest.mark.asyncio

@@ -13099,10 +13099,10 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | Scope | Type | Used by |
 | --- | --- | --- |
 | `offline_access` | classic | Token refresh |
-| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_transition_issue` |
+| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
 | `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments` |
-| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments` |
+| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
+| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
 | `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
 | `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
 | `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
