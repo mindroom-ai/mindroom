@@ -10319,16 +10319,20 @@ agents:
 | --- | --- |
 | `google_drive_list_files()` | Lists recently modified files. |
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`; PDFs, Office files, and Drawings need a download and a reader for that format. |
-| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
+| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
+| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
 | `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
 | `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
 | `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
-When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, a name containing `/`, or a size over `max_download_size`.
+Use `google_drive_read_file` to read a document or text file, and `google_drive_download_file` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
+Files with binary content, such as audio, video, images, PDFs, archives, and Office files, are never returned as text.
+When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
+Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
+On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
@@ -10340,10 +10344,10 @@ Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API
 | `list_files` | `boolean` | `true` | Enable file listing. |
 | `search_files` | `boolean` | `true` | Enable metadata search. |
 | `read_file` | `boolean` | `true` | Enable content reads. |
-| `download_file` | `boolean` | `false` | Enable downloads and exports into the agent workspace. |
+| `download_file` | `boolean` | `true` | Enable downloads and exports into the agent workspace. |
 | `write` | `boolean` | `true` | Enable upload, content replacement, folder creation, move or rename, and trash; `false` removes all of them. |
-| `max_read_size` | `number` | `10485760` | Largest non-Workspace file to read, in bytes. |
-| `max_download_size` | `number` | `104857600` | Largest file or export to download, in bytes. |
+| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read_file` returns as text, in bytes. |
+| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_download_file` saves, in bytes. |
 
 To require a person to approve each Drive change, add [Tool Approval](https://docs.mindroom.chat/tool-approval/) rules:
 
@@ -13099,10 +13103,10 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | Scope | Type | Used by |
 | --- | --- | --- |
 | `offline_access` | classic | Token refresh |
-| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_transition_issue` |
+| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
 | `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments` |
-| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments` |
+| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
+| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
 | `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
 | `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
 | `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
@@ -13138,6 +13142,38 @@ Which site the tool uses:
 - When the configured site is not reachable with the connected account, or `site_url` and `cloud_id` name different sites, it returns `site_not_found` with the `available_sites` Atlassian reports and never falls back to another site.
 
 Atlassian reports every site by its atlassian.net URL, so a custom-domain `site_url` never matches; use the site's atlassian.net URL or its `cloud_id` instead.
+
+## Limit What An Agent Can Do
+
+Set `write` and the space lists on an agent's tool entry to fix what that agent may do for every requester, such as a team agent that everyone connects their own account to:
+
+```yaml
+agents:
+  docs_helper:
+    tools:
+      - atlassian:
+          site_url: https://example.atlassian.net
+          write: false
+          confluence_spaces: [DOCS, ENG]
+          jira_spaces: []
+```
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `write` | `boolean` | `true` | `false` offers only the functions that do not change data. |
+| `jira_spaces` | `string[]` | `null` | Keys of the only Jira spaces (formerly projects), such as `ENG`, the agent may use; `[]` removes the Jira functions. |
+| `confluence_spaces` | `string[]` | `null` | Keys of the only Confluence spaces, such as `DOCS`, the agent may use; `[]` removes the Confluence functions. |
+
+- An unset space list allows every space the requester can reach.
+- With a list, searches return only results in those spaces, and reads, downloads, and writes of anything elsewhere return `space_not_allowed` and change nothing.
+- The agent still acts as the requester, so it reaches only spaces that are both listed and open to that requester in Atlassian.
+- A space key is the part after `/spaces/` in a space's URL, such as `DOCS` in `https://example.atlassian.net/wiki/spaces/DOCS`, and every Jira issue key starts with its space key.
+- Config validation rejects an entry that cannot be a space key, such as a name with spaces in it.
+- An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, searches can select allowed issues by such relations, and creating or updating an issue can set a parent in another space.
+- A refusal tells the agent that an item exists outside the allowed spaces, but nothing of what it holds.
+- `write` combines with `defaults.tools` and dashboard settings like any [tool setting](https://docs.mindroom.chat/tools/#how-settings-combine), while the space lists can be set only on an agent's tool entry.
+- Changing these options needs no reconnect.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
 
 ## Connect An Account
 
@@ -13200,8 +13236,11 @@ agents:
   assistant:
     tools:
       - atlassian
-      - partner_atlassian
+      - partner_atlassian:
+          confluence_spaces: [PARTNER]
 ```
+
+A connection's tool entry accepts the space lists of its products and, when the connection's `write` is `True`, `write: false`, as described in [Limit What An Agent Can Do](#limit-what-an-agent-can-do).
 
 | Field | Default | Notes |
 | --- | --- | --- |
@@ -13259,7 +13298,7 @@ tool_approval:
 
 The leading `*` also matches the prefixed functions of additional connections, such as `partner_confluence_create_page`.
 Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
-To give an agent read access only, hide the write functions with [`exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions), or register a connection with `write=False` so that it never requests write scopes.
+To give an agent read access only, set [`write: false`](#limit-what-an-agent-can-do) on its tool entry, or register a connection with `write=False` so that it never requests write scopes.
 
 ## Attachments
 
@@ -13277,6 +13316,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 - Search and listing functions return at most 50 results per call.
 - Each API call other than an attachment download must finish within 60 seconds and return at most 32 MiB; an attachment download must finish within 120 seconds.
 - Page reads and attachment listings go through Confluence search, so a page or attachment created moments ago can be missing briefly.
+  With `confluence_spaces`, the same applies to updating, commenting on, downloading from, or creating a page under such a page.
 - Archived and draft pages are not returned.
 - Only Atlassian Cloud is supported.
 - The tool does not upload attachments, delete content, or manage spaces and projects.
@@ -13285,6 +13325,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 
 | Result | Cause and fix |
 | --- | --- |
+| `space_not_allowed` | The item is outside the agent's `jira_spaces` or `confluence_spaces`, which the result lists in `allowed_spaces`; check that each entry is the space key from the space's URL rather than its name, and add the space to the agent's tool entry if the agent should use it. |
 | `scope_mismatch` | Atlassian rejected a request for a scope the app does not grant; reconnecting grants the same scopes again, so an administrator must add the scopes in [Scopes](#scopes) to the app. |
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
 | `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
@@ -16612,6 +16653,7 @@ Do not report or "fix" these; they are deliberate.
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
+- The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
@@ -16642,6 +16684,7 @@ Do not report or "fix" these; they are deliberate.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
 - A personal `slack_download` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
+- `google_drive_download_file`, on by default, saves a file the connected Google account can see into the agent's workspace, so on a non-private agent with requester-owned Google Drive connections every requester of that agent can read another requester's downloads; such connections belong on `private` agents.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, as is a started profile's running browser with its open tabs, so one requester can use web sessions another signed in, read pages another left open, and upload screenshots another took; they never cross agents or the requesters of a private agent.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.

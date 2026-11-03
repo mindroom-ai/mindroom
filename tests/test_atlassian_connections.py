@@ -18,7 +18,11 @@ from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
 )
-from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.metadata import (
+    ToolConfigOverrideError,
+    get_tool_by_name,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.atlassian_test_support import (
@@ -368,3 +372,40 @@ async def test_requesters_never_share_a_connection(tmp_path: Path, monkeypatch: 
 
     assert result["oauth_connection_required"] is True
     assert gateway.requests == []
+
+
+@pytest.mark.asyncio
+async def test_connection_tools_take_space_limits_for_their_own_products(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent entry can narrow a connection to read access and its products' spaces, but never widen it."""
+    config, paths = _plugin(tmp_path)
+    manager = save_client_config(paths)
+    plugins = publish_test_plugins(config, paths)
+    publish_grant(plugins.oauth_providers["partner_atlassian"], manager, PARTNER_TOKEN)
+    gateway = FakeGateway(sites_by_token={PARTNER_TOKEN: [site(OTHER_CLOUD_ID, OTHER_SITE_URL)]}).install(monkeypatch)
+    gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search", OTHER_CLOUD_ID), {"results": []})
+    tool = get_tool_by_name(
+        "partner_atlassian",
+        paths,
+        worker_target=worker_target(),
+        runs_in_worker=False,
+        tool_config_overrides={"write": False, "confluence_spaces": ["DOCS"]},
+        tools=plugins.tools,
+    )
+    assert isinstance(tool, AtlassianToolkit)
+
+    await _call(tool, "partner_confluence_search", cql="type = page")
+
+    assert gateway.product_requests()[0].url.params["cql"] == 'space in ("DOCS") AND (type = page)'
+    assert tuple(tool.functions) == atlassian_function_names(("confluence",), write=False, prefix="partner_")
+    # The prompt shows toolkit instructions unnamed, so they name the connection's own functions.
+    assert tool.instructions == "The `partner_confluence_*` functions may use only these Confluence spaces: DOCS."
+    archive = _build("archive_atlassian", plugins)
+    assert tuple(archive.functions) == atlassian_function_names(write=False, prefix="archive_")
+    entries = plugins.tools.entries
+    assert [field.name for field in entries["partner_atlassian"].agent_override_fields or ()] == ["confluence_spaces"]
+    for name, overrides in (("partner_atlassian", {"jira_spaces": ["ENG"]}), ("archive_atlassian", {"write": True})):
+        with pytest.raises(ToolConfigOverrideError, match="unknown authored override"):
+            validate_authored_tool_entry_overrides(name, overrides, tool_metadata=entries)
