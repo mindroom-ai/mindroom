@@ -48,7 +48,8 @@ def dedicated_worker_refusal(
     resource_profile: str | None,
 ) -> str | None:
     """Return why ``caller_name`` cannot run a subagent in a dedicated worker with ``resource_profile``, or None."""
-    if not config.get_agent(caller_name).dedicated_subagent_workers:
+    caller = config.agents.get(caller_name)
+    if caller is None or not caller.dedicated_subagent_workers:
         return f"Cannot delegate: {caller_name} may not run subagents in dedicated workers."
     if not _dedicated_workers_available(runtime_paths):
         return (
@@ -76,7 +77,6 @@ def child_placement(
     """
     if (
         not child.dedicated_worker
-        or child.caller_agent_name not in config.agents
         or dedicated_worker_refusal(
             child.caller_agent_name,
             config,

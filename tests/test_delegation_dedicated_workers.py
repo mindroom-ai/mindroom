@@ -16,7 +16,7 @@ from mindroom.delegation import direct as direct_module
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.state import DelegationChild, DelegationState
 from mindroom.delegation.targets import resolve_fresh_target
-from mindroom.delegation.workers import child_placement
+from mindroom.delegation.workers import child_placement, dedicated_worker_refusal
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import current_execution_identity, tool_runtime_context
@@ -233,6 +233,17 @@ def test_a_fresh_child_that_cannot_have_its_own_worker_is_refused(
     )
 
     assert result == refusal
+
+
+def test_a_caller_a_reload_removed_is_refused(tmp_path: Path) -> None:
+    """A caller the live config no longer has is refused instead of failing the call."""
+    paths = _paths(tmp_path, _KUBERNETES)
+    config = _config(paths)
+    del config.agents["leader"]
+
+    assert dedicated_worker_refusal("leader", config, paths, resource_profile=None) == (
+        "Cannot delegate: leader may not run subagents in dedicated workers."
+    )
 
 
 def test_a_dedicated_child_records_its_choice_and_its_follow_ups_keep_it(tmp_path: Path) -> None:
