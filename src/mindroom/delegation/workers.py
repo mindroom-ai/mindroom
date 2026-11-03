@@ -34,7 +34,7 @@ def _dedicated_workers_available(runtime_paths: RuntimePaths) -> bool:
 
 def resource_profiles_available(runtime_paths: RuntimePaths) -> bool:
     """Return whether a subagent's own worker can be given a resource profile, which only Kubernetes enforces."""
-    return _dedicated_workers_available(runtime_paths) and _backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES
+    return _backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES and idle_worker_cleanup_runs(runtime_paths)
 
 
 def dedicated_worker_refusal(

@@ -50,7 +50,6 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     serialize_tool_execution_identity,
     subagent_worker_key,
-    subagent_worker_state_scope_key,
 )
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
@@ -800,12 +799,6 @@ def _call_proxy_sync(
                     runtime_paths,
                     config=runtime_config,
                     worker_target=worker_target,
-                    # The broker signs the normal worker's scope, also for a subagent's own worker.
-                    routed_worker_key=(
-                        subagent_worker_state_scope_key(route.worker_key) or route.worker_key
-                        if route.worker_key is not None
-                        else None
-                    ),
                     call_env=execution_env,
                 ),
             }

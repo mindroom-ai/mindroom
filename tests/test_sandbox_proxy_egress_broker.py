@@ -154,9 +154,6 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-_ROUTED_UNSCOPED_KEY = "v1:routed:unscoped:code"
-
-
 @pytest.fixture
 def payloads(monkeypatch: pytest.MonkeyPatch, current_static_runner: None) -> list[dict[str, Any]]:
     """Record every execute payload the sandbox proxy sends; the default backend is the shared static runner."""
@@ -175,13 +172,13 @@ def payloads(monkeypatch: pytest.MonkeyPatch, current_static_runner: None) -> li
 
 @pytest.fixture
 def dedicated_routing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Route calls to a dedicated worker whose key is the target's own or, for unscoped targets, a routed one."""
+    """Route calls to a dedicated worker whose key is the target's own or, for unscoped targets, its unscoped one."""
 
     def worker_route(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[WorkerRoute, None]:
         assert worker_target is not None
         route = WorkerRoute(
             protocol=WORKER_PROTOCOL_VERSION,
-            worker_key=worker_target.worker_key or _ROUTED_UNSCOPED_KEY,
+            worker_key=worker_target.worker_key or resolve_unscoped_worker_key("code"),
         )
         return route, None
 
@@ -282,11 +279,11 @@ async def test_call_proxy_sync_merges_broker_env_for_shell_only(
 
 @pytest.mark.usefixtures("dedicated_routing")
 @pytest.mark.asyncio
-async def test_unscoped_shell_call_signs_routed_worker_key(
+async def test_unscoped_shell_call_signs_its_unscoped_worker_key(
     runtime_paths: RuntimePaths,
     payloads: list[dict[str, Any]],
 ) -> None:
-    """An unscoped target has no key of its own, so the token carries the key the call was routed to."""
+    """An unscoped target has no key of its own, so the token carries the unscoped key its worker is routed by."""
     config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())
@@ -294,7 +291,7 @@ async def test_unscoped_shell_call_signs_routed_worker_key(
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         _call(runtime_paths, config, "shell", target, manager)
     [payload] = payloads
-    assert _token_worker_key(runtime_paths, payload["execution_env"]) == _ROUTED_UNSCOPED_KEY
+    assert _token_worker_key(runtime_paths, payload["execution_env"]) == resolve_unscoped_worker_key("code")
 
 
 @pytest.mark.asyncio
@@ -308,7 +305,7 @@ async def test_subagent_worker_shell_call_signs_its_normal_worker_key(
     def worker_route(**_kwargs: object) -> tuple[WorkerRoute, None]:
         return WorkerRoute(
             protocol=WORKER_PROTOCOL_VERSION,
-            worker_key=subagent_worker_key(_ROUTED_UNSCOPED_KEY, "e" * 32),
+            worker_key=subagent_worker_key(resolve_unscoped_worker_key("code"), "e" * 32),
         ), None
 
     monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
@@ -318,7 +315,7 @@ async def test_subagent_worker_shell_call_signs_its_normal_worker_key(
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         _call(runtime_paths, config, "shell", target, manager)
     [payload] = payloads
-    assert _token_worker_key(runtime_paths, payload["execution_env"]) == _ROUTED_UNSCOPED_KEY
+    assert _token_worker_key(runtime_paths, payload["execution_env"]) == resolve_unscoped_worker_key("code")
 
 
 @pytest.mark.asyncio

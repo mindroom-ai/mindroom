@@ -2,13 +2,15 @@
 
 A delegated subagent that asked for its own worker binds its placement here for each attempt of its turn, under the
 child's session ID, which every execution identity of that attempt carries: the tools its agent was built with, tools
-composed from the Matrix runtime context, minimal-mode CLI calls, and the jobs it starts. The worker route reads it.
+composed from the Matrix runtime context, and minimal-mode CLI calls. The worker route reads it. Background scripts the
+child starts outlive the attempt, so their calls run on their normal workers (``normal_worker_calls``).
 """
 
 from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -17,7 +19,7 @@ if TYPE_CHECKING:
 
     from mindroom.workers.models import ScriptResourceProfileName
 
-__all__ = ["DedicatedWorkerPlacement", "dedicated_worker_placement", "placement_for_session"]
+__all__ = ["DedicatedWorkerPlacement", "dedicated_worker_placement", "normal_worker_calls", "placement_for_session"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,7 @@ class DedicatedWorkerPlacement:
 
 
 _lock = threading.Lock()
+_normal_worker_calls: ContextVar[bool] = ContextVar("normal_worker_calls", default=False)
 # Each bound session's placement and how many attempts hold it.
 _placements: dict[str, tuple[DedicatedWorkerPlacement, int]] = {}
 
@@ -40,11 +43,9 @@ def dedicated_worker_placement(session_id: str, placement: DedicatedWorkerPlacem
         yield
         return
     with _lock:
-        bound = _placements.get(session_id)
-        if bound is not None and bound[0] != placement:
-            msg = "A session is already placed in another dedicated worker."
-            raise RuntimeError(msg)
-        _placements[session_id] = (placement, 1 if bound is None else bound[1] + 1)
+        # A session names its subagent, whose placement never changes, so nested attempts bind the same one.
+        _, holders = _placements.get(session_id, (placement, 0))
+        _placements[session_id] = (placement, holders + 1)
     try:
         yield
     finally:
@@ -56,9 +57,22 @@ def dedicated_worker_placement(session_id: str, placement: DedicatedWorkerPlacem
                 _placements[session_id] = (placement, holders - 1)
 
 
+@contextmanager
+def normal_worker_calls() -> Iterator[None]:
+    """Run the block's calls on their normal workers whatever their session's placement, as background scripts do.
+
+    A script outlives the subagent attempt that started it, so its calls would otherwise move between workers.
+    """
+    token = _normal_worker_calls.set(True)
+    try:
+        yield
+    finally:
+        _normal_worker_calls.reset(token)
+
+
 def placement_for_session(session_id: str | None) -> DedicatedWorkerPlacement | None:
     """Return the dedicated worker placement bound for ``session_id``, if any."""
-    if session_id is None:
+    if session_id is None or _normal_worker_calls.get():
         return None
     with _lock:
         bound = _placements.get(session_id)

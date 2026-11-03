@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement, placement_for_session
+from mindroom.workers.placements import (
+    DedicatedWorkerPlacement,
+    dedicated_worker_placement,
+    normal_worker_calls,
+    placement_for_session,
+)
 
 _PLACEMENT = DedicatedWorkerPlacement("a" * 32, "small")
 
@@ -34,16 +39,12 @@ def test_no_placement_places_nothing() -> None:
         assert placement_for_session("session") is None
 
 
-def test_a_bound_session_cannot_take_another_placement() -> None:
-    """One session never runs in two dedicated workers at once."""
+def test_normal_worker_calls_see_no_placement() -> None:
+    """Calls a background script makes stay on their normal workers while their subagent's session is placed."""
     with dedicated_worker_placement("session", _PLACEMENT):
-        with (
-            pytest.raises(RuntimeError, match="already placed"),
-            dedicated_worker_placement("session", DedicatedWorkerPlacement("b" * 32)),
-        ):
-            pass
+        with normal_worker_calls():
+            assert placement_for_session("session") is None
         assert placement_for_session("session") == _PLACEMENT
-    assert placement_for_session("session") is None
 
 
 def _fail_while_placed() -> None:

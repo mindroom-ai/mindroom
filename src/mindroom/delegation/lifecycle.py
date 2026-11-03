@@ -492,5 +492,5 @@ def prepare_child_turn(
         agent_mode=agent_mode,
         persona=persona,
         dedicated_worker=dedicated_worker,
-        worker_resource_profile=worker_resource_profile if dedicated_worker else None,
+        worker_resource_profile=worker_resource_profile,
     )

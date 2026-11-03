@@ -62,6 +62,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
 )
+from mindroom.workers.placements import normal_worker_calls
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -456,7 +457,9 @@ class ScriptToolBroker:
                     state=ScriptCallState.FAILED,
                     error=_REVOKED_GRANT_ERROR,
                 )
-            return await self._execute_claimed_call_serialized(durable_run, call, arguments)
+            # The run outlives the subagent attempt that may have started it, so its calls keep their normal workers.
+            with normal_worker_calls():
+                return await self._execute_claimed_call_serialized(durable_run, call, arguments)
 
     async def _execute_claimed_call_serialized(  # noqa: PLR0911
         self,

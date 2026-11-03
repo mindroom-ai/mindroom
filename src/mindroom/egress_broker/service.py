@@ -500,15 +500,11 @@ async def serve_egress_broker(
         await run_blocking_until_complete(service.stop)
 
 
-def _signable_target(worker_target: ResolvedWorkerTarget, routed_worker_key: object) -> ResolvedWorkerTarget:
-    """Give an unscoped target, which has no worker key of its own, the key its token names.
-
-    That is the dedicated worker the call was routed to, or on the shared static runner the unscoped key a dedicated
-    backend would give the agent.
-    """
+def _signable_target(worker_target: ResolvedWorkerTarget) -> ResolvedWorkerTarget:
+    """Give an unscoped target, which has no worker key of its own, the unscoped key a dedicated backend routes it by."""
     if worker_target.worker_scope is not None or worker_target.worker_key is not None:
         return worker_target
-    worker_key = routed_worker_key if isinstance(routed_worker_key, str) else _unscoped_worker_key(worker_target)
+    worker_key = _unscoped_worker_key(worker_target)
     return worker_target if worker_key is None else replace(worker_target, worker_key=worker_key)
 
 
@@ -527,13 +523,11 @@ def execution_env_for_worker(
     *,
     config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
-    routed_worker_key: object = None,
     call_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Return the broker env for one worker-routed call: a fresh scope-bound token, the CA, and placeholders.
 
     Empty when the broker is not running, there is no config, or the target has no worker identity to sign.
-    `routed_worker_key` is the worker key the call was routed to, if any, which an unscoped target's token names.
     Placeholders come only from services with a secret in the target's scope, a stored key or a usable OAuth
     connection, checked in the stores the broker injects from. The services are the config's plus the scope's own,
     less those whose `agents` list leaves out the target's agent.
@@ -542,7 +536,7 @@ def execution_env_for_worker(
     runtime = _active.runtime
     if runtime is None or config is None or worker_target is None:
         return {}
-    claims = WorkerClaims.from_worker_target(_signable_target(worker_target, routed_worker_key))
+    claims = WorkerClaims.from_worker_target(_signable_target(worker_target))
     if claims is None:
         return {}
     # Check status for the target the broker will rebuild from the token, so both agree on the scope.
