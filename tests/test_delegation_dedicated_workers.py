@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.config.agent import AgentConfig
 from mindroom.constants import resolve_runtime_paths
@@ -19,6 +18,7 @@ from mindroom.delegation.state import DelegationChild, DelegationState
 from mindroom.delegation.targets import resolve_fresh_target
 from mindroom.delegation.workers import child_placement
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import current_execution_identity, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.workers.placements import DedicatedWorkerPlacement, placement_for_session
