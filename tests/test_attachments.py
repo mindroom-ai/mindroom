@@ -984,6 +984,48 @@ async def test_a_declared_type_stands_over_the_file_name(tmp_path: Path) -> None
     assert record.mime_type == "text/csv"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", ["video/mp2t", "video/vnd.dlna.mpeg-tts"])
+async def test_a_text_file_declared_as_audio_or_video_reaches_claude_as_text(tmp_path: Path, declared: str) -> None:
+    """A browser types a TypeScript file as an MPEG transport stream; its UTF-8 text makes it a text file instead.
+
+    A real transport stream declared so keeps its declared type.
+    """
+    payloads = {
+        "index.ts": b"export const answer: number = 42;\n",
+        "clip.ts": b"\x47\x40\x00\x10\x00\x00\xb0\x0d\x00\x01",
+    }
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            payloads[urlsplit(path).path.rsplit("/", 1)[-1]],
+        ),
+    )
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$file{index}", filename, {"mimetype": declared}),
+        )
+        for index, filename in enumerate(payloads)
+    ]
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    assert [record.mime_type if record else None for record in records] == ["text/plain", declared]
+    _, _, files, _ = attachment_records_to_media([records[0]] if records[0] else [])
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
+    await claude_turn(
+        route_provider("anthropic", tmp_path, wire),
+        ModelRequest(messages=[Message(role="user", content="Review.", files=files)]),
+    )
+    (user,) = wire.body()["messages"]
+    assert [block["source"] for block in user["content"] if block["type"] == "document"] == [
+        {"type": "text", "media_type": "text/plain", "data": "export const answer: number = 42;\n"},
+    ]
+
+
 def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:
     """Repeated writes for the same attachment ID should not reuse temp metadata paths."""
     file_path = tmp_path / "payload.txt"

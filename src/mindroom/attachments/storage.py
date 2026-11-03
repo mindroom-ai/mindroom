@@ -917,7 +917,9 @@ async def _register_media_attachment(
     )
 
 
-def _is_utf8_text(data: bytes) -> bool:
+def _is_utf8_text(data: bytes | None) -> bool:
+    if data is None:
+        return False
     try:
         data.decode("utf-8")
     except UnicodeDecodeError:
@@ -929,12 +931,15 @@ def _received_file_type(declared: str | None, filename: str | None, data: bytes 
     """Return a received file's type: the declared one, else its filename's, else ``text/plain`` for UTF-8 text.
 
     Clients leave the type out, or declare ``application/octet-stream``, for an extension the browser cannot type,
-    such as ``.yaml``, so that type names none. A file whose type stays unknown keeps the declared one.
+    such as ``.yaml``, so that type names none. An audio or video type names none for UTF-8 text, which no audio or
+    video file is, because browsers type a TypeScript file (``.ts``) as an MPEG transport stream. A file whose type
+    stays unknown keeps the declared one.
     """
     for candidate in (canonical_mime_type(declared), named_mime_type(filename or "")):
-        if candidate not in {None, "application/octet-stream"}:
+        media = candidate is not None and candidate.startswith(("audio/", "video/"))
+        if candidate not in {None, "application/octet-stream"} and not (media and _is_utf8_text(data)):
             return candidate
-    return "text/plain" if data is not None and _is_utf8_text(data) else declared
+    return "text/plain" if _is_utf8_text(data) else declared
 
 
 async def _register_file_or_video_attachment(
