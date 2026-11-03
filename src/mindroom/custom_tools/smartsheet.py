@@ -93,6 +93,51 @@ def _row_ids(value: object) -> list[int]:
     return [_positive_id(row_id, "row_ids") for row_id in value]
 
 
+def _new_rows(rows: object) -> list[Mapping[str, Any]]:
+    """Return the new rows, each mapping at least one column title to a value."""
+    if not isinstance(rows, list) or not rows:
+        msg = "rows must be a non-empty list of rows"
+        raise _invalid(msg)
+    if not all(isinstance(row, dict) and row for row in rows):
+        msg = "each row must map at least one column title to a value"
+        raise _invalid(msg)
+    return [_mapping(row) for row in rows]
+
+
+def _row_updates(rows: object) -> list[tuple[int, Mapping[str, Any]]]:
+    """Return each update's row ID and the cells it changes."""
+    if not isinstance(rows, list) or not rows:
+        msg = "rows must be a non-empty list of row updates"
+        raise _invalid(msg)
+    updates: list[tuple[int, Mapping[str, Any]]] = []
+    for row in rows:
+        update = _mapping(row)
+        cells = update.get("cells")
+        if not isinstance(cells, dict) or not cells:
+            msg = "each row update needs row_id and cells mapping at least one column title to a value"
+            raise _invalid(msg)
+        updates.append((_positive_id(update.get("row_id"), "row_id"), _mapping(cells)))
+    return updates
+
+
+def _cells(values: Mapping[str, Any], column_ids: Mapping[str, int]) -> list[dict[str, object]]:
+    """Return Smartsheet cells for values keyed by column title, refusing a title the sheet lacks."""
+    unknown = [title for title in values if title not in column_ids]
+    if unknown:
+        raise _SmartsheetError(
+            code="invalid_argument",
+            message=f"The sheet has no column titled {', '.join(map(repr, unknown))}",
+            available_columns=list(column_ids),
+        )
+    return [{"columnId": column_ids[title], "value": value} for title, value in values.items()]
+
+
+def _written_rows(data: object) -> list[dict[str, object]]:
+    return [
+        {"row_id": row.get("id"), "row_number": row.get("rowNumber")} for row in _items(_mapping(data).get("result"))
+    ]
+
+
 def _paging(page: int, page_size: int) -> dict[str, int]:
     return {"page": max(1, page), "pageSize": min(max(1, page_size), _MAX_PAGE_SIZE)}
 
@@ -183,6 +228,16 @@ async def _request(
             message="Smartsheet returned a response that is not JSON",
             status_code=response.status_code,
         ) from None
+
+
+async def _column_ids(token: str, sheet_id: int) -> dict[str, int]:
+    """Return the sheet's column IDs by title."""
+    data = _mapping(await _request(token, "GET", f"/sheets/{sheet_id}/columns", params={"includeAll": "true"}))
+    return {
+        column["title"]: column["id"]
+        for column in _items(data.get("data"))
+        if isinstance(column.get("title"), str) and isinstance(column.get("id"), int)
+    }
 
 
 def _refresh_failed(exc: OAuthProviderError) -> _SmartsheetError:
@@ -371,5 +426,65 @@ class SmartsheetTools(Toolkit):
                 "columns": [_column_summary(column) for column in columns],
                 "rows": [_row_summary(row, titles) for row in _items(sheet.get("rows"))],
             }
+
+        return await self._call(operation)
+
+    @tool
+    async def add_rows(self, sheet_id: int | str, rows: list[dict[str, Any]], to_top: bool = False) -> str:
+        """Add rows to a sheet; all are added or none.
+
+        Args:
+            sheet_id: The sheet's ID.
+            rows: One mapping per new row from column title to cell value, such as {"Task": "Ship", "Done": false}.
+            to_top: Add the rows at the top of the sheet instead of the bottom.
+
+        """
+
+        async def operation(token: str) -> dict[str, object]:
+            sheet = _sheet_id(sheet_id)
+            new_rows = _new_rows(rows)
+            column_ids = await _column_ids(token, sheet)
+            position = {"toTop": True} if to_top else {"toBottom": True}
+            body = [{**position, "cells": _cells(row, column_ids)} for row in new_rows]
+            return {"rows": _written_rows(await _request(token, "POST", f"/sheets/{sheet}/rows", json_body=body))}
+
+        return await self._call(operation)
+
+    @tool
+    async def update_rows(self, sheet_id: int | str, rows: list[dict[str, Any]]) -> str:
+        """Change cells in existing rows; all are updated or none.
+
+        Args:
+            sheet_id: The sheet's ID.
+            rows: One update per row, such as {"row_id": 123, "cells": {"Done": true}}, naming cells by column title.
+
+        """
+
+        async def operation(token: str) -> dict[str, object]:
+            sheet = _sheet_id(sheet_id)
+            updates = _row_updates(rows)
+            column_ids = await _column_ids(token, sheet)
+            body = [{"id": row_id, "cells": _cells(cells, column_ids)} for row_id, cells in updates]
+            return {"rows": _written_rows(await _request(token, "PUT", f"/sheets/{sheet}/rows", json_body=body))}
+
+        return await self._call(operation)
+
+    @tool
+    async def delete_rows(self, sheet_id: int | str, row_ids: list[int | str]) -> str:
+        """Delete rows from a sheet; if any row is missing, none are deleted.
+
+        Args:
+            sheet_id: The sheet's ID.
+            row_ids: IDs of the rows to delete, at most 100.
+
+        """
+
+        async def operation(token: str) -> dict[str, object]:
+            sheet = _sheet_id(sheet_id)
+            params = {"ids": ",".join(str(row_id) for row_id in _row_ids(row_ids)), "ignoreRowsNotFound": "false"}
+            data = _mapping(await _request(token, "DELETE", f"/sheets/{sheet}/rows", params=params))
+            result = data.get("result")
+            deleted = [row_id for row_id in result if isinstance(row_id, int)] if isinstance(result, list) else []
+            return {"deleted_row_ids": deleted}
 
         return await self._call(operation)

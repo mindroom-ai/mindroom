@@ -452,3 +452,157 @@ async def test_network_failure_reports_type_only(tmp_path: Path, monkeypatch: py
     assert result["code"] == "network_error"
     assert result["error_type"] == "ConnectError"
     assert "api-token" not in raw
+
+
+def _sheet_api(write_response: object) -> Callable[[httpx.Request], httpx.Response]:
+    """Answer the column listing with the test sheet's columns and any write with ``write_response``."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/2.0/sheets/123/columns":
+            return httpx.Response(200, json={"data": _SHEET["columns"]})
+        return httpx.Response(200, json=write_response)
+
+    return handle
+
+
+def _added(row_id: int, row_number: int) -> dict[str, object]:
+    return {"message": "SUCCESS", "resultCode": 0, "result": [{"id": row_id, "rowNumber": row_number}]}
+
+
+@pytest.mark.asyncio
+async def test_add_rows_maps_titles_to_column_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """New rows name cells by column title and reach Smartsheet as column IDs at the bottom of the sheet."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _sheet_api(_added(77, 4)))
+
+    result = json.loads(
+        await _tools(paths, manager, access_token=_API_TOKEN).add_rows("123", [{"Task": "Ship", "Done": False}]),
+    )
+
+    columns_request, write_request = requests
+    assert columns_request.url.params["includeAll"] == "true"
+    assert write_request.method == "POST"
+    assert write_request.url.path == "/2.0/sheets/123/rows"
+    assert json.loads(write_request.content) == [
+        {"toBottom": True, "cells": [{"columnId": 1, "value": "Ship"}, {"columnId": 2, "value": False}]},
+    ]
+    assert result["status"] == "ok"
+    assert result["rows"] == [{"row_id": 77, "row_number": 4}]
+
+
+@pytest.mark.asyncio
+async def test_add_rows_to_top(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows can go to the top of the sheet instead."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _sheet_api(_added(77, 1)))
+
+    await _tools(paths, manager, access_token=_API_TOKEN).add_rows(123, [{"Task": "Ship"}], to_top=True)
+
+    assert json.loads(requests[1].content) == [{"toTop": True, "cells": [{"columnId": 1, "value": "Ship"}]}]
+
+
+@pytest.mark.asyncio
+async def test_unknown_column_title_sends_no_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A title the sheet lacks is refused with the sheet's titles, and nothing is written."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _sheet_api(_added(77, 4)))
+
+    result = json.loads(await _tools(paths, manager, access_token=_API_TOKEN).add_rows(123, [{"Nope": 1}]))
+
+    assert result["code"] == "invalid_argument"
+    assert "Nope" in result["message"]
+    assert result["available_columns"] == ["Task", "Done", "Owner", "Notes"]
+    assert [request.method for request in requests] == ["GET"]
+
+
+@pytest.mark.asyncio
+async def test_update_rows_puts_row_ids_and_cells(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Updates name each row by ID and its changed cells by column title."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _sheet_api(_added(9, 1)))
+
+    result = json.loads(
+        await _tools(paths, manager, access_token=_API_TOKEN).update_rows(
+            "123",
+            [{"row_id": "9", "cells": {"Done": True}}],
+        ),
+    )
+
+    write_request = requests[1]
+    assert write_request.method == "PUT"
+    assert write_request.url.path == "/2.0/sheets/123/rows"
+    assert json.loads(write_request.content) == [{"id": 9, "cells": [{"columnId": 2, "value": True}]}]
+    assert result["rows"] == [{"row_id": 9, "row_number": 1}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [{"cells": {"Done": True}}],
+        [{"row_id": 9}],
+        [{"row_id": 9, "cells": {}}],
+        [{"row_id": "x", "cells": {"Done": True}}],
+        [],
+    ],
+)
+async def test_malformed_update_sends_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[dict[str, object]],
+) -> None:
+    """An update without a valid row ID or any cells is refused before any request."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _sheet_api(_added(9, 1)))
+
+    result = json.loads(await _tools(paths, manager, access_token=_API_TOKEN).update_rows(123, rows))
+
+    assert result["code"] == "invalid_argument"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rows", [[], [{}]])
+async def test_empty_new_rows_send_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[dict[str, object]],
+) -> None:
+    """Adding no rows, or a row without cells, is refused before any request."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _sheet_api(_added(77, 4)))
+
+    result = json.loads(await _tools(paths, manager, access_token=_API_TOKEN).add_rows(123, rows))
+
+    assert result["code"] == "invalid_argument"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_delete_rows_refuses_missing_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deletes send every row ID and ask Smartsheet to delete nothing if any is missing."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _json(200, {"message": "SUCCESS", "resultCode": 0, "result": [9, 10]}))
+
+    result = json.loads(await _tools(paths, manager, access_token=_API_TOKEN).delete_rows(123, [9, "10"]))
+
+    (request,) = requests
+    assert request.method == "DELETE"
+    assert request.url.path == "/2.0/sheets/123/rows"
+    assert request.url.params["ids"] == "9,10"
+    assert request.url.params["ignoreRowsNotFound"] == "false"
+    assert result["deleted_row_ids"] == [9, 10]
+
+
+@pytest.mark.asyncio
+async def test_delete_more_than_100_rows_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """At most 100 rows are deleted per call."""
+    paths, manager = _runtime(tmp_path)
+    requests = _serve(monkeypatch, _json(200, {"result": []}))
+
+    result = json.loads(
+        await _tools(paths, manager, access_token=_API_TOKEN).delete_rows(123, list(range(1, 102))),
+    )
+
+    assert result["code"] == "invalid_argument"
+    assert requests == []
