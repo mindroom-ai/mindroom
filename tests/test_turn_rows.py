@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -871,9 +873,7 @@ class TestRetention:
         unsettled: Sequence[str] = (),
         max_turns: int = 100,
     ) -> turn_rows.RetentionResult:
-        return await write(
-            store,
-            turn_rows.retain,
+        return await turn_rows.TurnRecordStore(store.backend, AGENT).retain(
             now=1_000_000.0,
             max_age_seconds=1000.0,
             max_turns=max_turns,
@@ -930,6 +930,37 @@ class TestRetention:
         kept = {f"$done{index}" for index in range(4) if await lookup(store, f"$done{index}") is not None}
         assert kept == {"$done2", "$done3"}
         assert await lookup(store, "$pending") is not None
+
+    async def test_the_scan_leaves_the_writer_free_and_keeps_a_turn_written_meanwhile(
+        self,
+        store: EventJournalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Choosing what to drop holds no write, so other writes go on, and a candidate written meanwhile stays."""
+        for event_id in ("$old", "$touched"):
+            await write(store, turn_rows.record_turn, TurnRecord.create([event_id]), room_id=ROOM)
+            await self._age(store, event_id, 1.0)
+        scanning, resume = threading.Event(), threading.Event()
+        load_rows = turn_rows._load_rows
+
+        def paused(*args: Any) -> Any:  # noqa: ANN401
+            if not scanning.is_set():
+                scanning.set()
+                resume.wait(10)
+            return load_rows(*args)
+
+        monkeypatch.setattr(turn_rows, "_load_rows", paused)
+        retention = asyncio.create_task(self._retain(store))
+        try:
+            assert await asyncio.to_thread(scanning.wait, 10)
+            await asyncio.wait_for(self._age(store, "$touched", 999_999.0), timeout=5)
+        finally:
+            resume.set()
+        result = await retention
+
+        assert await lookup(store, "$old") is None
+        assert await lookup(store, "$touched") is not None
+        assert result.dropped_turn_count == 1
 
     async def test_a_settled_checkpoint_loses_its_plaintext_but_keeps_its_echo(self, store: EventJournalStore) -> None:
         """A settled checkpoint loses its plaintext but keeps its echo."""

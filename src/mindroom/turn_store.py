@@ -240,8 +240,7 @@ class TurnStore:
 
     async def cleanup(self, *, unsettled_source_event_ids: Collection[str] = ()) -> None:
         """Drop old turns that own no unfinished work, after startup recovery identifies live sources."""
-        result = await self.deps.turn_records.write(
-            turn_rows.retain,
+        result = await self.deps.turn_records.retain(
             now=time.time(),
             max_age_seconds=_RETENTION_MAX_AGE_SECONDS,
             max_turns=_RETENTION_MAX_TURNS,

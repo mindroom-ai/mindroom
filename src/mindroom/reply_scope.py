@@ -262,7 +262,6 @@ class ClaimRefused(Enum):
 # As long as turn retention keeps a turn: nothing reaches a finished reply after
 # its turn is forgotten.
 _FINISHED_REPLY_RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
-_FORGET_BATCH = 500
 
 
 @dataclass
@@ -436,9 +435,7 @@ class ReplyRuntime:
 
     async def forget_finished(self) -> None:
         """Drop the records of replies finished as long ago as turn retention forgets their turns."""
-        before_ns = time.time_ns() - _FINISHED_REPLY_RETENTION_NS
-        while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
-            pass
+        await self.store.replies.forget_finished(before_ns=time.time_ns() - _FINISHED_REPLY_RETENTION_NS)
 
     async def take_ownership(self) -> None:
         """Make this bot instance the owner of its principal's replies, before it writes any of them."""
