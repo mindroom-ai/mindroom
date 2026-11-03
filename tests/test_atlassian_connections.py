@@ -478,6 +478,8 @@ async def test_shared_connection_follows_the_agent_worker_scope(
     plugins = publish_test_plugins(config, paths)
     provider = plugins.oauth_providers["team_atlassian"]
     tool_metadata = plugins.tools.entries["team_atlassian"]
+    assert tool_metadata.helper_text is not None
+    assert tool_metadata.helper_text.startswith("The Team Confluence account follows the agent's worker scope")
 
     def target(requester_id: str, agent_name: str = "assistant") -> ResolvedWorkerTarget:
         identity = replace(execution_identity(requester_id), agent_name=agent_name)
@@ -493,8 +495,6 @@ async def test_shared_connection_follows_the_agent_worker_scope(
         )
         assert isinstance(tool, AtlassianToolkit)
         assert ("currentUser() in JQL or CQL is that account" in (tool.instructions or "")) is bob_served
-        assert tool_metadata.helper_text is not None
-        assert tool_metadata.helper_text.startswith("The Team Confluence account follows the agent's worker scope")
         result = await _call(tool, "team_confluence_search", cql="type = page")
         if result.get("oauth_connection_required"):
             return False

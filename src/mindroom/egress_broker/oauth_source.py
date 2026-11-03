@@ -252,7 +252,7 @@ def shared_worker_oauth(
 ) -> SharedWorkerOAuth | None:
     """Return whether the broker uses a requester's own account in a sandbox that several requesters share.
 
-    A requester-scoped provider (GitHub, Atlassian) supplies the calling requester's own token. Its sandbox belongs
+    A requester-scoped provider (GitHub, built-in Atlassian) supplies the calling requester's own token. Its sandbox belongs
     to that requester only when the worker scope is `user` or `user_agent` and the worker backend is dedicated
     (Docker or Kubernetes). Every other sandbox is shared: a `shared` worker, one without a worker scope (a None
     target is the global store such agents read), and any scope on the static runner, where all calls run in one

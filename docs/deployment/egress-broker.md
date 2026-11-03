@@ -128,7 +128,7 @@ egress_broker:
 | `oauth_on_shared_workers` | No | Default `false`. Set `true` to use a requester's own GitHub or Atlassian account in shared sandboxes too; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes). Only `config.yaml` may set it, and presets never do |
 | `restrict_to_rules` | No | Default `false`. Set `true` to refuse, with 403 `path_not_allowed`, a request to this service's hosts whose path matches none of its party's rules there, instead of forwarding it without credentials; see [Limiting paths and repositories](#limiting-paths-and-repositories). Presets never set it |
 | `restrict_only` | No | Default `false`. Only for user services; see [Limiting in place](#limiting-in-place) |
-| `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` other than `github` or `atlassian` on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
+| `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` that is not requester-scoped (GitHub and the built-in Atlassian are) on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
 | `admin_key` | No | Default `false`. Set `true` to give every agent the service serves one key that only an administrator sets; see [Administrator keys](#administrator-keys). Only `config.yaml` may set it, and presets never do |
 | `agents` | No | Default every agent. A list of agent names that get the service's key or account; see [Limiting a service to some agents](#limiting-a-service-to-some-agents). Only `config.yaml` may set it |
 | `github_app` | No | Default none. `{credentials_service: <name>, repositories: {<owner>/<repository>: read \| read_write}}` makes the service send short-lived tokens of a GitHub App installation, limited to those repositories, instead of a key or account; see [GitHub App](#github-app). Only `config.yaml` may set it, and presets never do |
@@ -571,7 +571,7 @@ When a config service sets the same variable, the config value wins, and the edi
 ### A service's own account
 
 A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Account**: **Another <provider> account**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
-A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
+A GitHub or requester-scoped Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 A row on the tools' account with a connected account offers **Add another <provider> account** under its status, which adds such a service with the row's preset and the next free name (`google_gmail-2`) at once.
 After that link, or **Save and sign in** in the editor, the new row asks what agents may do with the account and then opens the provider's sign-in, where Google always shows its account picker; cancelled, the row keeps its **Connect** button.
 That service's row then connects, allows, and disconnects an account of its own, which shows as "Not used by commands yet" until it is allowed, and the agent's tools and every other service keep the account they use.
@@ -685,7 +685,7 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 - A service with nothing configured also reports `can_connect_account`.
   When it is `true`, the user can connect an account Agent Keys may use instead of adding a key, and `provider` names the OAuth provider id.
   It is `false` when the account is not allowed, the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or a requester-scoped Atlassian connection in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null` unless the account is not allowed.
-  A `true` value says the provider can be connected, not that this user may connect it: for the Google providers on a shared agent, only administrators and credential managers can.
+  A `true` value says the provider can be connected, not that this user may connect it: for the Google providers, or an Atlassian connection with `requester_scoped=False`, on a shared agent, only administrators and credential managers can.
 - `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
 - For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, that only that page can allow an account for Agent Keys, and that an allowed account can still be connected at the `connect_url` in the broker's refusal.
 - The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.

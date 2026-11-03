@@ -433,7 +433,7 @@ async def egress_oauth_status(
     read through `broker_credential_context` as the broker reads them. A provider the broker refuses in a shared sandbox
     (`shared_worker_oauth`) is reported unavailable before any state is read.
     Without a service account the status is what the Connections portal shows the same viewer; requester-scoped
-    connections (GitHub, Atlassian) belong to the requester, so every user of the agent manages their own. A service
+    connections (GitHub, built-in Atlassian) belong to the requester, so every user of the agent manages their own. A service
     account is not a token the broker can inject, so with one `connected` and `account_label` only reflect a stored
     personal connection, which the broker uses once allowed, and nothing is connectable. Any failure to read one provider's state, the worker
     backend check included, shows that service as not connectable instead of failing the page.

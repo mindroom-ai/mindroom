@@ -202,7 +202,7 @@ def _oauth_reuse_target(
 ) -> ResolvedWorkerTarget | None:
     """Return the target whose connection the panel shows for the selected scope, where its opt-in lives.
 
-    A requester-scoped connection (GitHub, Atlassian) is the dashboard user's own whatever scope is selected, as the
+    A requester-scoped connection (GitHub, built-in Atlassian) is the dashboard user's own whatever scope is selected, as the
     OAuth routes resolve it; any other is the scope's own.
     """
     if not provider.requester_scoped_credentials:
