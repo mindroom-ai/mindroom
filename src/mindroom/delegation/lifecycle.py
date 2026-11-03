@@ -26,6 +26,7 @@ from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, child_execution_identity
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.delegation.workers import child_placement
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.requester_identity import is_access_checked_requester_id
@@ -34,6 +35,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
+from mindroom.workers.placements import dedicated_worker_placement
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.workers.models import ScriptResourceProfileName
 
 MAX_DELEGATION_DEPTH = 3
 
@@ -257,7 +260,8 @@ async def child_run_context(
     observation = ChildRunObservation(child, audit, parent=_CHILD_RUN.get())
     token = _CHILD_RUN.set(observation)
     try:
-        yield observation
+        with dedicated_worker_placement(child.session_id, child_placement(child, config, runtime_paths)):
+            yield observation
     finally:
         try:
             await flush_child_audit(audit)
@@ -436,12 +440,15 @@ def prepare_child_turn(
     agent_mode: AgentMode,
     previous: DelegationChild | None,
     persona: SubagentPersona | None,
+    dedicated_worker: bool = False,
+    worker_resource_profile: ScriptResourceProfileName | None = None,
     parent_tool_call_id: str = "",
     parent_requirement_id: str = "",
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the mode and persona of the child it continues, and its requested model, checked again against the owner's budget.
+    A follow-up keeps the mode, persona, and worker choice of the child it continues, and its requested model, checked
+    again against the owner's budget.
     """
     delegation_id = uuid4().hex
     if previous is None:
@@ -453,6 +460,7 @@ def prepare_child_turn(
         identity = child_execution_identity(previous)
         subagent_id, previous_delegation_id = previous.subagent_id, previous.delegation_id
         model, agent_mode, persona = previous.requested_model_name, previous.agent_mode, previous.persona
+        dedicated_worker, worker_resource_profile = previous.dedicated_worker, previous.worker_resource_profile
     # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
     turn_model = resolve_turn_model(
         config,
@@ -483,4 +491,6 @@ def prepare_child_turn(
         storage_bindings=freeze_delegation_storage(config, (caller_name, agent_name)),
         agent_mode=agent_mode,
         persona=persona,
+        dedicated_worker=dedicated_worker,
+        worker_resource_profile=worker_resource_profile if dedicated_worker else None,
     )

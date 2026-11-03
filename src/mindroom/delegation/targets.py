@@ -20,6 +20,7 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT
+from mindroom.delegation.workers import dedicated_worker_refusal
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.workers.models import ScriptResourceProfileName
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class DelegationTarget:
     agent_mode: AgentMode = "standard"
     persona: SubagentPersona | None = None
     model: str | None = None
+    dedicated_worker: bool = False
+    resource_profile: ScriptResourceProfileName | None = None
 
 
 async def resolve_delegation_target(
@@ -167,6 +171,9 @@ def resolve_fresh_target(
     if retained is not None:
         # A resumed call never rereads a profile the worker could have changed.
         return DelegationTarget(child_name, task, model=model)
+    worker = _dedicated_worker_request(args, caller_name=caller_name, config=config, runtime_paths=runtime_paths)
+    if isinstance(worker, str):
+        return worker
     request = resolve_persona_request(
         caller_name=caller_name,
         agent_name=child_name,
@@ -196,10 +203,41 @@ def resolve_fresh_target(
     )
     if isinstance(request, str):
         return request
+    dedicated_worker, resource_profile = worker
     return DelegationTarget(
         child_name,
         task,
         agent_mode=request.agent_mode,
         persona=request.persona,
         model=request.model,
+        dedicated_worker=dedicated_worker,
+        resource_profile=resource_profile,
     )
+
+
+def _dedicated_worker_request(
+    args: Mapping[str, object],
+    *,
+    caller_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[bool, ScriptResourceProfileName | None] | str:
+    """Read whether a fresh child asks for its own worker, and with which resource profile, or return a refusal."""
+    dedicated_worker, resource_profile = args.get("dedicated_worker"), args.get("resource_profile")
+    if dedicated_worker is not None and not isinstance(dedicated_worker, bool):
+        return "Cannot delegate: dedicated_worker must be a boolean or null."
+    if resource_profile is not None and not dedicated_worker:
+        return "Cannot delegate: resource_profile requires dedicated_worker=true."
+    if not dedicated_worker:
+        return False, None
+    if resource_profile is not None and not isinstance(resource_profile, str):
+        return "Cannot delegate: resource_profile must be small, standard, or large."
+    refusal = dedicated_worker_refusal(
+        caller_name,
+        live_delegation_config(config),
+        runtime_paths,
+        resource_profile=resource_profile,
+    )
+    if refusal is not None:
+        return refusal
+    return True, cast("ScriptResourceProfileName | None", resource_profile)

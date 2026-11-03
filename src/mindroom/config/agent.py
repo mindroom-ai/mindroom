@@ -450,6 +450,10 @@ class AgentConfig(BaseModel):
         description="Allowed agents for run_subagent and continue_subagent, including this agent when explicitly listed",
         json_schema_extra=dashboard_hint(reference="agent"),
     )
+    dedicated_subagent_workers: bool = Field(
+        default=False,
+        description="Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
+    )
 
     @property
     def tool_names(self) -> list[str]:

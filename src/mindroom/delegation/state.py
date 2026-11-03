@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.workers.models import ScriptResourceProfileName
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
@@ -134,6 +135,17 @@ class DelegationChild:
     requested_model_name: str
     # None for a child that runs its configured agent's own prompt.
     persona: SubagentPersona | None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a subagent could ask for a dedicated worker.
+    # Legacy format: A child snapshot in a subagent session file or a run's `mindroom_delegation` metadata that lacks
+    # `dedicated_worker` and `worker_resource_profile`.
+    # Last legacy release: v2026.11.104; the next release writes both fields.
+    # Handling: The defaults read such a child as running on its normal worker with no resource profile, which is how
+    # it ran. They stay on the model, because run metadata is rewritten only by a conversation layout step.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
+    # tests/test_delegation_dedicated_workers.py::test_child_snapshot_without_worker_fields_runs_on_its_normal_worker.
+    # Whether the child's worker-routed calls run in a worker of its own, and the resource profile that worker gets.
+    dedicated_worker: bool = False
+    worker_resource_profile: ScriptResourceProfileName | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:

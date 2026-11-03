@@ -71,6 +71,7 @@ def _generated_agent_data(
             "rooms": [],
             "automations": None,
             "delegate_to": [],
+            "dedicated_subagent_workers": False,
             "allow_self_config": False,
             "created_agents_per_owner": 0,
         }

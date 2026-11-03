@@ -743,7 +743,7 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         return func(*args, **kwargs)
 
     main.initialize_api_app(main.app, first_runtime)
-    monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
+    monkeypatch.setattr(main, "worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
     monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
     monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
 

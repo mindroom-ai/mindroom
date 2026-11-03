@@ -75,6 +75,7 @@ from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
 from mindroom.workers.runtime import (
     lease_configured_primary_worker_manager,
+    worker_cleanup_interval_seconds,
 )
 
 if TYPE_CHECKING:
@@ -87,7 +88,6 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
-_WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
@@ -202,16 +202,6 @@ class PersonalAgentResponse(BaseModel):
     template_exists: bool
 
 
-def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
-    """Return the configured background idle-worker cleanup interval."""
-    raw = runtime_paths.env_value(_WORKER_CLEANUP_INTERVAL_ENV, default="0")
-    try:
-        interval = float(raw)
-    except ValueError:
-        return 0.0
-    return max(0.0, interval)
-
-
 def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
@@ -253,7 +243,7 @@ async def _worker_cleanup_loop(
     """Periodically clean idle workers using the app's current runtime paths."""
     while not stop_event.is_set():
         runtime_paths = _app_runtime_paths(api_app)
-        interval_seconds = _worker_cleanup_interval_seconds(runtime_paths)
+        interval_seconds = worker_cleanup_interval_seconds(runtime_paths)
         if interval_seconds <= 0:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=idle_poll_interval_seconds)

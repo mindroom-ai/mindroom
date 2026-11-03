@@ -42,6 +42,7 @@ __all__ = [
     "reset_worker_launch_config",
     "serialized_dedicated_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
+    "worker_cleanup_interval_seconds",
     "worker_config_snapshot",
     "worker_visible_storage_root",
 ]
@@ -50,6 +51,7 @@ _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 _PRIMARY_WORKER_MANAGER_CONDITION = threading.Condition(_PRIMARY_WORKER_MANAGER_LOCK)
 logger = logging.getLogger(__name__)
 _DEFAULT_PRIMARY_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 
 
 @dataclass(slots=True)
@@ -207,6 +209,16 @@ def build_worker_launch_config(
         grantable_credentials=config.get_worker_grantable_credentials(),
         digest=_stable_json_digest({"config": config_data, "tools": tool_snapshot_digest}),
     )
+
+
+def worker_cleanup_interval_seconds(runtime_paths: RuntimePaths) -> float:
+    """Return how often idle-worker cleanup runs, or 0 when it never does."""
+    raw = runtime_paths.env_value(_WORKER_CLEANUP_INTERVAL_ENV, default="0")
+    try:
+        interval = float(raw)
+    except ValueError:
+        return 0.0
+    return max(0.0, interval)
 
 
 def worker_visible_storage_root(runtime_paths: RuntimePaths) -> Path | None:

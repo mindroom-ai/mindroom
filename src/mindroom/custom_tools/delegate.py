@@ -7,7 +7,7 @@ Each turn runs independently and returns its response as the tool result.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
@@ -19,6 +19,7 @@ from mindroom.delegation.personas import list_profiles, render_profile_listing
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, RUN_SUBAGENT
 from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
+from mindroom.delegation.workers import dedicated_worker_refusal, resource_profiles_available
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
@@ -75,6 +76,11 @@ class DelegateTools(Toolkit):
         self._persona = persona
         # A caller that may run itself may also author that copy's prompt, tools, skills, knowledge, or profile.
         self._authoring = agent_name in self._delegate_to
+        # Whether this caller may run a child in a worker of its own, and size that worker.
+        self._dedicated_workers = (
+            dedicated_worker_refusal(agent_name, config, runtime_paths, resource_profile=None) is None
+        )
+        self._resource_profiles = self._dedicated_workers and resource_profiles_available(runtime_paths)
 
         super().__init__(
             name="delegate",
@@ -89,6 +95,8 @@ class DelegateTools(Toolkit):
         hidden = {
             *(() if self._minimal_targets else ("minimal",)),
             *(() if self._authoring else ("system_prompt", "tools", "skills", "knowledge", "profile")),
+            *(() if self._dedicated_workers else ("dedicated_worker",)),
+            *(() if self._resource_profiles else ("resource_profile",)),
         }
         description = self._build_run_subagent_description()
         if not hidden:
@@ -161,9 +169,26 @@ class DelegateTools(Toolkit):
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
             "follow-ups keep the child's model and mode.\n"
             f"{minimal_guidance}"
+            f"{self._dedicated_worker_guidance()}"
             f"{self._authoring_guidance()}"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
             "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."
+        )
+
+    def _dedicated_worker_guidance(self) -> str:
+        if not self._dedicated_workers:
+            return ""
+        profiles = (
+            "Set resource_profile to small, standard, or large to size that worker; omit it for the normal worker size. "
+            if self._resource_profiles
+            else ""
+        )
+        return (
+            "Set dedicated_worker to true to run the child's shell, file, python, and other worker tools in a new "
+            "worker of its own instead of the worker it shares with your other subagents, so parallel or heavy "
+            "children do not compete for one worker. It sees the same workspace; its first worker call waits for the "
+            "new worker to start, and packages installed into the shared worker's environment are not there. "
+            f"{profiles}Follow-ups keep the child's worker.\n"
         )
 
     def _authoring_guidance(self) -> str:
@@ -200,6 +225,8 @@ class DelegateTools(Toolkit):
         skills: list[str] | None = None,
         knowledge: list[str] | None = None,
         profile: str | None = None,
+        dedicated_worker: bool = False,
+        resource_profile: Literal["small", "standard", "large"] | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
@@ -216,6 +243,8 @@ class DelegateTools(Toolkit):
             skills: Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too.
             knowledge: Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too.
             profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge.
+            dedicated_worker: True runs the child's worker tools in a new worker of its own, for parallel or heavy children.
+            resource_profile: CPU and memory size of that worker, small, standard, or large; omit for the normal size.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
@@ -233,6 +262,8 @@ class DelegateTools(Toolkit):
                 "skills": skills,
                 "knowledge": knowledge,
                 "profile": profile,
+                "dedicated_worker": dedicated_worker,
+                "resource_profile": resource_profile,
             },
         )
 
@@ -350,6 +381,8 @@ class DelegateTools(Toolkit):
             previous=target.previous_child,
             parent_tool_call_id=(parent.context.call_id or "") if parent is not None else "",
             persona=target.persona,
+            dedicated_worker=target.dedicated_worker,
+            worker_resource_profile=target.resource_profile,
         )
         return child, config, parent.context.run_id if parent is not None else None
 

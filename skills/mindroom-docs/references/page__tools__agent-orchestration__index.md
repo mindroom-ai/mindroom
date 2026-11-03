@@ -70,6 +70,8 @@ run_subagent(
     skills: list[str] | None = None,
     knowledge: list[str] | None = None,
     profile: str | None = None,
+    dedicated_worker: bool = False,
+    resource_profile: Literal["small", "standard", "large"] | None = None,
 ) -> str
 continue_subagent(subagent_id: str, message: str) -> str
 ```
@@ -79,6 +81,7 @@ Include the relevant facts, constraints, and expected output in `task`, because 
 Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
 Set `model` to an alias from `models:` to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
 Set `minimal=True` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), which saves tokens when the child does not need its full system prompt.
+Set `dedicated_worker=True` to run the child's worker tools in a worker of its own; see [Dedicated Workers](#dedicated-workers).
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
 Delegated runs do not create a Matrix thread and cannot ask the user interactive questions.
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
@@ -116,6 +119,40 @@ Common errors:
 - `Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up.` - the child's previous turn has not finished.
 - `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a workflow participant, whose tools work only inside its run.
 - `Cannot delegate an empty task. Please provide a task description.` - `task` or `message` is empty.
+
+### Dedicated Workers
+
+With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell`, `python`, and `file`, in a worker of its own instead of the worker it shares with its agent's other subagents.
+Use it when an agent runs several subagents at once or a subagent does heavy work, so they do not compete for one worker's CPU and memory.
+Set `dedicated_subagent_workers: true` on the calling agent; MindRoom then offers `dedicated_worker` and, on Kubernetes, `resource_profile` in its `run_subagent`.
+The backend must also run idle-worker cleanup (`MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` above 0, which both Helm charts set), because every such subagent gets a new worker.
+
+```yaml
+agents:
+  lead:
+    display_name: Lead
+    delegate_to: [lead]
+    dedicated_subagent_workers: true
+    worker_tools: [shell, file, python]
+```
+
+```python
+run_subagent(task="Build the parser branch and run its tests.", dedicated_worker=True, resource_profile="large")
+```
+
+`resource_profile` is `small`, `standard`, or `large`, the [background script profiles](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings); omitting it gives the worker the normal worker resources.
+The worker sees the same workspace, shared directories, and knowledge as the subagent's normal worker, with the same file access, leased tool settings, and shared credentials.
+Settings saved inside the normal worker and packages installed into its environment are not there, so a subagent that needs extra packages installs them again or uses a virtual environment in the workspace.
+The subagent's first worker call waits for the new worker to start, and `continue_subagent` follow-ups use the same worker while it exists.
+The worker is removed once it has been idle for the worker idle timeout (`workers.kubernetes.idleTimeoutSeconds`, or `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` with Docker), which stops any process the subagent left running there; a later follow-up starts a new one.
+If the calling agent loses the setting or the backend stops supporting dedicated workers, the subagent's later turns use its normal worker.
+
+Errors:
+
+- `Cannot delegate: <caller> may not run subagents in dedicated workers.` - the calling agent does not set `dedicated_subagent_workers: true`.
+- `Cannot delegate: dedicated workers need the docker or kubernetes worker backend with MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS above 0.` - use a dedicated worker backend and enable idle-worker cleanup.
+- `Cannot delegate: resource_profile requires dedicated_worker=true.` - a profile sizes only a dedicated worker.
+- `Cannot delegate: resource_profile requires the kubernetes worker backend.` - Docker workers have no resource profiles.
 
 ### Authored Subagents
 
