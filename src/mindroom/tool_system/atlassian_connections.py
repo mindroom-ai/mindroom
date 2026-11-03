@@ -116,6 +116,8 @@ def _connection_tool_factory(connection: AtlassianConnectionConfig) -> Callable[
                 credentials_manager: CredentialsManager | None = None,
                 worker_target: ResolvedWorkerTarget | None = None,
                 runtime_config: Config | None = None,
+                jira_spaces: list[str] | None = None,
+                confluence_spaces: list[str] | None = None,
             ) -> None:
                 super().__init__(
                     provider=atlassian_connection_oauth_provider(connection),
@@ -128,6 +130,8 @@ def _connection_tool_factory(connection: AtlassianConnectionConfig) -> Callable[
                     credentials_manager=credentials_manager,
                     worker_target=worker_target,
                     runtime_config=runtime_config,
+                    jira_spaces=jira_spaces,
+                    confluence_spaces=confluence_spaces,
                 )
 
         AtlassianConnectionTools.__name__ = f"{connection.name}_AtlassianConnectionTools"
@@ -140,6 +144,8 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
     """Register one connection's tool from a plugin tools module, using its normal ownership."""
     base = builtin_tool_registry().entries["atlassian"]
     products = " and ".join(product.capitalize() for product in connection.products)
+    # Only the space limits of the connection's own products.
+    space_fields = {f"{product}_spaces" for product in connection.products}
     register_tool_with_metadata(
         name=connection.provider_id,
         display_name=connection.display_name,
@@ -152,6 +158,7 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
         auth_provider=connection.provider_id,
         icon=base.icon,
         icon_color=base.icon_color,
+        agent_override_fields=[field for field in base.agent_override_fields or () if field.name in space_fields],
         managed_init_args=base.managed_init_args,
         docs_url=base.docs_url,
         helper_text=(

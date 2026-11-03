@@ -18,7 +18,11 @@ from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
 )
-from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.metadata import (
+    ToolConfigOverrideError,
+    get_tool_by_name,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.atlassian_test_support import (
@@ -368,3 +372,35 @@ async def test_requesters_never_share_a_connection(tmp_path: Path, monkeypatch: 
 
     assert result["oauth_connection_required"] is True
     assert gateway.requests == []
+
+
+@pytest.mark.asyncio
+async def test_connection_tools_take_space_limits_for_their_own_products(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent entry limits a connection's spaces, and a connection offers only its products' space fields."""
+    config, paths = _plugin(tmp_path)
+    manager = save_client_config(paths)
+    plugins = publish_test_plugins(config, paths)
+    publish_grant(plugins.oauth_providers["partner_atlassian"], manager, PARTNER_TOKEN)
+    gateway = FakeGateway(sites_by_token={PARTNER_TOKEN: [site(OTHER_CLOUD_ID, OTHER_SITE_URL)]}).install(monkeypatch)
+    gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search", OTHER_CLOUD_ID), {"results": []})
+    tool = get_tool_by_name(
+        "partner_atlassian",
+        paths,
+        worker_target=worker_target(),
+        runs_in_worker=False,
+        tool_config_overrides={"confluence_spaces": ["DOCS"]},
+        tools=plugins.tools,
+    )
+    assert isinstance(tool, AtlassianToolkit)
+
+    await _call(tool, "partner_confluence_search", cql="type = page")
+
+    assert gateway.product_requests()[0].url.params["cql"] == 'space in ("DOCS") AND (type = page)'
+    fields = plugins.tools.entries["partner_atlassian"].agent_override_fields or ()
+    assert [field.name for field in fields] == ["confluence_spaces"]
+    for overrides in ({"write": False}, {"jira_spaces": ["ENG"]}):
+        with pytest.raises(ToolConfigOverrideError, match="unknown authored override"):
+            validate_authored_tool_entry_overrides("partner_atlassian", overrides, tool_metadata=plugins.tools.entries)

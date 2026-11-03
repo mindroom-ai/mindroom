@@ -28,6 +28,11 @@ from mindroom.custom_tools.atlassian_client import (
     request_json,
     select_site,
 )
+from mindroom.custom_tools.atlassian_spaces import (
+    CONFLUENCE_SPACE_KEY_PATTERN,
+    JIRA_PROJECT_KEY_PATTERN,
+    AtlassianSpaces,
+)
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
@@ -76,14 +81,14 @@ _MAX_PAGE_SIZE = 50
 _PAGE_ID_PATTERN = re.compile(r"[0-9]{1,20}")
 _ATTACHMENT_ID_PATTERN = re.compile(r"(?:att)?([0-9]{1,20})")
 _ISSUE_KEY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,254}-[0-9]{1,20}|[0-9]{1,20}")
-_PROJECT_KEY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,254}")
-_SPACE_KEY_PATTERN = re.compile(r"~?[A-Za-z0-9_-]{1,255}")
 _CURSOR_PATTERN = re.compile(r"[A-Za-z0-9._~+/=%-]{1,2048}")
 _MIME_TYPE_PATTERN = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}")
 _MAX_FILENAME_CHARS = 200
 _DEFAULT_ISSUE_FIELDS = ("summary", "status", "assignee", "reporter", "priority", "issuetype", "updated")
 # Every field of an issue can be very large, so a single read adds only the description by default.
 _DEFAULT_ISSUE_READ_FIELDS = (*_DEFAULT_ISSUE_FIELDS, "description")
+# Field selectors whose results already include each issue's space.
+_PROJECT_FIELD_SELECTORS = frozenset({"project", "*all", "*navigable"})
 _ATTACHMENT_USAGE = (
     "Usable in this turn only. Open it with get_attachment(attachment_id), or save it with "
     "get_attachment(attachment_id, mindroom_output_path=...); download it again in a later turn."
@@ -95,6 +100,25 @@ class _InvalidArgumentError(AtlassianError):
 
     def __init__(self, message: str) -> None:
         super().__init__(code="invalid_argument", message=message)
+
+
+class _SpaceNotAllowedError(AtlassianError):
+    """The item is outside the spaces this agent may use, so nothing of it is returned or changed."""
+
+    def __init__(self, product: AtlassianProduct, allowed: Sequence[str]) -> None:
+        super().__init__(
+            code="space_not_allowed",
+            message=f"This agent may use only these {product.capitalize()} spaces: {', '.join(allowed)}.",
+            allowed_spaces=list(allowed),
+        )
+
+
+def _page_not_found() -> AtlassianError:
+    return AtlassianError(
+        code="page_not_found",
+        message="The page was not found. It may not exist, may not be a page, may not be viewable by "
+        "the connected account, or may not be indexed by search yet if it was created moments ago.",
+    )
 
 
 def _page_id(value: str, *, field_name: str = "page_id") -> str:
@@ -250,6 +274,17 @@ def _attachment_kind(mime_type: str) -> Literal["audio", "file", "image", "video
     return "video" if top_level == "video" else "file"
 
 
+def _issue_space_key(issue: object) -> object:
+    return _mapping(_mapping(_mapping(issue).get("fields")).get("project")).get("key")
+
+
+def _search_result_space_key(item: object) -> object:
+    """Return the space of a search result, which is the content's space or, for a space result, the space itself."""
+    item_data = _mapping(item)
+    space = _mapping(_mapping(item_data.get("content")).get("space")) or _mapping(item_data.get("space"))
+    return space.get("key")
+
+
 def _issue_reference(issue: object, site: AtlassianSite) -> dict[str, object]:
     issue_data = _mapping(issue)
     key = issue_data.get("key")
@@ -260,8 +295,12 @@ def _issue_reference(issue: object, site: AtlassianSite) -> dict[str, object]:
     }
 
 
-def _issue_summary(issue: object, site: AtlassianSite) -> dict[str, object]:
-    return {**_issue_reference(issue, site), "fields": _mapping(issue).get("fields")}
+def _issue_summary(issue: object, site: AtlassianSite, *, omit_space: bool = False) -> dict[str, object]:
+    """Return an issue's reference and fields, without the space field when only the space check requested it."""
+    fields = _mapping(issue).get("fields")
+    if omit_space and isinstance(fields, dict):
+        fields = {name: value for name, value in fields.items() if name != "project"}
+    return {**_issue_reference(issue, site), "fields": fields}
 
 
 def _transition_summary(transition: object) -> dict[str, object]:
@@ -378,6 +417,8 @@ class AtlassianToolkit(Toolkit):
         credentials_manager: CredentialsManager | None,
         worker_target: ResolvedWorkerTarget | None,
         runtime_config: Config | None,
+        jira_spaces: list[str] | None = None,
+        confluence_spaces: list[str] | None = None,
     ) -> None:
         if credentials_manager is None:
             msg = "Atlassian tools require an explicit credentials_manager"
@@ -387,11 +428,14 @@ class AtlassianToolkit(Toolkit):
             site_url=normalize_site_url(site_url) if site_url and site_url.strip() else None,
             cloud_id=normalize_cloud_id(cloud_id) if cloud_id and cloud_id.strip() else None,
         )
+        self._spaces = AtlassianSpaces.from_config(jira_spaces=jira_spaces, confluence_spaces=confluence_spaces)
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
         self._config = runtime_config
-        super().__init__(name=provider.id)
+        # An empty space list leaves the agent no space of that product, so none of its functions are offered.
+        enabled_products = tuple(product for product in products if self._spaces.keys(product) != ())
+        super().__init__(name=provider.id, instructions=self._spaces.instructions(enabled_products))
         functions = {
             "jira_search_issues": self.jira_search_issues,
             "jira_get_issue": self.jira_get_issue,
@@ -408,7 +452,8 @@ class AtlassianToolkit(Toolkit):
             "confluence_add_comment": self.confluence_add_comment,
         }
         self.functions = {
-            f"{function_prefix}{name}": functions[name] for name in atlassian_function_names(products, write=write)
+            f"{function_prefix}{name}": functions[name]
+            for name in atlassian_function_names(enabled_products, write=write)
         }
 
     def _payload(self, status: str, **fields: object) -> str:
@@ -484,6 +529,42 @@ class AtlassianToolkit(Toolkit):
     def _error(self, exc: AtlassianError) -> str:
         return self._payload("error", code=exc.code, message=exc.message, **exc.details)
 
+    def _require_space(self, product: AtlassianProduct, key: object) -> None:
+        """Refuse an item whose space this agent may not use."""
+        allowed = self._spaces.keys(product)
+        if allowed is not None and not self._spaces.allows(product, key):
+            raise _SpaceNotAllowedError(product, allowed)
+
+    def _adds_space_field(self, fields: list[str]) -> bool:
+        """Return whether issue reads must also request each issue's space, so results can be checked."""
+        return self._spaces.jira is not None and not _PROJECT_FIELD_SELECTORS & set(fields)
+
+    async def _require_issue_space(self, access_token: str, site: AtlassianSite, key: str) -> None:
+        """Read an issue's current space before changing it, when this agent's Jira spaces are limited."""
+        if self._spaces.jira is None:
+            return
+        path = f"/rest/api/3/issue/{key}"
+        issue = await request_json(access_token, site, "jira", "GET", path, params={"fields": "project"})
+        self._require_space("jira", _issue_space_key(issue))
+
+    async def _require_page_space(self, access_token: str, site: AtlassianSite, page: str) -> None:
+        """Read a page's space before using it, when this agent's Confluence spaces are limited."""
+        if self._spaces.confluence is None:
+            return
+        params = {"cql": f"id = {page}", "limit": 1, "expand": "space"}
+        data = await request_json(
+            access_token,
+            site,
+            "confluence",
+            "GET",
+            "/wiki/rest/api/content/search",
+            params=params,
+        )
+        results = _mapping(data).get("results")
+        if not isinstance(results, list) or not results:
+            raise _page_not_found()
+        self._require_space("confluence", _mapping(_mapping(results[0]).get("space")).get("key"))
+
     async def jira_search_issues(
         self,
         jql: str,
@@ -502,10 +583,12 @@ class AtlassianToolkit(Toolkit):
 
         """
         try:
+            requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_FIELDS)
+            adds_space_field = self._adds_space_field(requested)
             body: dict[str, object] = {
-                "jql": _required_text(jql, "jql"),
+                "jql": self._spaces.restrict_query("jira", _required_text(jql, "jql")),
                 "maxResults": _page_size(max_results),
-                "fields": _string_list(fields, "fields") or list(_DEFAULT_ISSUE_FIELDS),
+                "fields": [*requested, "project"] if adds_space_field else requested,
             }
             if token := _cursor(next_page_token, "next_page_token"):
                 body["nextPageToken"] = token
@@ -522,7 +605,13 @@ class AtlassianToolkit(Toolkit):
             has_more = not is_last if isinstance(is_last, bool) else next_token is not None
             issues = data.get("issues")
             return {
-                "issues": [_issue_summary(issue, site) for issue in issues] if isinstance(issues, list) else [],
+                "issues": [
+                    _issue_summary(issue, site, omit_space=adds_space_field)
+                    for issue in issues
+                    if self._spaces.allows("jira", _issue_space_key(issue))
+                ]
+                if isinstance(issues, list)
+                else [],
                 **_page_fields(has_more, next_token, cursor_field="next_page_token"),
             }
 
@@ -539,9 +628,11 @@ class AtlassianToolkit(Toolkit):
         """
         try:
             key = _issue_key(issue_key)
+            requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_READ_FIELDS)
+            adds_space_field = self._adds_space_field(requested)
             params: dict[str, str | int] = {
                 "expand": "transitions",
-                "fields": ",".join(_string_list(fields, "fields") or _DEFAULT_ISSUE_READ_FIELDS),
+                "fields": ",".join([*requested, "project"] if adds_space_field else requested),
             }
         except AtlassianError as exc:
             return self._error(exc)
@@ -550,8 +641,9 @@ class AtlassianToolkit(Toolkit):
             data = _mapping(
                 await request_json(access_token, site, "jira", "GET", f"/rest/api/3/issue/{key}", params=params),
             )
+            self._require_space("jira", _issue_space_key(data))
             transitions = data.get("transitions")
-            issue = _issue_summary(data, site)
+            issue = _issue_summary(data, site, omit_space=adds_space_field)
             issue["transitions"] = (
                 [_transition_summary(item) for item in transitions] if isinstance(transitions, list) else []
             )
@@ -578,9 +670,10 @@ class AtlassianToolkit(Toolkit):
 
         """
         try:
-            if not _PROJECT_KEY_PATTERN.fullmatch(project_key):
+            if not JIRA_PROJECT_KEY_PATTERN.fullmatch(project_key):
                 msg = "project_key must be a Jira project key such as PROJ."
                 raise _InvalidArgumentError(msg)
+            self._require_space("jira", project_key)
             issue_fields: dict[str, object] = {
                 **_extra_fields(fields),
                 "project": {"key": project_key.upper()},
@@ -635,6 +728,7 @@ class AtlassianToolkit(Toolkit):
             return self._error(exc)
 
         async def update(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            await self._require_issue_space(access_token, site, key)
             await request_json(
                 access_token,
                 site,
@@ -662,6 +756,7 @@ class AtlassianToolkit(Toolkit):
             return self._error(exc)
 
         async def add_comment(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            await self._require_issue_space(access_token, site, key)
             data = _mapping(
                 await request_json(
                     access_token,
@@ -691,6 +786,7 @@ class AtlassianToolkit(Toolkit):
             return self._error(exc)
 
         async def transition_issue(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            await self._require_issue_space(access_token, site, key)
             path = f"/rest/api/3/issue/{key}/transitions"
             data = _mapping(await request_json(access_token, site, "jira", "GET", path))
             available = [_transition_summary(item) for item in data.get("transitions") or [] if isinstance(item, dict)]
@@ -711,11 +807,12 @@ class AtlassianToolkit(Toolkit):
 
         """
         try:
+            expand = "content.history,content.history.ownedBy,content.version"
             params: dict[str, str | int] = {
-                "cql": _required_text(cql, "cql"),
+                "cql": self._spaces.restrict_query("confluence", _required_text(cql, "cql")),
                 "limit": _page_size(limit),
                 "excerpt": "indexed",
-                "expand": "content.history,content.history.ownedBy,content.version",
+                "expand": f"{expand},content.space" if self._spaces.confluence is not None else expand,
             }
             if next_cursor := _cursor(cursor, "cursor"):
                 # Search's own next links pair the cursor with next=true.
@@ -730,7 +827,11 @@ class AtlassianToolkit(Toolkit):
             links = _mapping(data.get("_links"))
             results = data.get("results")
             return {
-                "results": [_search_result_summary(item, links.get("base")) for item in results]
+                "results": [
+                    _search_result_summary(item, links.get("base"))
+                    for item in results
+                    if self._spaces.allows("confluence", _search_result_space_key(item))
+                ]
                 if isinstance(results, list)
                 else [],
                 **_page_fields(*_next_cursor(links)),
@@ -759,12 +860,10 @@ class AtlassianToolkit(Toolkit):
             data = _mapping(await request_json(access_token, site, "confluence", "GET", path, params=params))
             results = data.get("results")
             if not isinstance(results, list) or not results:
-                raise AtlassianError(
-                    code="page_not_found",
-                    message="The page was not found. It may not exist, may not be a page, may not be viewable by "
-                    "the connected account, or may not be indexed by search yet if it was created moments ago.",
-                )
+                raise _page_not_found()
             item = _mapping(results[0])
+            space = _mapping(item.get("space"))
+            self._require_space("confluence", space.get("key"))
             content_type = item.get("type")
             if content_type != "page":
                 described = (
@@ -775,7 +874,6 @@ class AtlassianToolkit(Toolkit):
                     message=f"This ID belongs to {described}, not a page, and confluence_get_page reads pages only.",
                     content_type=content_type if isinstance(content_type, str) else None,
                 )
-            space = _mapping(item.get("space"))
             links = _mapping(item.get("_links"))
             return {
                 "page": {
@@ -814,6 +912,7 @@ class AtlassianToolkit(Toolkit):
             return self._error(exc)
 
         async def list_attachments(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            await self._require_page_space(access_token, site, page)
             path = "/wiki/rest/api/content/search"
             data = _mapping(await request_json(access_token, site, "confluence", "GET", path, params=params))
             results = data.get("results")
@@ -862,6 +961,8 @@ class AtlassianToolkit(Toolkit):
         max_bytes_setting = INLINE_ATTACHMENT_BYTES_ENV if inline_limit < RETAINED_MEDIA_MAX_BYTES else None
 
         async def download_attachment(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            # Checking the page suffices: Confluence answers 404 for an attachment of another page under this path.
+            await self._require_page_space(access_token, site, page)
             path = f"/wiki/rest/api/content/{page}/child/attachment/{confluence_attachment_id}/download"
             downloaded = await download(
                 access_token,
@@ -924,20 +1025,24 @@ class AtlassianToolkit(Toolkit):
 
         """
         try:
-            if not _SPACE_KEY_PATTERN.fullmatch(space_key):
+            if not CONFLUENCE_SPACE_KEY_PATTERN.fullmatch(space_key):
                 msg = "space_key must be a Confluence space key such as DOCS."
                 raise _InvalidArgumentError(msg)
+            self._require_space("confluence", space_key)
             body: dict[str, object] = {
                 "status": "current",
                 "title": _required_text(title, "title"),
                 "body": _storage_body(_required_text(body_storage, "body_storage")),
             }
-            if parent_page_id is not None:
-                body["parentId"] = _page_id(parent_page_id, field_name="parent_page_id")
+            parent = _page_id(parent_page_id, field_name="parent_page_id") if parent_page_id is not None else None
+            if parent is not None:
+                body["parentId"] = parent
         except AtlassianError as exc:
             return self._error(exc)
 
         async def create(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            if parent is not None:
+                await self._require_page_space(access_token, site, parent)
             spaces = _mapping(
                 await request_json(
                     access_token,
@@ -1013,6 +1118,7 @@ class AtlassianToolkit(Toolkit):
             return self._error(exc)
 
         async def update(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            await self._require_page_space(access_token, site, page)
             data = await request_json(
                 access_token,
                 site,
@@ -1040,6 +1146,7 @@ class AtlassianToolkit(Toolkit):
             return self._error(exc)
 
         async def add_comment(access_token: str, site: AtlassianSite) -> dict[str, object]:
+            await self._require_page_space(access_token, site, page)
             data = _mapping(
                 await request_json(
                     access_token,
@@ -1067,7 +1174,7 @@ class AtlassianToolkit(Toolkit):
 
 
 class AtlassianTools(AtlassianToolkit):
-    """The default Atlassian connection, optionally pinned to one site per agent."""
+    """The default Atlassian connection, optionally pinned to one site, read-only access, and spaces per agent."""
 
     def __init__(
         self,
@@ -1078,16 +1185,21 @@ class AtlassianTools(AtlassianToolkit):
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
+        write: bool = True,
+        jira_spaces: list[str] | None = None,
+        confluence_spaces: list[str] | None = None,
     ) -> None:
         super().__init__(
             provider=atlassian_oauth_provider(),
             function_prefix="",
             products=ATLASSIAN_PRODUCTS,
-            write=True,
+            write=write,
             site_url=site_url,
             cloud_id=cloud_id,
             runtime_paths=runtime_paths,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
             runtime_config=runtime_config,
+            jira_spaces=jira_spaces,
+            confluence_spaces=confluence_spaces,
         )

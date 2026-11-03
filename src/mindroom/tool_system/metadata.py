@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import math
 import os
+import re
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -182,7 +183,13 @@ def _validate_text_authored_override_value(
     agent_override_field = _agent_override_field(metadata, field.name)
     try:
         if field.type == "string[]":
-            return _normalize_string_array_override(value, preserve_empty_list=True)
+            values = _normalize_string_array_override(value, preserve_empty_list=True)
+            pattern = (field.validation or {}).get("pattern")
+            invalid = next((item for item in values or () if pattern and not re.fullmatch(pattern, item)), None)
+            if invalid is not None:
+                msg = f"{full_path}: {invalid!r} is not a valid {field.label} entry."
+                raise ToolConfigOverrideError(msg)
+            return values
         if agent_override_field is not None and agent_override_field.type == "string[]":
             normalized = _normalize_string_array_override(value)
             return None if normalized is None else ", ".join(normalized)

@@ -8153,7 +8153,38 @@
       "status": "requires_config"
     },
     {
-      "agent_override_fields": null,
+      "agent_override_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Keys of the only Jira spaces (projects) this agent may use; an empty list removes the Jira functions, and unset allows every space.",
+          "env": [],
+          "label": "Jira Spaces",
+          "name": "jira_spaces",
+          "options": null,
+          "placeholder": "ENG",
+          "required": false,
+          "type": "string[]",
+          "validation": {
+            "pattern": "[A-Za-z][A-Za-z0-9_]{0,254}"
+          }
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Keys of the only Confluence spaces this agent may use; an empty list removes the Confluence functions, and unset allows every space.",
+          "env": [],
+          "label": "Confluence Spaces",
+          "name": "confluence_spaces",
+          "options": null,
+          "placeholder": "DOCS",
+          "required": false,
+          "type": "string[]",
+          "validation": {
+            "pattern": "~?[A-Za-z0-9_-]{1,255}"
+          }
+        }
+      ],
       "auth_provider": "atlassian",
       "category": "productivity",
       "config_fields": [
@@ -8181,6 +8212,19 @@
           "placeholder": null,
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating, updating, commenting on, and transitioning Jira issues and Confluence pages.",
+          "env": [],
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
