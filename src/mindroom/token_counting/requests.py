@@ -113,7 +113,8 @@ def _file_tokens(counter: TokenCounter, file: File) -> int:
     """Return what ``file`` counts: a PDF the model's page price per page, text its text, any other the allowance.
 
     Claude, Gemini, and OpenAI's Responses API read a text file as its text. Bytes that are not UTF-8 are text only in
-    a file of a text type, such as a Windows-1252 CSV, which counts as the wires decode it, with replacement characters.
+    a file of a text type, such as a Windows-1252 CSV, which counts its UTF-8 decode with replacement characters, the
+    text Claude sends.
     """
     data = _file_bytes(file)
     if data is None:
