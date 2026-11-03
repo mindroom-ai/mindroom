@@ -19,6 +19,7 @@ from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.custom_tools import atlassian as atlassian_module
 from mindroom.custom_tools import atlassian_client
 from mindroom.custom_tools.atlassian import AtlassianTools
+from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.oauth.atlassian import atlassian_oauth_provider
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
@@ -725,6 +726,31 @@ async def test_unknown_content_type_is_guessed_from_the_filename(
     record = load_attachment(tmp_path / "storage", result["attachment_id"])
     assert record is not None
     assert record.kind == "image"
+
+
+@pytest.mark.asyncio
+async def test_a_compressed_download_served_as_octet_stream_is_never_viewed_as_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compressed name such as ``rows.tsv.gz`` names no type, so its gzip bytes never reach the model as text."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
+    gateway.route(
+        "GET",
+        gateway_url("confluence", DOWNLOAD_PATH),
+        _file(
+            b"\x1f\x8b\x08\x00gzip",
+            {"content-type": "application/octet-stream", "content-disposition": "attachment; filename=rows.tsv.gz"},
+        ),
+    )
+
+    with tool_runtime_context(context):
+        result = json.loads(await tool.confluence_download_attachment(page_id="123", attachment_id="att456"))
+        viewed = await AttachmentTools().get_attachment(str(result["attachment_id"]), view=True)
+
+    assert result["attachment"]["mime_type"] == "application/octet-stream"
+    assert isinstance(viewed, str)
+    assert json.loads(viewed)["status"] == "error"
 
 
 @pytest.mark.asyncio
