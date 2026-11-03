@@ -1194,6 +1194,28 @@ describe("presets and unsaved edits on the personal page", () => {
     expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
   });
 
+  it("scrolls the editor, and the notice before replacing it, into view from the row's menu", async () => {
+    await renderPage();
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    await edit("One");
+    expect(scroll.mock.contexts).toEqual([
+      screen.getByRole("heading", { name: "Edit one" }),
+    ]);
+    expect(scroll).toHaveBeenLastCalledWith({ block: "nearest" });
+
+    // Typing re-renders the editor without scrolling it again.
+    fireEvent.change(description(), {
+      target: { value: "typed but not saved" },
+    });
+    expect(scroll).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(await rowAction("Edit service for Two"));
+    expect(scroll.mock.contexts).toEqual([
+      screen.getByRole("heading", { name: "Edit one" }),
+      screen.getByRole("alert"),
+    ]);
+  });
+
   it("keeps Edit off for the service whose editor is open", async () => {
     await renderPage();
     await edit("One");
