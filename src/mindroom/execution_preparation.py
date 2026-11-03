@@ -693,13 +693,16 @@ def _frame_holding_attachments(
 
     Attachments estimated past ``limit`` even beside nothing but the scope's summary are left to the media fallback,
     which drops them if the provider refuses, so an estimate that runs high trims the history but never fails the reply.
+    A scope without a session has no summary to keep and nothing to compact, so its attachments always count, and the
+    thread history that stands in for its replay is fitted beside them.
     """
     if not media.has_any():
         return frame
     media_frame = partial(_frame_with_media, frame, media)
     session = scope_context.session if scope_context is not None else None
-    summary = session.summary if session is not None else None
-    if limit is None or model.request_tokens(media_frame(turn).request(summary=summary)) <= limit:
+    if session is None or limit is None:
+        return media_frame
+    if model.request_tokens(media_frame(turn).request(summary=session.summary)) <= limit:
         return media_frame
     return frame
 

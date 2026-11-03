@@ -645,6 +645,44 @@ async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
 
 
 @pytest.mark.asyncio
+async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attachments(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """A reply with no stored history replays the thread instead, as much of it as leaves room for the attachments."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=12_000,
+    )
+    thread_history = [
+        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 3_000, event_id=f"$note-{index}")
+        for index in range(10)
+    ]
+    current = make_visible_message(sender="@alice:localhost", body="Read the archive.", event_id="$current")
+    archive = File(content=b"\x89\xff binary", filename="archive.bin")
+
+    with _no_memory():
+        await ai_response(
+            replace(
+                make_turn_context("test_agent", session_id="fresh", reply_to_event_id="$current"),
+                prompt="Read the archive.",
+                thread_history=[*thread_history, current],
+                media=MediaInputs(files=(archive,)),
+            ),
+            runtime_paths,
+            config,
+        )
+
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (archive,)
+    sent = render_prepared_messages_text(request.messages)
+    assert "note-9" in sent
+    assert "note-0" not in sent
+    assert provider.model.request_tokens(request) <= 12_000 - 500
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("provider")
 async def test_without_a_context_window_the_prepared_size_holds_the_attachments(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=None)
