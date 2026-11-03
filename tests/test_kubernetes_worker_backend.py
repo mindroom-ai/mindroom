@@ -3812,10 +3812,18 @@ def test_kubernetes_cleanup_removes_an_expired_subagent_worker(tmp_path: Path, r
         _expire(apps_api, handle.worker_id, replicas=replicas if key == subagent_key else 1)
     subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
 
-    cleaned = backend.cleanup_idle_workers(now=10.0)
-
-    assert {handle.worker_key for handle in cleaned} == {base_key, script_key, subagent_key}
     subagent_id = handles[subagent_key].worker_id
+    cleaned = backend.cleanup_idle_workers(now=10.0)
+    if replicas:
+        # A running one is scaled down like any idle worker first, and removed on the next pass.
+        assert {handle.worker_key for handle in cleaned} == {base_key, script_key, subagent_key}
+        assert apps_api.deployments[subagent_id].spec.replicas == 0
+        assert subagent_root.is_dir()
+        cleaned = backend.cleanup_idle_workers(now=11.0)
+        assert {handle.worker_key for handle in cleaned} == {subagent_key}
+    else:
+        assert {handle.worker_key for handle in cleaned} == {base_key, script_key, subagent_key}
+
     assert subagent_id not in apps_api.deployments
     assert subagent_id not in core_api.services
     assert subagent_id not in core_api.secrets
@@ -3823,6 +3831,38 @@ def test_kubernetes_cleanup_removes_an_expired_subagent_worker(tmp_path: Path, r
     for key in (base_key, script_key):
         assert apps_api.deployments[handles[key].worker_id].spec.replicas == 0
         assert (backend.storage_root / backend._state_subpath(key)).is_dir()
+
+
+def test_kubernetes_cleanup_goes_on_when_a_subagent_worker_cannot_be_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subagent worker whose removal fails stays for the next pass, and the pass still scales other workers down."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    normal = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
+    _expire(apps_api, subagent.worker_id, replicas=0)
+    _expire(apps_api, normal.worker_id, replicas=1)
+
+    def fail(worker_key: str) -> None:
+        msg = f"cannot remove {worker_key}"
+        raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(backend, "_retire_worker_locked", fail)
+    with capture_logs() as logs:
+        cleaned = backend.cleanup_idle_workers(now=10.0)
+
+    assert [handle.worker_key for handle in cleaned] == [_TEST_SCOPED_WORKER_KEY_B]
+    assert apps_api.deployments[normal.worker_id].spec.replicas == 0
+    assert subagent.worker_id in apps_api.deployments
+    assert [entry["worker"] for entry in logs if entry["event"] == "subagent_worker_retire_failed"] == [
+        worker_log_id(subagent_key),
+    ]
 
 
 def test_kubernetes_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(tmp_path: Path) -> None:

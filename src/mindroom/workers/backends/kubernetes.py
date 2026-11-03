@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -498,8 +498,7 @@ class KubernetesWorkerBackend:
         cleaned: list[WorkerHandle] = []
         for deployment in deployments:
             handle = self._handle_from_deployment(deployment, now=now)
-            expired_subagent_worker = subagent_worker_expired(handle, self.idle_timeout_seconds, now=now)
-            if not expired_subagent_worker and (handle.status != "idle" or int(deployment.spec.replicas or 0) == 0):
+            if self._cleanup_action(handle, deployment, now=now) is None:
                 continue
             worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
@@ -509,12 +508,12 @@ class KubernetesWorkerBackend:
                 if live is None:
                     continue
                 handle = self._handle_from_deployment(live, now=now)
-                if subagent_worker_expired(handle, self.idle_timeout_seconds, now=now):
-                    # A subagent's own worker serves no one once idle, so it is removed instead of kept scaled down.
-                    if retire_subagent_worker(self._retire_worker_locked, handle.worker_key):
-                        cleaned.append(self._handle_from_deployment(live, now=now, replicas_override=0))
+                action = self._cleanup_action(handle, live, now=now)
+                if action is None:
                     continue
-                if handle.status != "idle" or int(live.spec.replicas or 0) == 0:
+                if action == "retire":
+                    if retire_subagent_worker(self._retire_worker_locked, handle.worker_key):
+                        cleaned.append(handle)
                     continue
                 annotations = resources.with_lifecycle_transition(
                     live.metadata.annotations or {},
@@ -534,6 +533,23 @@ class KubernetesWorkerBackend:
             finally:
                 worker_lock.release()
         return cleaned
+
+    def _cleanup_action(
+        self,
+        handle: WorkerHandle,
+        deployment: resources.KubernetesDeployment,
+        *,
+        now: float,
+    ) -> Literal["stop", "retire"] | None:
+        """Return what idle cleanup does to one worker: scale it to zero, remove it, or leave it.
+
+        A subagent's own worker is stopped like any idle worker once it expires, and removed on a later pass, when it
+        runs no pod: the removal then returns at once, and a failed one leaves the Deployment for the next pass.
+        """
+        expired_subagent_worker = subagent_worker_expired(handle, self.idle_timeout_seconds, now=now)
+        if int(deployment.spec.replicas or 0) == 0:
+            return "retire" if expired_subagent_worker else None
+        return "stop" if handle.status == "idle" or expired_subagent_worker else None
 
     def _reconcile_drifted_deployments(
         self,

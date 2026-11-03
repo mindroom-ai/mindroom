@@ -285,6 +285,9 @@ def test_a_child_whose_caller_lost_the_setting_runs_on_its_normal_worker(tmp_pat
 
     assert child_placement(child, _config(paths, allowed=False), paths) is None
     assert child_placement(child, _config(paths), _paths(tmp_path / "static", {})) is None
+    without_caller = _config(paths)
+    del without_caller.agents["leader"]
+    assert child_placement(child, without_caller, paths) is None
 
 
 def test_child_snapshot_without_worker_fields_runs_on_its_normal_worker(tmp_path: Path) -> None:

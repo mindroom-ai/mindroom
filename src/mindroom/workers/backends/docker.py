@@ -8,7 +8,7 @@ import importlib
 import math
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -657,11 +657,13 @@ class DockerWorkerBackend:
                 container = self._read_owned_container(metadata.worker_key)
                 handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
                 idle_timed_out = timestamp - metadata.lifecycle.last_used_at >= self.idle_timeout_seconds
-                if subagent_worker_expired(handle, self.idle_timeout_seconds, now=timestamp):
-                    # A subagent's own worker serves no one once idle, so it is removed instead of kept stopped.
+                expired_subagent_worker = subagent_worker_expired(handle, self.idle_timeout_seconds, now=timestamp)
+                running = self._container_is_running(container)
+                if expired_subagent_worker and not running:
+                    # A subagent's own worker serves no one once it expires: it is stopped first, then removed.
                     if retire_subagent_worker(self._retire_worker_locked, metadata.worker_key):
-                        cleaned.append(replace(handle, status="idle"))
-                elif handle.status == "idle" and self._container_is_running(container):
+                        cleaned.append(handle)
+                elif running and (handle.status == "idle" or expired_subagent_worker):
                     self._stop_container(container)
                     metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
                     self._save_metadata(paths, metadata)

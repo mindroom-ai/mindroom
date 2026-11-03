@@ -185,9 +185,10 @@ class DelegateTools(Toolkit):
         )
         return (
             "Set dedicated_worker to true to run the child's shell, file, python, and other worker tools in a new "
-            "worker of its own instead of the worker it shares with your other subagents, so parallel or heavy "
-            "children do not compete for one worker. It sees the same workspace; its first worker call waits for the "
-            "new worker to start, and packages installed into the shared worker's environment are not there. "
+            "worker of its own instead of its normal worker, which it shares with you or with its agent's other "
+            "subagents, so parallel or heavy children do not compete for one worker. It sees the same workspace; its "
+            "first worker call waits for the new worker to start, and packages installed into the normal worker's "
+            "environment are not there. "
             f"{profiles}Follow-ups keep the child's worker.\n"
         )
 

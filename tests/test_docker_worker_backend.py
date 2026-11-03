@@ -3307,7 +3307,11 @@ def test_docker_cleanup_removes_an_expired_subagent_worker(
 
     cleaned = backend.cleanup_idle_workers(now=100.0)
 
+    # A running one is stopped like any idle worker first, and removed on the next pass.
     assert {worker.worker_key for worker in cleaned} == {base_key, subagent_key}
+    assert fake_client.containers.by_name[subagent.worker_id].stopped == 1
+    assert fake_client.containers.by_name[subagent.worker_id].removed == 0
+    assert [worker.worker_key for worker in backend.cleanup_idle_workers(now=101.0)] == [subagent_key]
     assert fake_client.containers.by_name[subagent.worker_id].removed == 1
     assert worker_root_path(tmp_path, subagent_key).exists() is False
     assert fake_client.containers.by_name[ordinary.worker_id].removed == 0
