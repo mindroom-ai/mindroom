@@ -985,11 +985,11 @@ async def test_a_declared_type_stands_over_the_file_name(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("declared", ["video/mp2t", "video/vnd.dlna.mpeg-tts"])
+@pytest.mark.parametrize("declared", ["video/mp2t", "video/vnd.dlna.mpeg-tts", "audio/mpeg"])
 async def test_a_text_file_declared_as_audio_or_video_reaches_claude_as_text(tmp_path: Path, declared: str) -> None:
     """A browser types a TypeScript file as an MPEG transport stream; its UTF-8 text makes it a text file instead.
 
-    A real transport stream declared so keeps its declared type.
+    The same holds for any audio or video type, and a real stream declared so keeps its declared type.
     """
     payloads = {
         "index.ts": b"export const answer: number = 42;\n",
