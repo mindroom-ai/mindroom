@@ -118,7 +118,7 @@ def _pdf_pages(data: bytes) -> int:
 def _file_tokens(counter: TokenCounter, file: File) -> int:
     """Return what ``file`` counts: a PDF the allowance per page, UTF-8 text its text, and any other file the allowance.
 
-    Every route sends a text file as text or as a document its provider reads as text.
+    Claude, Gemini, and OpenAI's Responses API read a text file as its text.
     """
     data = _file_bytes(file)
     if data is None:
