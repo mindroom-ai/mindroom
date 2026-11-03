@@ -362,7 +362,14 @@ class TestStripeRoutesEndpoints:
             ("active", {"collection_method": "send_invoice"}, "hobby", "pro", "monthly"),
             (
                 "active",
-                {"items": {"data": [{"id": "si_1", "price": {"id": "x"}}, {"id": "si_2", "price": {"id": "y"}}]}},
+                {
+                    "items": {
+                        "data": [
+                            {"id": "si_1", "price": {"id": get_stripe_price_id("hobby", "monthly")}},
+                            {"id": "si_2", "price": {"id": "price_add_on"}},
+                        ]
+                    }
+                },
                 "hobby",
                 "pro",
                 "monthly",
