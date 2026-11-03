@@ -164,12 +164,13 @@ class ResolvedHistoryExecutionPlan:
     replay_window_tokens: int | None
     trigger_threshold_tokens: int | None
     reserve_tokens: int
-    static_prompt_tokens: int | None
-    replay_budget_tokens: int | None
+    # The whole-request sizes compaction acts at: the trigger, and the limit no request may exceed (the replay window
+    # minus the reserve); None without a replay window.
+    trigger_tokens: int | None
+    limit_tokens: int | None
     summary_input_budget_tokens: int | None
     compaction_timeout_seconds: float
     unavailable_reason: CompactionAvailabilityReason | None = None
-    hard_replay_budget_tokens: int | None = None
     compaction_fallback_model_name: str | None = None
     compaction_fallback_summary_input_budget_tokens: int | None = None
 
@@ -191,10 +192,10 @@ class CompactionDecision:
 
     mode: _CompactionDecisionMode
     reason: str
-    current_history_tokens: int | None = None
-    trigger_budget_tokens: int | None = None
-    hard_budget_tokens: int | None = None
-    fitted_replay_tokens: int | None = None
+    # The size of the reply's first request and the plan's trigger and limit it was compared with.
+    request_tokens: int | None = None
+    trigger_tokens: int | None = None
+    limit_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -384,19 +385,6 @@ class PreparedHistoryState:
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
+    # The size of the run's first request as preparation found it.
     prepared_context_tokens: int | None = None
-    # What the run's requests hold before their turn (``history.replay.request_basis``); a run whose final plan replays
-    # the history its settings select publishes it, so a later reply can tell whether the request size the provider
-    # reported for this run describes its own history.
-    request_basis: str | None = None
-    # Whether the replayed history was sized from the provider's reported request size, which already holds the tool
-    # definitions tool search loaded.
-    reported_history: bool = False
     native_history: NativeHistory | None
-
-    @property
-    def replayed_history_tokens(self) -> int | None:
-        """Return the size of the stored history the run's requests replay, as preparation found it, if they replay any."""
-        if not self.replays_persisted_history or self.replay_plan is None:
-            return None
-        return self.replay_plan.estimated_tokens

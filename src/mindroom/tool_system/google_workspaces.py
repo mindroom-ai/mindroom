@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.oauth.google import google_oauth_providers, with_google_account_picker
+from mindroom.oauth.providers import OAuthConsentGroup
 from mindroom.tool_system.registry import builtin_tool_registry, register_tool
 
 __all__ = ["GoogleWorkspaceConfig", "google_workspace_oauth_providers", "register_google_workspace_tools"]
@@ -73,6 +74,8 @@ def google_workspace_oauth_providers(workspace: GoogleWorkspaceConfig) -> tuple[
                 id=f"{workspace.name}_{base.id}",
                 display_name=f"{workspace.display_name} {base.display_name}",
                 credential_service=f"{workspace.name}_{base.credential_service}",
+                # The Connections portal shows the Google logo for a group whose key starts with `google_`.
+                consent_group=OAuthConsentGroup(f"google_{workspace.name}", workspace.display_name),
                 tool_config_service=f"{workspace.name}_{service}",
                 client_config_services=(),
                 shared_client_config_services=(workspace.client_config_service,),

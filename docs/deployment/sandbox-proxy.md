@@ -344,7 +344,7 @@ Adding, removing, or re-scoping a `worker_scope: user` agent changes every user 
 
 The dashboard's generic credential forms work only for unscoped agents and agents with `worker_scope: shared`.
 OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](../oauth-framework.md) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime, except Spotify, which, like the Home Assistant integration, stays shared-only.
-GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
+GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`, except an Atlassian connection registered with `requester_scoped=False` ([Share One Account](../tools/atlassian.md#share-one-account)).
 Saved tool settings are stored by the primary per agent for `shared`, per requester across agents for `user`, and per requester-agent pair for `user_agent`, and reach worker-routed calls through [credential leases](#credential-leases).
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so configure them in authored config (see [Per-Agent Tool Configuration](../tools/index.md#per-agent-tool-configuration)) or through shared settings granted with `defaults.worker_grantable_credentials`.
 Only unscoped and `shared` agents are available through the [OpenAI-compatible API](../openai-api.md#model-selection).

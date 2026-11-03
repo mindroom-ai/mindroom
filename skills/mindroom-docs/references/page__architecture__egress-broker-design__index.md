@@ -96,9 +96,10 @@ The record is [Separate Accounts for Agent Keys Services](https://docs.mindroom.
 **An administrator key is one key in the global store, and an agent list refuses other agents instead of hiding the service from them.**
 An administrator wanted to give every agent, personal agents included, one key that users can see is set but never change, so the dashboard writes it whichever scope is selected and the Connections page refuses it; a fallback key that a scope's own key overrides was rejected because users could then change which key their agent uses.
 An `agents` list keeps the service in every agent's routing and refuses the others with `agent_not_allowed`, because a per-agent operator config would reach every check that reads it and would send unlisted agents' requests out without a key under `passthrough`.
+Routing prefers a service that serves the requesting agent before rule specificity, so per-team services on the same hosts (one GitHub App service per team, replacing per-person tokens) each serve their own agents; the refusal remains for an agent no matching service serves.
 The record is [Administrator Keys and Agent Lists for Agent Keys Services](https://docs.mindroom.chat/dev/2026-10-29-agent-keys-admin-keys-design/).
 
-**Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
+**Requester-scoped accounts (GitHub, built-in Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
 A shared sandbox can opt in with `oauth_on_shared_workers`, which only administrators can set.
 Even a personal worker shares the workspace folder on a non-private agent, so personal accounts and keys are only isolated on `private` agents.

@@ -21,6 +21,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
@@ -48,7 +49,7 @@ def scripted_body(identity: ModelIdentity, request: ModelRequest) -> dict[str, A
 
 
 @dataclass
-class ScriptedModel:
+class ScriptedModel(PlainRequestSizing):
     """Replay one scripted turn per request, in order; ``requests`` keeps every request as the loop sent it.
 
     Each finished turn is stamped with the model's identity, as every adapter stamps the turns it finishes.

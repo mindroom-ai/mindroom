@@ -42,7 +42,8 @@ from mindroom.matrix.personal_room_store import personal_room_record_path, read_
 from mindroom.matrix.state import resolve_room_id
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
+from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
+from mindroom.thread_tags import RESOLVED_THREAD_TAG, set_thread_tag
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
@@ -63,6 +64,8 @@ logger = get_logger(__name__)
 
 _RUN_FALLBACK = timedelta(hours=1)
 _MAX_SLEEP_SECONDS = 60.0
+# Every thread an automation starts carries this tag, so its runs can be found and filtered.
+_AUTOMATION_THREAD_TAG = "automation"
 
 
 @dataclass(frozen=True)
@@ -385,7 +388,7 @@ class AutomationRunner:
                     step.on_loop()
                 await self._notify(bot, chain, pending.thread_id, step.notice)
                 for thread_id in step.resolve:
-                    await self._resolve_thread(bot, chain, thread_id)
+                    await self._tag_thread(bot, chain, thread_id, RESOLVED_THREAD_TAG)
                 return
             posted = await self._post(config, bot, chain, pending.thread_id, step, timedelta(0))
         finally:
@@ -431,6 +434,9 @@ class AutomationRunner:
                     requester=chain.requester_id,
                     error=str(exc),
                 )
+            await self._tag_thread(bot, chain, event_id, _AUTOMATION_THREAD_TAG)
+        if ask.summary is not None:
+            await self._set_summary(config, bot, chain, thread, ask.summary)
         logger.info(
             "Automation prompt posted",
             agent=chain.agent_name,
@@ -440,23 +446,43 @@ class AutomationRunner:
         )
         return True
 
-    async def _resolve_thread(self, bot: AgentBot, chain: _Chain, thread_id: str) -> None:
-        """Mark a finished chain's thread as resolved."""
+    async def _set_summary(self, config: Config, bot: AgentBot, chain: _Chain, thread_id: str, summary: str) -> None:
+        """Pin ``summary`` as the title of a prompt's thread."""
         if bot.client is None:
             return
         try:
-            await set_thread_tag(
+            await set_manual_thread_summary(
                 bot.client,
                 chain.room_id,
                 thread_id,
-                RESOLVED_THREAD_TAG,
-                set_by=bot.client.user_id,
+                summary,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                conversation_reader=bot.conversation_reader,
+                entity_name=chain.agent_name,
+                membership_index=self.agent_reply_memberships,
             )
-        except ThreadTagsError as exc:
+        except ThreadSummaryWriteError as exc:
             logger.warning(
-                "Automation could not resolve its thread",
+                "Automation could not set its thread summary",
                 agent=chain.agent_name,
                 requester=chain.requester_id,
+                error=str(exc),
+            )
+
+    async def _tag_thread(self, bot: AgentBot, chain: _Chain, thread_id: str, tag: str) -> None:
+        """Add ``tag`` to one of a chain's threads."""
+        if bot.client is None:
+            return
+        try:
+            await set_thread_tag(bot.client, chain.room_id, thread_id, tag, set_by=bot.client.user_id)
+        # Tagging is best effort: a refused write or a failed request must not undo a prompt that was already posted.
+        except Exception as exc:
+            logger.warning(
+                "Automation could not tag its thread",
+                agent=chain.agent_name,
+                requester=chain.requester_id,
+                tag=tag,
                 error=str(exc),
             )
 

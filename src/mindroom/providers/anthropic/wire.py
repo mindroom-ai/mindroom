@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from anthropic.types.beta import BetaMessage, BetaUsage
 
-from mindroom.llm.media import image_format
+from mindroom.llm.media import canonical_mime_type, file_text, image_format, is_text_mime_type
 from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -26,9 +26,11 @@ from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
 from mindroom.providers.media_files import read_media_bytes
+from mindroom.token_counting.counts import count, opaque_tokens
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types import ToolUseBlock, Usage
@@ -82,23 +84,6 @@ _IMAGE_MEDIA_TYPES = {
     "gif": "image/gif",
     "webp": "image/webp",
 }
-# Documents Claude reads as plain text; every other type is a base64 document, which the API accepts for PDF only.
-_TEXT_DOCUMENT_MEDIA_TYPES = frozenset(
-    {
-        "text/plain",
-        "text/csv",
-        "text/html",
-        "text/css",
-        "text/markdown",
-        "text/xml",
-        "text/rtf",
-        "text/javascript",
-        "text/x-python",
-        "application/json",
-        "application/x-javascript",
-        "application/x-python",
-    },
-)
 _STOP_REASONS: dict[str, StopReason] = {
     "end_turn": "end",
     "stop_sequence": "end",
@@ -284,16 +269,17 @@ def _document_block(file: File, provider: str) -> dict[str, Any] | None:
         if data is None:
             # The file is empty, which its reader already logged.
             return None
-        media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+        media_type = canonical_mime_type(file.mime_type) or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
     elif file.content is not None:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        media_type = file.mime_type or "application/pdf"
+        media_type = canonical_mime_type(file.mime_type) or "application/pdf"
     else:
         return None
-    if media_type in _TEXT_DOCUMENT_MEDIA_TYPES:
+    if is_text_mime_type(media_type):
         # The text document source accepts only text/plain; other text types are sent as plain text.
-        source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
+        source = {"type": "text", "media_type": "text/plain", "data": file_text(data)}
     else:
+        # Any other type is a base64 document, which the API accepts for PDF only.
         source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
     return {"type": "document", "source": source}
 
@@ -307,7 +293,8 @@ def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
     # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
     # content.
     # Handling: each block is sent as stored, and any other item as a text block.
-    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks
+    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks,
+    # tests/providers/test_request_tokens.py::test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks
     if isinstance(result.content, list):
         payload = [
             block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
@@ -337,6 +324,102 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
         elif key in {"anyOf", "allOf", "oneOf"} and isinstance(value, list):
             result[key] = [_with_additional_properties_false(item) for item in value]
     return result
+
+
+# Block fields no model reads as sent, at any depth: ids, cache breakpoints, signatures, and ciphertext the provider
+# decrypts, such as a web search result's page (``_readable``).
+_TRANSPORT_BLOCK_FIELDS = frozenset(
+    {"id", "tool_use_id", "cache_control", "citations", "signature", "data", "encrypted_content", "encrypted_index"},
+)
+
+
+def claude_body_parts(
+    body: Mapping[str, Any],
+    messages: Sequence[Message],
+    parts: RequestParts,
+    *,
+    loaded: frozenset[str],
+    static: bool,
+) -> None:
+    """Add what a Claude request body built from ``messages`` gives its model to ``parts``.
+
+    System and message text count as text, and tool inputs, results, and definitions as JSON. With ``static`` the
+    system text and the offered tools count; a deferred tool counts once a tool search loaded it (``loaded``), as the
+    API loads it then. A replayed ``thinking`` or ``redacted_thinking`` block is ciphertext beside a summary, so each
+    answer whose thinking the body replays counts its reported output beyond its visible part, or its thinking text
+    when that is larger.
+    """
+    system = body.get("system") if static else None
+    if isinstance(system, str):
+        parts.text(system)
+    for block in system if isinstance(system, list) else ():
+        parts.text(block.get("text"))
+    replayed: set[str] = set()
+    for turn in body.get("messages") or ():
+        for block in turn["content"]:
+            _block_parts(block, parts, replayed)
+    for message in messages:
+        if message.role == "assistant":
+            _thinking_parts(message, parts, replayed)
+    for tool in body.get("tools") or ():
+        if tool.get("name") in loaded if tool.get("defer_loading") else static:
+            parts.value({key: value for key, value in tool.items() if key not in {"cache_control", "defer_loading"}})
+
+
+def _block_parts(block: Mapping[str, Any], parts: RequestParts, replayed: set[str]) -> None:
+    """Add one content block; the identity of a thinking block goes to ``replayed`` and its cost is the answer's."""
+    kind = block.get("type")
+    if kind in _THINKING_BLOCK_TYPES:
+        replayed.add(_thinking_identity(block))
+    elif kind == "text":
+        parts.text(block.get("text"))
+    elif kind in {"image", "document"}:
+        parts.cost(MEDIA_ALLOWANCE_TOKENS)
+    elif kind == "tool_result":
+        content = block.get("content")
+        if isinstance(content, str):
+            parts.text(content)
+        for nested in content if isinstance(content, list) else ():
+            _block_parts(nested, parts, replayed)
+    elif kind == "compaction":
+        parts.text(block.get("content"))
+    else:
+        parts.value(_readable(block, parts))
+
+
+def _readable(value: Any, parts: RequestParts) -> Any:  # noqa: ANN401 - any JSON value of a block
+    """Return ``value`` without its transport fields; ciphertext the model reads decrypted costs ``opaque_tokens``.
+
+    A tool call's ``input`` holds the model's own arguments, which it reads as sent.
+    """
+    if isinstance(value, dict):
+        if isinstance(ciphertext := value.get("encrypted_content"), str):
+            parts.cost(opaque_tokens(len(ciphertext)))
+        return {
+            key: item if key == "input" else _readable(item, parts)
+            for key, item in value.items()
+            if key not in _TRANSPORT_BLOCK_FIELDS
+        }
+    if isinstance(value, list):
+        return [_readable(item, parts) for item in value]
+    return value
+
+
+def _thinking_identity(block: Mapping[str, Any]) -> str:
+    return str(block.get("signature") or block.get("data") or block.get("thinking") or "")
+
+
+def _thinking_parts(message: Message, parts: RequestParts, replayed: set[str]) -> None:
+    blocks = replayed_blocks(message)
+    thinking = [block for block in blocks if block.get("type") in _THINKING_BLOCK_TYPES]
+    if not any(_thinking_identity(block) in replayed for block in thinking):
+        return
+    visible = RequestParts(parts.counter)
+    for block in blocks:
+        if block.get("type") not in _THINKING_BLOCK_TYPES:
+            _block_parts(block, visible, set())
+    text = "".join(str(block.get("thinking") or "") for block in thinking)
+    parts.cost(max(count(parts.counter, text), message.metrics.tokens.output_tokens - visible.counted()))
 
 
 # Claude answers a tool whose ``input_schema`` has one of these at its root with a 400 ("input_schema does not support
@@ -457,6 +540,7 @@ __all__ = [
     "FormattedConversation",
     "assistant_message_from_response",
     "checks_thinking_prefix",
+    "claude_body_parts",
     "format_claude_messages",
     "format_claude_tools",
     "parse_claude_usage",

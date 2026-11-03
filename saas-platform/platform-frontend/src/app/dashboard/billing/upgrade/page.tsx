@@ -121,7 +121,7 @@ export default function UpgradePage() {
         </p>
         {activeTier && (
           <p className="text-sm text-brand-700 dark:text-brand-400 mt-2">
-            Currently on {activeTier} plan. Upgrading will prorate your billing.
+            Currently on {activeTier} plan. Upgrading starts the new plan today and credits the unused time of your current one.
           </p>
         )}
       </div>
@@ -308,7 +308,7 @@ export default function UpgradePage() {
           )}
           <li>• Cancel or change your plan anytime</li>
           <li>• {billingCycle === 'yearly' ? `Save ${discountPercentage}% with annual billing` : `Switch to yearly billing and save ${discountPercentage}%`}</li>
-          <li>• Upgrades are prorated to your billing cycle</li>
+          <li>• An upgrade starts a new billing period right away</li>
           <li>• No setup fees or hidden charges</li>
         </ul>
       </div>

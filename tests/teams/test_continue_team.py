@@ -792,7 +792,8 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_its_memb
     )
 
     assert (record.status, record.content) == (RunStatus.completed, "Both say 42.")
-    assert [member.agent_id for member in store.members] == (["writer", "checker"] if both_pause else ["checker"])
+    # The members resume concurrently, so they store in the order they finish.
+    assert sorted(member.agent_id for member in store.members) == (["checker", "writer"] if both_pause else ["checker"])
     assert (len(writer.requests), len(checker.requests)) == ((2, 2) if both_pause else (1, 2))
     assert record.tools is not None
     assert {tool.tool_call_id: tool.result for tool in record.tools} == {

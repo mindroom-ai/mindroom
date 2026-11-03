@@ -12,7 +12,12 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
-from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
+from mindroom.config.egress_broker import (
+    RESERVED_PLACEHOLDER_NAMES,
+    RESERVED_PLACEHOLDER_PREFIXES,
+    EgressService,
+    GitHubRepositoryAccess,
+)
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.egress_broker.oauth_reuse import oauth_reuse_access
 from mindroom.egress_broker.oauth_source import (
@@ -57,6 +62,7 @@ logger = get_logger(__name__)
 
 _RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
 _OWN_ACCOUNT_KEY_REFUSAL = "This service uses only its own account and never sends a key, so it cannot store one"
+_GITHUB_APP_KEY_REFUSAL = "This service uses only its GitHub App and never sends a key, so it cannot store one"
 _READ_ONLY_UNSUPPORTED = "This service does not offer read-only access"
 
 # Service status loads that may run at once on one event loop, across every egress listing on it. A load can hold an
@@ -357,12 +363,26 @@ class OAuthReuseRequest(BaseModel):
     access: OAuthAccess = "read_write"
 
 
+# The repositories a `github_app` service's App covers, as `owner/repository`, each with its access; both rows send it.
+type GitHubAppRepositories = dict[str, GitHubRepositoryAccess]
+
+
+def github_app_repositories(service: EgressService) -> GitHubAppRepositories | None:
+    """Return the repositories a `github_app` service's App covers, each with its access; None for any other service."""
+    return None if service.github_app is None else dict(service.github_app.repositories)
+
+
 def key_refusal(service: EgressService) -> str | None:
-    """Return why `service` cannot store a key, or None: a limit sends nothing, and an own-account service its account."""
+    """Return why `service` cannot store a key, or None: a limit sends nothing, an own-account service its account.
+
+    A `github_app` service sends only its App's tokens.
+    """
     if service.restrict_only:
         return _RESTRICT_ONLY_KEY_REFUSAL
     if service.oauth_separate_account:
         return _OWN_ACCOUNT_KEY_REFUSAL
+    if service.github_app is not None:
+        return _GITHUB_APP_KEY_REFUSAL
     return None
 
 
@@ -381,11 +401,12 @@ class EgressSourceStatus(BaseModel):
 
     `configured` is true when either source is available. `active_source` says which source the broker uses: an
     explicit key wins over an OAuth connection, which counts only once Agent Keys may use it (`oauth.reuse_enabled`).
-    A service with its own account (`oauth_separate_account`) never has a key.
+    A service with its own account (`oauth_separate_account`) never has a key, and a `github_app` service has only its
+    App (`github_app`), configured while the App's credential is stored.
     """
 
     configured: bool
-    active_source: Literal["key", "oauth"] | None
+    active_source: Literal["key", "oauth", "github_app"] | None
     key_configured: bool
     key_updated_at: str | None
     oauth: OAuthStatus | None
@@ -412,7 +433,7 @@ async def egress_oauth_status(
     read through `broker_credential_context` as the broker reads them. A provider the broker refuses in a shared sandbox
     (`shared_worker_oauth`) is reported unavailable before any state is read.
     Without a service account the status is what the Connections portal shows the same viewer; requester-scoped
-    connections (GitHub, Atlassian) belong to the requester, so every user of the agent manages their own. A service
+    connections (GitHub, built-in Atlassian) belong to the requester, so every user of the agent manages their own. A service
     account is not a token the broker can inject, so with one `connected` and `account_label` only reflect a stored
     personal connection, which the broker uses once allowed, and nothing is connectable. Any failure to read one provider's state, the worker
     backend check included, shows that service as not connectable instead of failing the page.

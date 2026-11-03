@@ -29,9 +29,8 @@ from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
 from mindroom.agent_loop.spec import RunContext
-from mindroom.agent_loop.tools import PlannedCall, PreparedTools
+from mindroom.agent_loop.tools import PlannedCall
 from mindroom.ai_run_metadata import with_prior_usage
 from mindroom.approval import execution as approval_execution
 from mindroom.approval import tool_owners as approval_tools
@@ -84,6 +83,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     ScriptedProvider,
     agent_cli_api,
+    checkpoint_loop_state,
     cli_window,
     install_scripted_shell,
     offered_tools,
@@ -1054,16 +1054,7 @@ async def _checkpointed_batch(
         )
         for call_id, command in batch
     ]
-    state = LoopState(
-        messages=[assistant],
-        offered=PreparedTools(functions={}),
-        tools=(),
-        run=catalog.run,
-        record=record,
-        request_index=1,
-        loop_start_ids=frozenset(),
-        request_template=EMPTY_REQUEST,
-    )
+    state = checkpoint_loop_state([assistant], catalog.run, record)
     await checkpoint.capture(state, planned)
     checkpoint.complete("call_completed", ToolOutcome(content="completed sibling result", images=(sibling_image,)))
     await checkpoint.persist_approval("old-bash")

@@ -145,7 +145,6 @@ REFUSED_REQUESTS = {
 EXTRA_ENABLING_OVERRIDES: dict[str, dict[str, object]] = {
     # custom_scrape_website exists only with a query to run.
     "agentql": {"agentql_query": "{ title }"},
-    "google_drive": {"download_file": True},
     "usage_stats": {"admin_scope": True},
 }
 

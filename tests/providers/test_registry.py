@@ -184,8 +184,8 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str]] = {
 def test_every_documented_provider_value_gets_its_adapter_and_identity(route: str, runtime_paths: RuntimePaths) -> None:
     """Dispatch picks the family adapter, and the identity keeps the provider strings stored runs and usage carry.
 
-    The pipeline hands callers the adapter as its own native-history route (Responses and Claude), replay estimator
-    (Responses and Gemini), and recorded settings, so nothing has to unwrap it.
+    The pipeline hands callers the adapter as its own native-history route (Responses and Claude) and recorded
+    settings, and sizes a request through the adapter that renders it, so nothing has to unwrap it.
     """
     fields, adapter_type, provider_label = _ROUTES[route]
     config = Config(models={"target": ModelConfig(**fields)})
@@ -200,7 +200,9 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
     native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
     assert provider.native_history_route is native_history
-    assert provider.token_counter.replay is (adapter if adapter_type in {ResponsesAdapter, GeminiProvider} else None)
+    request = ModelRequest(messages=(Message(role="user", content="How large is this request?"),))
+    assert provider.request_tokens(request) == adapter.request_tokens(request) > 0
+    assert provider.request_tokens(request, start=1) == adapter.request_tokens(request, start=1)
     assert provider.model_params == adapter.model_params
 
 

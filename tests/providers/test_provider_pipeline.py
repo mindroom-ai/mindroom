@@ -31,7 +31,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.media import Audio, File, Image
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import (
     Capabilities,
     DeferredTools,
@@ -56,11 +56,16 @@ from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
-from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_stream
+from mindroom.providers.pipeline.media import (
+    FALLBACK_MARKER,
+    media_fallback_projection,
+    media_fallback_stream,
+)
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import Await, scripted_body
 from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import pipeline_provider
@@ -82,7 +87,7 @@ _CAPABILITIES = Capabilities()
 
 
 @dataclass
-class _ScriptedProvider:
+class _ScriptedProvider(PlainRequestSizing):
     """Answer each request with the next scripted attempt; an exception step raises, a float or ``Await`` step waits.
 
     Unless ``sends`` is off, each attempt first reports its ``scripted_body`` as sent, so a failing step fails a
@@ -491,16 +496,54 @@ async def test_a_media_free_retry_that_is_rejected_too_ends_the_request() -> Non
 
 @pytest.mark.asyncio
 async def test_input_specific_rejection_retries_without_learning() -> None:
+    """The retry's usage describes a request without the image, so its answer is marked as another request's."""
     rejection = InvalidRequest("Image exceeds 5 MB maximum", provider="Scripted", status_code=400)
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
 
-    await _drain(provider, request)
-    await _drain(provider, request)
+    retried = (await _drain(provider, request))[-1]
+    sent_as_asked = (await _drain(provider, request))[-1]
 
     assert inner.requests[1].messages[0].images is None
     assert inner.requests[2].messages[0].images == [_image()]
+    assert isinstance(retried, TurnCompleted)
+    assert isinstance(sent_as_asked, TurnCompleted)
+    assert (retried.message.provider_data or {}).get(REWRITTEN_ATTEMPT_KEY) is True
+    assert REWRITTEN_ATTEMPT_KEY not in (sent_as_asked.message.provider_data or {})
+
+
+@pytest.mark.asyncio
+async def test_a_plain_retry_resends_the_request_and_marks_nothing() -> None:
+    inner = _ScriptedProvider([[_transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    finished = (await _drain(provider, ModelRequest(messages=[_user()])))[-1]
+
+    assert isinstance(finished, TurnCompleted)
+    assert REWRITTEN_ATTEMPT_KEY not in (finished.message.provider_data or {})
+
+
+@pytest.mark.asyncio
+async def test_a_learned_media_limit_changes_the_size_and_identity_of_a_request() -> None:
+    """Once the route learned its model rejects images, a request sizes the note it sends instead, under a new key."""
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider([[rejection], [_turn()]], identity=replace(_IDENTITY, endpoint="http://learning/v1"))
+    provider = WrappedProvider(
+        inner,
+        partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT),
+        media_fallback_projection(_FALLBACK_PROMPT),
+    )
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+    size, key = provider.request_tokens(request), provider.context_key(request)
+
+    await _drain(provider, request)
+
+    assert provider.context_key(request) != key
+    assert provider.request_tokens(request) < size
+    assert provider.request_tokens(request) == inner.request_tokens(
+        ModelRequest(messages=[_user(f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")]),
+    )
 
 
 @pytest.mark.asyncio

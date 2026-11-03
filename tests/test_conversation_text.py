@@ -7,11 +7,10 @@ import pytest
 from mindroom.agent_loop.tools import media_follow_up
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.conversation_text import thread_context_note, utterances
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 

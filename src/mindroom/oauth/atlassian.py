@@ -30,12 +30,13 @@ class _AtlassianFunction:
 
 # Classic scopes wherever an API accepts them.
 # Confluence page and comment writes exist only in the v2 API, which accepts granular scopes only.
+# An agent limited to some spaces reads an item's space before changing or downloading it.
 _ATLASSIAN_FUNCTIONS = (
     _AtlassianFunction("jira_search_issues", "jira", writes=False, scopes=("read:jira-work",)),
     _AtlassianFunction("jira_get_issue", "jira", writes=False, scopes=("read:jira-work",)),
     _AtlassianFunction("jira_create_issue", "jira", writes=True, scopes=("write:jira-work",)),
-    _AtlassianFunction("jira_update_issue", "jira", writes=True, scopes=("write:jira-work",)),
-    _AtlassianFunction("jira_add_comment", "jira", writes=True, scopes=("write:jira-work",)),
+    _AtlassianFunction("jira_update_issue", "jira", writes=True, scopes=("read:jira-work", "write:jira-work")),
+    _AtlassianFunction("jira_add_comment", "jira", writes=True, scopes=("read:jira-work", "write:jira-work")),
     _AtlassianFunction("jira_transition_issue", "jira", writes=True, scopes=("read:jira-work", "write:jira-work")),
     _AtlassianFunction("confluence_search", "confluence", writes=False, scopes=("search:confluence",)),
     _AtlassianFunction(
@@ -54,16 +55,26 @@ _ATLASSIAN_FUNCTIONS = (
         "confluence_download_attachment",
         "confluence",
         writes=False,
-        scopes=("readonly:content.attachment:confluence",),
+        scopes=("search:confluence", "read:confluence-content.all", "readonly:content.attachment:confluence"),
     ),
     _AtlassianFunction(
         "confluence_create_page",
         "confluence",
         writes=True,
-        scopes=("read:space:confluence", "write:page:confluence"),
+        scopes=("search:confluence", "read:confluence-content.all", "read:space:confluence", "write:page:confluence"),
     ),
-    _AtlassianFunction("confluence_update_page", "confluence", writes=True, scopes=("write:page:confluence",)),
-    _AtlassianFunction("confluence_add_comment", "confluence", writes=True, scopes=("write:comment:confluence",)),
+    _AtlassianFunction(
+        "confluence_update_page",
+        "confluence",
+        writes=True,
+        scopes=("search:confluence", "read:confluence-content.all", "write:page:confluence"),
+    ),
+    _AtlassianFunction(
+        "confluence_add_comment",
+        "confluence",
+        writes=True,
+        scopes=("search:confluence", "read:confluence-content.all", "write:comment:confluence"),
+    ),
 )
 
 
@@ -141,8 +152,13 @@ def atlassian_oauth_provider(
     products: Sequence[AtlassianProduct] = ATLASSIAN_PRODUCTS,
     write: bool = True,
     client_config_service: str = _ATLASSIAN_CLIENT_CONFIG_SERVICE,
+    requester_scoped: bool = True,
 ) -> OAuthProvider:
-    """Return one Atlassian connection's provider; tokens always belong to the requesting user."""
+    """Return one Atlassian connection's provider.
+
+    Tokens belong to the requesting user unless ``requester_scoped`` is false; they then follow the agent's
+    worker scope, so a shared agent has one connection that its credential managers connect.
+    """
     return OAuthProvider(
         id=provider_id,
         display_name=display_name,
@@ -154,7 +170,7 @@ def atlassian_oauth_provider(
         # Shared services derive each provider's own callback instead of reusing a stored redirect URI.
         shared_client_config_services=(client_config_service,),
         extra_auth_params={"audience": "api.atlassian.com", "prompt": "consent"},
-        requester_scoped_credentials=True,
+        requester_scoped_credentials=requester_scoped,
         status_capabilities=tuple(
             {"jira": "Jira issues", "confluence": "Confluence pages and attachments"}[product]
             for product in ATLASSIAN_PRODUCTS

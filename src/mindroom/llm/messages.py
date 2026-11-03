@@ -55,6 +55,9 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 # ``Message.provider_data`` key marking an assistant message whose usage sums a retried request's attempts, so usage
 # readers do not take the sum for one request's size; ``usage_sums_attempts`` reads it.
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
+# ``Message.provider_data`` key marking an assistant message that answered another request than the one its caller
+# sent, such as a retry without the media the provider rejected, so its usage sizes no request of the caller's.
+REWRITTEN_ATTEMPT_KEY = "mindroom_attempt_rewritten"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
 # which ``model_provenance`` builds for every writer and ``read_model_provenance`` reads for usage attribution
 # (``usage/storage.py``, ``agent_loop/helper.py``). It also tells a run's own model messages from the replies its
@@ -99,6 +102,24 @@ def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
     Such usage counts toward the totals but describes no one request: not its size, its price, or its time.
     """
     return (provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+
+
+# ``Message.provider_data`` key marking a queued-message notice MindRoom wrote, which tells the model a newer message waits.
+QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+
+
+def is_queued_notice_message(message: Message) -> bool:
+    """Return whether a message is a queued-message notice MindRoom wrote."""
+    marker = (message.provider_data or {}).get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
+    # LEGACY_COMPAT: Queued-message notices marked "persisted" after delivery.
+    # Legacy format: a stored notice whose marker is ``"persisted"`` instead of ``True``; once a reply was delivered,
+    # MindRoom rewrote the notices its stored runs held into one marked so, and a reply that opened a scope rewrote a
+    # notice a crashed reply had left with ``True``.
+    # Last legacy release: v2026.10.760, whose post-delivery rewrite wrote the marker; replacement: the next release,
+    # which stores each notice once, as its run held it, with ``True``.
+    # Handling: such a notice reads as a notice, as one marked ``True`` does; both replay alike, so no row is rewritten.
+    # Coverage: tests/test_agent_turn_runtime.py::test_a_notice_an_earlier_release_stored_replays_as_it_is_stored
+    return marker is True or marker == "persisted"
 
 
 def is_own_model_message(message: Message) -> bool:
@@ -389,10 +410,13 @@ def tool_result_view(message: Message) -> ToolResultView:
 __all__ = [
     "AGGREGATE_USAGE_KEY",
     "MODEL_PROVENANCE_KEY",
+    "QUEUED_MESSAGE_NOTICE_MARKER_KEY",
+    "REWRITTEN_ATTEMPT_KEY",
     "Message",
     "ModelProvenance",
     "ToolResultView",
     "is_own_model_message",
+    "is_queued_notice_message",
     "media_items",
     "model_provenance",
     "read_model_provenance",

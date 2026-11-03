@@ -29,6 +29,7 @@ const service: ConnectionService = {
   display_name: "Mail",
   description: "Read your email.",
   tools: ["mail"],
+  consent_group: null,
 };
 const status = {
   provider: "mail",
@@ -847,6 +848,79 @@ describe("connections", () => {
     );
     unmount();
     await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
+  });
+
+  it("connects an agent's unconnected Google services with one sign-in and drops the button once they are connected", async () => {
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
+    };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const google = (provider: string, display_name: string) => ({
+      ...service,
+      provider,
+      display_name,
+      tools: [provider],
+      consent_group: { key: "google", display_name: "Google" },
+    });
+    let connected = false;
+    const groupStatus = (provider: string) => async () =>
+      json({ ...status, provider, connected });
+    installApi({
+      "/api/connections": async () =>
+        json(
+          catalog([
+            google("google_drive", "Google Drive"),
+            google("google_sheets", "Google Sheets"),
+          ]),
+        ),
+      "/api/connections/agents/personal/google_drive/status":
+        groupStatus("google_drive"),
+      "/api/connections/agents/personal/google_sheets/status":
+        groupStatus("google_sheets"),
+      "/api/connections/agents/personal/consent-groups/google/connect":
+        async () =>
+          json({
+            provider: "google_drive",
+            auth_url: "https://auth.example.com/start",
+            completion_origin: window.location.origin,
+          }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    expect(
+      await screen.findByText("2 Google services are not connected."),
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Connect all Google services" }),
+    );
+    await waitFor(() =>
+      expect(popup.location.href).toBe("https://auth.example.com/start"),
+    );
+    connected = true;
+    act(() =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: window.location.origin,
+          source: popup as unknown as Window,
+          data: {
+            type: "mindroom-oauth",
+            provider: "google_drive",
+            status: "connected",
+          },
+        }),
+      ),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Disconnect for Google Sheets",
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: /Connect all/ }),
+    ).not.toBeInTheDocument();
   });
 });
 

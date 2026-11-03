@@ -9,6 +9,7 @@ Agno-layout runs only the storage v2 conversion still reads. ``content`` travels
 from __future__ import annotations
 
 import base64
+import codecs
 import mimetypes
 from dataclasses import dataclass, field, fields, replace
 from pathlib import PurePosixPath
@@ -207,6 +208,81 @@ def canonical_mime_type(mime_type: str | None) -> str | None:
     return normalized or None
 
 
+_APPLICATION_TEXT_MIME_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/toml",
+        "application/sql",
+        "application/javascript",
+        "application/ecmascript",
+        "application/x-javascript",
+        "application/x-python",
+        "application/x-sh",
+        "application/x-shellscript",
+        "application/x-perl",
+        "application/x-php",
+        "application/x-ruby",
+        "application/x-tex",
+        "application/x-latex",
+    },
+)
+_BINARY_DOCUMENT_MIME_TYPES = frozenset(
+    {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/msword",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-outlook",
+        "application/zip",
+        "message/rfc822",
+    },
+)
+
+
+def is_text_mime_type(mime_type: str | None) -> bool:
+    """Return whether a file of ``mime_type`` holds text, which Claude and Gemini read as plain text.
+
+    That is any ``text/*`` type, the text types outside ``text/`` such as JSON and YAML, any ``application/*+json``,
+    and any ``application/*+xml`` outside the vendor tree, whose ``+xml`` types include ZIP packages such as Visio's,
+    whatever their parameters.
+    """
+    canonical = canonical_mime_type(mime_type) or ""
+    structured = canonical.startswith("application/") and (
+        canonical.endswith("+json") or (canonical.endswith("+xml") and not canonical.startswith("application/vnd."))
+    )
+    return canonical.startswith("text/") or canonical in _APPLICATION_TEXT_MIME_TYPES or structured
+
+
+def is_document_mime_type(mime_type: str | None) -> bool:
+    """Return whether a file of ``mime_type`` is a document a tool may return for the model to read.
+
+    That is a text file or a PDF, Office, Outlook, ZIP, or email file; a model's provider adapter decides which of
+    them it sends.
+    """
+    return is_text_mime_type(mime_type) or canonical_mime_type(mime_type) in _BINARY_DOCUMENT_MIME_TYPES
+
+
+def file_text(data: bytes) -> str:
+    """Return the text a text file's bytes hold: UTF-16 or UTF-8 by their byte-order mark, else UTF-8, else Windows-1252.
+
+    Bytes that do not decode become replacement characters.
+    """
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", errors="replace")
+    if data.startswith(codecs.BOM_UTF8):
+        return data.decode("utf-8-sig", errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
+
+
 # The longest attachment name or type that model-facing text prints.
 _MAX_RENDERED_LABEL_LENGTH = 80
 _RENDERED_LABEL_REPLACEMENTS = str.maketrans({'"': "'", "<": "\u2039", ">": "\u203a"})
@@ -263,36 +339,6 @@ def image_mime_type(image: Image, data: bytes) -> str:
 
 def _is_text(mime_type: str | None) -> bool:
     return mime_type is not None and mime_type.startswith("text/")
-
-
-# The document types a tool may return a file as for the model to read; a model's provider adapter decides which of
-# them it sends.
-DOCUMENT_MIME_TYPES = frozenset(
-    {
-        "application/pdf",
-        "application/json",
-        "application/x-javascript",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/msword",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.ms-excel",
-        "application/vnd.ms-outlook",
-        "application/zip",
-        "message/rfc822",
-        "text/javascript",
-        "application/x-python",
-        "text/x-python",
-        "text/plain",
-        "text/html",
-        "text/css",
-        "text/markdown",
-        "text/csv",
-        "text/xml",
-        "text/rtf",
-    },
-)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -357,10 +403,20 @@ class File:
 MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
-def _named_type(name: str) -> str | None:
+# Types Python's MIME table lacks or names differently, so the host's MIME table must not decide them; OpenAI's
+# Responses API reads a shell script typed ``text/x-sh``, not Python's ``application/x-sh``.
+_SUFFIX_MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".sh": "text/x-sh",
+}
+
+
+def named_mime_type(name: str) -> str | None:
     """Return the type a file name names; a compressed name, such as ``report.csv.gz``, names none."""
     named, encoding = mimetypes.guess_type(name)
-    return named if encoding is None else None
+    return _SUFFIX_MIME_TYPES.get(PurePosixPath(name).suffix.lower(), named) if encoding is None else None
 
 
 def named_by_resource[T: Image | Audio | Video | File](
@@ -372,18 +428,17 @@ def named_by_resource[T: Image | Audio | Video | File](
 
     ``resource_name`` is the last part of that resource's path or URL, and ``declared_mime`` the type its server
     declared. A type, format, or filename the item already has stands. A file takes the first of the declared type,
-    its filename's, and the resource name's that is in ``DOCUMENT_MIME_TYPES``. Other media without a type or format
-    takes the declared type when it is of its kind, an image also its resource name's; audio and video take the
-    name's suffix as their format, and audio whose suffix names no audio format the format its type means, such as
-    ``mp3``.
+    its filename's, and the resource name's that is a document type. Other media without a type or format takes the
+    declared type when it is of its kind, an image also its resource name's; audio and video take the name's suffix
+    as their format, and audio whose suffix names no audio format the format its type means, such as ``mp3``.
     """
     if isinstance(media, File):
         filename = media.filename or media.name or resource_name or None
-        candidates = (declared_mime, _named_type(filename or ""), _named_type(resource_name))
-        mime_type = media.mime_type or next((value for value in candidates if value in DOCUMENT_MIME_TYPES), None)
+        candidates = (declared_mime, named_mime_type(filename or ""), named_mime_type(resource_name))
+        mime_type = media.mime_type or next((value for value in candidates if is_document_mime_type(value)), None)
         return replace(media, filename=filename, mime_type=mime_type)
     mime_type, media_format = media.mime_type, media.format
-    named_type = _named_type(resource_name)
+    named_type = named_mime_type(resource_name)
     if mime_type is None and media_format is None:
         family = MEDIA_MIME_FAMILIES[type(media)]
         candidates = (declared_mime, named_type if isinstance(media, Image) else None)
@@ -400,7 +455,6 @@ def named_by_resource[T: Image | Audio | Video | File](
 
 
 __all__ = [
-    "DOCUMENT_MIME_TYPES",
     "IMAGE_HEADER_BYTES",
     "MEDIA_MIME_FAMILIES",
     "VIEWED_IMAGE_ID_PREFIX",
@@ -409,9 +463,13 @@ __all__ = [
     "Image",
     "Video",
     "canonical_mime_type",
+    "file_text",
     "image_format",
     "image_mime_type",
+    "is_document_mime_type",
+    "is_text_mime_type",
     "named_by_resource",
+    "named_mime_type",
     "rendered_label",
     "url_file_name",
 ]

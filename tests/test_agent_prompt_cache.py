@@ -89,7 +89,7 @@ def _agent_request(
     ]
     claude = bare_adapter(build.spec.model)
     assert isinstance(claude, ClaudeProvider)
-    body = claude._prepare(ModelRequest(messages=tuple(messages))).kwargs
+    body = claude._request_body(ModelRequest(messages=tuple(messages))).kwargs
     return system_text(system), body
 
 

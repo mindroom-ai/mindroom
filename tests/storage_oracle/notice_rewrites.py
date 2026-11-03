@@ -12,8 +12,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, is_model_history_visible_run
-from mindroom.llm.messages import Message
+from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
 from tests.storage_oracle.backend import NOTICE_TURN_KEY
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
         None,
     )
     all_matches = [message for run in runs for message in _notices(run, turn)]
-    if not all_matches and destination is None:
+    if not all_matches:
         return []
     matches = _notices(destination, turn) if destination is not None else []
     text = next(
@@ -69,12 +69,6 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
         and matches[0].content == text
     ):
         return []
-    position = None
-    if destination is not None:
-        position = next(
-            (index for index, message in enumerate(destination.messages) if _is_notice(message, turn)),
-            None,
-        )
     edited: dict[int, AnyRunRecord] = {}
     for run in runs:
         if _notices(run, turn):
@@ -83,15 +77,14 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
             edited[id(run)] = copy
     if destination is None or text is None:
         return list(edited.values())
-    if id(destination) not in edited:
-        edited[id(destination)] = deepcopy(destination)
+    position = next(index for index, message in enumerate(destination.messages) if _is_notice(message, turn))
     copy = edited[id(destination)]
     persisted = Message(
         role="user",
         content=text,
         provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: _PERSISTED, NOTICE_TURN_KEY: turn},
     )
-    copy.messages.insert(len(copy.messages) if position is None else min(position, len(copy.messages)), persisted)
+    copy.messages.insert(position, persisted)
     return list(edited.values())
 
 

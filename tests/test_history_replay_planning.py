@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -22,9 +26,16 @@ from mindroom.history.policy import (
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
     estimate_prompt_visible_history_tokens,
-    estimate_request_messages_tokens,
+    estimate_summary_text_tokens,
     plan_replay_that_fits,
 )
+from mindroom.history.request_size import request_sizer
+from mindroom.history.runtime import (
+    finalize_history_preparation,
+    prepare_scope_history,
+    resolve_entity_preparation_inputs,
+)
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import (
     read_scope_state,
     with_force_compaction,
@@ -32,6 +43,8 @@ from mindroom.history.storage import (
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
+    HistoryScope,
+    PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ResolvedReplayPlan,
@@ -39,13 +52,21 @@ from mindroom.history.types import (
 )
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from mindroom.turn_model import ModelScope, resolve_turn_model
-from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    prepare_history_for_run_for_test,
+    request_frame,
+    seed_session,
+)
+from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import summary_model
-from tests.fakes.token_counter import fake_token_counter, quarter_tokens
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
-    ReplayEstimate,
     _completed_run,
     _make_config,
     _runtime_paths,
@@ -53,6 +74,11 @@ from tests.history_helpers import (
     folded_run_ids,
     replay_settings,
 )
+from tests.providers.golden_support import golden_paths, load_golden
+from tests.providers.openai_family_support import openai_family_adapter
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
 def _agent_settings(config: Config) -> ResolvedHistorySettings:
@@ -68,45 +94,79 @@ def _viewed_image_message(index: int) -> Message:
     )
 
 
-def test_a_native_route_without_a_checkpoint_estimates_text_as_a_plain_request_does() -> None:
-    """One history gets one estimate: a native route rounds its canonical text the way a plain request does."""
-    messages = [Message(role="user", content="a") for _ in range(4)]
+@dataclass
+class _RecordingModel(ScriptedModel):
+    """A fake provider that keeps every request it sized."""
 
-    assert estimate_request_messages_tokens(messages, counter=fake_token_counter(), native_route="native-route") == 1
-    assert estimate_request_messages_tokens(messages, counter=fake_token_counter()) == 1
+    sized: list[ModelRequest] = field(default_factory=list)
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        self.sized.append(request)
+        return super().request_tokens(request, start=start)
 
 
 def test_an_empty_media_list_adds_nothing_to_a_message_estimate() -> None:
     """A message estimates by its text and tool calls; an empty media list carries neither."""
     with_empty_media = Message(role="user", content="abcdefg", images=[], files=[])
 
-    assert estimate_request_messages_tokens([with_empty_media], counter=fake_token_counter()) == 1
+    assert ScriptedModel([]).request_tokens(ModelRequest(messages=[with_empty_media])) == 1
 
 
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_projects_bounded_viewed_images_without_mutating_session(native_route: str | None) -> None:
-    """The planner and provider estimator see the same bounded newest-first media replay."""
+def test_history_estimate_projects_bounded_viewed_images_without_mutating_session() -> None:
+    """The planner sizes the same bounded newest-first media replay a request sends."""
     messages = [_viewed_image_message(index) for index in range(6)]
     session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
     before = deepcopy(session)
-    replay_estimator = ReplayEstimate(100, uses_visual_tokens=True)
+    model = _RecordingModel([])
 
     estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=replay_settings(),
-        counter=fake_token_counter(replay=replay_estimator),
-        native_route=native_route,
+        model=model,
     )
 
-    replayed_ids = [image.id for message in replay_estimator.messages for image in message.images or []]
+    [request] = [sized for sized in model.sized if sized.messages]
+    replayed_ids = [image.id for message in request.messages for image in message.images or []]
     assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
-    assert sum("omitted from replay" in str(message.content) for message in replay_estimator.messages) == 2
+    assert sum("omitted from replay" in str(message.content) for message in request.messages) == 2
     assert session == before
 
 
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator(native_route: str | None) -> None:
-    """Fallback planning charges visual tokens without treating image bytes as prompt text."""
+@pytest.mark.parametrize("estimate", ["history", "summary"])
+def test_history_estimates_leave_out_the_instructions_a_route_sends_with_every_request(
+    tmp_path: Path,
+    estimate: str,
+) -> None:
+    """Codex sends its default instructions in every request, which the request without its history already counts."""
+    config = load_golden(golden_paths(("codex",))[0])["input"]["model_config"]
+    session = _session(
+        "codex",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[Message(role="user", content="Hi"), Message(role="assistant", content="Hello")],
+            ),
+        ],
+    )
+
+    def estimated(instructions: str) -> int:
+        root = tmp_path / str(len(instructions))
+        root.mkdir()
+        authored = {**config, "extra_kwargs": {**config["extra_kwargs"], "default_instructions": instructions}}
+        model = openai_family_adapter(authored, root, lambda _request: httpx.Response(500))
+        if estimate == "history":
+            return estimate_prompt_visible_history_tokens(
+                session=session,
+                history_settings=replay_settings(),
+                model=model,
+            )
+        return estimate_summary_text_tokens("The user greeted the agent.", model)
+
+    assert estimated("Be brief.") == estimated("Be brief. " * 1_000)
+
+
+def test_history_estimate_charges_conservative_visual_cost() -> None:
+    """Planning charges each replayed image its allowance without treating image bytes as prompt text."""
     settings = replay_settings()
     without_image = _session(
         "without-image",
@@ -121,69 +181,12 @@ def test_history_estimate_charges_conservative_visual_cost_without_provider_esti
         "with-image",
         runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
     )
+    estimate = partial(estimate_prompt_visible_history_tokens, history_settings=settings, model=ScriptedModel([]))
 
-    text_tokens = estimate_prompt_visible_history_tokens(
-        session=without_image,
-        history_settings=settings,
-        native_route=native_route,
-        counter=fake_token_counter(),
-    )
-    visual_tokens = estimate_prompt_visible_history_tokens(
-        session=with_image,
-        history_settings=settings,
-        native_route=native_route,
-        counter=fake_token_counter(),
-    )
+    text_tokens = estimate(session=without_image)
+    visual_tokens = estimate(session=with_image)
 
-    assert 5_000 <= visual_tokens - text_tokens < 5_100
-
-
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavailable(native_route: str | None) -> None:
-    """A declared visual capability cannot erase image cost when its estimate is unavailable."""
-    session = _session("with-image", runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])])
-
-    tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=replay_settings(),
-        counter=fake_token_counter(replay=ReplayEstimate(None, uses_visual_tokens=True)),
-        native_route=native_route,
-    )
-
-    assert tokens >= 5_000
-
-
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_estimate(
-    native_route: str | None,
-) -> None:
-    """A larger provider text estimate cannot hide the fallback image charge."""
-    settings = replay_settings()
-    without_image = _session(
-        "without-image",
-        runs=[_completed_run("run-1", messages=[Message(role="user", content="Viewed output")])],
-    )
-    with_image = _session(
-        "with-image",
-        runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
-    )
-    replay_estimator = ReplayEstimate(12_000)
-
-    text_tokens = estimate_prompt_visible_history_tokens(
-        session=without_image,
-        history_settings=settings,
-        native_route=native_route,
-        counter=fake_token_counter(replay=replay_estimator),
-    )
-    visual_tokens = estimate_prompt_visible_history_tokens(
-        session=with_image,
-        history_settings=settings,
-        native_route=native_route,
-        counter=fake_token_counter(replay=replay_estimator),
-    )
-
-    assert visual_tokens - text_tokens >= 5_000
-    assert replay_estimator.messages[0].images is None
+    assert visual_tokens - text_tokens == MEDIA_ALLOWANCE_TOKENS
 
 
 @pytest.mark.asyncio
@@ -252,7 +255,6 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000_000,
-        static_prompt_tokens=10,
     )
 
     assert execution_plan.replay_window_tokens == 1
@@ -392,7 +394,6 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
-        static_prompt_tokens=2_000,
     )
     assert execution_plan.compaction_timeout_seconds == 75.0
 
@@ -426,9 +427,9 @@ def test_only_an_authored_enabled_compaction_config_compacts_automatically(
     """The settings own whether compaction runs on its own, and the plan carries their answer.
 
     ``defaults.compaction: null`` leaves the built-in config, which is enabled but authored by nobody, so like
-    ``enabled: false`` it has no trigger and keeps ``reserve_tokens`` free for the reply. On this 48k window with a
-    2k static prompt, fitting replay to the 80% trigger instead would replay 36,400 tokens and leave 9,600 for the
-    reply, below the 16,384 reserve.
+    ``enabled: false`` it has no trigger and keeps ``reserve_tokens`` free for the reply. On this 48k window, fitting
+    requests to the 80% trigger instead would let a request reach 38,400 tokens and leave 9,600 for the reply, below
+    the 16,384 reserve. With automatic compaction the trigger is capped at the limit for the same reason.
     """
     config = Config.validate_with_runtime(
         {
@@ -444,12 +445,11 @@ def test_only_an_authored_enabled_compaction_config_compacts_automatically(
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
-        static_prompt_tokens=2_000,
     )
 
     assert _agent_settings(config).automatic_compaction is automatic
     assert execution_plan.automatic_compaction is automatic
-    assert execution_plan.hard_replay_budget_tokens == execution_plan.replay_budget_tokens == 48_000 - 16_384 - 2_000
+    assert execution_plan.trigger_tokens == execution_plan.limit_tokens == 48_000 - 16_384
     assert execution_plan.trigger_threshold_tokens == (38_400 if automatic else None)
 
 
@@ -717,7 +717,6 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
-        static_prompt_tokens=1_000,
     )
 
     assert execution_plan.compaction_model_name == "summary-model"
@@ -754,7 +753,6 @@ def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_su
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000_000,
-        static_prompt_tokens=10_000,
     )
 
     assert execution_plan.replay_window_tokens == 200_000
@@ -883,26 +881,27 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=None,
-        static_prompt_tokens=2_000,
     )
 
     # The summary model's 32,000 window, half of it reserved, minus prompt overhead and a 10% margin.
     assert execution_plan.summary_input_budget_tokens == 10_800
     assert execution_plan.replay_window_tokens == 20_000
     assert execution_plan.trigger_threshold_tokens == 16_000
-    assert execution_plan.replay_budget_tokens == 8_000
-    assert execution_plan.hard_replay_budget_tokens == 8_000
+    # The 20,000-token replay window minus its reserve, clamped to half the window, caps the 16,000 trigger.
+    assert execution_plan.trigger_tokens == 10_000
+    assert execution_plan.limit_tokens == 10_000
     assert execution_plan.text_compaction_available is True
 
+    # A request of a 2,000-token static prompt and 8,001 tokens of history.
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
-        current_history_tokens=8_001,
+        request_tokens=10_001,
+        summary_request_tokens=2_000,
         allow_native_compaction=True,
-        summary_tokens=0,
     )
     assert decision.mode == "required"
-    assert decision.reason == "history_exceeds_hard_budget"
+    assert decision.reason == "request_exceeds_limit"
 
 
 def test_resolve_turn_model_uses_room_override_for_team(
@@ -981,7 +980,6 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=4_096,
-        static_prompt_tokens=500,
     )
 
     assert execution_plan.summary_input_budget_tokens == 0
@@ -1013,7 +1011,6 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=context_window_tokens,
-        static_prompt_tokens=10,
     )
 
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
@@ -1022,22 +1019,20 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
 
 
 @pytest.mark.parametrize(
-    ("context_window_tokens", "reserve_tokens", "spent_tokens", "expected"),
+    ("context_window_tokens", "reserve_tokens", "expected"),
     [
-        (1_000, 100, 25, 875),
-        (1_000, 800, 10, 490),
-        (1_000, 100, 2_000, 0),
-        (0, 100, 10, 0),
-        (-10, 5, 3, 0),
+        (1_000, 100, 900),
+        (1_000, 800, 500),
+        (0, 100, 0),
+        (-10, 5, 0),
     ],
 )
 def test_context_budget_after_reserve_preserves_replay_budget_bounds(
     context_window_tokens: int,
     reserve_tokens: int,
-    spent_tokens: int,
     expected: int,
 ) -> None:
-    assert context_budget_after_reserve(context_window_tokens, reserve_tokens, spent_tokens) == expected
+    assert context_budget_after_reserve(context_window_tokens, reserve_tokens) == expected
 
 
 def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(
@@ -1057,11 +1052,11 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000,
-        static_prompt_tokens=10,
     )
 
     assert execution_plan.trigger_threshold_tokens is None
-    assert execution_plan.replay_budget_tokens == 490
+    # Without automatic compaction a request fits the limit: the window minus its reserve, clamped to half the window.
+    assert execution_plan.trigger_tokens == execution_plan.limit_tokens == 500
 
 
 @pytest.mark.parametrize(
@@ -1088,27 +1083,26 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
         history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=active_context_window,
-        static_prompt_tokens=10_000,
     )
 
     assert execution_plan.replay_window_tokens == expected_replay_window
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
-    # The trigger falls below the hard budget here, so replay fits the trigger minus the static prompt.
-    assert execution_plan.replay_budget_tokens == int(expected_replay_window * 0.8) - 10_000
-    hard_replay_budget = execution_plan.hard_replay_budget_tokens
-    assert hard_replay_budget is not None
-    assert hard_replay_budget == expected_replay_window - 16_384 - 10_000
+    # The trigger falls below the limit here, so a request compacts at the trigger.
+    assert execution_plan.trigger_tokens == int(expected_replay_window * 0.8)
+    limit = execution_plan.limit_tokens
+    assert limit is not None
+    assert limit == expected_replay_window - 16_384
 
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
-        current_history_tokens=hard_replay_budget + 1,
+        request_tokens=limit + 1,
+        summary_request_tokens=10_000,
         allow_native_compaction=True,
-        summary_tokens=0,
     )
     assert decision.mode == "required"
-    assert decision.reason == "history_exceeds_hard_budget"
+    assert decision.reason == "request_exceeds_limit"
 
 
 def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
@@ -1120,9 +1114,8 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
-        static_prompt_tokens=2_000,
-        replay_budget_tokens=10_000,
-        hard_replay_budget_tokens=10_000,
+        trigger_tokens=12_000,
+        limit_tokens=12_000,
         summary_input_budget_tokens=5_000,
         compaction_timeout_seconds=600.0,
     )
@@ -1130,9 +1123,9 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=True,
-        current_history_tokens=5_000,
+        request_tokens=7_000,
+        summary_request_tokens=2_000,
         allow_native_compaction=True,
-        summary_tokens=0,
     )
 
     assert decision.mode == "required"
@@ -1140,25 +1133,24 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
 
 
 @pytest.mark.parametrize(
-    ("current_history_tokens", "allow_native_compaction", "expected_mode", "expected_reason", "expected_fitted"),
+    ("request_tokens", "allow_native_compaction", "expected_mode", "expected_reason"),
     [
-        (10_000, True, "none", "under_trigger", 10_000),
-        (10_000, False, "none", "under_trigger", 10_000),
-        (10_001, True, "none", "within_hard_budget", 10_001),
-        (10_001, False, "required", "over_trigger_native_disabled", 10_000),
-        (20_001, True, "required", "history_exceeds_hard_budget", 20_000),
-        (20_001, False, "required", "history_exceeds_hard_budget", 20_000),
+        (12_000, True, "none", "under_trigger"),
+        (12_000, False, "none", "under_trigger"),
+        (12_001, True, "none", "within_limit"),
+        (12_001, False, "required", "over_trigger_native_disabled"),
+        (22_001, True, "required", "request_exceeds_limit"),
+        (22_001, False, "required", "request_exceeds_limit"),
     ],
 )
 def test_classify_compaction_decision_compacts_at_trigger_only_without_native_compaction(
-    current_history_tokens: int,
+    request_tokens: int,
     expected_mode: str,
     expected_reason: str,
-    expected_fitted: int,
     *,
     allow_native_compaction: bool,
 ) -> None:
-    """Native compaction owns the range between the trigger and hard budgets, so runs without it compact there."""
+    """Native compaction owns the range between the trigger and the limit, so runs without it compact there."""
     execution_plan = ResolvedHistoryExecutionPlan(
         automatic_compaction=True,
         text_compaction_available=True,
@@ -1167,24 +1159,24 @@ def test_classify_compaction_decision_compacts_at_trigger_only_without_native_co
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
-        static_prompt_tokens=2_000,
-        replay_budget_tokens=10_000,
+        trigger_tokens=12_000,
+        limit_tokens=22_000,
         summary_input_budget_tokens=5_000,
-        hard_replay_budget_tokens=20_000,
         compaction_timeout_seconds=600.0,
     )
 
+    # The request without history, a 2,000-token static prompt, stays well under the trigger.
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
-        current_history_tokens=current_history_tokens,
+        request_tokens=request_tokens,
+        summary_request_tokens=2_000,
         allow_native_compaction=allow_native_compaction,
-        summary_tokens=0,
     )
 
     assert decision.mode == expected_mode
     assert decision.reason == expected_reason
-    assert decision.fitted_replay_tokens == expected_fitted
+    assert (decision.request_tokens, decision.trigger_tokens, decision.limit_tokens) == (request_tokens, 12_000, 22_000)
 
 
 def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope() -> None:
@@ -1216,9 +1208,9 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope() -> None:
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=history_settings,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         ),
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
     assert replay_plan.mode == "limited"
@@ -1296,7 +1288,7 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
         estimated_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=replay_settings(HistoryPolicy(mode="runs", limit=2)),
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         ),
         add_history_to_context=True,
         num_history_runs=2,
@@ -1352,6 +1344,38 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     assert prepared.replays_persisted_history is False
 
 
+async def _prepare_then_finalize_with_a_larger_prompt(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    scope_context: ScopeSessionContext,
+) -> PreparedHistoryState:
+    """Prepare under a short system prompt, then plan replay for a final request whose prompt nearly fills the limit."""
+    resolved_inputs = resolve_entity_preparation_inputs(
+        config=config,
+        runtime_paths=runtime_paths,
+        history_settings=_agent_settings(config),
+        active_model_name="default",
+        active_context_window=None,
+    )
+    limit = resolved_inputs.execution_plan.limit_tokens
+    assert limit == 64_000 - 16_384
+    prepared = await prepare_scope_history(
+        sizer=request_sizer(estimate_only_model(), config, "default"),
+        # The prompt compaction ran for left room for the summary.
+        frame=request_frame(system="You are helpful."),
+        resolved_inputs=resolved_inputs,
+        runtime_paths=runtime_paths,
+        config=config,
+        scope_context=scope_context,
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
+    )
+    # The final request without history leaves one token of the limit: (characters + 14 prompt characters) / 4.
+    final_frame = request_frame(system="s" * (4 * (limit - 1) - len("Current prompt")))
+    return finalize_history_preparation(prepared_scope_history=prepared, frame=final_frame, pipeline_timing=None)
+
+
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds_final_budget(
     tmp_path: Path,
@@ -1395,19 +1419,16 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
         ),
         pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
-        await prepare_history_for_run_for_test(
-            agent_name="test_agent",
-            full_prompt="Current prompt",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            storage=storage,
-            session=session,
-            # The final prompt leaves one token of the 64,000-token window after its reserve.
-            static_prompt_tokens=64_000 - 16_384 - 1,
-            # The prompt compaction ran for left room for the summary.
-            available_history_budget=1_000,
+        await _prepare_then_finalize_with_a_larger_prompt(
+            config,
+            runtime_paths,
+            ScopeSessionContext(
+                HistoryScope(kind="agent", scope_id="test_agent"),
+                storage,
+                session,
+                "session-1",
+                storage_factory=lambda: storage,
+            ),
         )
 
     persisted = storage.load_session("session-1")
@@ -1430,7 +1451,7 @@ def test_a_history_size_that_fits_replays_even_where_the_summary_estimate_does_n
         history_settings=replay_settings(),
         available_history_budget=5_000,
         current_history_tokens=4_000,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
     assert (plan.mode, plan.estimated_tokens) == ("configured", 4_000)
@@ -1445,7 +1466,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
     size = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=settings,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
     with pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"):
@@ -1454,7 +1475,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
             history_settings=settings,
             available_history_budget=500,
             current_history_tokens=size,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         )
 
     assert session.summary is summary
@@ -1466,7 +1487,7 @@ def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_his
         history_settings=settings,
         available_history_budget=10_000,
         current_history_tokens=size,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
     assert recovered.mode == "configured"
     assert recovered.estimated_tokens <= 10_000
@@ -1487,9 +1508,9 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=settings,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         ),
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
     assert plan.mode == "disabled"
     assert 0 < plan.estimated_tokens <= 100
@@ -1519,9 +1540,9 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=history_settings,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
         ),
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
     assert replay_plan.mode == "disabled"

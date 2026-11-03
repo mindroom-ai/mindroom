@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, SendRequest
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState, SendRequest
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import PreparedTools
@@ -837,10 +837,7 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
     assert isinstance(await approval_receipt_hook(_state_stub()), SendRequest)
 
 
-def _state_stub() -> object:
-    from mindroom.agent_loop.model_loop import LoopState  # noqa: PLC0415 - test-only state shape
-    from mindroom.llm.runs import RunRecord  # noqa: PLC0415
-
+def _state_stub() -> LoopState:
     return LoopState(
         messages=[Message(role="system", content="rules")],
         offered=PreparedTools(functions={}),
@@ -848,6 +845,5 @@ def _state_stub() -> object:
         run=context(),
         record=RunRecord(run_id="run-1"),
         request_index=0,
-        loop_start_ids=frozenset(),
         request_template=EMPTY_REQUEST,
     )

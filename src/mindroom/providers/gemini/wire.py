@@ -27,14 +27,13 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import canonical_mime_type, image_mime_type, rendered_label
-from mindroom.llm.messages import is_own_model_message, stable_serialize, system_text, tool_result_view
+from mindroom.llm.media import canonical_mime_type, image_mime_type, is_text_mime_type, rendered_label
+from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.errors import media_ids
 from mindroom.providers.media_files import read_media_file
-from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -47,7 +46,8 @@ if TYPE_CHECKING:
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
-    from mindroom.llm.provider import StopReason, StreamEvent, TokenCounter, ToolSpec
+    from mindroom.llm.provider import StopReason, StreamEvent, ToolSpec
+    from mindroom.token_counting.requests import RequestParts
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
@@ -75,17 +75,6 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
-# Text types outside ``text/``, which Gemini reads as plain text.
-_TEXT_FILE_MIME_TYPES = frozenset(
-    {
-        "application/json",
-        "application/xml",
-        "application/yaml",
-        "application/x-yaml",
-        "application/x-javascript",
-        "application/x-python",
-    },
-)
 # How Gemini rejects one media type, as reported for an SVG image: "Unsupported MIME type: image/svg+xml"
 # (https://github.com/google/adk-python/issues/5693). Its other rejection of media, "Request contains an invalid
 # argument.", which the Gemini API sent in October 2026 for an inline DOCX, names no attachment.
@@ -176,31 +165,38 @@ async def format_contents(
     return contents, system_text(messages) or None
 
 
-def estimate_replay_tokens(messages: Sequence[Message], *, counter: TokenCounter) -> int:
-    """Count what an explicitly replayed request sends for ``messages``, its text with ``counter``.
+def gemini_request_parts(
+    messages: Sequence[Message],
+    parts: RequestParts,
+    *,
+    tools: Sequence[Mapping[str, Any]],
+    server_tool_parts: bool,
+    static: bool,
+) -> None:
+    """Add what the contents a request sends for ``messages`` give the model, and with ``static`` its system and tools.
 
     The system instruction and text parts count as the model reads them, without the escaping JSON adds; function
-    calls, function responses, and server-side tool parts count as serialized, the last as though the request asked
-    for them. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each earlier
-    reply that replays one adds its reasoning tokens; the running turn's own replies are left to mid-turn sizing, which
-    adds each response's reported thinking. Media is left to the history estimate's allowances.
+    calls, function responses, and the server-side tool parts it replays with ``server_tool_parts`` count as
+    serialized. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each reply that
+    replays one adds its reasoning tokens.
     """
-    texts = [system_text(messages)]
-    structured: list[dict[str, Any]] = []
-    reasoning_tokens = 0
+    if static:
+        parts.text(system_text(messages))
     for message in messages:
         if message.role == "system":
             continue
-        message_parts = _message_parts(message, _ROLE_MAP.get(message.role, message.role), server_tool_parts=True)
-        if not is_own_model_message(message) and any("thought_signature" in part for part in message_parts):
-            reasoning_tokens += message.metrics.tokens.reasoning_tokens
+        role = _ROLE_MAP.get(message.role, message.role)
+        message_parts = _message_parts(message, role, server_tool_parts=server_tool_parts)
+        if any("thought_signature" in part for part in message_parts):
+            parts.cost(message.metrics.tokens.reasoning_tokens)
         for part in message_parts:
             if isinstance(part.get("text"), str):
-                texts.append(part["text"])
+                parts.text(part["text"])
             else:
-                structured.append({key: value for key, value in part.items() if key != "thought_signature"})
-    sent = "".join(texts) + (stable_serialize(structured) if structured else "")
-    return count(counter, sent) + reasoning_tokens
+                parts.value({key: value for key, value in part.items() if key != "thought_signature"})
+    if static:
+        for tool in tools:
+            parts.value(tool)
 
 
 def _is_tool_result(message: Message) -> bool:
@@ -374,7 +370,7 @@ def _sent_file_type(mime_type: str) -> str | None:
     Gemini reads PDFs, text, images, audio, and video; it rejects other types, such as ``application/octet-stream``.
     """
     canonical = canonical_mime_type(mime_type) or ""
-    if canonical.startswith("text/") or canonical in _TEXT_FILE_MIME_TYPES:
+    if is_text_mime_type(canonical):
         return "text/plain"
     if canonical == "application/pdf" or canonical.startswith(("image/", "audio/", "video/")):
         return canonical
@@ -665,9 +661,9 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
 __all__ = [
     "GeminiReply",
     "MediaRoute",
-    "estimate_replay_tokens",
     "format_contents",
     "function_declarations",
+    "gemini_request_parts",
     "malformed_tool_call_error",
     "read_chunk",
     "rejected_media",

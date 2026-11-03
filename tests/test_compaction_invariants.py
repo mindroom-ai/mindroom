@@ -66,8 +66,9 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import counter_for_model, load_o200k
 from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.summary_model import summary_model, summary_turn
-from tests.fakes.token_counter import fake_token_counter, quarter_tokens
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
     _reported,
     _runtime_paths,
@@ -187,7 +188,7 @@ async def _compact(
         before_tokens=0,
         progress=None,
         complete=_reported,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
 
@@ -1295,7 +1296,6 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
             execution_identity=None,
             storage=storage,
             session=persisted,
-            static_prompt_tokens=0,
         )
 
     runtime_generate_summary.assert_not_awaited()

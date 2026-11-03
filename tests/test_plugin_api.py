@@ -67,6 +67,7 @@ _EXPORTS = [
     "MessageTarget",
     "ModelProvider",
     "ModelScope",
+    "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
     "ReactionReceivedContext",
@@ -142,12 +143,12 @@ _SIGNATURES = {
     "AgentLifecycleContext": (
         f"({_HOOK}, entity_name, entity_type, rooms, matrix_user_id, joined_room_ids, stop_reason, *, {_HOOK_HELPERS})"
     ),
-    "Ask": "(text, new_thread, then)",
+    "Ask": "(text, new_thread, then, summary)",
     "AutomationContext": (
         "(agent_name, config, runtime_paths, entry, options, settings, requester_id, execution_identity, workspace, "
         "state_dir)"
     ),
-    "AtlassianConnectionConfig": "(*, name, display_name, site_url, cloud_id, products, write, client_config_service)",
+    "AtlassianConnectionConfig": "(*, name, display_name, site_url, cloud_id, products, write, requester_scoped, client_config_service)",
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
@@ -186,6 +187,7 @@ _SIGNATURES = {
     "MessageReceivedContext": f"({_HOOK}, envelope, skip_plugin_names, suppress, *, {_HOOK_HELPERS})",
     "MessageTarget": "(room_id, source_thread_id, resolved_thread_id, reply_to_event_id, session_id)",
     "ModelScope": "(entity, room_id, thread_id, explicit, explicit_context_window)",
+    "OAuthConsentGroup": "(key, display_name)",
     "OAuthDiscoveryConfig": (
         "(resource, discovery, authorization_server, authorization_url, token_url, registration_url, "
         "dynamic_client_registration, token_endpoint_auth_method, pkce_code_challenge_method, allow_insecure_env, "
@@ -198,7 +200,7 @@ _SIGNATURES = {
         "requester_scoped_credentials, tool_config_oauth_fallback_fields, allowed_email_domains, "
         "allowed_hosted_domains, allowed_email_domains_env, allowed_hosted_domains_env, status_capabilities, "
         "token_parser, token_exchanger, claim_validator, runtime_bootstrapper, account_claims_reader, "
-        "legacy_credentials)"
+        "legacy_credentials, consent_group)"
     ),
     "ReactionReceivedContext": (
         f"({_HOOK}, room_id, event_id, sender_id, reaction_key, target_event_id, thread_id, *, {_HOOK_HELPERS})"

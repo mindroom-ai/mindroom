@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import seed_session
+from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.summary_model import summary_model as _summary_model
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (  # noqa: F401
@@ -47,7 +48,7 @@ async def _rewrite_with_summary_model(
         max_summary_tokens=None,
         before_persist=AsyncMock(),
         after_persist=AsyncMock(),
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
 

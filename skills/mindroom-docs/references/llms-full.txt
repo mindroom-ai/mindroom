@@ -3118,7 +3118,8 @@ defaults:
 Every token limit, including `context_window`, the compaction thresholds, and `memory.file.max_entrypoint_tokens`, is counted as the model that receives the text counts tokens.
 OpenAI models with a known tokenizer, such as GPT-4o, count exactly on OpenAI's own endpoints, Codex, and OpenRouter, and on Azure when the deployment is named after the model.
 Other models use an estimate that is deliberately high, by up to about three quarters for Claude and two thirds for Gemini, so limits act early rather than late.
-Conversation history is sized from the request size the provider reported for the previous reply; without one, such as after a history limit dropped older messages, another model answered, or the agent's system prompt or tools changed (including on the first reply of each day, because the system prompt names the date), or once native compaction has condensed part of it, it uses the estimate.
+Each request to the model, including the first one after an approval, is sized from the request size the provider reported for the latest answer it continues; without one, such as after a history limit dropped older messages, another model answered, or the agent's system prompt or tools changed (including on the first reply of each day, because the system prompt names the date), or right after native compaction condensed the history, it uses the estimate.
+Either way, the size includes reasoning sent back to the model, such as earlier thinking.
 Estimates need the `o200k_base` vocabulary, and older OpenAI models such as GPT-4 on OpenAI's own routes need `cl100k_base`; each downloads on first use, so without network access set `TIKTOKEN_CACHE_DIR` to a directory that already holds them, or the log shows `o200k_base did not load` and estimates fall back to a quarter token per character, while the `MEMORY.md` preload, compaction input, and a compaction summary before it is saved count UTF-8 bytes, which preloads about a third as much and can refuse a summary that would fit.
 To fill that directory, run MindRoom once with network access and `TIKTOKEN_CACHE_DIR` set, then copy the directory; tiktoken names each cached file after its download URL, so a vocabulary file downloaded by hand is not found.
 No reply waits for a token count.
@@ -3128,7 +3129,7 @@ No reply waits for a token count.
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply when the request, including the system prompt and tools, exceeds the compaction threshold on a route without native compaction, when history exceeds the hard replay budget, or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
+Text compaction runs before a reply when the request, including the system prompt and tools, exceeds the compaction threshold on a route without native compaction, when it exceeds the replay window minus `reserve_tokens`, or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
 If compaction fails, the notice reads `Compaction failed; continuing without compaction.` with the reason; before a reply, the reply continues with fitted history.
 
@@ -3197,8 +3198,8 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
   An authored `compact_20260112` context-management policy keeps its own trigger and instructions, and `pause_after_compaction: true` is rejected because MindRoom needs the provider to continue its response.
 - Gemini, Chat Completions, and all other providers use text compaction.
 
-Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the hard request limit.
-An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the hard budget uses text compaction instead.
+Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the replay window minus `reserve_tokens`.
+An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the replay window minus `reserve_tokens` uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
 When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
@@ -3757,7 +3758,7 @@ knowledge_bases:
 - `exclude_extensions` removes extensions last and wins over both.
 
 The allowed set depends only on this configuration, never on the embedder or installed packages.
-Formats such as `.pdf`, `.docx`, or `.pptx` need their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) installed in the MindRoom environment.
+Formats such as `.docx` or `.pptx` need their reader package (for example `python-docx` or `python-pptx`) installed in the MindRoom environment; the PDF reader is installed with MindRoom.
 When a reader package is missing, the refresh indexes the other files, logs a warning naming the file and the missing package, and reports an indexing error instead of publishing an index that silently lacks those files.
 Extension filtering does not apply in `files` mode.
 Semantic indexing skips symlinked files and folders inside a base, so copy linked documents into the base instead.
@@ -5721,7 +5722,7 @@ Models without that support can still work with the file through the [`attachmen
 When a provider rejects inline media, MindRoom retries without it and tells the agent the content was not inspected; see [Media Fallback](https://docs.mindroom.chat/images/#media-fallback).
 Some provider integrations never send certain media kinds, so MindRoom leaves those out from the start with the same note.
 Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
-Models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file.
+Claude models (the `anthropic`, `vertexai_claude`, and `bedrock_claude` providers) and models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file type.
 
 ## Attachment IDs
 
@@ -10517,16 +10518,20 @@ agents:
 | --- | --- |
 | `google_drive_list_files()` | Lists recently modified files. |
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`; PDFs, Office files, and Drawings need a download and a reader for that format. |
-| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
+| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
+| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
 | `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
 | `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
 | `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
-When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, a name containing `/`, or a size over `max_download_size`.
+Use `google_drive_read_file` to read a document or text file, and `google_drive_download_file` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
+Files with binary content, such as audio, video, images, PDFs, archives, and Office files, are never returned as text.
+When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
+Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
+On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
@@ -10538,10 +10543,10 @@ Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API
 | `list_files` | `boolean` | `true` | Enable file listing. |
 | `search_files` | `boolean` | `true` | Enable metadata search. |
 | `read_file` | `boolean` | `true` | Enable content reads. |
-| `download_file` | `boolean` | `false` | Enable downloads and exports into the agent workspace. |
+| `download_file` | `boolean` | `true` | Enable downloads and exports into the agent workspace. |
 | `write` | `boolean` | `true` | Enable upload, content replacement, folder creation, move or rename, and trash; `false` removes all of them. |
-| `max_read_size` | `number` | `10485760` | Largest non-Workspace file to read, in bytes. |
-| `max_download_size` | `number` | `104857600` | Largest file or export to download, in bytes. |
+| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read_file` returns as text, in bytes. |
+| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_download_file` saves, in bytes. |
 
 To require a person to approve each Drive change, add [Tool Approval](https://docs.mindroom.chat/tool-approval/) rules:
 
@@ -13298,10 +13303,10 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | Scope | Type | Used by |
 | --- | --- | --- |
 | `offline_access` | classic | Token refresh |
-| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_transition_issue` |
+| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
 | `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments` |
-| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments` |
+| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
+| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
 | `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
 | `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
 | `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
@@ -13338,6 +13343,38 @@ Which site the tool uses:
 
 Atlassian reports every site by its atlassian.net URL, so a custom-domain `site_url` never matches; use the site's atlassian.net URL or its `cloud_id` instead.
 
+## Limit What An Agent Can Do
+
+Set `write` and the space lists on an agent's tool entry to fix what that agent may do for every requester, such as a team agent that everyone connects their own account to:
+
+```yaml
+agents:
+  docs_helper:
+    tools:
+      - atlassian:
+          site_url: https://example.atlassian.net
+          write: false
+          confluence_spaces: [DOCS, ENG]
+          jira_spaces: []
+```
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `write` | `boolean` | `true` | `false` offers only the functions that do not change data. |
+| `jira_spaces` | `string[]` | `null` | Keys of the only Jira spaces (formerly projects), such as `ENG`, the agent may use; `[]` removes the Jira functions. |
+| `confluence_spaces` | `string[]` | `null` | Keys of the only Confluence spaces, such as `DOCS`, the agent may use; `[]` removes the Confluence functions. |
+
+- An unset space list allows every space the requester (or the [shared account](#share-one-account)) can reach.
+- With a list, searches return only results in those spaces, and reads, downloads, and writes of anything elsewhere return `space_not_allowed` and change nothing.
+- The agent still acts as the requester (or the shared account), so it reaches only spaces that are both listed and open to that account in Atlassian.
+- A space key is the part after `/spaces/` in a space's URL, such as `DOCS` in `https://example.atlassian.net/wiki/spaces/DOCS`, and every Jira issue key starts with its space key.
+- Config validation rejects an entry that cannot be a space key, such as a name with spaces in it.
+- An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, searches can select allowed issues by such relations, and creating or updating an issue can set a parent in another space.
+- A refusal tells the agent that an item exists outside the allowed spaces, but nothing of what it holds.
+- `write` combines with `defaults.tools` and dashboard settings like any [tool setting](https://docs.mindroom.chat/tools/#how-settings-combine), while the space lists can be set only on an agent's tool entry.
+- Changing these options needs no reconnect.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
+
 ## Connect An Account
 
 When a requester has not connected Atlassian yet, every function returns `oauth_connection_required: true` with a `connect_url` for that requester.
@@ -13346,6 +13383,7 @@ Users can also connect and disconnect from the dashboard Integrations page.
 
 Tokens belong to the requester and are never shared with other users or stored globally.
 A call without a concrete requester always asks for a connection instead of using another account.
+Only a separately registered connection with `requester_scoped=False` shares one account, as described in [Share One Account](#share-one-account).
 A connection that has not been used for 90 days expires, and the requester then reconnects.
 
 ## Add More Connections
@@ -13399,8 +13437,11 @@ agents:
   assistant:
     tools:
       - atlassian
-      - partner_atlassian
+      - partner_atlassian:
+          confluence_spaces: [PARTNER]
 ```
+
+A connection's tool entry accepts the space lists of its products and, when the connection's `write` is `True`, `write: false`, as described in [Limit What An Agent Can Do](#limit-what-an-agent-can-do).
 
 | Field | Default | Notes |
 | --- | --- | --- |
@@ -13410,6 +13451,7 @@ agents:
 | `cloud_id` | `null` | Cloud ID (a UUID) of the site; when `site_url` is also set, both must name the same site. |
 | `products` | `("jira", "confluence")` | Non-empty, duplicate-free products whose functions and scopes this connection enables. |
 | `write` | `True` | Set to `False` to register only read functions and request only read scopes. |
+| `requester_scoped` | `True` | Set to `False` to store the connection's tokens under the agent's worker scope, as in [Share One Account](#share-one-account). |
 | `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret; the name must end in `_oauth_client`. |
 
 Every connection requires `site_url` or `cloud_id`, so a named connection always acts on one pinned site.
@@ -13432,6 +13474,47 @@ Atlassian records consent per user and app, so with a shared app the default con
 Revoking the shared app in Atlassian disconnects every connection that uses it.
 
 Each connection has its own card on the Integrations page and its own connect link.
+
+### Share One Account
+
+By default every requester connects their own Atlassian account.
+With `requester_scoped=False`, a connection's tokens follow the agent's effective worker scope instead (`private.per`, then the agent's `worker_scope`, then `defaults.worker_scope`), like Google's:
+
+- On a `shared` agent, one account serves every requester of that agent. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
+- On a `user` or `user_agent` agent, each requester still connects their own account, but, as for Google, the egress broker no longer withholds those tokens from [shared sandboxes](https://docs.mindroom.chat/deployment/egress-broker/#personal-accounts-and-shared-sandboxes), so use the built-in tool or a requester-scoped connection there.
+- Without an effective worker scope, one installation-level connection serves every unscoped agent that lists the tool, and a credential manager of any of them can replace it, as described in [Where Connections Are Stored](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored). Give each agent `worker_scope: shared` so it gets its own; that also moves the agent's other agent-scoped credentials, such as Google connections and egress keys, to a per-agent store, where they are connected again.
+
+Everyone who may use the agent then reads what that account can see, so connect a dedicated account, not a person's.
+Set `write=False` on the connection before anyone connects it, so the account is authorized with read scopes only and Atlassian itself refuses writes.
+An account connected while `write` was `True` keeps its write scopes until it is disconnected and connected again.
+Limit the agent's tool entry to the spaces it needs:
+
+```python
+AtlassianConnectionConfig(
+    name="team",
+    display_name="Team Confluence",
+    site_url="https://example.atlassian.net",
+    products=("confluence",),
+    write=False,
+    requester_scoped=False,
+)
+```
+
+```yaml
+agents:
+  docs_helper:
+    worker_scope: shared
+    credential_managers: ["@kim:example.org"]
+    tools:
+      - team_atlassian:
+          confluence_spaces: [DOCS]
+```
+
+The credential manager connects the account from the Connections page, signed in to Atlassian as the dedicated account.
+A connect link the agent replies with also works, but on a shared agent whoever opens it first connects their account, so a credential manager should ask for it in a direct message with the agent and open it right away.
+On a `shared` or unscoped agent, the toolkit tells the model that `currentUser()` in JQL or CQL is the shared account, not the requester.
+The built-in `atlassian` tool always stays requester-scoped.
+Disconnect the shared account before setting `requester_scoped` back to `True`; afterwards no page reaches the token left in the agent's store.
 
 ## Approvals For Writes
 
@@ -13458,7 +13541,7 @@ tool_approval:
 
 The leading `*` also matches the prefixed functions of additional connections, such as `partner_confluence_create_page`.
 Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
-To give an agent read access only, hide the write functions with [`exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions), or register a connection with `write=False` so that it never requests write scopes.
+To give an agent read access only, set [`write: false`](#limit-what-an-agent-can-do) on its tool entry, or register a connection with `write=False` so that it never requests write scopes.
 
 ## Attachments
 
@@ -13476,6 +13559,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 - Search and listing functions return at most 50 results per call.
 - Each API call other than an attachment download must finish within 60 seconds and return at most 32 MiB; an attachment download must finish within 120 seconds.
 - Page reads and attachment listings go through Confluence search, so a page or attachment created moments ago can be missing briefly.
+  With `confluence_spaces`, the same applies to updating, commenting on, downloading from, or creating a page under such a page.
 - Archived and draft pages are not returned.
 - Only Atlassian Cloud is supported.
 - The tool does not upload attachments, delete content, or manage spaces and projects.
@@ -13484,6 +13568,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 
 | Result | Cause and fix |
 | --- | --- |
+| `space_not_allowed` | The item is outside the agent's `jira_spaces` or `confluence_spaces`, which the result lists in `allowed_spaces`; check that each entry is the space key from the space's URL rather than its name, and add the space to the agent's tool entry if the agent should use it. |
 | `scope_mismatch` | Atlassian rejected a request for a scope the app does not grant; reconnecting grants the same scopes again, so an administrator must add the scopes in [Scopes](#scopes) to the app. |
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
 | `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
@@ -13941,6 +14026,7 @@ The scopes stay the same with `write: false`, so turning writes back on does not
 When a requester has not connected a tool's service yet, each of its functions returns `oauth_connection_required: true` with a `connect_url` for that requester.
 The requester opens the link, signs in to Microsoft, approves the requested permissions, and retries the request.
 Users can also connect and disconnect from the dashboard Integrations page, where each service is a separate connection.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows) can connect most of an agent's unconnected Microsoft 365 services with one sign-in.
 
 Tokens belong to the requester and are never shared with other users or stored globally.
 A call without a concrete requester always asks for a connection instead of using another account.
@@ -16095,6 +16181,7 @@ See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-crede
 ### Where Connections Are Stored
 
 Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+An Atlassian connection registered with `requester_scoped=False` is the exception ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -16145,6 +16232,8 @@ These rules apply to built-in providers and to providers that plugins register (
 - `account_claims_reader` (callable, default `None`) takes the token data of a finished code exchange and returns verified account claims, such as `{"login": "octo"}`, for a provider whose token response names no account.
   It runs once per connection, never on refresh, and the callback waits for it, so it should answer within a few seconds; if it raises or returns `{}`, the account still connects, without a label.
   The Connections pages label the account with the claim `email`, else `login`.
+- `consent_group` (`OAuthConsentGroup(key, display_name)`, default `None`) lets services that share one OAuth app connect together from the Connections portal with one sign-in, and should be set only when the provider's refresh tokens stay valid after use and none of its scopes can make the provider refuse or block a combined sign-in.
+  Providers with the same `key`, which uses only letters, numbers, colon, underscore, and hyphen, form one group, and `display_name` names it on the portal's **Connect all** button.
 
 ### Troubleshooting OAuth Connections
 
@@ -16261,6 +16350,9 @@ The portal groups OAuth services by agent, covering every agent the user may use
 Services come from each agent's tools, including deferred tools and plugin or MCP OAuth providers; tools that need no browser sign-in are listed too, and room-dependent tools are marked **MindRoom only**.
 The agent list shows at once, and each agent's counts of connected accounts and set keys fill in as they load.
 Each service's status loads independently, so one failing or unconnected service does not block the others.
+When an agent has two or more unconnected Google Workspace services, services of an additional Google workspace, or Microsoft 365 services, a **Connect all** button above its tools, such as **Connect all Google services**, connects them with one sign-in.
+Google Cloud, Microsoft Teams, Teams Meetings, and People keep their own **Connect** button, because Google can block a sign-in that asks for Google Cloud access and Microsoft refuses one that needs administrator consent.
+Services whose access the user does not grant on the consent screen stay unconnected, and the result page names them.
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
@@ -16344,7 +16436,7 @@ That page also lists the scopes each Google tool requests and how to restrict wh
 ## Choose Providers
 
 Add only the Google tools your agents need.
-Each Google Workspace tool connects and asks for Google approval separately.
+Each Google Workspace tool has its own connection, and the [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows) can connect all of an agent's Google Workspace tools with one sign-in.
 Google Cloud tools such as `google_bigquery` use one Google Cloud connection instead; see [Providers](https://docs.mindroom.chat/deployment/google-services-oauth/#providers).
 
 ```yaml
@@ -16412,7 +16504,7 @@ How connections are made, stored per credential scope, disconnected, and reset i
 
 ## Providers
 
-Each Google Workspace tool has its own provider, so users connect and approve each service separately.
+Each Google Workspace tool has its own provider, so users can approve each service separately or connect all of an agent's Google Workspace services at once from the [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows).
 Google Cloud is the exception: one read-only provider serves every Google Cloud tool, such as `google_bigquery`, so users connect once for all of them.
 
 | Tool | Provider ID | Token service | Client config service | Settings service | Google scopes |
@@ -16612,10 +16704,11 @@ A service can also take its secret from an OAuth account that a user connected (
 The broker uses such an account for a service only after someone allowed Agent Keys to use it, an opt-in kept primary-only beside the connection, so connecting an account for its tools, whose writes may ask for approval, never by itself lets an agent's commands act as it.
 A user's own service on a personal agent can instead have an account of its own (`oauth_separate_account`), stored and allowed the same way beside the tools' connection, which the provider's tools never use.
 An opt-in allowed read only, for a service that declares `read_only`, gets the token only for `GET`, `HEAD`, and `POST` to the service's listed read paths, and never for a WebSocket upgrade or a request with a method-override header; that limit holds only as far as the upstream API keeps its writes off those methods and paths.
+A group sign-in on the Connections portal (**Connect all**) stores one token per member service, and each token carries every scope of that sign-in, so an Agent Keys allowance for one member acts with the whole grant on the hosts that service allows.
 The primary fetches and refreshes those access tokens through the OAuth credential lifecycle and the broker injects them as the matched rule's auth type; workers never receive an OAuth access token or a refresh token, only the proxy token and placeholder values, and the broker's logs and audit records never contain them.
-Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers follow the agent's worker scope.
+Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers, and Atlassian connections registered with `requester_scoped=False`, follow the agent's worker scope.
 The broker uses a requester-scoped account only on `user` and `user_agent` workers that run on a dedicated (Docker or Kubernetes) worker backend by default.
-A `shared` or unscoped worker, and every worker on the static runner, runs every requester's commands in one sandbox, where a later command from another user can read an earlier caller's proxy token (for example from the environment of a process left running) and act with that caller's account until the token expires, so there the broker injects no GitHub or Atlassian account, adds no placeholder for it, and offers no connect link.
+A `shared` or unscoped worker, and every worker on the static runner, runs every requester's commands in one sandbox, where a later command from another user can read an earlier caller's proxy token (for example from the environment of a process left running) and act with that caller's account until the token expires, so there the broker injects no requester-scoped GitHub or Atlassian account, adds no placeholder for it, and offers no connect link.
 A service's `oauth_on_shared_workers: true` removes that gate: every user of such a shared sandbox can then act with any other user's connected account until that user's proxy token expires.
 The `connect_url` that a 403 response carries goes only to the worker whose proxy token has that scope; it is the same short-lived single-use connect link that conversation OAuth uses, and it starts a connection for that one scope after the recheck of the requester's permission.
 The link also requires the browser to be signed in to MindRoom as that requester.
@@ -16624,7 +16717,9 @@ A shared Google service account (`GOOGLE_SERVICE_ACCOUNT_FILE`) is never injecte
 On the shared static runner, including the hosted `static_runner` sidecar, a scoped call's broker token, valid for the token TTL, lives in a process shared with other users' calls, consistent with the static runner not being an isolation boundary; use dedicated `user` or `user_agent` workers on `private` agents when requesters must not be able to use each other's brokered credentials (see [Shared workspaces on non-private agents](https://docs.mindroom.chat/deployment/egress-broker/#shared-workspaces-on-non-private-agents)), because a dedicated `shared` or unscoped worker also runs every requester's commands in one sandbox.
 Only administrators and an agent's credential managers can change the keys, services, account connection, and account opt-in of a shared or unscoped agent.
 The credential managers of one key scope, and of all unscoped agents, can change each other's keys and services (see [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#secrets-and-identity)).
-Users can define egress services of their own, which apply only to their own scope, route only that scope's keys and accounts, never widen the administrator's policy, and cannot take a config service's name or set `oauth_on_shared_workers`, `admin_key`, or `agents`.
+Users can define egress services of their own, which apply only to their own scope, route only that scope's keys and accounts, never widen the administrator's policy, and cannot take a config service's name or set `oauth_on_shared_workers`, `admin_key`, `agents`, or `github_app`.
+A `github_app` service's tokens are minted in the primary from the App private key named by a stored credential, which the primary reads and workers never see; the tokens cover only the listed repositories, and GitHub enforces that scope.
+Every scope a `github_app` service serves shares its tokens, so code in any of those sandboxes can revoke the current token or use up the installation's rate limit for all of them until the next mint (accepted; see [GitHub App](https://docs.mindroom.chat/deployment/egress-broker/#github-app)).
 An administrator key (`admin_key`) is one key in the global store for every scope of a service, which only administrators set from the dashboard; a service's `agents` list limits which agents get its key or account, but not which code can use them where agents share a sandbox, such as the static runner or a requester's `user` agents (see [Limiting a service to some agents](https://docs.mindroom.chat/deployment/egress-broker/#limiting-a-service-to-some-agents)).
 A user service can use a connected account only in a personal scope, and its placeholder variables are limited to credential-like names and plain values, because a shared agent's services set variables in every requester's sandbox.
 `restrict_to_rules` is not a network boundary: under `passthrough` a worker can reach the same server by IP address through a tunnel the broker does not intercept, which carries no credential, so the real boundary stays the token's own permissions on the upstream side.
@@ -16702,6 +16797,7 @@ The exporter's drift check reads at most 8 MiB of a room's `index.json` and rebu
 Workspace todo templates have the size, render, and listing limits documented in [`todo`](https://docs.mindroom.chat/tools/project-management/#todo), and they render in a short-lived, memory-limited child process instead of the primary, because sandboxed Jinja alone does not bound their cost.
 
 Workspace `SKILL.md` and subagent profile frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, `%TAG` directives, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
+Request sizing reads the page count of a PDF a request carries, an attachment or a tool's result, with pypdf in the primary, so a crafted PDF costs the parse time pypdf allows; the dependency floor follows pypdf's denial-of-service fixes.
 
 ## Hosted tenant isolation
 
@@ -16802,6 +16898,7 @@ Do not report or "fix" these; they are deliberate.
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
 - Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
+- The `atlassian` tool's `write`, `jira_spaces`, and `confluence_spaces` limit only that tool's own functions, which act as a requester who may reach more: an issue in an allowed space still shows the keys and summaries of linked, parent, and sub-issues in other spaces, searches can select allowed issues by those relations, an issue's `fields` can set a parent elsewhere, `space_not_allowed` reveals that an item exists outside the allowed spaces, and the egress broker `atlassian` service, the API-token `jira` and `confluence` tools, and code execution in the primary are not limited; see [Limit What An Agent Can Do](https://docs.mindroom.chat/tools/atlassian/#limit-what-an-agent-can-do).
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
 - Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
@@ -16832,6 +16929,7 @@ Do not report or "fix" these; they are deliberate.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
 - A personal `slack_download` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
+- `google_drive_download_file`, on by default, saves a file the connected Google account can see into the agent's workspace, so on a non-private agent with requester-owned Google Drive connections every requester of that agent can read another requester's downloads; such connections belong on `private` agents.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, as is a started profile's running browser with its open tabs, so one requester can use web sessions another signed in, read pages another left open, and upload screenshots another took; they never cross agents or the requesters of a private agent.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
@@ -16982,9 +17080,10 @@ The record is [Separate Accounts for Agent Keys Services](https://docs.mindroom.
 **An administrator key is one key in the global store, and an agent list refuses other agents instead of hiding the service from them.**
 An administrator wanted to give every agent, personal agents included, one key that users can see is set but never change, so the dashboard writes it whichever scope is selected and the Connections page refuses it; a fallback key that a scope's own key overrides was rejected because users could then change which key their agent uses.
 An `agents` list keeps the service in every agent's routing and refuses the others with `agent_not_allowed`, because a per-agent operator config would reach every check that reads it and would send unlisted agents' requests out without a key under `passthrough`.
+Routing prefers a service that serves the requesting agent before rule specificity, so per-team services on the same hosts (one GitHub App service per team, replacing per-person tokens) each serve their own agents; the refusal remains for an agent no matching service serves.
 The record is [Administrator Keys and Agent Lists for Agent Keys Services](https://docs.mindroom.chat/dev/2026-10-29-agent-keys-admin-keys-design/).
 
-**Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
+**Requester-scoped accounts (GitHub, built-in Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
 A shared sandbox can opt in with `oauth_on_shared_workers`, which only administrators can set.
 Even a personal worker shares the workspace folder on a non-private agent, so personal accounts and keys are only isolated on `private` agents.
@@ -17931,6 +18030,9 @@ agents:
   Bind anything a step needs from the check with `functools.partial`.
 - `timed_out` is true when no answer ended within an hour of the prompt being posted; `False` only means the answer ended, which includes a failed run, so check the result before reporting success.
 - The check's `Ask` and every later `Ask` with `new_thread=True` get their own thread and session, even for an agent with `thread_mode: room`; a later `Ask` with `new_thread=False` follows up in the current thread.
+  Every thread an automation starts is tagged `automation`; generated topic tags only go on threads without tags, so automation threads get none.
+- `Ask(..., new_thread=True, summary="...")` pins that text as the title of the thread the prompt starts, so no generated summary replaces it; without it, the thread gets the usual automatic summary unless `Done` resolves it first.
+  `summary` with `new_thread=False` raises `ValueError`, since only the step that starts a thread titles it.
 
 `AutomationContext` fields:
 
@@ -20424,7 +20526,7 @@ Adding, removing, or re-scoping a `worker_scope: user` agent changes every user 
 
 The dashboard's generic credential forms work only for unscoped agents and agents with `worker_scope: shared`.
 OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](https://docs.mindroom.chat/oauth-framework/) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime, except Spotify, which, like the Home Assistant integration, stays shared-only.
-GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
+GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`, except an Atlassian connection registered with `requester_scoped=False` ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
 Saved tool settings are stored by the primary per agent for `shared`, per requester across agents for `user`, and per requester-agent pair for `user_agent`, and reach worker-routed calls through [credential leases](#credential-leases).
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so configure them in authored config (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) or through shared settings granted with `defaults.worker_grantable_credentials`.
 Only unscoped and `shared` agents are available through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/#model-selection).
@@ -20737,9 +20839,10 @@ egress_broker:
 | `oauth_on_shared_workers` | No | Default `false`. Set `true` to use a requester's own GitHub or Atlassian account in shared sandboxes too; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes). Only `config.yaml` may set it, and presets never do |
 | `restrict_to_rules` | No | Default `false`. Set `true` to refuse, with 403 `path_not_allowed`, a request to this service's hosts whose path matches none of its party's rules there, instead of forwarding it without credentials; see [Limiting paths and repositories](#limiting-paths-and-repositories). Presets never set it |
 | `restrict_only` | No | Default `false`. Only for user services; see [Limiting in place](#limiting-in-place) |
-| `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` other than `github` or `atlassian` on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
+| `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` that is not requester-scoped (GitHub and the built-in Atlassian are) on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
 | `admin_key` | No | Default `false`. Set `true` to give every agent the service serves one key that only an administrator sets; see [Administrator keys](#administrator-keys). Only `config.yaml` may set it, and presets never do |
 | `agents` | No | Default every agent. A list of agent names that get the service's key or account; see [Limiting a service to some agents](#limiting-a-service-to-some-agents). Only `config.yaml` may set it |
+| `github_app` | No | Default none. `{credentials_service: <name>, repositories: {<owner>/<repository>: read \| read_write}}` makes the service send short-lived tokens of a GitHub App installation, limited to those repositories, instead of a key or account; see [GitHub App](#github-app). Only `config.yaml` may set it, and presets never do |
 
 **Rule fields:**
 
@@ -20761,7 +20864,7 @@ egress_broker:
 
 Prefer `bearer`, `basic`, or `header` over `query`, which puts the key in the URL; see [What the broker cannot protect against](#what-the-broker-cannot-protect-against).
 
-Matching follows this order: exact host over wildcard, specific port over none, longest path prefix, then the service whose name sorts first, so the order services are written in never matters.
+Matching follows this order: a service that serves the requesting agent (see [`agents`](#limiting-a-service-to-some-agents)) over one that does not, exact host over wildcard, specific port over none, longest path prefix, then the service whose name sorts first, so the order services are written in never matters.
 
 Service names use up to 63 lowercase letters, digits, `_`, and `-`, start with a letter or digit, and must not end in `_oauth` or `_oauth_client`.
 
@@ -20781,7 +20884,7 @@ Two parties can restrict a host, and a path must pass every party's restriction:
 - **The requester.** When one of the requester's own [user services](#user-services) that has a rule for the host and port sets `restrict_to_rules`, the path must match a rule of one of their user services on that host and port.
 
 A rule bound to another port never restricts this one.
-A path that passes both checks gets the credential of the most specific matching rule over the config and user services (config services win a tie before the service name does), and a path that matches no rule is forwarded without credentials.
+A path that passes both checks gets the credential of the best matching rule over the config and user services, in the [matching order](#custom-services) (config services win a tie before the service name does), and a path that matches no rule is forwarded without credentials.
 Rules of `restrict_only` services take part in the checks but never choose the credential.
 
 What follows from this:
@@ -20826,7 +20929,7 @@ The helper writes:
   The tunnel carries no credential, but paths you did not list stay reachable through it.
   `unmatched_hosts: deny` refuses that tunnel.
 - The real boundary is the credential.
-  Use a fine-grained personal access token limited to the repositories you want, or a GitHub App installed on selected repositories, so GitHub itself refuses everything else.
+  Use a fine-grained personal access token limited to the repositories you want, or a [GitHub App](#github-app), so GitHub itself refuses everything else.
   The rules only decide what the broker injects and forwards.
 
 #### Limiting in place
@@ -20872,6 +20975,8 @@ A service can take its secret from two sources in a worker's scope:
 - **Connected account**: an OAuth login that the user connected through MindRoom's OAuth providers (the GitHub App user login, the Google providers, Atlassian).
   A service uses this source when it has an `oauth_provider`, which every preset except `openai` and `anthropic` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
 
+A [GitHub App](#github-app) service uses only tokens of its App instead.
+
 For each request the broker picks the secret in this order:
 
 1. The API key stored for the scope, if there is one.
@@ -20887,6 +20992,7 @@ The matched rule's auth type then formats the token like any other secret, so a 
 - The account follows the provider's own credential policy.
   GitHub and Atlassian are requester-scoped: the broker uses the requester named in the worker's verified token, so each user's requests use that user's own account.
   In shared sandboxes the broker does not use them by default; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
+  An Atlassian connection registered with `requester_scoped=False` follows the worker scope like the Google providers instead ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
 - The Google providers follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
 - A call without a requester has no requester-scoped account (GitHub or Atlassian) to use.
 
@@ -20907,10 +21013,10 @@ Every other sandbox is shared:
 A proxy token minted for one user's call stays readable in a shared sandbox for its lifetime (for example in the environment of a process that call left running), so a later command from another user could use it to act with the first user's GitHub or Atlassian account until the token expires; keep `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` short where that matters.
 
 So in a shared sandbox the broker does not use requester-scoped accounts at all.
-It injects no GitHub or Atlassian account and adds no placeholder variables for it, a matched request without an API key gets 403 `credential_not_configured` with no connect link, and the egress pages, the connect routes, and the [`egress_credentials` tool](#agent-tool) offer no connection for it.
+It injects no requester-scoped GitHub or Atlassian account and adds no placeholder variables for it, a matched request without an API key gets 403 `credential_not_configured` with no connect link, and the egress pages, the connect routes, and the [`egress_credentials` tool](#agent-tool) offer no connection for it.
 
 Give those agents an API key instead, or run the agents whose users need their own account with worker scope `user` or `user_agent` on the Docker or Kubernetes worker backend, and make them `private` if other requesters can use them (see [Shared workspaces on non-private agents](#shared-workspaces-on-non-private-agents)).
-The Google providers are not affected: their connection on a shared agent is the agent's own, maintained by its credential managers.
+The Google providers and Atlassian connections with `requester_scoped=False` are not affected: their connection on a shared agent is the agent's own, maintained by its credential managers.
 
 An operator who accepts the risk can set `oauth_on_shared_workers: true` on the service.
 The broker then injects the calling requester's own account in shared sandboxes as well, and anyone who can run commands in such a sandbox can act with any other user's connected account until that user's proxy token expires (`MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS`, default 7 days).
@@ -20926,7 +21032,7 @@ A file one requester leaves there, such as `.mindroom/worker-env.sh`, can run in
 So another requester's code can use that requester's connected accounts and personal keys, but not read them, as long as none of the hosts those services reach echo requests (see [Hosts that echo requests](#what-the-broker-cannot-protect-against)).
 When requesters need to be kept apart, make the agent `private`, so that each requester gets a workspace root of their own.
 Set `private.per` to `user` or `user_agent` instead of `worker_scope`, because the two cannot both be set (see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances)).
-Connected accounts and personal keys belong to the requester, not to one agent: GitHub and Atlassian accounts are stored at scope `user` whichever agent uses them, and `user` keys are shared by all of that requester's `user` agents.
+Connected accounts and personal keys belong to the requester, not to one agent: GitHub and requester-scoped Atlassian accounts are stored at scope `user` whichever agent uses them, and `user` keys are shared by all of that requester's `user` agents.
 So every personal (`user` or `user_agent`) agent that other requesters can use must be `private` for those accounts to stay out of other requesters' code, not only the agent that seems most sensitive.
 
 ## Secret management
@@ -20990,19 +21096,110 @@ egress_broker:
       agents: [research, coder]
 ```
 
-Requests from any other agent that the service matches get 403 `agent_not_allowed`, its egress page and the [`egress_credentials` tool](#agent-tool) leave the service out for that agent, and its placeholder variables are not set.
+A request from any other agent goes to the best matching service that serves that agent, which can be another config service on the same hosts or the user's own service, and gets 403 `agent_not_allowed` only when no such service matches.
+So services limited to different agents can share hosts and paths, such as one [GitHub App](#github-app) service per team.
+When two services that serve the agent match equally well, the config service wins over a user's own, then the one whose name sorts first.
+The service's egress page and the [`egress_credentials` tool](#agent-tool) leave the service out for other agents, and its placeholder variables are not set for them.
 The dashboard lists the service in every scope with the agents it is limited to.
-A user's own service on the same hosts and paths loses the tie to it, so for another agent a request uses that service only by naming it with the `X-Agent-Keys-Service` header (see [A service's own account](#a-services-own-account)).
 Every name must be an existing agent.
 Where agents share a sandbox, the list decides which agents get the key but not which code can reach it: the static runner runs every agent's calls in one process, and a requester's `user` agents share one worker, so code there can use a listed agent's proxy token (see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes)).
+
+### GitHub App
+
+A GitHub App owned by an organization can serve shared agents instead of one person's token.
+The broker mints the App's installation tokens in the primary, limited to the repositories the service lists, and refreshes each one before it expires.
+Workers never see the App's private key or its tokens, only the placeholder variables.
+
+Store the App as a credential, the same object [Git knowledge bases](https://docs.mindroom.chat/knowledge/#private-repository-authentication) use, through the dashboard **Credentials** tab or as the `credentials` field of `POST /api/credentials/<name>`:
+
+```json
+{
+  "auth_type": "github_app",
+  "app_id": 12345,
+  "installation_id": 67890,
+  "private_key_file": "/var/run/secrets/github-app/private-key.pem"
+}
+```
+
+Then name it in a service and list the repositories with their access:
+
+```yaml
+egress_broker:
+  services:
+    github:
+      preset: github
+      github_app:
+        credentials_service: acme_github_app
+        repositories:
+          acme/api: read_write
+          acme/docs: read
+```
+
+- The repositories all belong to the account the App is installed on, and the installation must include them.
+- `read` lets the agent clone, fetch, and read issues, pull requests, and their CI results; `read_write` also lets it push and create or update issues and pull requests.
+- The tokens ask for these App permissions, so the App needs at least them:
+
+  | Access | `contents` | `issues` | `pull_requests` | `checks` | `statuses` | `actions` | `metadata` |
+  |--------|------------|----------|-----------------|----------|------------|-----------|------------|
+  | `read` | read | read | read | read | read | read | read |
+  | `read_write` | write | write | write | read | read | read | read |
+
+- Pushing changes to workflow files under `.github/workflows` needs a permission the tokens do not ask for, so GitHub refuses such pushes.
+- `gh pr view` also fails on a pull request with a team review request, which needs the organization's Members permission, and `gh pr status` on a branch with a classic protection rule, which needs Administration; the tokens ask for neither, so use `gh pr view --json <fields>` without `reviewRequests`, or `gh api`, there.
+- A request for a repository the service does not list, a public one included, gets 403 `repository_not_allowed` and no token.
+  To let agents fetch other public repositories, such as a `pip install git+https://github.com/<owner>/<repository>` dependency, keep `preset: github` and set the service's `rules` yourself, which replace the preset's, limited to the App's owner, so REST and git requests for other repositories match no rule and go out without credentials (GraphQL still gets the App's token, as below):
+
+  ```yaml
+  rules:
+    - { host: api.github.com, path_prefix: /repos/acme/, auth: { type: bearer } }
+    - { host: api.github.com, path_prefix: /graphql, auth: { type: bearer } }
+    - { host: uploads.github.com, path_prefix: /repos/acme/, auth: { type: bearer } }
+    - { host: github.com, path_prefix: /acme/, auth: { type: basic, username: x-access-token } }
+    - { host: github.com, path_prefix: /user-attachments/, auth: { type: basic, username: x-access-token } }
+  ```
+
+- A request that names no repository in its path, such as GraphQL, which `gh pr create` and `gh pr view` use, gets read access to every listed repository, or read and write when every listed repository is `read_write`.
+  In a service that mixes the two, `gh` commands that write through GraphQL therefore fail; `gh api repos/<owner>/<repository>/...` and git work at each repository's own access.
+  Prefer one access level per service, as in the example below.
+- GitHub refuses the token for anything private outside its repositories and for anything its permissions do not allow, even when the path names no repository.
+- The service uses no key or connected account: a preset's account login is left out, setting `oauth_provider`, `read_only`, `oauth_on_shared_workers`, or `admin_key` next to `github_app` is an error, and the egress pages offer no key for it.
+- Every agent the service serves shares the App, whatever its worker scope.
+  Combine it with [`agents`](#limiting-a-service-to-some-agents) to choose which agents get it.
+  Because the tokens are shared, code in any of those agents' sandboxes can use up the installation's rate limit or revoke the current token, which cuts the others off until the broker mints the next one, within an hour.
+
+To give teams different repositories, define one service per team, each limited with [`agents`](#limiting-a-service-to-some-agents) and with one access level, so `gh pr create` works for the team that writes:
+
+```yaml
+egress_broker:
+  services:
+    github_team_a:
+      preset: github
+      agents: [agent_a]
+      github_app:
+        credentials_service: acme_github_app
+        repositories: {acme/api: read_write, acme/web: read_write}
+    github_team_b:
+      preset: github
+      agents: [agent_b]
+      github_app:
+        credentials_service: acme_github_app
+        repositories: {acme/docs: read}
+```
+
+Each agent's requests then use its own team's service; an agent in neither list gets 403 `agent_not_allowed`.
+Two services that serve the same agent on the same hosts do not combine: the one whose name sorts first takes every request, so list all of an agent's repositories in one service.
+That includes a service without `agents`, which serves every agent: next to team services, give it an `agents` list that leaves the teams' agents out, or remove it.
+
+Until the credential is stored, the service shows as not set, its placeholder variables are not added, and requests get 403 `credential_not_configured`.
+When GitHub issues no token, for example because the App lacks a permission or an installation does not include a listed repository, requests get 503 `github_app_token_failed` and the primary logs `egress_broker_github_app_token_failed` with GitHub's HTTP status.
 
 ### Connecting an account
 
 On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
 A row whose account Agent Keys uses shows "Using connected account" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Stop using <provider> account** and **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
-In a shared sandbox, GitHub and Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
+In a shared sandbox, GitHub and requester-scoped Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 
-**Shared accounts.** Where connecting an account makes everyone who uses the agent act as it, which is an agent-scoped account (the Google providers) on a shared or unscoped agent, **Connect** first asks for confirmation that says so.
+**Shared accounts.** Where connecting an account makes everyone who uses the agent act as it, which is an agent-scoped account (the Google providers, or an Atlassian connection with `requester_scoped=False`) on a shared or unscoped agent, **Connect** first asks for confirmation that says so.
 Every user of the agent, not only its managers, sees which account is connected, because they all act as it.
 Only administrators and credential managers can connect, allow, or disconnect it.
 
@@ -21013,7 +21210,7 @@ Every service of the agent that uses the provider and the provider's tools stop 
 A connection that everyone using an agent shares never gets a link; connect it at `manage_url` instead.
 
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
-On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects and allows their own account.
+On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and requester-scoped Atlassian connections under `oauth_on_shared_workers` are the exception, where each user connects and allows their own account.
 
 The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) or from [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/).
 With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no trusted upstream auth, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
@@ -21026,7 +21223,7 @@ An account connected for the provider's tools, on the Connections portal or here
 Its row then shows "Connected for tools only" and offers **Let commands use it**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
 The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
-Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
+Allowing a GitHub or requester-scoped Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
 **Stop using <provider> account** turns it off again and keeps the connection for the tools.
 An allowance covers that provider's account for that scope until someone stops it: disconnecting keeps it, so an account of the same provider connected later, also one connected for the tools on the Connections portal, is used at once.
 It does not apply while the service's `oauth_provider` names another provider, or while the service uses [its own account](#a-services-own-account) instead of the one it was allowed for, or the reverse.
@@ -21085,7 +21282,7 @@ When a config service sets the same variable, the config value wins, and the edi
 ### A service's own account
 
 A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Account**: **Another <provider> account**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
-A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
+A GitHub or requester-scoped Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 A row on the tools' account with a connected account offers **Add another <provider> account** under its status, which adds such a service with the row's preset and the next free name (`google_gmail-2`) at once.
 After that link, or **Save and sign in** in the editor, the new row asks what agents may do with the account and then opens the provider's sign-in, where Google always shows its account picker; cancelled, the row keeps its **Connect** button.
 That service's row then connects, allows, and disconnects an account of its own, which shows as "Not used by commands yet" until it is allowed, and the agent's tools and every other service keep the account they use.
@@ -21188,17 +21385,18 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 - The tool lists the services the broker matches for the calling scope that take a credential: the services in `config.yaml`, then the user's own [user services](#user-services).
   `source` says which, `config` or `user`, so the agent can tell the user whether an administrator defined a service or they added it themselves.
   A [`restrict_only` service](#limiting-in-place) is left out, and so is a service whose [`agents` list](#limiting-a-service-to-some-agents) leaves out the calling agent.
-- `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`.
-  The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
-- `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)); it is `null` for a service without an account provider or whose GitHub or Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
+- `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, `github_app`, or `null`.
+  The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and requester-scoped Atlassian connections, their own account, and an agent with no worker scope reads the global store.
+- `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)); it is `null` for a service without an account provider or whose GitHub or requester-scoped Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
   When it is `false`, `provider` names the account to allow, and the note tells the agent that allowing it lets its commands act as the account without the approval prompts the account's tools ask for, and who may allow it.
 - `oauth_access` is `read` or `read_write` for an account Agent Keys may use, and `null` otherwise; under `read`, writes fail with `read_only` until the account is allowed read and write (see [Read-only accounts](#read-only-accounts)).
 - `separate_account: true` marks a service with [its own account](#a-services-own-account), and the note tells the agent to name one of the user's own services with the `X-Agent-Keys-Service` header.
 - `admin_key: true` marks an [administrator key](#administrator-keys), and the note tells the agent to ask an administrator, not the user, when it is not configured.
+- `github_app_repositories` lists the repositories a [GitHub App](#github-app) service covers, each `read` or `read_write`.
 - A service with nothing configured also reports `can_connect_account`.
   When it is `true`, the user can connect an account Agent Keys may use instead of adding a key, and `provider` names the OAuth provider id.
-  It is `false` when the account is not allowed, the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null` unless the account is not allowed.
-  A `true` value says the provider can be connected, not that this user may connect it: for the Google providers on a shared agent, only administrators and credential managers can.
+  It is `false` when the account is not allowed, the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or a requester-scoped Atlassian connection in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null` unless the account is not allowed.
+  A `true` value says the provider can be connected, not that this user may connect it: for the Google providers, or an Atlassian connection with `requester_scoped=False`, on a shared agent, only administrators and credential managers can.
 - `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
 - For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, that only that page can allow an account for Agent Keys, and that an allowed account can still be connected at the `connect_url` in the broker's refusal.
 - The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
@@ -21304,8 +21502,11 @@ The broker returns these errors to worker code:
 | Request that an account allowed read only may not make (see [Read-only accounts](#read-only-accounts)) | 403 JSON `{"error": "read_only", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; allow read and write at `manage_url` |
 | Matched service, no key, and an account provider nobody allowed Agent Keys to use | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "provider": "<id>", "oauth_reuse": "off", "manage_url": "<link>", "message": "..."}` with no `connect_url`; add a key or allow the account at `manage_url` |
 | Matched service whose [own account](#a-services-own-account) is not connected or not allowed | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}` with no `connect_url`, plus `"provider": "<id>"` and `"oauth_reuse": "off"` while nobody allowed it; connect and allow the service's own account at `manage_url` |
-| Matched service whose `agents` list leaves out the calling agent (see [Limiting a service to some agents](#limiting-a-service-to-some-agents)) | 403 JSON `{"error": "agent_not_allowed", "service": "<name>", "message": "..."}`; an administrator changes the list |
+| Matched service whose `agents` list leaves out the calling agent, with no matching service that serves it (see [Limiting a service to some agents](#limiting-a-service-to-some-agents)) | 403 JSON `{"error": "agent_not_allowed", "service": "<name>", "message": "..."}`; an administrator changes the list |
 | Matched [administrator key](#administrator-keys) service whose key is not set | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "message": "..."}` with no `manage_url`; an administrator sets the key on the dashboard |
+| Matched [GitHub App](#github-app) service whose App credential is not stored | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "message": "..."}` with no `manage_url`; an administrator stores the credential |
+| Matched [GitHub App](#github-app) service, request for a repository it does not list | 403 JSON `{"error": "repository_not_allowed", "service": "<name>", "repository": "<owner>/<repository>", "message": "..."}`; an administrator adds the repository |
+| GitHub issued no token for a [GitHub App](#github-app) service | 503 JSON `{"error": "github_app_token_failed", "service": "<name>", "message": "..."}`; retry, and check the primary's log if it persists |
 | Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the user can connect an account that is not shared by everyone using the agent |
 | Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>", "manage_url": "<link>", "message": "..."}`; `connect_url` is `null` for a shared connection, and an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
 | Provider outage, timeout, or network failure while refreshing the account's token | 503 JSON `{"error": "oauth_refresh_failed", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; retry later, do not reconnect |
@@ -21373,7 +21574,7 @@ A 503 `oauth_refresh_failed` instead means the provider failed while the broker 
 **A connected account does not take effect.** Check that the service has an `oauth_provider` (presets set it) and that the id exists in the OAuth registry; an unknown id logs a warning naming the service and leaves the service on API keys only.
 An API key stored for the scope wins over the account, so remove the key to use the account.
 A provider served by a shared service account is never injected; give the service an API key.
-A GitHub or Atlassian account is not used in a [shared sandbox](#personal-accounts-and-shared-sandboxes) unless the service sets `oauth_on_shared_workers`.
+A GitHub or requester-scoped Atlassian account is not used in a [shared sandbox](#personal-accounts-and-shared-sandboxes) unless the service sets `oauth_on_shared_workers`; an Atlassian connection with `requester_scoped=False` follows the worker scope like the Google providers ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
 
 **403 `path_not_allowed` errors.** A service on that host sets `restrict_to_rules` and no rule of that party lists the path.
 The body's `service` names the restricting service, and it can be the user's own limit (such as `github-limited`, a [`restrict_only` service](#limiting-in-place)) as well as an administrator's service: a user's restriction also limits the administrator's services on its hosts, for its own scope.

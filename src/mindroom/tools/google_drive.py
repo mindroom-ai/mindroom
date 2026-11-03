@@ -54,15 +54,15 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow reading Google Drive file contents.",
+            description="Allow reading Google Drive files as text.",
         ),
         ConfigField(
             name="download_file",
             label="Download Files",
             type="boolean",
             required=False,
-            default=False,
-            description="Allow downloading or exporting Google Drive files.",
+            default=True,
+            description="Allow saving Google Drive files, including binary files, into the agent workspace.",
         ),
         ConfigField(
             name="write",
@@ -78,7 +78,7 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=10485760,
-            description="Maximum non-Google-Workspace file size to read in bytes.",
+            description="Maximum non-Google-Workspace file size to read as text in bytes.",
         ),
         ConfigField(
             name="max_download_size",

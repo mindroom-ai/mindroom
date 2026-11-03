@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import urlsplit
 
 import nio
 import pytest
@@ -41,6 +42,7 @@ from mindroom.attachments.storage import (
     resolve_attachments,
     resolve_thread_attachment_ids,
 )
+from mindroom.llm.media import canonical_mime_type, is_text_mime_type
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import bound_log_context
@@ -51,6 +53,23 @@ from tests.providers.golden_support import Wire
 
 if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+
+
+def _file_event(event_id: str, filename: str, info: dict[str, object] | None) -> nio.RoomMessageFile:
+    content: dict[str, object] = {"msgtype": "m.file", "body": filename, "url": f"mxc://localhost/{filename}"}
+    if info is not None:
+        content["info"] = info
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1780736400000,
+            "type": "m.room.message",
+            "content": content,
+        },
+    )
+    assert isinstance(event, nio.RoomMessageFile)
+    return event
 
 
 def test_attachment_id_for_event_is_stable() -> None:
@@ -282,16 +301,7 @@ async def test_register_matrix_media_attachment_stops_reading_an_oversized_downl
     response = FakeMediaResponse(b"x" * (5 * limit))
     client = make_matrix_client_mock()
     client.send = AsyncMock(return_value=response)
-    event = nio.Event.parse_event(
-        {
-            "event_id": "$huge",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1780736400000,
-            "type": "m.room.message",
-            "content": {"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
-        },
-    )
-    assert isinstance(event, nio.RoomMessageFile)
+    event = _file_event("$huge", "huge.bin", None)
 
     record = await register_matrix_media_attachment(
         client,
@@ -483,27 +493,16 @@ async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) 
     """Each event keeps its own record, but events naming one upload share its single copy."""
     client = make_matrix_client_mock()
     client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"%PDF-1.7 shared"))
-    records = []
-    for index in range(3):
-        event = nio.Event.parse_event(
-            {
-                "event_id": f"$copy{index}",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1780736400000,
-                "type": "m.room.message",
-                "content": {"msgtype": "m.file", "body": "report.pdf", "url": "mxc://localhost/shared"},
-            },
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$copy{index}", "report.pdf", None),
         )
-        assert isinstance(event, nio.RoomMessageFile)
-        records.append(
-            await register_matrix_media_attachment(
-                client,
-                tmp_path,
-                room_id="!room:localhost",
-                thread_id=None,
-                event=event,
-            ),
-        )
+        for index in range(3)
+    ]
     assert await attachments_module.wait_for_attachment_cleanup_tasks()
 
     stored = [record for record in records if record is not None]
@@ -899,6 +898,90 @@ async def test_a_text_attachment_whose_mime_type_has_parameters_reaches_claude_a
         {"type": "text", "media_type": "text/plain", "data": "Plain notes."},
     ]
     assert [(item.mime_type, item.local_path.suffix) for item in resolved] == [("text/plain", ".txt")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("info", [None, {"mimetype": ""}, {"mimetype": "application/octet-stream"}])
+async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
+    tmp_path: Path,
+    info: dict[str, object] | None,
+) -> None:
+    """A file whose client declares no type takes its name's type, else plain text for UTF-8 text, else none.
+
+    Its retained copy carries that type's suffix, and a text file reaches Claude as the text document Claude reads.
+    """
+    payloads = {
+        "config.yaml": b"replicas: 3\n",
+        "Dockerfile": b"FROM python:3.13\n",
+        "setup.sh": b"echo hi\n",
+        "report.pdf": b"%PDF-1.7\n",
+        "blob": b"\x00\x01binary",
+        "image": b"\x89\xff\xfebinary",
+        "notes.txt.gz": b"\x1f\x8b\x08\x00binary",
+    }
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            payloads[urlsplit(path).path.rsplit("/", 1)[-1]],
+        ),
+    )
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$file{index}", filename, info),
+        )
+        for index, filename in enumerate(payloads)
+    ]
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    typed = {record.filename: record for record in records if record is not None}
+    # Whether a file name such as ``config.yaml`` names a type, and which suffix ``text/x-sh`` takes, depend on the
+    # host's MIME table.
+    assert is_text_mime_type(typed["config.yaml"].mime_type)
+    assert typed["setup.sh"].mime_type == "text/x-sh"
+    declared = canonical_mime_type((info or {}).get("mimetype"))
+    host_dependent = {"config.yaml", "setup.sh"}
+    assert [
+        (typed[name].mime_type, typed[name].local_path.suffix) for name in payloads if name not in host_dependent
+    ] == [
+        ("text/plain", ".txt"),
+        ("application/pdf", ".pdf"),
+        (declared, ".bin"),
+        (declared, ".bin"),
+        (declared, ".bin"),
+    ]
+    _, _, files, _ = attachment_records_to_media([typed["config.yaml"], typed["Dockerfile"]])
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
+    await claude_turn(
+        route_provider("anthropic", tmp_path, wire),
+        ModelRequest(messages=[Message(role="user", content="Summarize.", files=files)]),
+    )
+    (user,) = wire.body()["messages"]
+    assert [block["source"] for block in user["content"] if block["type"] == "document"] == [
+        {"type": "text", "media_type": "text/plain", "data": "replicas: 3\n"},
+        {"type": "text", "media_type": "text/plain", "data": "FROM python:3.13\n"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_declared_type_stands_over_the_file_name(tmp_path: Path) -> None:
+    """A client's declared type decides a received file's type, even where its name names another."""
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(return_value=FakeMediaResponse(b"a,b\n"))
+
+    record = await register_matrix_media_attachment(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        event=_file_event("$rows", "rows.pdf", {"mimetype": "text/csv"}),
+    )
+
+    assert record is not None
+    assert record.mime_type == "text/csv"
 
 
 def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:

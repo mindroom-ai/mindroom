@@ -3,6 +3,8 @@
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import stripe
+from backend.pricing import get_stripe_price_id
 from fastapi.testclient import TestClient
 
 
@@ -269,7 +271,7 @@ class TestStripeRoutesEndpoints:
             data={"stripe_customer_id": "cus_test_123"}
         )
         mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
-            Mock(id="sub_existing", status=status, trial_start=None)
+            _subscription("sub_existing", status, "price_test_123")
         ]
         mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
         mock_stripe.checkout.Session.create.return_value = Mock(url="https://checkout.stripe.com/pay/cs_test_123")
@@ -284,6 +286,166 @@ class TestStripeRoutesEndpoints:
         else:
             mock_stripe.billing_portal.Session.create.assert_not_called()
             assert response.json()["url"] == "https://checkout.stripe.com/pay/cs_test_123"
+
+    @pytest.mark.parametrize("status", ["trialing", "active"])
+    @pytest.mark.parametrize("configuration_exists", [True, False])
+    def test_checkout_opens_the_upgrade_confirmation_for_a_subscriber(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        configuration_exists: bool,
+        status: str,
+    ):
+        """A subscriber choosing a larger plan confirms the switch in a portal configuration offering only that plan."""
+        hobby, pro, pro_yearly = (
+            get_stripe_price_id("hobby", "monthly"),
+            get_stripe_price_id("pro", "monthly"),
+            get_stripe_price_id("pro", "yearly"),
+        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"stripe_customer_id": "cus_test_123"}
+        )
+        mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
+            _subscription("sub_existing", status, hobby)
+        ]
+        other = Mock(id="bpc_other", metadata={"mindroom_upgrade_prices": "price_a,price_b"})
+        existing = Mock(id="bpc_pro", metadata={"mindroom_upgrade_prices": f"{pro},{pro_yearly}"})
+        mock_stripe.billing_portal.Configuration.list.return_value.auto_paging_iter.return_value = (
+            [other, existing] if configuration_exists else [other]
+        )
+        mock_stripe.billing_portal.Configuration.modify.return_value = Mock(id="bpc_pro")
+        mock_stripe.billing_portal.Configuration.create.return_value = Mock(id="bpc_pro")
+        mock_stripe.Price.retrieve.return_value = Mock(product="prod_subscription")
+        mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
+
+        response = client.post("/stripe/checkout", json={"tier": "pro", "billing_cycle": "monthly"})
+
+        assert response.json() == {"url": "https://billing.stripe.com/session/x"}
+        mock_stripe.checkout.Session.create.assert_not_called()
+        session = mock_stripe.billing_portal.Session.create.call_args.kwargs
+        assert session["configuration"] == "bpc_pro"
+        assert session["flow_data"]["type"] == "subscription_update_confirm"
+        assert session["flow_data"]["subscription_update_confirm"] == {
+            "subscription": "sub_existing",
+            "items": [{"id": "si_existing", "price": pro, "quantity": 1}],
+        }
+        assert session["flow_data"]["after_completion"] == {
+            "type": "redirect",
+            "redirect": {"return_url": "https://app.mindroom.chat/dashboard/billing"},
+        }
+        if configuration_exists:
+            mock_stripe.billing_portal.Configuration.create.assert_not_called()
+            assert mock_stripe.billing_portal.Configuration.modify.call_args.args == ("bpc_pro",)
+            params = mock_stripe.billing_portal.Configuration.modify.call_args.kwargs
+        else:
+            mock_stripe.billing_portal.Configuration.modify.assert_not_called()
+            params = mock_stripe.billing_portal.Configuration.create.call_args.kwargs
+            assert params["metadata"] == {"mindroom_upgrade_prices": f"{pro},{pro_yearly}"}
+        assert params["features"]["subscription_update"] == {
+            "enabled": True,
+            "default_allowed_updates": ["price"],
+            "products": [{"product": "prod_subscription", "prices": [pro, pro_yearly]}],
+            "billing_cycle_anchor": "now",
+            "proration_behavior": "always_invoice",
+            "trial_update_behavior": "end_trial",
+        }
+
+    @pytest.mark.parametrize(
+        ("price_id", "metadata_tier", "tier", "opens_confirmation"),
+        [
+            ("price_retired_hobby", "hobby", "pro", True),
+            ("price_retired_pro", "pro", "hobby", False),
+            ("price_retired_unknown", None, "pro", False),
+            # A configured price ID decides the plan even when its metadata says otherwise.
+            (get_stripe_price_id("pro", "monthly"), "hobby", "pro", False),
+        ],
+    )
+    def test_checkout_finds_the_plan_of_a_price_no_longer_in_the_pricing_config(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        price_id: str,
+        metadata_tier: str | None,
+        tier: str,
+        opens_confirmation: bool,
+    ):
+        """A subscriber kept on an old price upgrades like any other, judged by the plan its metadata names."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"stripe_customer_id": "cus_test_123"}
+        )
+        metadata = {"tier": metadata_tier, "billing_cycle": "monthly"} if metadata_tier else {}
+        mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
+            _subscription("sub_existing", "active", price_id, metadata)
+        ]
+        mock_stripe.billing_portal.Configuration.list.return_value.auto_paging_iter.return_value = []
+        mock_stripe.billing_portal.Configuration.create.return_value = Mock(id="bpc_new")
+        mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
+
+        response = client.post("/stripe/checkout", json={"tier": tier, "billing_cycle": "monthly"})
+
+        assert response.status_code == 200
+        session = mock_stripe.billing_portal.Session.create.call_args.kwargs
+        assert ("flow_data" in session) is opens_confirmation
+
+    @pytest.mark.parametrize(
+        ("status", "cancel", "current_tier", "tier", "billing_cycle"),
+        [
+            ("past_due", {}, "hobby", "pro", "monthly"),
+            ("active", {"cancel_at": 1_800_000_000}, "hobby", "pro", "monthly"),
+            ("active", {"cancel_at_period_end": True}, "hobby", "pro", "monthly"),
+            ("active", {"schedule": "sub_sched_1"}, "hobby", "pro", "monthly"),
+            ("active", {"collection_method": "send_invoice"}, "hobby", "pro", "monthly"),
+            (
+                "active",
+                {
+                    "items": {
+                        "data": [
+                            {"id": "si_1", "price": {"id": get_stripe_price_id("hobby", "monthly")}},
+                            {"id": "si_2", "price": {"id": "price_add_on"}},
+                        ]
+                    }
+                },
+                "hobby",
+                "pro",
+                "monthly",
+            ),
+            ("active", {}, "pro", "hobby", "monthly"),
+            ("trialing", {}, "hobby", "byok", "monthly"),
+            ("active", {}, "hobby", "hobby", "yearly"),
+        ],
+    )
+    def test_checkout_opens_the_portal_home_when_the_subscription_cannot_be_upgraded(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        status: str,
+        cancel: dict,
+        current_tier: str,
+        tier: str,
+        billing_cycle: str,
+    ):
+        """An unpaid or cancelling subscription is settled first, and a downgrade would credit a spent AI budget."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"stripe_customer_id": "cus_test_123"}
+        )
+        mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
+            _subscription("sub_existing", status, get_stripe_price_id(current_tier, "monthly"), **cancel)
+        ]
+        mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
+
+        response = client.post("/stripe/checkout", json={"tier": tier, "billing_cycle": billing_cycle})
+
+        assert response.json() == {"url": "https://billing.stripe.com/session/x"}
+        session = mock_stripe.billing_portal.Session.create.call_args.kwargs
+        assert "flow_data" not in session
+        assert "configuration" not in session
+        mock_stripe.billing_portal.Configuration.list.assert_not_called()
 
     def test_checkout_stripe_error(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
@@ -326,3 +488,23 @@ class TestStripeRoutesEndpoints:
         """Test accessing endpoints without authentication."""
         response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
         assert response.status_code == 401
+
+
+def _subscription(
+    subscription_id: str, status: str, price_id: str | None, price_metadata: dict | None = None, **fields: object
+) -> stripe.Subscription:
+    """Build a Stripe subscription with one item, read by attribute and by key like the real object."""
+    return stripe.Subscription.construct_from(
+        {
+            "id": subscription_id,
+            "status": status,
+            "trial_start": None,
+            "cancel_at": None,
+            "cancel_at_period_end": False,
+            "schedule": None,
+            "collection_method": "charge_automatically",
+            "items": {"data": [{"id": "si_existing", "price": {"id": price_id, "metadata": price_metadata or {}}}]},
+            **fields,
+        },
+        "sk_test_mock",
+    )

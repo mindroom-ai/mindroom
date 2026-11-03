@@ -1,3 +1,9 @@
+/** Services that one sign-in connects together, such as an agent's Google services. */
+export interface ConnectionConsentGroup {
+  key: string;
+  display_name: string;
+}
+
 export interface ConnectionService {
   provider: string;
   is_shared: boolean;
@@ -12,6 +18,8 @@ export interface ConnectionService {
   description: string;
   icon: string | null;
   tools: string[];
+  /** The group whose unconnected services one sign-in connects together, `null` for a service in none. */
+  consent_group: ConnectionConsentGroup | null;
 }
 
 export interface AgentConnections {
@@ -158,6 +166,12 @@ export interface EgressCredentialService {
   /** The agents the service serves, `null` for every agent. Sent on the dashboard only. */
   agents?: string[] | null;
   /**
+   * The repositories, as `owner/repository`, that the service's GitHub App
+   * covers, each with its access; `null` for any other service. Such a
+   * service takes no key and no account.
+   */
+  github_app_repositories: Record<string, EgressAccess> | null;
+  /**
    * The names of the variables the service sets in the sandbox, a preset's
    * included, so a service of one's own that sets the same one can be warned
    * about those of an administrator's. Sent for every service in the personal
@@ -168,10 +182,10 @@ export interface EgressCredentialService {
   /** Set by the dashboard for the global key that every agent without a worker scope shares. */
   is_global?: boolean;
   can_manage: boolean;
-  /** True when either an API key or a connected account is available. */
+  /** True when an API key, a connected account, or a stored GitHub App credential is available. */
   configured: boolean;
   /** Which source the broker uses; an explicit key wins over a connected account. */
-  active_source: "key" | "oauth" | null;
+  active_source: "key" | "oauth" | "github_app" | null;
   key_configured: boolean;
   key_updated_at: string | null;
   oauth: EgressOAuthStatus | null;
@@ -251,6 +265,11 @@ export interface AuthoredEgressService {
   admin_key?: boolean;
   /** Operator-only: the agents whose requests get the service's credential; absent for every agent. */
   agents?: string[];
+  /** Operator-only: the GitHub App whose tokens, limited to these repositories, are the service's credential. */
+  github_app?: {
+    credentials_service: string;
+    repositories: Record<string, EgressAccess>;
+  };
 }
 
 /** A built-in service preset as the server expands it. */

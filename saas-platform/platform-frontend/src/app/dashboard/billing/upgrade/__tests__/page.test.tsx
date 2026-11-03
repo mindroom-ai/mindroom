@@ -81,7 +81,7 @@ describe('UpgradePage', () => {
     render(<UpgradePage />)
 
     expect(await screen.findByRole('heading', { name: 'Upgrade Your Plan' })).toBeInTheDocument()
-    expect(screen.getByText('Currently on hobby plan. Upgrading will prorate your billing.')).toBeInTheDocument()
+    expect(screen.getByText('Currently on hobby plan. Upgrading starts the new plan today and credits the unused time of your current one.')).toBeInTheDocument()
     expect(screen.queryByText(/Selected:/)).not.toBeInTheDocument()
   })
 

@@ -2,7 +2,7 @@
 
 An agent turn, an approval resume, a delegated child's resume, a team member's run or resume, and a team leader's
 turn or resume install the hooks ``_loop_hooks`` composes once: the wait budget of managed tool-job calls, the
-participation gate, mid-turn compaction, the approval receipt, the output-limit answer, portable tool search, the
+participation gate, the approval receipt, mid-turn compaction, the output-limit answer, portable tool search, the
 tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn. Every run has the approval receipt hook; the hook adds
@@ -56,8 +56,7 @@ class HookTurn:
     history under, so a fold lands in the scope when they replay some; a run without a scope or a plan compacts within
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
     ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
-    member lack; ``prepared_history_tokens`` is the size of the stored history the run replays, as the turn's
-    preparation found it, from the provider's reported request size when ``prepared_history_reported``.
+    member lack.
     """
 
     config: Config
@@ -68,8 +67,6 @@ class HookTurn:
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None = None
     turn_recorder: TurnRecorder | None = None
-    prepared_history_tokens: int | None = None
-    prepared_history_reported: bool = False
 
 
 def agent_loop_hooks(
@@ -148,17 +145,18 @@ def _loop_hooks(
     The request cap is the loop's own and refuses a request before any hook runs; the wait budget of
     ``job_definitions``' managed calls joins their definitions first, so the participation decision and the
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
-    stays silent never compacts or requests; mid-turn compaction rewrites the live messages, and folds into the
-    scope only when the run replays it; the bound approval receipt then joins the messages of a run that reads it,
-    before its first request as a reader. Queued-message notices follow every tool batch and a resume's entry when
-    ``queued_notices`` is on; the run hears of the ended jobs of ``job_notices_for`` after each batch;
-    ``skill_review_capture`` records the run's final request.
+    stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
+    it, before its first request as a reader; mid-turn compaction last sizes the request that is sent, rewrites the
+    live messages, keeping the receipt, and folds into the scope only when the run replays it. Queued-message notices
+    follow every tool batch and a resume's entry when ``queued_notices`` is on; the run hears of the ended jobs of
+    ``job_notices_for`` after each batch; ``skill_review_capture`` records the run's final request.
     """
     before_request: list[BeforeRequestHook] = []
     if job_definitions is not None:
         before_request.append(job_definitions_hook(job_definitions))
     if participation is not None:
         before_request.append(participation_hook(participation, model))
+    before_request.append(approval_receipt_hook)
     before_request.append(
         mid_turn_compaction_hook(
             config=turn.config,
@@ -172,11 +170,8 @@ def _loop_hooks(
             prompt_id=turn.prompt_id,
             lifecycle=turn.lifecycle,
             turn_recorder=turn.turn_recorder,
-            prepared_history_tokens=turn.prepared_history_tokens,
-            prepared_history_reported=turn.prepared_history_reported,
         ),
     )
-    before_request.append(approval_receipt_hook)
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),

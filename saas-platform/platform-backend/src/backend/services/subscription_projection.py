@@ -21,7 +21,7 @@ def maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
     return timestamp_to_iso(timestamp) if timestamp is not None else None
 
 
-def _plan_from_price(price: dict) -> tuple[str, BillingCycle]:
+def plan_from_price(price: dict) -> tuple[str, BillingCycle]:
     """Return the canonical tier and billing cycle of a Stripe price, from the pricing config or its metadata."""
     if match := get_stripe_price_match(price.get("id")):
         return match.tier, match.billing_cycle
@@ -61,7 +61,7 @@ def subscription_fields(sb: Any, subscription: dict) -> _SubscriptionFields:
     """Project the fields shared by subscription creation and update events."""
     item = subscription["items"]["data"][0] if subscription.get("items", {}).get("data") else {}
     price_data = item["price"] if item else {}
-    tier, billing_cycle = _plan_from_price(price_data)
+    tier, billing_cycle = plan_from_price(price_data)
 
     subscription_data: _SubscriptionFields = {
         "stripe_subscription_id": subscription["id"],

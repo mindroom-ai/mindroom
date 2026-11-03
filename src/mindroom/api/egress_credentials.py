@@ -28,6 +28,7 @@ from mindroom.api.egress_status import (
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
+    GitHubAppRepositories,
     OAuthReuseRequest,
     PresetsResponse,
     PutSecretRequest,
@@ -36,6 +37,7 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    github_app_repositories,
     key_refusal,
     load_concurrently,
     oauth_provider_of_service,
@@ -247,7 +249,8 @@ class EgressCredentialService(EgressSourceStatus):
     the paths of the other services on its hosts and never has a key or account of its own. `read_only_supported` says
     whether its account can be allowed read-only, and `separate_account` that the account is the service's own, not the
     one the agent's tools use. `admin_key` marks a service whose one key only an administrator sets, on the dashboard,
-    so its `can_manage` is false.
+    so its `can_manage` is false. `github_app_repositories` maps each repository a `github_app` service's App covers to
+    its access (null for any other service); such a service takes no key.
     """
 
     name: str
@@ -262,6 +265,7 @@ class EgressCredentialService(EgressSourceStatus):
     read_only_supported: bool
     separate_account: bool
     admin_key: bool
+    github_app_repositories: GitHubAppRepositories | None
 
 
 class EgressCredentialAgent(BaseModel):
@@ -356,6 +360,7 @@ async def egress_services_for_agent(
             read_only_supported=service.read_only is not None,
             separate_account=service.oauth_separate_account,
             admin_key=service.admin_key,
+            github_app_repositories=github_app_repositories(service),
             **asdict(sources),
         )
 
@@ -565,7 +570,7 @@ def put_user_service(
     409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
     an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider,
     one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, a service's own account of a
-    requester-scoped provider (GitHub, Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
+    requester-scoped provider (GitHub, built-in Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
     """
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)

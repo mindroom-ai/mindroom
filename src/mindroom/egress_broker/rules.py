@@ -289,24 +289,28 @@ def match_rule(
     path: str,
     *,
     preferred: Collection[str] = (),
+    agent_name: str | None = None,
 ) -> RuleMatch | None:
-    """Find the best matching rule for the given request.
+    """Find the best matching rule for the given request of the routing agent `agent_name`.
 
     Paths match by segment (see `path_matches`). This does not refuse ambiguous paths;
     request handling goes through `route_request`, which does.
 
     Matching priority:
-    1. Exact host beats wildcard
-    2. Port-specific rule beats no-port rule (different port never matches)
-    3. Longest path_prefix wins
-    4. A `preferred` service beats the others (`route_request` prefers the operator's services)
-    5. The service whose name sorts first, then the service's first rule
+    1. A service that serves `agent_name` (`EgressService.serves_agent`) beats one that does not
+    2. Exact host beats wildcard
+    3. Port-specific rule beats no-port rule (different port never matches)
+    4. Longest path_prefix wins
+    5. A `preferred` service beats the others (`route_request` prefers the operator's services)
+    6. The service whose name sorts first, then the service's first rule
 
-    So the order services are written in never decides a match. Rules of `restrict_only` services never match here:
-    they only limit paths and have no credential.
+    So the order services are written in never decides a match, and services limited to different agents can share
+    hosts and paths. A request still matches a service that does not serve its agent when none that does matches,
+    and the secret lookup then refuses it. Rules of `restrict_only` services never match here: they only limit paths
+    and have no credential.
     """
     credential_services = {name: service for name, service in config.services.items() if not service.restrict_only}
-    return _best_match(credential_services, host.lower(), port, path, preferred=preferred)
+    return _best_match(credential_services, host.lower(), port, path, preferred=preferred, agent_name=agent_name)
 
 
 def _best_match(
@@ -316,8 +320,9 @@ def _best_match(
     path: str,
     *,
     preferred: Collection[str] = (),
+    agent_name: str | None = None,
 ) -> RuleMatch | None:
-    """Return the most specific rule of `services` for a lowercase host, in `match_rule`'s priority order."""
+    """Return the best rule of `services` for a lowercase host and `agent_name`, in `match_rule`'s priority order."""
     candidates = [
         (service_name, rule)
         for service_name, service in services.items()
@@ -327,10 +332,11 @@ def _best_match(
     if not candidates:
         return None
 
-    def rank(candidate: tuple[str, EgressRule]) -> tuple[int, int, int, bool, str]:
+    def rank(candidate: tuple[str, EgressRule]) -> tuple[bool, int, int, int, bool, str]:
         service_name, rule = candidate
         host_priority, port_priority, path_priority = _rule_priority(rule, port)
-        return (-host_priority, -port_priority, -path_priority, service_name not in preferred, service_name)
+        serves = services[service_name].serves_agent(agent_name)
+        return (not serves, -host_priority, -port_priority, -path_priority, service_name not in preferred, service_name)
 
     # `min` keeps the first of equal candidates, so one service's rules keep their order.
     service_name, rule = min(candidates, key=rank)
@@ -385,8 +391,9 @@ def route_request(  # noqa: PLR0911 - one return per row of the table
     path: str,
     *,
     requested: str | None = None,
+    agent_name: str | None = None,
 ) -> Route:
-    """Decide how to handle a request for `path` (origin-form, query removed) on `host`:`port`.
+    """Decide how to handle a request of the routing agent `agent_name` for `path` (origin-form, query removed).
 
     The first row whose condition holds decides:
 
@@ -412,9 +419,10 @@ def route_request(  # noqa: PLR0911 - one return per row of the table
     does not have matches nothing. So a request picks a user service that ties with an operator service on purpose
     only, and never changes which operator credential the most specific operator rule picks.
     Without a name, row 6 chooses the credential: the most specific applicable rule, operator's or user's, outside `restrict_only`
-    services; an operator rule wins a tie with a user rule. So a user's limit in place keeps the operator's service,
-    with the user's connection or key, for the paths it allows. With no matching rule the request goes out without
-    credentials; `unmatched_hosts` does not apply, since the host has rules.
+    services, of a service that serves `agent_name` if one matches (`match_rule`); an operator rule wins a tie with a
+    user rule. So a user's limit in place keeps the operator's service, with the user's connection or key, for the
+    paths it allows. With no matching rule the request goes out without credentials; `unmatched_hosts` does not apply,
+    since the host has rules.
     """
     host = host.lower()
     if not rules.intercepts(host, port):
@@ -431,7 +439,8 @@ def route_request(  # noqa: PLR0911 - one return per row of the table
     if user_refusal is not None:
         return user_refusal
     if requested is None:
-        return Route(host_has_rules=True, match=match_rule(rules.effective, host, port, path, preferred=operator))
+        match = match_rule(rules.effective, host, port, path, preferred=operator, agent_name=agent_name)
+        return Route(host_has_rules=True, match=match)
     named = user.get(requested)
     match = None if named is None or named.restrict_only else _best_match({requested: named}, host, port, path)
     if match is None:

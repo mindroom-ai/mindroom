@@ -26,9 +26,8 @@ from typing import TYPE_CHECKING, Any, override
 
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
-from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.storage import has_queued_force_compaction
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, is_queued_notice_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import TOKEN_FIELDS, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.legacy_scope_metadata import (

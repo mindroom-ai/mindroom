@@ -23,9 +23,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
-from mindroom.execution_preparation import _PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext, render_prepared_messages_text
 from mindroom.history.conversation_text import utterances
-from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import ScopeSessionContext, load_scope_session
 from mindroom.history.storage import (
@@ -37,11 +36,14 @@ from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
+from mindroom.llm.media import File
 from mindroom.llm.messages import Message, stable_serialize, system_text
+from mindroom.llm.runs import RunStatus
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import (
@@ -52,13 +54,14 @@ from tests.conftest import (
     seed_session,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.fakes.token_counter import fake_token_counter, quarter_tokens
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     _completed_run,
     _make_config,
     _runtime_paths,
     _session,
+    blank_pdf,
     seed_summary,
     stored_turn,
 )
@@ -67,7 +70,8 @@ from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
@@ -228,15 +232,15 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
 
     assert prepare.await_args is not None
     build = prepared.build
-    estimator = build_static_token_estimator(
-        build.spec.model.token_counter,
-        prepared.spec.system_messages,
-        PreparedTools(functions=build.spec.functions).specs(),
-        build.request_template.deferred_tools.names,
-    )
-    assert prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens == estimator.estimate(
-        "Current prompt",
-    )
+    kwargs = prepare.await_args.kwargs
+    assert kwargs["sizer"].model is build.spec.model
+    # The provisional first request holds the agent's system prompt, its tools, and the prompt; persisted replay stands
+    # in for the thread history.
+    frame = kwargs["frame"]
+    assert frame.system_messages == tuple(prepared.spec.system_messages)
+    assert "Verbose role" in system_text(frame.system_messages)
+    assert frame.template.tools == tuple(PreparedTools(functions=build.spec.functions).specs())
+    assert render_prepared_messages_text(frame.turn.in_request_order()) == "Current prompt"
 
 
 @pytest.mark.asyncio
@@ -268,8 +272,8 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
 
     assert provider.model_names == ["large"]
     assert prepare.await_args is not None
-    assert prepare.await_args.kwargs["resolved_inputs"].active_model_name == "large"
-    assert prepare.await_args.kwargs["resolved_inputs"].active_context_window == 48_000
+    plan = prepare.await_args.kwargs["resolved_inputs"].execution_plan
+    assert (plan.compaction_model_name, plan.replay_window_tokens) == ("large", 48_000)
 
 
 @pytest.mark.asyncio
@@ -308,8 +312,13 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
     assert provider.model_names == ["call_fast"]
     assert prepare.await_args is not None
     resolved_inputs = prepare.await_args.kwargs["resolved_inputs"]
-    assert resolved_inputs.active_model_name == "call_fast"
-    assert resolved_inputs.active_context_window == 16_000
+    assert (
+        resolved_inputs.execution_plan.compaction_model_name,
+        resolved_inputs.execution_plan.replay_window_tokens,
+    ) == (
+        "call_fast",
+        16_000,
+    )
 
 
 @pytest.mark.asyncio
@@ -350,18 +359,9 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     assert prepared_run.prompt_text == "\n\n".join(expected)
 
 
-class _TextOnlyEstimator:
-    """A static estimate of the prompt text alone, so the thread fallback must fit the window by itself."""
-
-    counter = fake_token_counter()
-    non_prompt_tokens = 0
-    fingerprint = "static"
-
-    def __init__(self, *_args: object) -> None:
-        pass
-
-    def estimate(self, full_prompt: str) -> int:
-        return quarter_tokens(full_prompt)
+def _turn_text_tokens(_model: object, _frame: object, turn: TurnMessages) -> int:
+    """Size a turn by its text alone, so the thread fallback must fit the window by itself."""
+    return quarter_tokens(render_prepared_messages_text(turn.in_request_order()))
 
 
 @pytest.mark.asyncio
@@ -379,7 +379,7 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
 
     with (
         _no_memory(),
-        patch("mindroom.execution_preparation.build_static_token_estimator", _TextOnlyEstimator),
+        patch("mindroom.execution_preparation._turn_tokens", _turn_text_tokens),
         _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
         prepared_run = await prepare_agent_and_prompt_for_test(
@@ -593,6 +593,258 @@ async def test_a_reply_replays_recent_stored_history_without_persisting_the_repl
     latest_run = persisted.runs[-1]
     assert _contents(latest_run.messages) == ["Current prompt", "ok"]
     assert all(message.from_history is False for message in latest_run.messages)
+
+
+# A file that counts the attachment allowance, 5,000 tokens.
+_ARCHIVE = File(content=b"\x89\xff binary", filename="archive.bin")
+
+
+def _uncompacted_config(tmp_path: Path, context_window: int) -> tuple[Config, RuntimePaths]:
+    """Return the test config with automatic compaction off, a 500-token reserve, and ``context_window``."""
+    return _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=context_window,
+    )
+
+
+def _notes(count: int, length: int) -> list[ResolvedVisibleMessage]:
+    """Return ``count`` thread messages ``note-<n>``, each about ``length`` characters long."""
+    return [
+        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * length, event_id=f"$note-{index}")
+        for index in range(count)
+    ]
+
+
+async def _reply_with(
+    attachment: File,
+    provider: _Provider,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    prompt: str,
+    session_id: str = "session-1",
+    thread: Sequence[ResolvedVisibleMessage] | None = None,
+) -> tuple[str, ModelRequest]:
+    """Run one reply to ``prompt`` carrying ``attachment``; return its text and the one request it sent, which carries it.
+
+    With ``thread``, the prompt is the thread's current message ``$current``, after ``thread``.
+    """
+    current = make_visible_message(sender="@alice:localhost", body=prompt, event_id="$current")
+    with _no_memory():
+        response = await ai_response(
+            replace(
+                make_turn_context(
+                    "test_agent",
+                    session_id=session_id,
+                    reply_to_event_id="$current" if thread is not None else None,
+                ),
+                prompt=prompt,
+                thread_history=[*thread, current] if thread is not None else None,
+                media=MediaInputs(files=(attachment,)),
+            ),
+            runtime_paths,
+            config,
+        )
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (attachment,)
+    return response.text, request
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Without compaction, the history a reply replays leaves room for the attachments its prompt sends."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    question = "q" * 3_000
+    seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[
+                _completed_run(
+                    f"run-{index}",
+                    messages=[
+                        Message(role="user", content=f"run-{index} {question}"),
+                        Message(role="assistant", content=f"run-{index} answer"),
+                    ],
+                )
+                for index in range(8)
+            ],
+        ),
+    )
+    report = File(content=b"%PDF-1.7 report", mime_type="application/pdf", filename="report.pdf")
+
+    _, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the report.")
+
+    replayed = [str(message.content).split()[0] for message in _after_prompt(request.messages)[:-1]]
+    assert "run-7" in replayed
+    assert "run-0" not in replayed
+    assert provider.model.request_tokens(request) <= 12_000 - 500
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("errored_run", [False, True])
+async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attachments(
+    tmp_path: Path,
+    provider: _Provider,
+    *,
+    errored_run: bool,
+) -> None:
+    """A reply with no history to replay replays the thread instead, as much of it as leaves room for the attachments.
+
+    A scope whose only stored run errored has a session but nothing to replay either.
+    """
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    if errored_run:
+        storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+        failed = replace(_completed_run("run-0"), status=RunStatus.error)
+        seed_session(storage, _session("fresh", runs=[failed]))
+
+    _, request = await _reply_with(
+        _ARCHIVE,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the archive.",
+        session_id="fresh",
+        thread=_notes(10, 3_000),
+    )
+
+    sent = render_prepared_messages_text(request.messages)
+    assert "note-9" in sent
+    assert "note-0" not in sent
+    assert provider.model.request_tokens(request) <= 12_000 - 500
+
+
+@pytest.mark.asyncio
+async def test_a_first_reply_whose_attachment_cannot_fit_keeps_its_thread(tmp_path: Path, provider: _Provider) -> None:
+    """An attachment estimated past the limit on its own leaves the thread fallback as it was without it."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    # Three pages count 15,000 tokens, over the 11,500-token limit.
+    report = File(content=blank_pdf(3), mime_type="application/pdf", filename="report.pdf")
+
+    _, request = await _reply_with(
+        report,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the report.",
+        session_id="fresh",
+        thread=_notes(5, 400),
+    )
+
+    sent = render_prepared_messages_text(request.messages)
+    assert all(f"note-{index}" in sent for index in range(5))
+
+
+@pytest.mark.asyncio
+async def test_attachments_that_fit_only_without_the_unseen_thread_fail_no_reply(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """The thread messages a stored scope has not seen are part of the turn, which no replay trim shortens."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 14_500)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    seed_session(storage, session)
+    seed_summary(storage, session, _SCOPE, "stored summary")
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+
+    # About 5,000 tokens of thread the scope has not seen, which with the report's 10,000 exceed the 14,000-token limit
+    # that the report and the rest of the turn fit.
+    text, request = await _reply_with(
+        report,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the report.",
+        thread=_notes(5, 4_000),
+    )
+
+    assert text == "ok"
+    assert all(f"note-{index}" in render_prepared_messages_text(request.messages) for index in range(5))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
+async def test_without_a_context_window_the_prepared_size_holds_the_attachments(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
+
+    with _no_memory():
+        sizes = [
+            (
+                await prepare_agent_and_prompt_for_test(
+                    make_turn_context("test_agent", session_id="session-1"),
+                    prompt="Read this.",
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    scope_context=_scope_context(config, runtime_paths),
+                    media=MediaInputs(files=files),
+                )
+            ).prepared_history.prepared_context_tokens
+            for files in ((_ARCHIVE,), ())
+        ]
+
+    assert sizes[0] - sizes[1] == MEDIA_ALLOWANCE_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_a_reply_compacts_before_its_first_request_to_make_room_for_its_attachment(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """History under the trigger on its own but over it beside the attachment compacts before the reply is sent."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(reserve_tokens=500),
+        context_window=12_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    # Six runs of about 750 tokens each, under the 9,600-token trigger alone and over it beside a 5,000-token file.
+    runs = [
+        _completed_run(
+            f"run-{index}",
+            messages=[
+                Message(role="user", content=f"run-{index} " + "q" * 3_000),
+                Message(role="assistant", content=f"run-{index} answer"),
+            ],
+        )
+        for index in range(6)
+    ]
+    seed_session(storage, _session("session-1", runs=runs))
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
+        _, request = await _reply_with(_ARCHIVE, provider, config, runtime_paths, prompt="Read the archive.")
+
+    assert any("merged summary" in str(message.content) for message in request.messages)
+
+
+@pytest.mark.asyncio
+async def test_attachments_estimated_past_the_limit_leave_the_summarized_history_to_the_provider(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Attachments that fit the limit only without the summary fail no reply: it replays as without them."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    seed_session(storage, session)
+    # About 5,000 tokens, which the limit holds beside the turn but not beside the turn and the report's 10,000 too.
+    seed_summary(storage, session, _SCOPE, "stored summary " * 1_300)
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+
+    text, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the report.")
+
+    assert text == "ok"
+    history = _after_prompt(request.messages)
+    assert is_compaction_summary(history[0])
+    assert [message.content for message in history[1:3]] == ["run-1 question", "run-1 answer"]
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@
 The cache breakpoints come from the ladder primitives in ``providers/cache_ladder.py``, which the OpenRouter
 Claude ladder shares. The repairs run on every request, cached or not, because they depend on the request itself:
 the tools it offers, its tool-result order, and the inline media it carries. ``claude_loaded_tool_names`` reads
-which deferred tools earlier tool searches loaded, which the mid-turn history budget counts as sent.
+which deferred tools earlier tool searches loaded, whose definitions the route's request sizing counts as sent.
 """
 
 from __future__ import annotations

@@ -25,14 +25,9 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
-from mindroom.history.prompt_tokens import build_static_token_estimator
-from mindroom.history.replay import (
-    configured_replay_plan,
-    estimate_request_messages_tokens,
-    estimate_summary_text_tokens,
-)
+from mindroom.history.replay import configured_replay_plan, estimate_summary_text_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
+from mindroom.history.request_size import RequestSize, RequestSizer
 from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
 from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
@@ -53,24 +48,24 @@ from mindroom.hooks import (
 )
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File, Image
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
     NativeCompactionReplay,
     TokenCounter,
-    ToolSpec,
 )
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.model_usage import message_context_tokens
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import persist_to, watch_session_row
-from mindroom.token_counting.counts import utf8_byte_bound
+from mindroom.token_counting.counts import count, utf8_byte_bound
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
@@ -79,10 +74,9 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.usage.storage import run_usage_snapshot
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.fakes.scripted_model import estimate_only_model
 from tests.fakes.summary_model import summary_model
-from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import (
-    BIG_TOOL,
     TEST_AGENT_SCOPE,
     TOOL_RESULT,
     RecordingCompactionLifecycle,
@@ -102,7 +96,6 @@ from tests.history_helpers import (
     seeded_storage,
     summary_rows_of,
 )
-from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -183,8 +176,6 @@ class _Agent:
     before_request: tuple[BeforeRequestHook, ...] = ()
     system_messages: tuple[Message, ...] = ()
     records: list[RunRecord] = field(default_factory=list)
-    # The history size the reply's preparation found, from the provider's reported size where one applied.
-    prepared_history_tokens: int | None = None
 
     def spec(self) -> AgentSpec:
         return AgentSpec(
@@ -257,7 +248,6 @@ async def _run(
         prompt_id=turn.prompt.id,
         lifecycle=agent.lifecycle,
         turn_recorder=agent.turn_recorder,
-        prepared_history_tokens=agent.prepared_history_tokens,
     )
     store_persist = persist_to(store, session) if store is not None else None
 
@@ -470,23 +460,47 @@ async def test_request_sizing_uses_the_latest_response_usage(tmp_path: Path, sum
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("input_tokens", [0, 10])
-async def test_request_sizing_counts_the_turns_thinking(
+@pytest.mark.parametrize(
+    ("reasoning", "output_tokens"),
+    [("t" * 100_000, 0), (None, 30_000)],
+    ids=["shown-reasoning", "hidden-thinking"],
+)
+async def test_request_sizing_leaves_out_reasoning_the_route_never_resends(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    input_tokens: int,
+    reasoning: str | None,
+    output_tokens: int,
 ) -> None:
+    """A route that sends no reasoning back sizes none, however much the turn thought."""
     config, paths = _config(tmp_path, context_window=20_000)
     model = ToolLoopModel(
         tool_rounds=2,
-        usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens)),
-        reasoning="t" * 100_000,
+        usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=output_tokens)),
+        reasoning=reasoning,
     )
 
     await _run(_Agent(model, config, paths), "Do the task")
 
-    assert summary_calls.inputs
-    assert any(is_compaction_summary(message) for message in model.requests[1].messages)
+    assert summary_calls.inputs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("over", "compacts"), [(0, False), (1, True)], ids=["at-the-limit", "over-the-limit"])
+async def test_a_request_compacts_only_once_its_size_exceeds_the_limit(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    monkeypatch: pytest.MonkeyPatch,
+    over: int,
+    compacts: bool,
+) -> None:
+    config, paths = _config(tmp_path)
+    # The model's window minus the reserve.
+    limit = 3_500
+    monkeypatch.setattr(RequestSizer, "size", lambda _self, _request: RequestSize(limit + over, reported=True))
+
+    await _run(_Agent(ToolLoopModel(tool_rounds=2), config, paths), "Do the task")
+
+    assert bool(summary_calls.inputs) is compacts
 
 
 @pytest.mark.asyncio
@@ -498,160 +512,18 @@ async def test_request_sizing_runs_off_the_event_loop(
     config, paths = _config(tmp_path)
     loop_thread = threading.get_ident()
     sizing_threads: list[int] = []
-    original = mid_turn_compaction.estimate_request_messages_tokens
+    original = RequestSizer.size
 
-    def recording(*args: Any, **kwargs: Any) -> int:  # noqa: ANN401
+    def recording(self: RequestSizer, request: ModelRequest) -> RequestSize:
         sizing_threads.append(threading.get_ident())
-        return original(*args, **kwargs)
+        return original(self, request)
 
-    monkeypatch.setattr(mid_turn_compaction, "estimate_request_messages_tokens", recording)
+    monkeypatch.setattr(RequestSizer, "size", recording)
 
     await _run(_Agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
 
     assert sizing_threads
     assert loop_thread not in sizing_threads
-
-
-def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None:
-    """A provider estimator must not count an attachment's encoded bytes as prompt text."""
-    model = responses_adapter(tmp_path, "gpt-6-luna", store=False)
-    pdf = File(content=b"%PDF-1.7\n" + b"x" * 300_000, mime_type="application/pdf", filename="report.pdf")
-    message = Message(role="user", content="Summarize the attached report.", files=[pdf])
-
-    tokens = estimate_request_messages_tokens([message], counter=model.token_counter)
-
-    assert tokens < 10_000
-
-
-def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
-    """Tool search keeps deferred definitions out of the context until the model loads them."""
-    tools = [
-        BIG_TOOL,
-        ToolSpec(
-            name="lookup",
-            description="Look up a value.",
-            parameters={},
-            strict=None,
-        ),
-    ]
-
-    counter = fake_token_counter()
-    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"}), counter) < 1_000
-    assert mid_turn_compaction._tool_tokens(tools, [], frozenset({"big_tool"}), counter) > 0
-
-
-def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None:
-    """One tool definition costs one amount, whether a running turn's request or the static prompt estimate sizes it."""
-    lookup = ToolSpec(
-        name="lookup",
-        description="Look up a value.",
-        parameters={"type": "object", "properties": {"key": {"type": "string"}}},
-        strict=None,
-    )
-    counter = fake_token_counter()
-    static = build_static_token_estimator(counter, (), [lookup], frozenset())
-
-    assert mid_turn_compaction._tool_tokens([lookup], [], frozenset(), counter) == static.estimate("")
-
-
-@pytest.mark.parametrize("provider", ["openai", "claude", "claude_legacy"])
-def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_them(
-    tmp_path: Path,
-    provider: str,
-) -> None:
-    """A deferred definition enters the context once when a tool search in the request returns it.
-
-    OpenAI replays the loaded definitions inside the search output, which the message estimate counts; Claude
-    replays only references that the provider expands, from a turn stored now or one stored only with its
-    server-tool blocks before v2026.9.44.
-    """
-    if provider == "openai":
-        counter = responses_adapter(tmp_path, "gpt-6-luna", store=False).token_counter
-        provider_data: dict[str, Any] = {
-            RESPONSE_OUTPUT_KEY: [
-                {
-                    "type": "tool_search_call",
-                    "id": "ts_1",
-                    "call_id": "search_1",
-                    "execution": "server",
-                    "arguments": {"query": "big"},
-                    "status": "completed",
-                },
-                {
-                    "type": "tool_search_output",
-                    "id": "tso_1",
-                    "call_id": "search_1",
-                    "execution": "server",
-                    "status": "completed",
-                    "tools": [
-                        # About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.
-                        {"type": "function", "name": "big_tool", "description": "word " * 20_000, "parameters": {}},
-                    ],
-                },
-            ],
-        }
-    else:
-        counter = fake_token_counter()
-        search = [
-            {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
-            {
-                "type": "tool_search_tool_result",
-                "tool_use_id": "srv_1",
-                "content": {
-                    "type": "tool_search_tool_search_result",
-                    "tool_references": [{"type": "tool_reference", "tool_name": "big_tool"}],
-                },
-            },
-        ]
-        provider_data = {"claude_blocks" if provider == "claude" else "server_tool_blocks": search}
-    searched = [
-        Message(role="user", content="Use the big tool"),
-        Message(role="assistant", provider_data=provider_data),
-    ]
-
-    total = estimate_request_messages_tokens(searched, counter=counter) + mid_turn_compaction._tool_tokens(
-        [BIG_TOOL],
-        searched,
-        frozenset({"big_tool"}),
-        counter,
-    )
-
-    assert 15_000 < total < 30_000
-
-
-@pytest.mark.parametrize("reported", [True, False], ids=["reported-history", "estimated-history"])
-def test_the_first_request_counts_loaded_tool_definitions_once(*, reported: bool) -> None:
-    """A reported request size already holds the definitions Claude's tool search loaded; an estimate leaves them out."""
-    search = [
-        {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
-        {
-            "type": "tool_search_tool_result",
-            "tool_use_id": "srv_1",
-            "content": {
-                "type": "tool_search_tool_search_result",
-                "tool_references": [{"type": "tool_reference", "tool_name": "big_tool"}],
-            },
-        },
-    ]
-    history = [
-        Message(role="user", content="Use the big tool", from_history=True),
-        Message(role="assistant", provider_data={"claude_blocks": search}, from_history=True),
-    ]
-    counter = fake_token_counter()
-
-    total = mid_turn_compaction._prepared_request_tokens(
-        1_000,
-        reported=reported,
-        messages=[*history, Message(role="user", content="Go on")],
-        tools=[BIG_TOOL],
-        deferred=frozenset({"big_tool"}),
-        counter=counter,
-    )
-
-    if reported:
-        assert total < 2_000
-    else:
-        assert total > 15_000
 
 
 def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
@@ -776,41 +648,42 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("prepared_history_tokens", "images", "system", "folds"),
+    ("reported_tokens", "images", "system", "folds"),
     [
         pytest.param(None, 0, "", True, id="estimated"),
-        pytest.param(2_500, 0, "", False, id="prepared-history"),
-        pytest.param(2_500, 2, "", True, id="prepared-history-plus-new-images"),
-        pytest.param(2_500, 0, "s" * 40_000, True, id="prepared-history-plus-a-grown-system-prompt"),
+        pytest.param(2_500, 0, "", False, id="previous-answer"),
+        pytest.param(2_500, 2, "", True, id="previous-answer-plus-new-images"),
+        pytest.param(2_500, 0, "s" * 40_000, True, id="previous-answer-under-a-grown-system-prompt"),
     ],
 )
-async def test_the_first_request_takes_its_history_size_from_the_reply_s_preparation(
+async def test_the_first_request_anchors_on_the_previous_reply_s_answer(
     tmp_path: Path,
     summary_calls: SummaryCalls,
     *,
-    prepared_history_tokens: int | None,
+    reported_tokens: int | None,
     images: int,
     system: str,
     folds: bool,
 ) -> None:
-    """Before any response, the replayed history is as large as the reply's preparation found, and the rest estimated.
+    """Before any response of its own, a reply's request is sized from the previous reply's answer it extends.
 
-    That size comes from the provider's reported size where one applied, which a padded estimate of the history would
-    exceed, folding a conversation that fits; today's system prompt and the prompt's images are estimated on top.
+    That answer's reported size, which the estimate of the 46,000-character prompt it answered exceeds, plus what
+    follows it: the prompt's images at their allowance on top. A system prompt that grew since changes the request
+    before that answer, which is then estimated whole.
     """
     config, paths = _config(tmp_path, context_window=12_000)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    old = [Message(role="user", content="h" * 40_000), Message(role="assistant", content="a" * 8_000)]
-    seed_session(storage, _session("session-1", runs=[_completed_run("old", messages=old)]))
-    model = ToolLoopModel(tool_rounds=0)
-    agent = _scoped_agent(
-        model,
-        config,
-        paths,
-        storage,
-        prepared_history_tokens=prepared_history_tokens,
-        system_messages=(Message(role="system", content=system),) if system else (),
+    model = ToolLoopModel(
+        tool_rounds=0,
+        usage=lambda _number: MessageMetrics(
+            tokens=TokenCounts(input_tokens=reported_tokens) if reported_tokens is not None else TokenCounts(),
+        ),
     )
+    agent = _scoped_agent(model, config, paths, storage)
+    # Nothing in the first reply folds, however large its request.
+    await _run(agent, "h" * 46_000)
+    assert summary_calls.inputs == []
+    agent.system_messages = (Message(role="system", content=system),) if system else ()
     media = MediaInputs(
         images=[Image(id=f"photo-{index}", content=b"\x89PNG", mime_type="image/png") for index in range(images)],
     )
@@ -856,23 +729,29 @@ async def test_rewritten_request_within_the_model_window_is_sent(
 
 
 @pytest.mark.asyncio
-async def test_a_fold_beside_a_prompt_that_fills_the_replay_window_is_not_stored(
+@pytest.mark.parametrize(
+    ("prompt", "files"),
+    # About 4,000 tokens of prompt, or an attachment's 5,000-token allowance, over the 3,500-token limit.
+    [("p" * 16_000, ()), ("Read this archive.", (File(content=b"\x89\xff binary", filename="archive.bin"),))],
+    ids=["prompt", "attachment"],
+)
+async def test_a_prompt_that_fills_the_replay_window_alone_asks_for_no_summary(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    prompt: str,
+    files: tuple[File, ...],
 ) -> None:
-    """A prompt over the replay window leaves no history budget, so the fold stores nothing and the turn continues."""
+    """A prompt or its attachment over the replay window leaves a summary no room, so none is asked for or stored."""
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
     agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
 
-    output = await _run(agent, [Message(role="user", content="p" * 16_000)])
+    output = await _run(agent, [Message(role="user", content=prompt)], media=MediaInputs(files=files))
 
     assert str(output.content).endswith("done")
-    # A failed fold stops compacting for the turn.
-    assert len(summary_calls.inputs) == 1
-    [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
-    assert failure.failure_reason.endswith("; 0 available).")
+    assert summary_calls.inputs == []
+    assert lifecycle.events == []
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
 
 
@@ -905,7 +784,7 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
     # summary fits the replay window only without it.
     context = "c" * 4000
     summary_calls.summary = "fact " * 2400
-    assert estimate_summary_text_tokens(summary_calls.summary, fake_token_counter()) < 3500
+    assert estimate_summary_text_tokens(summary_calls.summary, estimate_only_model()) < 3500
     lifecycle = RecordingCompactionLifecycle()
     agent = _scoped_agent(
         ToolLoopModel(tool_rounds=5),
@@ -941,29 +820,20 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
     assert next_reply.compaction_reply_outcome == "failed"
 
 
-class _DenseTextRoute:
-    """A route whose own estimate counts each CJK character as a token, which a quarter token per character undercounts."""
+class _DenseTextLoop(ToolLoopModel):
+    """A tool loop whose route also counts each CJK character as a token, which a quarter token per character undercounts."""
 
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
-        texts = [str(message.content) for message in messages]
-        return sum(-(-len(text) // 4) + sum(character >= "\u3000" for character in text) for text in texts)
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return False
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        dense = sum(character >= "\u3000" for message in request.messages[start:] for character in str(message.content))
+        return super().request_tokens(request, start=start) + dense
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "counter",
-    [
-        pytest.param(fake_token_counter(replay=_DenseTextRoute()), id="route-request-estimate"),
-        pytest.param(TokenCounter(estimate=lambda _text: None), id="vocabulary-loading"),
-    ],
-)
+@pytest.mark.parametrize("route", ["route-request-estimate", "vocabulary-loading"])
 async def test_a_fold_never_stores_a_summary_on_a_count_that_undercounts_it(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    counter: TokenCounter,
+    route: str,
 ) -> None:
     """A dense summary within a quarter token per character, but over the route's request estimate, is not stored.
 
@@ -972,11 +842,14 @@ async def test_a_fold_never_stores_a_summary_on_a_count_that_undercounts_it(
     """
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
-    model = ToolLoopModel(tool_rounds=5)
-    model.token_counter = counter
+    if route == "route-request-estimate":
+        model = _DenseTextLoop(tool_rounds=5)
+    else:
+        model = ToolLoopModel(tool_rounds=5)
+        model.token_counter = TokenCounter(estimate=lambda _text: None)
     summary_calls.summary = "事实" * 5000
-    assert estimate_summary_text_tokens(summary_calls.summary, counter) < 3000
-    assert estimate_summary_text_tokens(summary_calls.summary, counter, as_request=True, upper_bound=True) > 3500
+    assert count(model.token_counter, summary_calls.summary) < 3000
+    assert estimate_summary_text_tokens(summary_calls.summary, model, upper_bound=True) > 3500
     lifecycle = RecordingCompactionLifecycle()
 
     output = await _run(_scoped_agent(model, config, paths, storage, lifecycle=lifecycle), "Do the task")
@@ -1116,23 +989,6 @@ async def test_an_exchange_larger_than_the_summary_input_still_folds(
     assert str(output.content).endswith("done")
     assert summary_calls.inputs
     assert "tool" not in _first_compacted(model).roles
-
-
-@pytest.mark.asyncio
-async def test_request_sizing_counts_thinking_the_response_did_not_show(
-    tmp_path: Path,
-    summary_calls: SummaryCalls,
-) -> None:
-    config, paths = _config(tmp_path, context_window=20_000)
-    model = ToolLoopModel(
-        tool_rounds=2,
-        usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=30_000)),
-    )
-
-    await _run(_Agent(model, config, paths), "Do the task")
-
-    assert summary_calls.inputs
-    assert any(is_compaction_summary(message) for message in model.requests[1].messages)
 
 
 @pytest.mark.asyncio
@@ -1401,6 +1257,23 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
     assert stored.summary is not None
     assert stored.summary.text == rows[-1].summary
     assert [run.run_id for run in stored.runs] == [output.run_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_an_answer_after_a_fold_records_the_request_it_answered(tmp_path: Path) -> None:
+    """A fold marks the prompt in place, so the next reply's sizing finds the answer only if it digested the change."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+
+    output = await _run(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    assert _ends_with_prompt_then_summary(_first_compacted(model))
+    answer = output.messages[-1]
+    assert answer.content == "done"
+    assert answer.provider_data is not None
+    assert answer.provider_data[REQUEST_IDENTITY_KEY] == request_prefixes(model, model.requests[-1].request)[-1]
 
 
 @pytest.mark.asyncio
@@ -1710,40 +1583,35 @@ async def test_a_mid_turn_compaction_notice_sizes_the_request_before_and_after_i
     outcome = next(event for event in lifecycle.events if isinstance(event, CompactionOutcome))
     # The first request after the fold carries its summary.
     rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
-    rewritten_tokens = (
-        estimate_request_messages_tokens(rewritten.messages, counter=fake_token_counter())
-        + mid_turn_compaction._thinking_tokens(rewritten.messages, fake_token_counter())
-        + mid_turn_compaction._tool_tokens(
-            rewritten.request.tools,
-            rewritten.messages,
-            frozenset(),
-            fake_token_counter(),
-        )
-    )
-    assert outcome.after_tokens == rewritten_tokens
+    assert outcome.after_tokens == model.request_tokens(rewritten.request)
     assert outcome.after_tokens < outcome.before_tokens
+
+
+class _SizeRecordingLoop(ToolLoopModel):
+    """A tool loop that records the messages of every request its route estimates whole."""
+
+    def __init__(self, *, tool_rounds: int) -> None:
+        super().__init__(tool_rounds=tool_rounds)
+        self.sized: list[tuple[str | None, ...]] = []
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        if not start:
+            self.sized.append(tuple(message.id for message in request.messages))
+        return super().request_tokens(request, start=start)
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
-async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path) -> None:
     """A scoped fold estimates the request it rewrote once."""
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
-    model = ToolLoopModel(tool_rounds=5)
-    sized: list[tuple[str | None, ...]] = []
-    estimated = mid_turn_compaction._estimated_request_tokens
-
-    def recording(policy: mid_turn_compaction._Policy, messages: list[Message], tools: Sequence[ToolSpec]) -> int:
-        sized.append(tuple(message.id for message in messages))
-        return estimated(policy, messages, tools)
-
-    monkeypatch.setattr(mid_turn_compaction, "_estimated_request_tokens", recording)
+    model = _SizeRecordingLoop(tool_rounds=5)
 
     await _run(_scoped_agent(model, config, paths, storage), "Do the task")
 
     rewritten = next(request for request in model.requests if any(map(is_compaction_summary, request.messages)))
-    assert sized.count(tuple(message.id for message in rewritten.messages)) == 1
+    assert model.sized.count(tuple(message.id for message in rewritten.messages)) == 1
 
 
 @pytest.mark.asyncio
@@ -2166,19 +2034,23 @@ class _CheckpointingLoop(ToolLoopModel):
 
 
 @pytest.mark.asyncio
-async def test_thinking_a_native_checkpoint_replaced_never_triggers_text_compaction(
+async def test_only_an_answer_after_the_native_checkpoint_anchors_a_request(
     tmp_path: Path,
     summary_calls: SummaryCalls,
 ) -> None:
+    """The checkpoint's answer is billed for the transcript it replaced, so the next request is estimated instead.
+
+    The answer after it reports a request over the window, which the request after that extends.
+    """
     config, paths = _config(tmp_path, context_window=40_000)
     model = _CheckpointingLoop(
         tool_rounds=6,
-        usage=lambda number: MessageMetrics(
-            tokens=TokenCounts(input_tokens=0, output_tokens=15_000 if number < 3 else 5_000),
-        ),
+        usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000 if number in {3, 4} else 10)),
     )
 
     await _run(_Agent(model, config, paths, native_compaction=_native(20_000)), "Do the task")
 
-    assert summary_calls.inputs == []
-    assert model.requests[-1].request.native_compaction == _native(20_000)
+    assert summary_calls.inputs
+    assert not any(is_compaction_summary(message) for request in model.requests[:4] for message in request.messages)
+    assert _first_compacted(model) is model.requests[4]
+    assert model.requests[-1].request.native_compaction is None

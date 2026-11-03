@@ -82,6 +82,49 @@ describe("connection popup", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("refuses an authorization for another provider than the one asked for", async () => {
+    const operation = connectWithPopup(
+      "mail",
+      async () => ({ ...authorization, provider: "calendar" }),
+      controller.signal,
+    );
+    await expect(operation).rejects.toThrow(
+      "Could not start the connection. Try again.",
+    );
+    expect(popup.location.href).toBe("about:blank");
+  });
+
+  it("follows the provider the authorization names when none is asked for", async () => {
+    const confirmConnected = vi.fn(async () => true);
+    const operation = connectWithPopup(
+      null,
+      async () => ({ ...authorization, provider: "calendar" }),
+      controller.signal,
+      confirmConnected,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(popup.location.href).toBe(authorization.auth_url);
+    say("connected", { provider: "mail" });
+    expect(popup.close).not.toHaveBeenCalled();
+    popup.closed = true;
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(operation).resolves.toBeUndefined();
+    expect(confirmConnected).toHaveBeenCalledExactlyOnceWith("calendar");
+  });
+
+  it("accepts the named provider's answer when none is asked for", async () => {
+    const operation = connectWithPopup(
+      null,
+      async () => ({ ...authorization, provider: "calendar" }),
+      controller.signal,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    say("connected", { provider: "calendar" });
+    await expect(operation).resolves.toBeUndefined();
+  });
+
   it("shows a themed placeholder until the authorization page replaces it", async () => {
     document.documentElement.classList.add("dark");
     let answer!: (value: typeof authorization) => void;

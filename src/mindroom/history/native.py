@@ -28,27 +28,27 @@ def configure_native_history(
     session: ConversationSession | None,
     allowed: bool,
     runs: Sequence[AnyRunRecord],
+    static_tokens: int,
 ) -> NativeHistory | None:
     """Return the native settings of a run's requests, with compaction only when it keeps the scope's authored semantics.
 
     None means the provider route manages no history of its own, so the requests carry no native settings. ``runs``
-    are the scope's visible runs, which these requests replay after the summary.
+    are the scope's visible runs, which these requests replay after the summary; ``static_tokens`` is the size of
+    the requests without their history, which the provider's trigger must exceed to leave history any room.
     """
     history_route = provider.native_history_route
     if history_route is None:
         return None
     threshold = plan.trigger_threshold_tokens
-    static_tokens = plan.static_prompt_tokens
-    hard_budget = plan.hard_replay_budget_tokens
+    limit = plan.limit_tokens
     enabled = (
         allowed
         and plan.automatic_compaction
         and not plan.explicit_compaction_model
         and history_settings.replays_whole_history
         and threshold is not None
-        and static_tokens is not None
-        and hard_budget is not None
-        and static_tokens < threshold < static_tokens + hard_budget
+        and limit is not None
+        and static_tokens < threshold < limit
     )
     native = history_route.native_compaction_settings(
         threshold=threshold if enabled else None,
@@ -58,7 +58,7 @@ def configure_native_history(
     if native is not None:
         summary = current_summary_text(session) if session is not None else None
         native = replace(native, basis=request_replay_basis(summary, runs, native.route))
-    return NativeHistory(native_compaction=native, portable_replay=hard_budget is not None)
+    return NativeHistory(native_compaction=native, portable_replay=limit is not None)
 
 
 def restore_native_history(

@@ -122,6 +122,7 @@ See [Authorization](authorization.md#platform-and-credential-authority) for admi
 ### Where Connections Are Stored
 
 Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+An Atlassian connection registered with `requester_scoped=False` is the exception ([Share One Account](tools/atlassian.md#share-one-account)).
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -172,6 +173,8 @@ These rules apply to built-in providers and to providers that plugins register (
 - `account_claims_reader` (callable, default `None`) takes the token data of a finished code exchange and returns verified account claims, such as `{"login": "octo"}`, for a provider whose token response names no account.
   It runs once per connection, never on refresh, and the callback waits for it, so it should answer within a few seconds; if it raises or returns `{}`, the account still connects, without a label.
   The Connections pages label the account with the claim `email`, else `login`.
+- `consent_group` (`OAuthConsentGroup(key, display_name)`, default `None`) lets services that share one OAuth app connect together from the Connections portal with one sign-in, and should be set only when the provider's refresh tokens stay valid after use and none of its scopes can make the provider refuse or block a combined sign-in.
+  Providers with the same `key`, which uses only letters, numbers, colon, underscore, and hyphen, form one group, and `display_name` names it on the portal's **Connect all** button.
 
 ### Troubleshooting OAuth Connections
 

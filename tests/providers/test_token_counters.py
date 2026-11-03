@@ -13,9 +13,8 @@ import pytest
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history.replay import estimate_request_messages_tokens
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelIdentity
+from mindroom.llm.provider import ModelIdentity, ModelRequest
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.openai.build import build_provider as build_openai_provider
@@ -103,14 +102,16 @@ def test_wrapped_provider_forwards_the_token_counter(tmp_path: Path) -> None:
     adapter = _openai_provider(tmp_path, provider="openai", id="gpt-6-astra", api_key="test-key")
     wrapped = WrappedProvider(adapter, lambda inner, request: inner.stream(request))
     assert count(wrapped.token_counter, "hello world") == count(adapter.token_counter, "hello world")
-    assert wrapped.token_counter.replay is adapter
+    request = ModelRequest(messages=(Message(role="user", content="hello world"),))
+    assert wrapped.request_tokens(request) == adapter.request_tokens(request)
+    assert wrapped.context_key(request) == adapter.context_key(request)
 
 
 def test_gemini_sizes_a_replayed_thought_signature_as_the_reasoning_its_reply_reported(tmp_path: Path) -> None:
     """Gemini bills a replayed signed reply about as the reasoning that reply reported, beyond its visible text.
 
     In a live run, replies that reported 476 and 389 reasoning tokens grew the next requests by 447 and 385 tokens
-    beyond their prompts and visible text. The running turn's own replies are left to mid-turn sizing.
+    beyond their prompts and visible text. The running turn's own replies replay their signatures too.
     """
     gemini = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, lambda _r: None)
     # A system prompt larger than the reasoning, which Gemini sends as its system instruction.
@@ -129,13 +130,12 @@ def test_gemini_sizes_a_replayed_thought_signature_as_the_reasoning_its_reply_re
         signed,
         provider_data={key: value for key, value in signed.provider_data.items() if key != "gemini_parts"},
     )
-    counter = gemini.token_counter
 
     def sized(reply: Message) -> int:
-        return estimate_request_messages_tokens([system, question, reply], counter=counter)
+        return gemini.request_tokens(ModelRequest(messages=(system, question, reply)))
 
     assert sized(signed) - sized(unsigned) == 500
-    assert sized(replace(signed, from_history=False)) == sized(replace(unsigned, from_history=False))
+    assert sized(replace(signed, from_history=False)) - sized(replace(unsigned, from_history=False)) == 500
 
 
 def test_gemini_counts_replayed_text_as_the_model_reads_it(tmp_path: Path) -> None:
@@ -148,6 +148,6 @@ def test_gemini_counts_replayed_text_as_the_model_reads_it(tmp_path: Path) -> No
         Message(role="assistant", content='{"verdict": "ok", "notes": ["a", "b"]}\n' * 20, from_history=True),
     ]
 
-    sized = gemini.token_counter.replay.estimate_portable_replay_tokens(messages)
+    sized = gemini.request_tokens(ModelRequest(messages=tuple(messages)))
 
     assert sized == count(gemini.token_counter, "".join(str(message.content) for message in messages))

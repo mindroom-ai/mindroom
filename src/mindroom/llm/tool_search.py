@@ -61,14 +61,19 @@ def call_arguments(function: Mapping[str, Any]) -> dict[str, Any]:
 
 def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with its deferred tools hidden behind ``call_tool`` when its tool search is portable."""
-    if (deferred := request.deferred_tools).portable:
-        request = replace(
-            request,
-            messages=[_projected_message(message, deferred.names) for message in request.messages],
-            tools=[tool for tool in request.tools if tool.name not in deferred.names],
-            deferred_tools=DeferredTools(),
-        )
-    return inner.stream(request)
+    return inner.stream(portable_tool_search_request(request))
+
+
+def portable_tool_search_request(request: ModelRequest) -> ModelRequest:
+    """Return ``request`` as portable tool search sends it: deferred schemas dropped, their calls wrapped."""
+    if not (deferred := request.deferred_tools).portable:
+        return request
+    return replace(
+        request,
+        messages=[_projected_message(message, deferred.names) for message in request.messages],
+        tools=[tool for tool in request.tools if tool.name not in deferred.names],
+        deferred_tools=DeferredTools(),
+    )
 
 
 def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
@@ -87,7 +92,9 @@ def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, A
     if function["name"] not in deferred:
         return call
     wrapped = json.dumps({"name": function["name"], "arguments": call_arguments(function)}, ensure_ascii=False)
-    return {**call, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
+    # ``call_tool`` lives in the default namespace, not in the one a hosted search loaded the wrapped function under.
+    kept = {key: value for key, value in call.items() if key != "namespace"}
+    return {**kept, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
 
 
 def resolve_call_tool_calls(tool_calls: list[dict[str, Any]], callable_names: Container[str]) -> list[dict[str, Any]]:
@@ -121,4 +128,4 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 
 
-__all__ = ["call_arguments", "portable_tool_search_stream", "resolve_call_tool_calls"]
+__all__ = ["call_arguments", "portable_tool_search_request", "portable_tool_search_stream", "resolve_call_tool_calls"]

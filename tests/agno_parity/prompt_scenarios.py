@@ -52,6 +52,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry
 from mindroom.providers.assistant_turn import stamp_model
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.response_turn import TurnSinks
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
@@ -98,13 +99,9 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.llm.provider import (
-        Capabilities,
-        ModelIdentity,
         ModelProvider,
         ModelRequest,
-        NativeHistoryRoute,
         StreamEvent,
-        TokenCounter,
         ToolChoice,
         ToolSpec,
     )
@@ -221,66 +218,38 @@ class Recorder:
         self.calls.append(call)
         return self.responder(call)
 
-    def _bind_adapter(self, adapter: ModelProvider) -> _RecordingAdapter:
+    def _bind_adapter(self, adapter: ModelProvider) -> WrappedProvider:
         index = self._built_models
         self._built_models += 1
-        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter, index))
+        return WrappedProvider(adapter, partial(_answered, partial(self._respond_to_request, adapter, index)))
 
     @contextmanager
     def installed(self) -> Iterator[None]:
         """Record every adapter the provider registry builds."""
         build_adapter = registry._build_adapter
 
-        def build_recording_adapter(*args: Any, **kwargs: Any) -> _RecordingAdapter:  # noqa: ANN401
+        def build_recording_adapter(*args: Any, **kwargs: Any) -> WrappedProvider:  # noqa: ANN401
             return self._bind_adapter(build_adapter(*args, **kwargs))
 
         with patch.object(registry, "_build_adapter", build_recording_adapter):
             yield
 
 
-@dataclass(frozen=True)
-class _RecordingAdapter:
-    """A built provider adapter whose requests the recorder answers instead of the provider.
+async def _answered(
+    respond: Callable[[ModelRequest], OwnedMessage],
+    adapter: ModelProvider,
+    request: ModelRequest,
+) -> AsyncIterator[StreamEvent]:
+    """Answer the request with the responder's message as one finished turn, stamped as ``adapter`` stamps it.
 
-    The registry wraps it in the request pipeline as it wraps the adapter, so every request is recorded as the
-    adapter would receive it, and everything but the stream is the configured route's own.
+    The registry wraps the recording provider in the request pipeline as it wraps the adapter, so every request is
+    recorded as the adapter would receive it, and everything but the stream is the configured route's own.
     """
-
-    adapter: ModelProvider
-    respond: Callable[[ModelRequest], OwnedMessage]
-
-    @property
-    def identity(self) -> ModelIdentity:
-        """The adapter's identity."""
-        return self.adapter.identity
-
-    @property
-    def capabilities(self) -> Capabilities:
-        """The adapter's capabilities."""
-        return self.adapter.capabilities
-
-    @property
-    def native_history_route(self) -> NativeHistoryRoute | None:
-        """The adapter's native-history route."""
-        return self.adapter.native_history_route
-
-    @property
-    def token_counter(self) -> TokenCounter:
-        """The adapter's token counter."""
-        return self.adapter.token_counter
-
-    @property
-    def model_params(self) -> dict[str, Any]:
-        """The adapter's recorded settings."""
-        return self.adapter.model_params
-
-    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Answer the request with the responder's message as one finished turn, stamped as the adapter stamps it."""
-        response = self.respond(request)
-        if response.content:
-            yield TextDelta(response.content)
-        stamp_model(response, self.identity)
-        yield TurnCompleted(message=response, stop_reason="tool_use" if response.tool_calls else "end")
+    response = respond(request)
+    if response.content:
+        yield TextDelta(response.content)
+    stamp_model(response, adapter.identity)
+    yield TurnCompleted(message=response, stop_reason="tool_use" if response.tool_calls else "end")
 
 
 @dataclass(frozen=True)

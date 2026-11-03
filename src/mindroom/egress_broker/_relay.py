@@ -474,7 +474,14 @@ class Relay:
         rules = await self.read_rules(client, entry)
         if rules is None:
             return None
-        route = route_request(rules, entry.host, port, entry.path, requested=requested)
+        route = route_request(
+            rules,
+            entry.host,
+            port,
+            entry.path,
+            requested=requested,
+            agent_name=entry.claims.routing_agent_name,
+        )
         if not route.host_has_rules and rules.unmatched_hosts == "deny":
             await self.deny(client, entry, host_not_allowed(rules, entry.host))
             return None

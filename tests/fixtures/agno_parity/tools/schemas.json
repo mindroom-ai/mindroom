@@ -9167,7 +9167,7 @@
     "functions": [
       {
         "name": "list_egress_credentials",
-        "description": "List the services this agent can use through the egress broker and how to give it credentials.\nCall this when a request fails with `credential_not_configured`, or before telling the user\nwhich credential they need. Returns each configured service with whether this agent has a\ncredential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).\n`source` says who defined the service: `config` for the administrator, `user` for the user's own.\n`oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`\nwhether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with\nnothing configured also says whether the user can connect an account instead of adding a key\n(`can_connect_account`), with the account's\n`provider` when it can or when the account still needs allowing. `separate_account: true` marks a service\nof the user's own that takes no API key, only an account of its own, which a request uses by naming it in an\n`X-Agent-Keys-Service` header.\nThe result carries the link\nwhere the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key\ninto the chat; send them to the link instead.",
+        "description": "List the services this agent can use through the egress broker and how to give it credentials.\nCall this when a request fails with `credential_not_configured`, or before telling the user\nwhich credential they need. Returns each configured service with whether this agent has a\ncredential for it (`configured`) and which one the broker uses (`active_source`: `key`, `oauth`, or\n`github_app`). A `github_app` service lists the repositories its GitHub App covers in\n`github_app_repositories`, each `read` or `read_write`; it takes no key and covers no other repository.\n`source` says who defined the service: `config` for the administrator, `user` for the user's own.\n`oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`\nwhether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with\nnothing configured also says whether the user can connect an account instead of adding a key\n(`can_connect_account`), with the account's\n`provider` when it can or when the account still needs allowing. `separate_account: true` marks a service\nof the user's own that takes no API key, only an account of its own, which a request uses by naming it in an\n`X-Agent-Keys-Service` header.\nThe result carries the link\nwhere the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key\ninto the chat; send them to the link instead.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14556,6 +14556,48 @@
           "properties": {
             "file_id": {
               "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "file_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "google_drive_download_file",
+        "description": "Save a Drive file, such as audio, video, an image, a PDF, or an archive, into the agent workspace.\nReturns the saved path, its size in bytes, and its MIME type. Each Drive file gets its own\ngoogle-drive-downloads/<file_id>/ directory, so files with the same name never overwrite each other,\nwhile downloading the same file again under the same name replaces its earlier copy. Google Workspace\nfiles are exported to a native format such as .docx or .xlsx.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_id": {
+              "type": "string",
+              "description": "The Drive file ID."
+            },
+            "export_format": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "MIME type to export a Google Workspace file to instead, such as application/pdf."
             },
             "mindroom_output_path": {
               "anyOf": [

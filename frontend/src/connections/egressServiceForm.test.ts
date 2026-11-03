@@ -216,6 +216,18 @@ describe("serializing a service", () => {
     expect(serialize(service, personal)).toEqual({ preset: "openai" });
   });
 
+  it("keeps an operator's GitHub App and never sends it from the personal page", () => {
+    const service = {
+      preset: "github",
+      github_app: {
+        credentials_service: "acme_app",
+        repositories: { "acme/api": "read_write" },
+      },
+    } satisfies AuthoredEgressService;
+    expect(serialize(service, operator)).toEqual(service);
+    expect(serialize(service, personal)).toEqual({ preset: "github" });
+  });
+
   it("writes an admin key and agent list the operator chose, and no account login with an admin key", () => {
     const custom: AuthoredEgressService = {
       rules: [bearerRule],

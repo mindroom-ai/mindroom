@@ -46,6 +46,7 @@ class AtlassianConnectionConfig(BaseModel):
     cloud_id: str | None = None
     products: tuple[AtlassianProduct, ...] = ATLASSIAN_PRODUCTS
     write: bool = True
+    requester_scoped: bool = True
     client_config_service: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*_oauth_client$")
 
     @field_validator("site_url")
@@ -99,6 +100,7 @@ def atlassian_connection_oauth_provider(connection: AtlassianConnectionConfig) -
         products=connection.products,
         write=connection.write,
         client_config_service=connection.oauth_client_service,
+        requester_scoped=connection.requester_scoped,
     )
 
 
@@ -116,18 +118,24 @@ def _connection_tool_factory(connection: AtlassianConnectionConfig) -> Callable[
                 credentials_manager: CredentialsManager | None = None,
                 worker_target: ResolvedWorkerTarget | None = None,
                 runtime_config: Config | None = None,
+                write: bool = True,
+                jira_spaces: list[str] | None = None,
+                confluence_spaces: list[str] | None = None,
             ) -> None:
                 super().__init__(
                     provider=atlassian_connection_oauth_provider(connection),
                     function_prefix=f"{connection.name}_",
                     products=connection.products,
-                    write=connection.write,
+                    # An agent's tool entry can only narrow the connection's write access.
+                    write=connection.write and write,
                     site_url=connection.site_url,
                     cloud_id=connection.cloud_id,
                     runtime_paths=runtime_paths,
                     credentials_manager=credentials_manager,
                     worker_target=worker_target,
                     runtime_config=runtime_config,
+                    jira_spaces=jira_spaces,
+                    confluence_spaces=confluence_spaces,
                 )
 
         AtlassianConnectionTools.__name__ = f"{connection.name}_AtlassianConnectionTools"
@@ -140,6 +148,8 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
     """Register one connection's tool from a plugin tools module, using its normal ownership."""
     base = builtin_tool_registry().entries["atlassian"]
     products = " and ".join(product.capitalize() for product in connection.products)
+    # Only the space limits of the connection's own products.
+    space_fields = {f"{product}_spaces" for product in connection.products}
     register_tool_with_metadata(
         name=connection.provider_id,
         display_name=connection.display_name,
@@ -152,11 +162,20 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
         auth_provider=connection.provider_id,
         icon=base.icon,
         icon_color=base.icon_color,
+        config_fields=[field for field in base.config_fields or () if field.name == "write"]
+        if connection.write
+        else [],
+        agent_override_fields=[field for field in base.agent_override_fields or () if field.name in space_fields],
         managed_init_args=base.managed_init_args,
         docs_url=base.docs_url,
         helper_text=(
-            f"Each user connects their own {connection.display_name} account. "
-            f"Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in {connection.oauth_client_service}."
+            (
+                f"Each user connects their own {connection.display_name} account. "
+                if connection.requester_scoped
+                else f"The {connection.display_name} account follows the agent's worker scope; "
+                "on a shared agent, its credential managers connect one account for every requester. "
+            )
+            + f"Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in {connection.oauth_client_service}."
         ),
         function_names=atlassian_function_names(
             connection.products,

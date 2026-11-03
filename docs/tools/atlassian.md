@@ -79,10 +79,10 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | Scope | Type | Used by |
 | --- | --- | --- |
 | `offline_access` | classic | Token refresh |
-| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_transition_issue` |
+| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
 | `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments` |
-| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments` |
+| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
+| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
 | `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
 | `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
 | `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
@@ -119,6 +119,38 @@ Which site the tool uses:
 
 Atlassian reports every site by its atlassian.net URL, so a custom-domain `site_url` never matches; use the site's atlassian.net URL or its `cloud_id` instead.
 
+## Limit What An Agent Can Do
+
+Set `write` and the space lists on an agent's tool entry to fix what that agent may do for every requester, such as a team agent that everyone connects their own account to:
+
+```yaml
+agents:
+  docs_helper:
+    tools:
+      - atlassian:
+          site_url: https://example.atlassian.net
+          write: false
+          confluence_spaces: [DOCS, ENG]
+          jira_spaces: []
+```
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `write` | `boolean` | `true` | `false` offers only the functions that do not change data. |
+| `jira_spaces` | `string[]` | `null` | Keys of the only Jira spaces (formerly projects), such as `ENG`, the agent may use; `[]` removes the Jira functions. |
+| `confluence_spaces` | `string[]` | `null` | Keys of the only Confluence spaces, such as `DOCS`, the agent may use; `[]` removes the Confluence functions. |
+
+- An unset space list allows every space the requester (or the [shared account](#share-one-account)) can reach.
+- With a list, searches return only results in those spaces, and reads, downloads, and writes of anything elsewhere return `space_not_allowed` and change nothing.
+- The agent still acts as the requester (or the shared account), so it reaches only spaces that are both listed and open to that account in Atlassian.
+- A space key is the part after `/spaces/` in a space's URL, such as `DOCS` in `https://example.atlassian.net/wiki/spaces/DOCS`, and every Jira issue key starts with its space key.
+- Config validation rejects an entry that cannot be a space key, such as a name with spaces in it.
+- An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, searches can select allowed issues by such relations, and creating or updating an issue can set a parent in another space.
+- A refusal tells the agent that an item exists outside the allowed spaces, but nothing of what it holds.
+- `write` combines with `defaults.tools` and dashboard settings like any [tool setting](index.md#how-settings-combine), while the space lists can be set only on an agent's tool entry.
+- Changing these options needs no reconnect.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](../deployment/egress-broker.md) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
+
 ## Connect An Account
 
 When a requester has not connected Atlassian yet, every function returns `oauth_connection_required: true` with a `connect_url` for that requester.
@@ -127,6 +159,7 @@ Users can also connect and disconnect from the dashboard Integrations page.
 
 Tokens belong to the requester and are never shared with other users or stored globally.
 A call without a concrete requester always asks for a connection instead of using another account.
+Only a separately registered connection with `requester_scoped=False` shares one account, as described in [Share One Account](#share-one-account).
 A connection that has not been used for 90 days expires, and the requester then reconnects.
 
 ## Add More Connections
@@ -180,8 +213,11 @@ agents:
   assistant:
     tools:
       - atlassian
-      - partner_atlassian
+      - partner_atlassian:
+          confluence_spaces: [PARTNER]
 ```
+
+A connection's tool entry accepts the space lists of its products and, when the connection's `write` is `True`, `write: false`, as described in [Limit What An Agent Can Do](#limit-what-an-agent-can-do).
 
 | Field | Default | Notes |
 | --- | --- | --- |
@@ -191,6 +227,7 @@ agents:
 | `cloud_id` | `null` | Cloud ID (a UUID) of the site; when `site_url` is also set, both must name the same site. |
 | `products` | `("jira", "confluence")` | Non-empty, duplicate-free products whose functions and scopes this connection enables. |
 | `write` | `True` | Set to `False` to register only read functions and request only read scopes. |
+| `requester_scoped` | `True` | Set to `False` to store the connection's tokens under the agent's worker scope, as in [Share One Account](#share-one-account). |
 | `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret; the name must end in `_oauth_client`. |
 
 Every connection requires `site_url` or `cloud_id`, so a named connection always acts on one pinned site.
@@ -213,6 +250,47 @@ Atlassian records consent per user and app, so with a shared app the default con
 Revoking the shared app in Atlassian disconnects every connection that uses it.
 
 Each connection has its own card on the Integrations page and its own connect link.
+
+### Share One Account
+
+By default every requester connects their own Atlassian account.
+With `requester_scoped=False`, a connection's tokens follow the agent's effective worker scope instead (`private.per`, then the agent's `worker_scope`, then `defaults.worker_scope`), like Google's:
+
+- On a `shared` agent, one account serves every requester of that agent. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
+- On a `user` or `user_agent` agent, each requester still connects their own account, but, as for Google, the egress broker no longer withholds those tokens from [shared sandboxes](../deployment/egress-broker.md#personal-accounts-and-shared-sandboxes), so use the built-in tool or a requester-scoped connection there.
+- Without an effective worker scope, one installation-level connection serves every unscoped agent that lists the tool, and a credential manager of any of them can replace it, as described in [Where Connections Are Stored](../oauth-framework.md#where-connections-are-stored). Give each agent `worker_scope: shared` so it gets its own; that also moves the agent's other agent-scoped credentials, such as Google connections and egress keys, to a per-agent store, where they are connected again.
+
+Everyone who may use the agent then reads what that account can see, so connect a dedicated account, not a person's.
+Set `write=False` on the connection before anyone connects it, so the account is authorized with read scopes only and Atlassian itself refuses writes.
+An account connected while `write` was `True` keeps its write scopes until it is disconnected and connected again.
+Limit the agent's tool entry to the spaces it needs:
+
+```python
+AtlassianConnectionConfig(
+    name="team",
+    display_name="Team Confluence",
+    site_url="https://example.atlassian.net",
+    products=("confluence",),
+    write=False,
+    requester_scoped=False,
+)
+```
+
+```yaml
+agents:
+  docs_helper:
+    worker_scope: shared
+    credential_managers: ["@kim:example.org"]
+    tools:
+      - team_atlassian:
+          confluence_spaces: [DOCS]
+```
+
+The credential manager connects the account from the Connections page, signed in to Atlassian as the dedicated account.
+A connect link the agent replies with also works, but on a shared agent whoever opens it first connects their account, so a credential manager should ask for it in a direct message with the agent and open it right away.
+On a `shared` or unscoped agent, the toolkit tells the model that `currentUser()` in JQL or CQL is the shared account, not the requester.
+The built-in `atlassian` tool always stays requester-scoped.
+Disconnect the shared account before setting `requester_scoped` back to `True`; afterwards no page reaches the token left in the agent's store.
 
 ## Approvals For Writes
 
@@ -239,7 +317,7 @@ tool_approval:
 
 The leading `*` also matches the prefixed functions of additional connections, such as `partner_confluence_create_page`.
 Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
-To give an agent read access only, hide the write functions with [`exclude_tools`](index.md#filtering-toolkit-functions), or register a connection with `write=False` so that it never requests write scopes.
+To give an agent read access only, set [`write: false`](#limit-what-an-agent-can-do) on its tool entry, or register a connection with `write=False` so that it never requests write scopes.
 
 ## Attachments
 
@@ -257,6 +335,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 - Search and listing functions return at most 50 results per call.
 - Each API call other than an attachment download must finish within 60 seconds and return at most 32 MiB; an attachment download must finish within 120 seconds.
 - Page reads and attachment listings go through Confluence search, so a page or attachment created moments ago can be missing briefly.
+  With `confluence_spaces`, the same applies to updating, commenting on, downloading from, or creating a page under such a page.
 - Archived and draft pages are not returned.
 - Only Atlassian Cloud is supported.
 - The tool does not upload attachments, delete content, or manage spaces and projects.
@@ -265,6 +344,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 
 | Result | Cause and fix |
 | --- | --- |
+| `space_not_allowed` | The item is outside the agent's `jira_spaces` or `confluence_spaces`, which the result lists in `allowed_spaces`; check that each entry is the space key from the space's URL rather than its name, and add the space to the agent's tool entry if the agent should use it. |
 | `scope_mismatch` | Atlassian rejected a request for a scope the app does not grant; reconnecting grants the same scopes again, so an administrator must add the scopes in [Scopes](#scopes) to the app. |
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
 | `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |

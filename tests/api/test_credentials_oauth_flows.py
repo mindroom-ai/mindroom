@@ -1,6 +1,7 @@
 """Tests for the pending dashboard OAuth state flow helpers."""
 
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -26,11 +27,17 @@ def _oauth_state_test_client(tmp_path: Path) -> TestClient:
         bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         return {"state": issue_pending_oauth_state(request, service, agent_name, payload=payload)}
 
+    @app.post("/issue-group/{service}")
+    async def issue_group(service: str, request: Request, group_members: list[dict[str, object]]) -> dict[str, str]:
+        bind_request_auth_user(request, AuthUser(user_id="alice", email=None, source=AuthSource.PLATFORM))
+        members = cast("list[dict[str, str]]", group_members)
+        return {"state": issue_pending_oauth_state(request, service, "general", group_members=members)}
+
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, object]:
         bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         pending = consume_pending_oauth_request(request, service, state)
-        return {"agent_name": pending.agent_name, "payload": pending.payload}
+        return {"agent_name": pending.agent_name, "payload": pending.payload, "group_members": pending.group_members}
 
     return TestClient(app)
 
@@ -44,7 +51,7 @@ def test_pending_oauth_state_round_trip(tmp_path: Path) -> None:
     response = client.post(f"/consume/google?user_id=alice&state={issue_response.json()['state']}")
 
     assert response.status_code == 200
-    assert response.json() == {"agent_name": "general", "payload": {}}
+    assert response.json() == {"agent_name": "general", "payload": {}, "group_members": []}
 
 
 def test_pending_oauth_state_rejects_different_user(tmp_path: Path) -> None:
@@ -59,7 +66,7 @@ def test_pending_oauth_state_rejects_different_user(tmp_path: Path) -> None:
 
     issuer_response = client.post(f"/consume/google?user_id=alice&state={state}")
     assert issuer_response.status_code == 200
-    assert issuer_response.json() == {"agent_name": "general", "payload": {}}
+    assert issuer_response.json() == {"agent_name": "general", "payload": {}, "group_members": []}
 
 
 def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
@@ -71,7 +78,31 @@ def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
     response = client.post(f"/consume/homeassistant?user_id=alice&state={state}")
 
     assert response.status_code == 200
-    assert response.json() == {"agent_name": "general", "payload": payload}
+    assert response.json() == {"agent_name": "general", "payload": payload, "group_members": []}
+
+
+def test_pending_oauth_request_preserves_group_members(tmp_path: Path) -> None:
+    """A consent group's state round-trips every member's target in order."""
+    client = _oauth_state_test_client(tmp_path)
+    members = [{"provider": "google_drive", "worker_key": "a"}, {"provider": "google_sheets", "worker_key": "b"}]
+
+    state = client.post("/issue-group/google_drive", json=members).json()["state"]
+    response = client.post(f"/consume/google_drive?user_id=alice&state={state}")
+
+    assert response.status_code == 200
+    assert response.json() == {"agent_name": "general", "payload": {}, "group_members": members}
+
+
+def test_pending_oauth_request_refuses_malformed_group_members(tmp_path: Path) -> None:
+    """One malformed member refuses the callback, so it never connects fewer services than the sign-in named."""
+    client = _oauth_state_test_client(tmp_path)
+    members = [{"provider": "google_drive"}, {"provider": 1}]
+
+    state = client.post("/issue-group/google_drive", json=members).json()["state"]
+    response = client.post(f"/consume/google_drive?user_id=alice&state={state}")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "OAuth state does not record its consent group members correctly"
 
 
 def test_pending_oauth_state_consume_twice_fails(tmp_path: Path) -> None:

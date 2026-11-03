@@ -41,12 +41,14 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import StreamEvent, ToolChoice, ToolSpec
     from mindroom.providers.openai.settings import ChatSettings
+    from mindroom.token_counting.requests import RequestParts
 
 __all__ = [
     "SDK_OPTION_KEYS",
     "ChatStream",
     "ChatTurnParts",
     "ChatWire",
+    "chat_body_parts",
     "chat_request_kwargs",
     "chat_stop_reason",
     "deepseek_request_thinks",
@@ -378,6 +380,42 @@ def chat_request_kwargs(
     if wire.route not in _UNASKED_STREAM_USAGE_ROUTES:
         params["stream_options"] = {"include_usage": True}
     return sdk_call_kwargs(params, "chat")
+
+
+# The text fields of an OpenRouter ``reasoning_details`` item; its ``data`` and ``signature`` are ciphertext.
+_REASONING_DETAIL_TEXT_FIELDS = ("text", "summary")
+
+
+def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts, *, static: bool) -> None:
+    """Add what a Chat request body gives its model to ``parts``.
+
+    ``body`` is the body ``chat_request_kwargs`` built from ``messages`` with ``extra_body`` merged
+    (``sdk_request_body``), so its messages are ``with_joined_system(messages)`` one for one. Message text, reasoning
+    text, and tool-result text count as text, and tool calls and, with ``static``, tool definitions as JSON; encrypted
+    reasoning details count the reasoning tokens their answer reported.
+    """
+    sent = body.get("messages") or []
+    for formatted, source in zip(sent, with_joined_system(messages), strict=True):
+        content = formatted.get("content")
+        if isinstance(content, str):
+            parts.text(content)
+        else:
+            for part in content or ():
+                if part.get("type") == "text":
+                    parts.text(part.get("text"))
+                else:
+                    parts.value(part)
+        parts.text(formatted.get("reasoning_content"))
+        details = formatted.get("reasoning_details") or ()
+        for detail in details:
+            for name in _REASONING_DETAIL_TEXT_FIELDS:
+                if isinstance(text := detail.get(name), str):
+                    parts.text(text)
+        if any(detail.get("data") for detail in details):
+            parts.cost(source.metrics.tokens.reasoning_tokens)
+        parts.value(formatted.get("tool_calls"))
+    if static:
+        parts.value(body.get("tools"))
 
 
 # --- Replies --------------------------------------------------------------------------------------------------

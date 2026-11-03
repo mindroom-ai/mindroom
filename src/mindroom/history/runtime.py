@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
@@ -27,15 +26,12 @@ from mindroom.history.policy import (
 )
 from mindroom.history.replay import (
     configured_replay_plan,
-    current_summary_text,
     estimate_prompt_visible_history_tokens,
-    estimate_request_messages_tokens,
     estimate_summary_tokens,
     has_effective_persisted_replay,
     log_replay_plan,
     plan_replay_that_fits,
     prompt_visible_history,
-    request_basis,
     scope_visible_runs,
 )
 from mindroom.history.storage import (
@@ -59,10 +55,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     owner_scope,
 )
-from mindroom.llm.messages import ModelProvenance, is_own_model_message, read_model_provenance
 from mindroom.logging_config import get_logger
-from mindroom.model_usage import message_context_tokens
-from mindroom.native_compaction import native_checkpoint_id
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
@@ -73,11 +66,11 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
-    from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, TokenCounter
+    from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -106,10 +99,9 @@ def note_prepared_history_timing(
         compaction_decision=decision.mode,
         compaction_reply_outcome=prepared_history.compaction_reply_outcome,
         compaction_reason=decision.reason,
-        compaction_current_history_tokens=decision.current_history_tokens,
-        compaction_trigger_budget_tokens=decision.trigger_budget_tokens,
-        compaction_hard_budget_tokens=decision.hard_budget_tokens,
-        compaction_fitted_replay_tokens=decision.fitted_replay_tokens,
+        compaction_request_tokens=decision.request_tokens,
+        compaction_trigger_tokens=decision.trigger_tokens,
+        compaction_limit_tokens=decision.limit_tokens,
         prepared_context_tokens=prepared_history.prepared_context_tokens,
         fitted_replay_tokens=(
             prepared_history.replay_plan.estimated_tokens if prepared_history.replay_plan is not None else None
@@ -119,11 +111,9 @@ def note_prepared_history_timing(
 
 @dataclass(frozen=True)
 class HistoryPreparationInputs:
-    """Fully resolved policy/model/token inputs for one history preparation."""
+    """The resolved history settings and execution plan of one history preparation."""
 
     history_settings: ResolvedHistorySettings
-    active_model_name: str
-    active_context_window: int | None
     execution_plan: ResolvedHistoryExecutionPlan
 
 
@@ -142,23 +132,21 @@ class PreparedScopeHistory:
     compaction_decision: CompactionDecision
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None
-    # How the route the run's requests go to counts tokens, which the final replay plan sizes with.
-    counter: TokenCounter
-    # Identifies the system prompt and tools the run's requests carry (``StaticTokenEstimator.fingerprint``).
-    static_fingerprint: str
+    # The model the run's requests go to, whose route sizes the final replay plan.
+    model: ModelProvider
+    # The size of the provisional first request without its summary and history.
+    static_tokens: int
     compaction_reply_outcome: CompactionReplyOutcome = "none"
-    # The history size the provider reported for the scope's latest request, when it still describes the history the
-    # run replays; the final replay plan sizes with it as the compaction check did.
-    reported_history_tokens: int | None = None
+    # The size of the provisional first request, when no compaction rewrote the history it holds.
+    request_size: RequestSize | None = None
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
-    model: ModelProvider,
+    sizer: RequestSizer,
+    frame: RequestFrame,
     resolved_inputs: HistoryPreparationInputs,
-    non_prompt_tokens: int,
-    static_fingerprint: str,
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None,
@@ -166,29 +154,33 @@ async def prepare_scope_history(
     pipeline_timing: DispatchPipelineTiming | None,
     allow_native_compaction: bool,
 ) -> PreparedScopeHistory:
-    """Prepare durable scope history before final replay planning; ``model`` is the provider the run's requests go to.
+    """Prepare durable scope history before final replay planning; ``sizer`` sizes the run's requests.
 
-    ``non_prompt_tokens`` and ``static_fingerprint`` are the tokens and identity of the run's system prompt and tools.
+    ``frame`` holds what the run's first request holds around the scope's history, with the turn as provisionally
+    prepared; compaction is decided from that request's size.
     """
-    counter = model.token_counter
+    model = sizer.model
+    execution_plan = resolved_inputs.execution_plan
+    # Encoding a long prompt would stall the replies sharing the event loop.
+    static_tokens = await asyncio.to_thread(model.request_tokens, frame.request())
+    configure_native = partial(
+        configure_native_history,
+        model,
+        plan=execution_plan,
+        history_settings=resolved_inputs.history_settings,
+        allowed=allow_native_compaction,
+        static_tokens=static_tokens,
+    )
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
-            native_history=configure_native_history(
-                model,
-                plan=resolved_inputs.execution_plan,
-                history_settings=resolved_inputs.history_settings,
-                session=None,
-                allowed=allow_native_compaction,
-                runs=(),
-            ),
-            counter=counter,
-            static_fingerprint=static_fingerprint,
+            native_history=configure_native(session=None, runs=()),
+            model=model,
+            static_tokens=static_tokens,
         )
 
-    execution_plan = resolved_inputs.execution_plan
     session = scope_context.session
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_start")
@@ -199,63 +191,35 @@ async def prepare_scope_history(
         partial(_prepare_scope_state_for_run, session=session, execution_plan=execution_plan),
     )
     visible_runs = scope_visible_runs(session)
-    native_history = configure_native_history(
-        model,
-        plan=execution_plan,
-        history_settings=resolved_inputs.history_settings,
-        session=session,
-        allowed=allow_native_compaction,
-        runs=visible_runs,
-    )
+    native_history = configure_native(session=session, runs=visible_runs)
     if state.force_compact_before_next_run and native_history is not None:
         native_history = native_history.without_native_compaction()
     compaction_reply_outcome: CompactionReplyOutcome = "none"
-    native_route = native_history_route(native_history)
-    estimate_history_tokens = partial(
-        estimate_prompt_visible_history_tokens,
-        session=session,
-        history_settings=resolved_inputs.history_settings,
-        counter=counter,
-    )
+    history = prompt_visible_history(session, resolved_inputs.history_settings)
+    request = partial(frame.request, summary=session.summary, history=history)
     # Large provider projections spend seconds in tokenizers that release the GIL.
-    estimated_history_tokens = await asyncio.to_thread(estimate_history_tokens, native_route=native_route)
-    reported_history_tokens = (
-        await asyncio.to_thread(
-            partial(
-                _reported_history_tokens,
-                session=session,
-                visible_runs=visible_runs,
-                resolved_inputs=resolved_inputs,
-                config=config,
-                model=model,
-                non_prompt_tokens=non_prompt_tokens,
-                static_fingerprint=static_fingerprint,
-            ),
-        )
-        if visible_runs
-        else None
-    )
-    # The provider's count of the latest request is closer than an estimate of the whole history.
-    current_history_tokens = estimated_history_tokens if reported_history_tokens is None else reported_history_tokens
+    request_size = await asyncio.to_thread(sizer.size, request(native=native_history))
+    summary_tokens = await asyncio.to_thread(estimate_summary_tokens, session, model)
+    native_route = native_history_route(native_history)
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
-        current_history_tokens=current_history_tokens,
-        # Only an active native route compacts between the trigger and hard budgets; without one, text compaction must.
+        request_tokens=request_size.tokens,
+        summary_request_tokens=static_tokens + summary_tokens,
+        # Only an active native route compacts between the trigger and the limit; without one, text compaction must.
         allow_native_compaction=native_route is not None,
-        summary_tokens=await asyncio.to_thread(estimate_summary_tokens, session, counter),
     )
     logger.info(
         "History preparation check",
         scope=scope_context.scope.key,
         auto_enabled=execution_plan.automatic_compaction and execution_plan.text_compaction_available,
         compaction_available=execution_plan.text_compaction_available,
-        trigger_budget=execution_plan.replay_budget_tokens,
-        hard_budget=execution_plan.hard_replay_budget_tokens,
+        trigger_tokens=execution_plan.trigger_tokens,
+        limit_tokens=execution_plan.limit_tokens,
         replay_window=execution_plan.replay_window_tokens,
-        static_prompt_tokens=execution_plan.static_prompt_tokens,
-        current_tokens=current_history_tokens,
-        estimated_tokens=estimated_history_tokens,
+        static_tokens=static_tokens,
+        request_tokens=request_size.tokens,
+        reported=request_size.reported,
         force=state.force_compact_before_next_run,
         compaction_decision=compaction_decision.mode,
         compaction_reason=compaction_decision.reason,
@@ -266,10 +230,9 @@ async def prepare_scope_history(
         pipeline_timing.note(
             compaction_decision=compaction_decision.mode,
             compaction_reason=compaction_decision.reason,
-            compaction_current_history_tokens=current_history_tokens,
-            compaction_trigger_budget_tokens=compaction_decision.trigger_budget_tokens,
-            compaction_hard_budget_tokens=compaction_decision.hard_budget_tokens,
-            compaction_fitted_replay_tokens=compaction_decision.fitted_replay_tokens,
+            compaction_request_tokens=compaction_decision.request_tokens,
+            compaction_trigger_tokens=compaction_decision.trigger_tokens,
+            compaction_limit_tokens=compaction_decision.limit_tokens,
         )
 
     if compaction_decision.mode == "required":
@@ -277,22 +240,25 @@ async def prepare_scope_history(
         if native_route is not None:
             assert native_history is not None
             native_history = native_history.without_native_compaction()
-            current_history_tokens = await asyncio.to_thread(estimate_history_tokens)
+            request_size = await asyncio.to_thread(sizer.size, request(native=native_history))
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
-        # Compaction skips history that already fits its budget, so a trigger-level pass targets the trigger.
-        compaction_budget = (
-            execution_plan.replay_budget_tokens
+        # A trigger-level pass reports its budget against the trigger, any other against the limit; notices show the
+        # history's share of the request.
+        target = (
+            execution_plan.trigger_tokens
             if compaction_decision.reason == "over_trigger_native_disabled"
-            else execution_plan.hard_replay_budget_tokens
+            else execution_plan.limit_tokens
         )
+        history_budget = _history_share(target, static_tokens)
+        history_tokens = max(0, request_size.tokens - static_tokens)
         compaction_result = await _run_scope_compaction_with_lifecycle(
             mode=state.compaction_mode,
             session_id=session.session_id,
             scope=scope_context.scope,
             execution_plan=execution_plan,
-            history_budget=compaction_budget,
-            current_history_tokens=current_history_tokens,
+            history_budget=history_budget,
+            current_history_tokens=history_tokens,
             runs_before=len(visible_runs),
             compaction_lifecycle=compaction_lifecycle,
             compact=partial(
@@ -301,9 +267,11 @@ async def prepare_scope_history(
                 session=session,
                 state=state,
                 resolved_inputs=resolved_inputs,
-                history_budget=compaction_budget,
-                before_tokens=current_history_tokens,
-                counter=counter,
+                history_budget=history_budget,
+                # A trigger-level pass may store a summary above its target, but never one the reply cannot replay.
+                max_summary_tokens=_history_share(execution_plan.limit_tokens, static_tokens),
+                before_tokens=history_tokens,
+                model=model,
                 config=config,
                 runtime_paths=runtime_paths,
             ),
@@ -328,84 +296,11 @@ async def prepare_scope_history(
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
-        counter=counter,
-        static_fingerprint=static_fingerprint,
+        model=model,
+        static_tokens=static_tokens,
         # A compaction rewrote the history that request held.
-        reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
+        request_size=request_size if compaction_decision.mode != "required" else None,
     )
-
-
-def _reported_history_tokens(
-    *,
-    session: ConversationSession,
-    visible_runs: list[AnyRunRecord],
-    resolved_inputs: HistoryPreparationInputs,
-    config: Config,
-    model: ModelProvider,
-    non_prompt_tokens: int,
-    static_fingerprint: str,
-) -> int | None:
-    """Size history from the request the provider reported for the scope's latest answer, or None when stale.
-
-    That request held its system prompt and tools, the history before its run, and its run up to the answer. It sizes
-    this reply's history only when this reply's model answered it and it recorded the basis this reply has without
-    that run: the same system prompt, tools, summary, and earlier history. Its system prompt and tools are then
-    today's, ``non_prompt_tokens``, which the replay budgets also take off the window.
-    """
-    latest_run = visible_runs[-1]
-    messages = latest_run.messages
-    anchor = next(
-        (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
-        None,
-    )
-    # History replay drops or bounds media that request carried in full, and a native checkpoint replaces the transcript
-    # before it in a way the basis does not track.
-    if (
-        anchor is None
-        or any(message.images or message.audio or message.videos or message.files for message in messages)
-        or any(native_checkpoint_id(message) for run in visible_runs for message in run.messages)
-    ):
-        return None
-    latest_ids = {message.id for message in messages}
-    earlier = [
-        message
-        for message in prompt_visible_history(session, resolved_inputs.history_settings)
-        if message.id not in latest_ids
-    ]
-    basis = request_basis(static_fingerprint=static_fingerprint, summary=current_summary_text(session), history=earlier)
-    answer = messages[anchor]
-    # Another model, such as a fallback that answered, counts with another tokenizer.
-    this_model = ModelProvenance(model_id=model.identity.id, provider=model.identity.provider)
-    if _recorded_request_basis(latest_run) != basis or read_model_provenance(answer.provider_data) != this_model:
-        return None
-    reported = reported_context_tokens(answer, model=model, config=config, model_name=resolved_inputs.active_model_name)
-    if reported is None:
-        return None
-    # Sized as the next request replays them: as history, whose earlier reasoning a model may render.
-    replayed = [replace(message, from_history=True) for message in messages[anchor:]]
-    newer_tokens = estimate_request_messages_tokens(replayed, counter=model.token_counter)
-    # The padded estimate of a large system prompt can exceed a short conversation's whole reported request.
-    return max(0, reported + newer_tokens - non_prompt_tokens)
-
-
-def _recorded_request_basis(run: AnyRunRecord) -> str | None:
-    """Return the request basis the run's published metadata records, or None when it records none."""
-    ai_run = (run.metadata or {}).get(AI_RUN_METADATA_KEY)
-    prepared_context = ai_run.get("prepared_context") if isinstance(ai_run, dict) else None
-    basis = prepared_context.get("request_basis") if isinstance(prepared_context, dict) else None
-    return basis if isinstance(basis, str) else None
-
-
-def reported_context_tokens(message: Message, *, model: ModelProvider, config: Config, model_name: str) -> int | None:
-    """Return the request-context size ``model`` reported with ``message``, configured as ``model_name``, if any."""
-    configured = config.models.get(model_name)
-    context = message_context_tokens(
-        message,
-        provider=model.identity.provider,
-        configured_provider=configured.provider if configured is not None else None,
-        model_id=model.identity.id,
-    )
-    return context.tokens if context is not None else None
 
 
 # Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
@@ -538,8 +433,9 @@ async def _compact_before_reply(
     state: HistoryScopeState,
     resolved_inputs: HistoryPreparationInputs,
     history_budget: int | None,
+    max_summary_tokens: int | None,
     before_tokens: int,
-    counter: TokenCounter,
+    model: ModelProvider,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> CompactionOutcome | None:
@@ -558,14 +454,13 @@ async def _compact_before_reply(
                 on_usage=scope_usage_recorder(storage, session.session_id),
             ),
             available_history_budget=history_budget,
-            # A trigger-level pass may store a summary above its target, but never one the reply cannot replay.
-            max_summary_tokens=resolved_inputs.execution_plan.hard_replay_budget_tokens,
+            max_summary_tokens=max_summary_tokens,
             before_tokens=before_tokens,
             replay_window_tokens=resolved_inputs.execution_plan.replay_window_tokens,
             threshold_tokens=resolved_inputs.execution_plan.trigger_threshold_tokens,
             progress=progress,
             complete=complete,
-            counter=counter,
+            model=model,
         )
     except ConversationChangedError:
         # A request the conversation outran stays, so the next reply compacts what the conversation holds then.
@@ -613,13 +508,13 @@ async def compact_scope_mid_turn(
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
     max_summary_tokens: int,
-    counter: TokenCounter,
+    model: ModelProvider,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
 ) -> CompactionOutcome | None:
     """Fold the stored runs after ``session``'s latest summary row and the running turn into one summary row.
 
-    A summary over ``max_summary_tokens``, as ``counter`` sizes it, fails the compaction and stores nothing.
+    A summary over ``max_summary_tokens``, as ``model``'s route sizes it, fails the compaction and stores nothing.
     """
     execution_plan = resolved_inputs.execution_plan
     scope = owner_scope(session)
@@ -652,9 +547,9 @@ async def compact_scope_mid_turn(
             before_tokens=before_tokens,
             replay_window_tokens=execution_plan.replay_window_tokens,
             threshold_tokens=execution_plan.trigger_threshold_tokens,
-            available_history_budget=execution_plan.hard_replay_budget_tokens,
+            available_history_budget=execution_plan.limit_tokens,
             max_summary_tokens=max_summary_tokens,
-            counter=counter,
+            model=model,
             on_commit=on_commit,
             rewritten_request_tokens=rewritten_request_tokens,
             complete=complete,
@@ -665,7 +560,7 @@ async def compact_scope_mid_turn(
         session_id=session.session_id,
         scope=scope,
         execution_plan=execution_plan,
-        history_budget=execution_plan.hard_replay_budget_tokens,
+        history_budget=execution_plan.limit_tokens,
         current_history_tokens=before_tokens,
         runs_before=len(basis.runs) + 1,
         compaction_lifecycle=compaction_lifecycle,
@@ -674,89 +569,89 @@ async def compact_scope_mid_turn(
     return result.outcome
 
 
+def _history_share(total: int | None, static_tokens: int) -> int | None:
+    """Return the history's share of a whole-request size: what it holds beyond the request without its history."""
+    return None if total is None else max(0, total - static_tokens)
+
+
 def finalize_history_preparation(
     *,
     prepared_scope_history: PreparedScopeHistory,
-    config: Config,
-    static_prompt_tokens: int,
+    frame: RequestFrame,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> PreparedHistoryState:
-    """Return the final persisted-replay decision after durable history prep, under the freshly resolved budget."""
+    """Return the final persisted-replay decision after durable history prep, for the run's final ``frame``."""
     if pipeline_timing is not None:
         pipeline_timing.mark("replay_plan_start")
     resolved_inputs = prepared_scope_history.resolved_inputs
     history_settings = resolved_inputs.history_settings
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        history_settings=history_settings,
-        active_model_name=resolved_inputs.active_model_name,
-        active_context_window=resolved_inputs.active_context_window,
-        static_prompt_tokens=static_prompt_tokens,
-    )
-    history_budget = execution_plan.hard_replay_budget_tokens
+    execution_plan = resolved_inputs.execution_plan
     if execution_plan.automatic_compaction and execution_plan.unavailable_reason is not None:
         logger.warning(
             "Compaction unavailable for this run",
             compaction_model=execution_plan.compaction_model_name,
             reason=describe_compaction_unavailability(execution_plan),
         )
-
+    model = prepared_scope_history.model
+    static_tokens = model.request_tokens(frame.request())
     session = prepared_scope_history.session
     native_history = prepared_scope_history.native_history
-    counter = prepared_scope_history.counter
     if session is None:
         # A scope's first request holds no summary and no history.
-        summary, history = None, []
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
         replays_persisted_history = False
-        reported_history = False
     else:
-        summary, history = current_summary_text(session), prompt_visible_history(session, history_settings)
         estimate_history_tokens = partial(
             estimate_prompt_visible_history_tokens,
             session=session,
             history_settings=history_settings,
-            counter=counter,
+            model=model,
         )
-        reported_history_tokens = prepared_scope_history.reported_history_tokens
-        current_history_tokens = reported_history_tokens
-        if current_history_tokens is None:
-            current_history_tokens = estimate_history_tokens(native_route=native_history_route(native_history))
-        fitting_budget = history_budget
-        if history_budget is not None and current_history_tokens > history_budget:
-            current_history_tokens = estimate_history_tokens()
-            if reported_history_tokens is not None:
-                # Trimming sizes candidate replays by estimate, which the provider's count of this conversation shows
-                # to undercount by reported / estimated, so the budget shrinks into the estimate's units. It never
-                # widens: that ratio fits the whole history, and the newest runs trimming keeps may overcount less.
-                fitting_budget = min(history_budget, history_budget * current_history_tokens // reported_history_tokens)
+        request_size = prepared_scope_history.request_size
+        estimated: int | None = None
+        if request_size is not None:
+            # The final request holds the prepared one's history beside what the final frame holds, whose turn can
+            # hold unseen thread context the provisional turn did not.
+            request_tokens = request_size.tokens + static_tokens - prepared_scope_history.static_tokens
+        else:
+            # Only a required compaction leaves no size, and it turned native compaction off.
+            estimated = estimate_history_tokens()
+            request_tokens = static_tokens + estimated
+        # The history's share, which a reported size below the static estimate leaves at nothing.
+        history_tokens = max(0, request_tokens - static_tokens)
+        limit = execution_plan.limit_tokens
+        if limit is not None and request_tokens > limit:
+            if estimated is None:
+                estimated = estimate_history_tokens()
+            available_history_budget = _fitting_history_budget(
+                limit=limit,
+                static_tokens=static_tokens,
+                history_tokens=history_tokens,
+                estimated_history_tokens=estimated,
+                reported=request_size is not None and request_size.reported,
+            )
             if native_history is not None:
                 # Never trim a native checkpoint by run/message count, and never let the provider checkpoint a trimmed
                 # request, which would replace history it never held. Fall back to the canonical guard.
                 native_history = native_history.without_native_compaction()
-        if fitting_budget is not None:
             replay_plan = plan_replay_that_fits(
                 session=session,
                 history_settings=history_settings,
-                available_history_budget=fitting_budget,
-                current_history_tokens=current_history_tokens,
-                counter=counter,
+                available_history_budget=available_history_budget,
+                current_history_tokens=estimated,
+                model=model,
             )
             log_replay_plan(
                 replay_plan=replay_plan,
                 scope=owner_scope(session),
-                available_history_budget=fitting_budget,
-                current_history_tokens=current_history_tokens,
+                available_history_budget=available_history_budget,
+                current_history_tokens=estimated,
             )
         else:
-            replay_plan = configured_replay_plan(
-                history_settings=history_settings,
-                estimated_tokens=current_history_tokens,
-            )
+            replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=history_tokens)
         replays_persisted_history = has_effective_persisted_replay(session=session, replay_plan=replay_plan)
-        reported_history = reported_history_tokens is not None and replay_plan.mode == "configured"
 
-    prepared_context_tokens = static_prompt_tokens + replay_plan.estimated_tokens
+    prepared_context_tokens = static_tokens + replay_plan.estimated_tokens
     if pipeline_timing is not None:
         pipeline_timing.mark("replay_plan_ready")
         pipeline_timing.note(
@@ -770,14 +665,29 @@ def finalize_history_preparation(
         compaction_decision=prepared_scope_history.compaction_decision,
         compaction_reply_outcome=prepared_scope_history.compaction_reply_outcome,
         prepared_context_tokens=prepared_context_tokens,
-        request_basis=request_basis(
-            static_fingerprint=prepared_scope_history.static_fingerprint,
-            summary=summary,
-            history=history,
-        ),
-        reported_history=reported_history,
         native_history=native_history,
     )
+
+
+def _fitting_history_budget(
+    *,
+    limit: int,
+    static_tokens: int,
+    history_tokens: int,
+    estimated_history_tokens: int,
+    reported: bool,
+) -> int:
+    """Return the most history, in estimate units, a trimmed replay may keep beside ``static_tokens`` within ``limit``.
+
+    Trimming sizes candidate replays by estimate. When the provider's count of this conversation (``history_tokens``,
+    reported) shows the estimate undercounts by ``history_tokens / estimated_history_tokens``, the budget shrinks into
+    the estimate's units; it never widens, since that ratio fits the whole history and the newest runs trimming keeps
+    may overcount less. A static part at or over the limit leaves no room.
+    """
+    budget = max(0, limit - static_tokens)
+    if not reported or history_tokens <= 0:
+        return budget
+    return min(budget, budget * estimated_history_tokens // history_tokens)
 
 
 def resolve_entity_preparation_inputs(
@@ -785,7 +695,6 @@ def resolve_entity_preparation_inputs(
     config: Config,
     runtime_paths: RuntimePaths,
     history_settings: ResolvedHistorySettings,
-    static_prompt_tokens: int,
     active_model_name: str,
     active_context_window: int | None,
 ) -> HistoryPreparationInputs:
@@ -807,14 +716,11 @@ def resolve_entity_preparation_inputs(
     )
     return HistoryPreparationInputs(
         history_settings=history_settings,
-        active_model_name=runtime_model.model_name,
-        active_context_window=runtime_model.context_window,
         execution_plan=resolve_history_execution_plan(
             config=config,
             history_settings=history_settings,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
-            static_prompt_tokens=static_prompt_tokens,
         ),
     )
 

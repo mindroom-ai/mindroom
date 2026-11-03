@@ -8,10 +8,9 @@ from itertools import chain, takewhile
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.storage import run_folded_tool_call_ids
 from mindroom.history.summary_message import is_compaction_summary, mark_summary_follows, summary_follows
-from mindroom.llm.messages import Message, is_own_model_message
+from mindroom.llm.messages import Message, is_own_model_message, is_queued_notice_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text

@@ -666,16 +666,14 @@ async def test_the_reply_metadata_and_timing_carry_the_prepared_context_and_comp
     ai_run = collector[AI_RUN_METADATA_KEY]
     prepared_context = ai_run["prepared_context"]
     assert prepared_context["tokens"] == timing.metadata["prepared_context_tokens"]
-    # The leader's request replayed the whole history, so the reply publishes what that request held before its turn,
-    # which tells the next reply whether the request size the provider reports describes its history.
-    assert isinstance(prepared_context["request_basis"], str)
     compaction = ai_run["compaction"]
     assert (compaction["decision"], compaction["outcome"], compaction["reason"]) == (
         timing.metadata["compaction_decision"],
         timing.metadata["compaction_reply_outcome"],
         timing.metadata["compaction_reason"],
     )
-    assert compaction["current_history_tokens"] == timing.metadata["compaction_current_history_tokens"]
+    # The size of the leader's first request, which the decision compared with the plan's totals.
+    assert compaction["request_tokens"] == timing.metadata["compaction_request_tokens"]
 
 
 def _private_team(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> TeamTurn:  # noqa: ANN401

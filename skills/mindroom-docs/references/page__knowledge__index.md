@@ -156,7 +156,7 @@ knowledge_bases:
 - `exclude_extensions` removes extensions last and wins over both.
 
 The allowed set depends only on this configuration, never on the embedder or installed packages.
-Formats such as `.pdf`, `.docx`, or `.pptx` need their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) installed in the MindRoom environment.
+Formats such as `.docx` or `.pptx` need their reader package (for example `python-docx` or `python-pptx`) installed in the MindRoom environment; the PDF reader is installed with MindRoom.
 When a reader package is missing, the refresh indexes the other files, logs a warning naming the file and the missing package, and reports an indexing error instead of publishing an index that silently lacks those files.
 Extension filtering does not apply in `files` mode.
 Semantic indexing skips symlinked files and folders inside a base, so copy linked documents into the base instead.
