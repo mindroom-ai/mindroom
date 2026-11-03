@@ -681,6 +681,29 @@ def _frame_with_media(
     return frame(with_media(turn, media))
 
 
+def _frame_holding_attachments(
+    model: ModelProvider,
+    frame: Callable[[TurnMessages], RequestFrame],
+    media: MediaInputs,
+    turn: TurnMessages,
+    limit: int | None,
+    scope_context: ScopeSessionContext | None,
+) -> Callable[[TurnMessages], RequestFrame]:
+    """Return ``frame`` with ``media`` on the prompt when a request holding them and ``turn`` fits beside the summary.
+
+    Attachments estimated past ``limit`` even beside nothing but the scope's summary are left to the media fallback,
+    which drops them if the provider refuses, so an estimate that runs high trims the history but never fails the reply.
+    """
+    if not media.has_any():
+        return frame
+    media_frame = partial(_frame_with_media, frame, media)
+    session = scope_context.session if scope_context is not None else None
+    summary = session.summary if session is not None else None
+    if limit is None or model.request_tokens(media_frame(turn).request(summary=summary)) <= limit:
+        return media_frame
+    return frame
+
+
 def _turn_tokens(model: ModelProvider, frame: Callable[[TurnMessages], RequestFrame], turn: TurnMessages) -> int:
     """Return the size of a request that holds ``turn`` and no history."""
     return model.request_tokens(frame(turn).request())
@@ -714,11 +737,9 @@ async def _prepare_execution_context_common(
 
     ``timezone`` is the zone the current message's time is written in. ``frame`` holds what the run's requests hold
     around the scope's history for a turn, and ``sizer`` sizes them; each size holds the media ``ctx`` puts on the
-    prompt. A fallback thread replay stands in for persisted replay, so ``resolved_inputs``' request limit bounds it
-    too.
+    prompt when they fit beside the turn and the scope's summary. A fallback thread replay stands in for persisted
+    replay, so ``resolved_inputs``' request limit bounds it too.
     """
-    frame = partial(_frame_with_media, frame, ctx.media or MediaInputs())
-    turn_tokens = partial(_turn_tokens, sizer.model, frame)
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
@@ -765,6 +786,16 @@ async def _prepare_execution_context_common(
         )
 
     provisional_messages, _ = turn_messages(seen_event_ids)
+    frame = await asyncio.to_thread(
+        _frame_holding_attachments,
+        sizer.model,
+        frame,
+        ctx.media or MediaInputs(),
+        provisional_messages,
+        resolved_inputs.execution_plan.limit_tokens,
+        scope_context,
+    )
+    turn_tokens = partial(_turn_tokens, sizer.model, frame)
     prepared_scope_history = await prepare_scope_history(
         sizer=sizer,
         frame=frame(provisional_messages),

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pypdf import PdfWriter
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
@@ -639,6 +641,48 @@ async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
     assert "run-7" in replayed
     assert "run-0" not in replayed
     assert provider.model.request_tokens(request) <= 12_000 - 500
+
+
+@pytest.mark.asyncio
+async def test_attachments_estimated_past_the_limit_leave_the_summarized_history_to_the_provider(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Attachments that fit the limit only without the summary fail no reply: it replays as without them."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=12_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    seed_session(storage, session)
+    # About 5,000 tokens, which the limit holds beside the turn but not beside the turn and the report's 10,000 too.
+    seed_summary(storage, session, _SCOPE, "stored summary " * 1_300)
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=612, height=792)
+    pages = io.BytesIO()
+    writer.write(pages)
+    report = File(content=pages.getvalue(), mime_type="application/pdf", filename="report.pdf")
+
+    with _no_memory():
+        response = await ai_response(
+            replace(
+                make_turn_context("test_agent", session_id="session-1"),
+                prompt="Summarize the report.",
+                media=MediaInputs(files=(report,)),
+            ),
+            runtime_paths,
+            config,
+        )
+
+    assert response.text == "ok"
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (report,)
+    history = _after_prompt(request.messages)
+    assert is_compaction_summary(history[0])
+    assert [message.content for message in history[1:3]] == ["run-1 question", "run-1 answer"]
 
 
 @pytest.mark.asyncio
