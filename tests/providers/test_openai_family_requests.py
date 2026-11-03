@@ -1503,6 +1503,37 @@ def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: s
     assert responses["file_data"] == chat["file"]["file_data"]
 
 
+@pytest.mark.parametrize(
+    ("file", "sent"),
+    [
+        (
+            File(content="1;Müller GmbH;3 €\n".encode("cp1252"), mime_type="text/csv", filename="rows.csv"),
+            "data:text/csv;base64," + base64.b64encode("1;Müller GmbH;3 €\n".encode()).decode(),
+        ),
+        (
+            File(content="1;Müller GmbH\n".encode("latin-1"), mime_type="text/csv; charset=iso-8859-1"),
+            "data:text/csv;base64," + base64.b64encode("1;Müller GmbH\n".encode()).decode(),
+        ),
+        (
+            File(content=b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", mime_type="application/pdf", filename="a.pdf"),
+            "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n").decode(),
+        ),
+    ],
+    ids=["windows-1252-csv", "latin-1-charset-csv", "pdf"],
+)
+def test_chat_and_responses_send_a_text_file_as_its_text_in_utf8(file: File, sent: str) -> None:
+    """A Windows-1252 CSV goes as the UTF-8 of the text it holds, the text Claude and request sizing read.
+
+    Its type goes without the charset its bytes no longer have, and any other file goes as its own bytes.
+    """
+    chat = chat_file_part(file, provider="OpenAI Chat")
+    responses = responses_file_part(file, provider="OpenAI Responses")
+
+    assert chat is not None
+    assert responses is not None
+    assert chat["file"]["file_data"] == responses["file_data"] == sent
+
+
 def test_a_file_without_any_name_takes_each_wire_s_generic_name() -> None:
     """Chat names such a file part ``file`` and Responses ``document``; a rejection's file names read the same rule."""
     chat = chat_file_part(File(content=b"%PDF"), provider="OpenAI Chat")

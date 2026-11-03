@@ -25,7 +25,7 @@ import nio
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.llm.media import canonical_mime_type, named_mime_type, rendered_label
+from mindroom.llm.media import canonical_mime_type, is_text_mime_type, named_mime_type, rendered_label
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -917,7 +917,10 @@ async def _register_media_attachment(
     )
 
 
-def _is_utf8_text(data: bytes) -> bool:
+def _is_text_file(data: bytes | None) -> bool:
+    """Return whether ``data`` is UTF-8 text without NULs and not a PDF, whose bytes may all be ASCII."""
+    if data is None or data.startswith(b"%PDF-"):
+        return False
     try:
         data.decode("utf-8")
     except UnicodeDecodeError:
@@ -926,15 +929,26 @@ def _is_utf8_text(data: bytes) -> bool:
 
 
 def _received_file_type(declared: str | None, filename: str | None, data: bytes | None) -> str | None:
-    """Return a received file's type: the declared one, else its filename's, else ``text/plain`` for UTF-8 text.
+    """Return a received file's type, and ``text/plain`` for UTF-8 text whose candidate type is not a text type.
 
-    Clients leave the type out, or declare ``application/octet-stream``, for an extension the browser cannot type,
-    such as ``.yaml``, so that type names none. A file whose type stays unknown keeps the declared one.
+    A declared type stands unless it is missing, ``application/octet-stream``, or an audio or video type; then the
+    candidate decides. The candidate is the declared audio or video type, because browsers type a TypeScript file
+    (``.ts``) as an MPEG transport stream, else the filename's type, because clients declare no type or
+    ``application/octet-stream`` for an extension the browser cannot type, such as ``.yaml``. A host's MIME table may
+    give a text file's name a non-text type, such as ``model/vnd.mts`` for ``.mts``, so UTF-8 text without NULs, other
+    than a PDF, whose candidate is not a text type is ``text/plain``. Any other file takes its candidate, else the
+    declared type.
     """
-    for candidate in (canonical_mime_type(declared), named_mime_type(filename or "")):
-        if candidate not in {None, "application/octet-stream"}:
-            return candidate
-    return "text/plain" if data is not None and _is_utf8_text(data) else declared
+    declared_type = canonical_mime_type(declared)
+    if declared_type is None or declared_type == "application/octet-stream":
+        candidate = named_mime_type(filename or "")
+    elif declared_type.startswith(("audio/", "video/")):
+        candidate = declared_type
+    else:
+        return declared_type
+    if not is_text_mime_type(candidate) and _is_text_file(data):
+        return "text/plain"
+    return candidate if candidate not in {None, "application/octet-stream"} else declared
 
 
 async def _register_file_or_video_attachment(
@@ -945,15 +959,17 @@ async def _register_file_or_video_attachment(
     thread_id: str | None,
     event: FileOrVideoMessageEvent,
 ) -> AttachmentRecord | None:
-    """Persist a file/video event and register it as an attachment record."""
+    """Persist a file/video event and register it as an attachment record; a video event holding text is a file."""
     media_bytes = await download_media_bytes(client, event)
-    kind: _AttachmentKind = "video" if is_video_message_event(event) else "file"
     filename = _filename_for_media_event(event)
+    mime_type = _received_file_type(media_mime_type(event), filename, media_bytes)
+    video = is_video_message_event(event) and not is_text_mime_type(mime_type)
+    kind: _AttachmentKind = "video" if video else "file"
     return await _register_media_attachment(
         storage_path=storage_path,
         event_id=event.event_id,
         media_bytes=media_bytes,
-        mime_type=_received_file_type(media_mime_type(event), filename, media_bytes),
+        mime_type=mime_type,
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,

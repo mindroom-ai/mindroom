@@ -6,6 +6,7 @@ import asyncio
 import errno
 import hashlib
 import json
+import mimetypes
 import os
 import threading
 from datetime import UTC, datetime, timedelta
@@ -55,8 +56,13 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
-def _file_event(event_id: str, filename: str, info: dict[str, object] | None) -> nio.RoomMessageFile:
-    content: dict[str, object] = {"msgtype": "m.file", "body": filename, "url": f"mxc://localhost/{filename}"}
+def _file_event(
+    event_id: str,
+    filename: str,
+    info: dict[str, object] | None,
+    msgtype: str = "m.file",
+) -> nio.RoomMessageFile | nio.RoomMessageVideo:
+    content: dict[str, object] = {"msgtype": msgtype, "body": filename, "url": f"mxc://localhost/{filename}"}
     if info is not None:
         content["info"] = info
     event = nio.Event.parse_event(
@@ -68,7 +74,7 @@ def _file_event(event_id: str, filename: str, info: dict[str, object] | None) ->
             "content": content,
         },
     )
-    assert isinstance(event, nio.RoomMessageFile)
+    assert isinstance(event, nio.RoomMessageFile | nio.RoomMessageVideo)
     return event
 
 
@@ -906,9 +912,10 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
     tmp_path: Path,
     info: dict[str, object] | None,
 ) -> None:
-    """A file whose client declares no type takes its name's type, else plain text for UTF-8 text, else none.
+    """A file whose client declares no type is plain text for UTF-8 text its name types as no text type.
 
-    Its retained copy carries that type's suffix, and a text file reaches Claude as the text document Claude reads.
+    Any other such file takes its name's type, else the declared one. Its retained copy carries that type's suffix,
+    and a text file reaches Claude as the text document Claude reads.
     """
     payloads = {
         "config.yaml": b"replicas: 3\n",
@@ -982,6 +989,103 @@ async def test_a_declared_type_stands_over_the_file_name(tmp_path: Path) -> None
 
     assert record is not None
     assert record.mime_type == "text/csv"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("declared", "filename", "msgtype"),
+    [
+        ("video/mp2t", "index.ts", "m.file"),
+        ("video/vnd.dlna.mpeg-tts", "vite.config.mts", "m.file"),
+        ("audio/mpeg", "notes.txt", "m.file"),
+        ("video/mp2t", "index.ts", "m.video"),
+    ],
+)
+async def test_a_text_file_declared_as_audio_or_video_reaches_claude_as_text(
+    tmp_path: Path,
+    declared: str,
+    filename: str,
+    msgtype: str,
+) -> None:
+    """A browser types a TypeScript file as an MPEG transport stream; its UTF-8 text makes it a plain text file instead.
+
+    The same holds for any audio or video type, whatever type the host's MIME table gives the file's name, and for a
+    video event, and a real stream sent so keeps its declared type and kind.
+    """
+    payloads = {
+        filename: b"export const answer: number = 42;\n",
+        f"clip{Path(filename).suffix}": b"\x47\x40\x00\x10\x00\x00\xb0\x0d\x00\x01",
+    }
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            payloads[urlsplit(path).path.rsplit("/", 1)[-1]],
+        ),
+    )
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$file{index}", filename, {"mimetype": declared}, msgtype),
+        )
+        for index, filename in enumerate(payloads)
+    ]
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    stream_kind = "video" if msgtype == "m.video" else "file"
+    assert [(record.mime_type, record.kind) if record else None for record in records] == [
+        ("text/plain", "file"),
+        (declared, stream_kind),
+    ]
+    assert records[0] is not None
+    _, _, files, _ = attachment_records_to_media([records[0]])
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
+    await claude_turn(
+        route_provider("anthropic", tmp_path, wire),
+        ModelRequest(messages=[Message(role="user", content="Review.", files=files)]),
+    )
+    (user,) = wire.body()["messages"]
+    assert [block["source"] for block in user["content"] if block["type"] == "document"] == [
+        {"type": "text", "media_type": "text/plain", "data": "export const answer: number = 42;\n"},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("info", [None, {"mimetype": "application/octet-stream"}])
+async def test_an_untyped_text_file_is_plain_text_whatever_the_host_names_its_extension(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    info: dict[str, object] | None,
+) -> None:
+    """Debian's MIME table names ``.mts`` a 3D model type; a TypeScript module's UTF-8 text is still plain text.
+
+    A binary file of that name keeps the type its name gives.
+    """
+    table = mimetypes.MimeTypes()
+    table.add_type("model/vnd.mts", ".mts")
+    monkeypatch.setattr(mimetypes, "guess_type", table.guess_type)
+    payloads = {"vite.config.mts": b"export default { root: 'src' };\n", "scene.mts": b"\x00\x01\x02model"}
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            payloads[urlsplit(path).path.rsplit("/", 1)[-1]],
+        ),
+    )
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$file{index}", filename, info),
+        )
+        for index, filename in enumerate(payloads)
+    ]
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    assert [record.mime_type if record else None for record in records] == ["text/plain", "model/vnd.mts"]
 
 
 def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:
