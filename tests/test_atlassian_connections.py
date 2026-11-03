@@ -402,6 +402,8 @@ async def test_connection_tools_take_space_limits_for_their_own_products(
     assert tuple(tool.functions) == atlassian_function_names(("confluence",), write=False, prefix="partner_")
     # The prompt shows toolkit instructions unnamed, so they name the connection's own functions.
     assert tool.instructions == "The `partner_confluence_*` functions may use only these Confluence spaces: DOCS."
+    archive = _build("archive_atlassian", plugins)
+    assert tuple(archive.functions) == atlassian_function_names(write=False, prefix="archive_")
     entries = plugins.tools.entries
     assert [field.name for field in entries["partner_atlassian"].agent_override_fields or ()] == ["confluence_spaces"]
     for name, overrides in (("partner_atlassian", {"jira_spaces": ["ENG"]}), ("archive_atlassian", {"write": True})):

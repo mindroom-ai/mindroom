@@ -185,10 +185,12 @@ def _validate_text_authored_override_value(
         if field.type == "string[]":
             values = _normalize_string_array_override(value, preserve_empty_list=True)
             pattern = (field.validation or {}).get("pattern")
-            invalid = next((item for item in values or () if pattern and not re.fullmatch(pattern, item)), None)
-            if invalid is not None:
-                msg = f"{full_path}: {invalid!r} is not a valid {field.label} entry."
-                raise ToolConfigOverrideError(msg)
+            if pattern:
+                invalid = next((item for item in values or () if not re.fullmatch(pattern, item)), None)
+                if invalid is not None:
+                    example = f", such as {field.placeholder}" if field.placeholder else ""
+                    msg = f"{full_path}: {invalid!r} is not a valid {field.label} entry; use values{example}."
+                    raise ToolConfigOverrideError(msg)
             return values
         if agent_override_field is not None and agent_override_field.type == "string[]":
             normalized = _normalize_string_array_override(value)

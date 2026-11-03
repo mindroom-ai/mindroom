@@ -79,10 +79,10 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | Scope | Type | Used by |
 | --- | --- | --- |
 | `offline_access` | classic | Token refresh |
-| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_transition_issue`, and with `jira_spaces` also `jira_update_issue` and `jira_add_comment` |
+| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_transition_issue` |
 | `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments`, and with `confluence_spaces` every Confluence function |
-| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments`, and with `confluence_spaces` every Confluence function except `confluence_search` |
+| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments` |
+| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments` |
 | `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
 | `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
 | `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
@@ -148,7 +148,7 @@ agents:
 - An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, and creating or updating an issue can set a parent in another space.
 - `write` combines with `defaults.tools` and dashboard settings like any [tool setting](index.md#how-settings-combine), while the space lists can be set only on an agent's tool entry.
 - Changing these options needs no reconnect.
-- These limits apply only to this tool, so do not also give a limited agent the [egress broker](../deployment/egress-broker.md) `atlassian` service, the API-token `jira` and `confluence` tools, or code-execution tools that run outside a worker, which reach every space the account can.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](../deployment/egress-broker.md) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.
 
 ## Connect An Account
 

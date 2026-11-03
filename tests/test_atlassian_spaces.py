@@ -159,7 +159,7 @@ def test_space_keys_are_checked_when_the_config_loads(value: object, accepted: l
     if accepted is None:
         with pytest.raises(
             ToolConfigOverrideError,
-            match=r"agents\.helper\.tools\.atlassian\.jira_spaces: .* is not a valid",
+            match=r"agents\.helper\.tools\.atlassian\.jira_spaces: .* is not a valid .* such as ENG\.",
         ):
             validate_authored_tool_entry_overrides(
                 "atlassian",
@@ -284,10 +284,22 @@ async def test_jira_create_outside_allowed_spaces_sends_nothing(
     """Creating an issue in another space is refused before any Atlassian call."""
     tool, gateway = _connected(tmp_path, monkeypatch, jira_spaces=["ENG"])
 
+    gateway.route("POST", gateway_url("jira", "/rest/api/3/issue"), {"id": "1", "key": "ENG-2"})
+
     result = await _call(tool, "jira_create_issue", project_key="OPS", summary="New")
+    assert gateway.requests == []
+    # Extra fields cannot move the new issue into another space.
+    created = await _call(
+        tool,
+        "jira_create_issue",
+        project_key="ENG",
+        summary="New",
+        fields={"project": {"key": "OPS"}},
+    )
 
     assert result["code"] == "space_not_allowed"
-    assert gateway.requests == []
+    assert created["status"] == "ok"
+    assert json_body(gateway.product_requests()[0])["fields"]["project"] == {"key": "ENG"}
 
 
 @pytest.mark.asyncio
