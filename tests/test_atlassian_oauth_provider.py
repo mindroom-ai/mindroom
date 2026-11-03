@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+import re
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -11,12 +12,9 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.oauth.atlassian import AtlassianProduct, atlassian_oauth_provider
+from mindroom.oauth.atlassian import _ATLASSIAN_FUNCTIONS, AtlassianProduct, atlassian_oauth_provider
 from mindroom.tool_system.plugins import config_plugins
 from tests.oauth_test_utils import oauth_authorization_url
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -114,3 +112,18 @@ def test_authorization_url_carries_audience_consent_and_callback(tmp_path: Path)
     assert query["state"] == ["opaque-state"]
     assert query["redirect_uri"] == ["https://chat.example.com/api/oauth/atlassian/callback"]
     assert query["scope"] == [" ".join(provider.scopes)]
+
+
+def test_docs_scope_table_lists_each_scope_s_functions() -> None:
+    """The Scopes table on the tool's docs page names exactly the functions that request each scope."""
+    page = (Path(__file__).parent.parent / "docs/tools/atlassian.md").read_text(encoding="utf-8")
+    rows = {
+        match.group(1): set(re.findall(r"`([a-z_]+)`", match.group(2)))
+        for match in re.finditer(r"^\| `([^`]+)` \| (?:classic|granular) \| (.*) \|$", page, re.MULTILINE)
+        if match.group(1) != "offline_access"
+    }
+
+    assert rows == {
+        scope: {function.name for function in _ATLASSIAN_FUNCTIONS if scope in function.scopes}
+        for scope in {scope for function in _ATLASSIAN_FUNCTIONS for scope in function.scopes}
+    }

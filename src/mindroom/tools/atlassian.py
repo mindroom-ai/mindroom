@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.custom_tools.atlassian_spaces import CONFLUENCE_SPACE_KEY_PATTERN, JIRA_PROJECT_KEY_PATTERN
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -50,6 +51,42 @@ if TYPE_CHECKING:
             required=False,
             default=None,
             description="Atlassian cloud ID of the site; when the site URL is also set, both must name the same site.",
+        ),
+        ConfigField(
+            name="write",
+            label="Allow Write Operations",
+            type="boolean",
+            required=False,
+            default=True,
+            description="Allow creating, updating, commenting on, and transitioning Jira issues and Confluence pages.",
+        ),
+    ],
+    agent_override_fields=[
+        ConfigField(
+            name="jira_spaces",
+            label="Jira Spaces",
+            type="string[]",
+            required=False,
+            default=None,
+            placeholder="ENG",
+            validation={"pattern": JIRA_PROJECT_KEY_PATTERN.pattern},
+            description=(
+                "Keys of the only Jira spaces (projects) this agent may use; "
+                "an empty list removes the Jira functions, and unset allows every space."
+            ),
+        ),
+        ConfigField(
+            name="confluence_spaces",
+            label="Confluence Spaces",
+            type="string[]",
+            required=False,
+            default=None,
+            placeholder="DOCS",
+            validation={"pattern": CONFLUENCE_SPACE_KEY_PATTERN.pattern},
+            description=(
+                "Keys of the only Confluence spaces this agent may use; "
+                "an empty list removes the Confluence functions, and unset allows every space."
+            ),
         ),
     ],
     managed_init_args=(
