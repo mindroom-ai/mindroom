@@ -907,9 +907,10 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
     tmp_path: Path,
     info: dict[str, object] | None,
 ) -> None:
-    """A file whose client declares no type takes its name's type, else plain text for UTF-8 text, else none.
+    """A file whose client declares no type is plain text for UTF-8 text its name types as no text type.
 
-    Its retained copy carries that type's suffix, and a text file reaches Claude as the text document Claude reads.
+    Any other such file takes its name's type, else the declared one. Its retained copy carries that type's suffix,
+    and a text file reaches Claude as the text document Claude reads.
     """
     payloads = {
         "config.yaml": b"replicas: 3\n",
