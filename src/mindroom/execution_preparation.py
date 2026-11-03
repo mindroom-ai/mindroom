@@ -671,9 +671,9 @@ async def _finalize_prepared_history(
     )
 
 
-def _turn_tokens(sizer: RequestSizer, frame: Callable[[TurnMessages], RequestFrame], turn: TurnMessages) -> int:
+def _turn_tokens(model: ModelProvider, frame: Callable[[TurnMessages], RequestFrame], turn: TurnMessages) -> int:
     """Return the size of a request that holds ``turn`` and no history."""
-    return sizer.model.request_tokens(frame(turn).request(summary=None, history=()))
+    return model.request_tokens(frame(turn).request())
 
 
 async def _prepare_execution_context_common(
@@ -706,7 +706,7 @@ async def _prepare_execution_context_common(
     around the scope's history for a turn, and ``sizer`` sizes them. A fallback thread replay stands in for persisted
     replay, so ``resolved_inputs``' request limit bounds it too.
     """
-    turn_tokens = partial(_turn_tokens, sizer, frame)
+    turn_tokens = partial(_turn_tokens, sizer.model, frame)
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.

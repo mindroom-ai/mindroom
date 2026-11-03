@@ -111,7 +111,7 @@ def note_prepared_history_timing(
 
 @dataclass(frozen=True)
 class HistoryPreparationInputs:
-    """Fully resolved policy/model/token inputs for one history preparation."""
+    """The resolved history settings and execution plan of one history preparation."""
 
     history_settings: ResolvedHistorySettings
     execution_plan: ResolvedHistoryExecutionPlan
@@ -162,7 +162,7 @@ async def prepare_scope_history(
     model = sizer.model
     execution_plan = resolved_inputs.execution_plan
     # Encoding a long prompt would stall the replies sharing the event loop.
-    static_tokens = await asyncio.to_thread(model.request_tokens, frame.request(summary=None, history=()))
+    static_tokens = await asyncio.to_thread(model.request_tokens, frame.request())
     configure_native = partial(
         configure_native_history,
         model,
@@ -230,7 +230,7 @@ async def prepare_scope_history(
         pipeline_timing.note(
             compaction_decision=compaction_decision.mode,
             compaction_reason=compaction_decision.reason,
-            compaction_request_tokens=request_size.tokens,
+            compaction_request_tokens=compaction_decision.request_tokens,
             compaction_trigger_tokens=compaction_decision.trigger_tokens,
             compaction_limit_tokens=compaction_decision.limit_tokens,
         )
@@ -250,7 +250,7 @@ async def prepare_scope_history(
             if compaction_decision.reason == "over_trigger_native_disabled"
             else execution_plan.limit_tokens
         )
-        history_budget = None if target is None else max(0, target - static_tokens)
+        history_budget = _history_share(target, static_tokens)
         history_tokens = max(0, request_size.tokens - static_tokens)
         compaction_result = await _run_scope_compaction_with_lifecycle(
             mode=state.compaction_mode,
@@ -269,9 +269,7 @@ async def prepare_scope_history(
                 resolved_inputs=resolved_inputs,
                 history_budget=history_budget,
                 # A trigger-level pass may store a summary above its target, but never one the reply cannot replay.
-                max_summary_tokens=(
-                    None if execution_plan.limit_tokens is None else max(0, execution_plan.limit_tokens - static_tokens)
-                ),
+                max_summary_tokens=_history_share(execution_plan.limit_tokens, static_tokens),
                 before_tokens=history_tokens,
                 model=model,
                 config=config,
@@ -571,6 +569,11 @@ async def compact_scope_mid_turn(
     return result.outcome
 
 
+def _history_share(total: int | None, static_tokens: int) -> int | None:
+    """Return the history's share of a whole-request size: what it holds beyond the request without its history."""
+    return None if total is None else max(0, total - static_tokens)
+
+
 def finalize_history_preparation(
     *,
     prepared_scope_history: PreparedScopeHistory,
@@ -590,7 +593,7 @@ def finalize_history_preparation(
             reason=describe_compaction_unavailability(execution_plan),
         )
     model = prepared_scope_history.model
-    static_tokens = model.request_tokens(frame.request(summary=None, history=()))
+    static_tokens = model.request_tokens(frame.request())
     session = prepared_scope_history.session
     native_history = prepared_scope_history.native_history
     if session is None:

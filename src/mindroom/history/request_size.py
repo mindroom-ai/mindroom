@@ -41,11 +41,14 @@ class RequestFrame:
     def request(
         self,
         *,
-        summary: ScopeSummary | None,
-        history: Sequence[Message],
+        summary: ScopeSummary | None = None,
+        history: Sequence[Message] = (),
         native: NativeHistory | None = None,
     ) -> ModelRequest:
-        """Return the request that replays ``history`` after ``summary``, with ``native``'s provider-history settings."""
+        """Return the request that replays ``history`` after ``summary``, with ``native``'s provider-history settings.
+
+        Without either, it is the request without its history, which sizes what every request holds besides it.
+        """
         messages = (*self.system_messages, *request_layout(summary=summary, history=history, turn=self.turn))
         return replace(with_native_history(self.template, native), messages=messages)
 
