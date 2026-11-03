@@ -689,12 +689,13 @@ def _frame_holding_attachments(
     limit: int | None,
     scope_context: ScopeSessionContext | None,
 ) -> Callable[[TurnMessages], RequestFrame]:
-    """Return ``frame`` with ``media`` on the prompt when a request holding them fits beside what no trim removes.
+    """Return ``frame`` with ``media`` on the prompt when a request holding them, ``turn``, and the summary fits ``limit``.
 
-    That is ``turn`` and the scope's summary; a scope without a session has no summary, and the thread history in its
-    turn stands in for a replay that is fitted beside the attachments later, so only the rest of the turn counts.
-    Attachments estimated past ``limit`` beside it are left to the media fallback, which drops them if the provider
-    refuses, so an estimate that runs high trims the history but never fails the reply or drops what it would keep.
+    ``turn`` is what the reply cannot trim, and ``scope_context`` the scope whose summary it replays: the whole turn
+    and the scope for a reply that replays stored history, and the turn without its thread and no scope for one whose
+    thread stands in for that history. Attachments estimated past ``limit`` beside them are left to the media fallback,
+    which drops them if the provider refuses, so an estimate that runs high trims the history but never fails the reply
+    or drops history it would keep.
     """
     if not media.has_any():
         return frame
@@ -702,9 +703,8 @@ def _frame_holding_attachments(
     if limit is None:
         return media_frame
     session = scope_context.session if scope_context is not None else None
-    kept = turn if session is not None else replace(turn, context=())
     summary = session.summary if session is not None else None
-    if model.request_tokens(media_frame(kept).request(summary=summary)) <= limit:
+    if model.request_tokens(media_frame(turn).request(summary=summary)) <= limit:
         return media_frame
     return frame
 
@@ -742,8 +742,8 @@ async def _prepare_execution_context_common(
 
     ``timezone`` is the zone the current message's time is written in. ``frame`` holds what the run's requests hold
     around the scope's history for a turn, and ``sizer`` sizes them; each size holds the media ``ctx`` puts on the
-    prompt when they fit beside the turn and the scope's summary. A fallback thread replay stands in for persisted
-    replay, so ``resolved_inputs``' request limit bounds it too.
+    prompt when they fit beside what the reply cannot trim (``_frame_holding_attachments``). A fallback thread replay
+    stands in for persisted replay, so ``resolved_inputs``' request limit bounds it too.
     """
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
@@ -791,19 +791,20 @@ async def _prepare_execution_context_common(
         )
 
     provisional_messages, _ = turn_messages(seen_event_ids)
-    frame = await asyncio.to_thread(
+    media = ctx.media or MediaInputs()
+    limit = resolved_inputs.execution_plan.limit_tokens
+    replay_frame = await asyncio.to_thread(
         _frame_holding_attachments,
         sizer.model,
         frame,
-        ctx.media or MediaInputs(),
+        media,
         provisional_messages,
-        resolved_inputs.execution_plan.limit_tokens,
+        limit,
         scope_context,
     )
-    turn_tokens = partial(_turn_tokens, sizer.model, frame)
     prepared_scope_history = await prepare_scope_history(
         sizer=sizer,
-        frame=frame(provisional_messages),
+        frame=replay_frame(provisional_messages),
         resolved_inputs=resolved_inputs,
         runtime_paths=runtime_paths,
         config=config,
@@ -820,7 +821,7 @@ async def _prepare_execution_context_common(
 
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
-        frame=frame(final_messages),
+        frame=replay_frame(final_messages),
         pipeline_timing=pipeline_timing,
     )
     if scheduled_history_budget is not None:
@@ -839,6 +840,17 @@ async def _prepare_execution_context_common(
                 active_event_ids=active_event_ids,
             )
         render_limits = thread_history_render_limits or ThreadHistoryRenderLimits()
+        # The thread is fitted beside what the reply cannot trim without it, and the reply replays no summary.
+        fallback_frame = await asyncio.to_thread(
+            _frame_holding_attachments,
+            sizer.model,
+            frame,
+            media,
+            replace(final_messages, context=()),
+            limit,
+            None,
+        )
+        turn_tokens = partial(_turn_tokens, sizer.model, fallback_frame)
         # Fitting the thread to the budget counts it repeatedly, so it runs in a worker thread.
         final_messages = await asyncio.to_thread(
             _build_thread_history_messages,
@@ -855,7 +867,7 @@ async def _prepare_execution_context_common(
             max_messages=render_limits.max_messages,
             max_message_length=render_limits.max_message_length,
             missing_sender_label=render_limits.missing_sender_label,
-            static_token_budget=resolved_inputs.execution_plan.limit_tokens,
+            static_token_budget=limit,
             turn_tokens=turn_tokens,
             attachment_context=attachment_context,
             member_display_names=member_display_names,

@@ -38,6 +38,7 @@ from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message, stable_serialize, system_text
+from mindroom.llm.runs import RunStatus
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
@@ -644,16 +645,26 @@ async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("errored_run", [False, True])
 async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attachments(
     tmp_path: Path,
     provider: _Provider,
+    *,
+    errored_run: bool,
 ) -> None:
-    """A reply with no stored history replays the thread instead, as much of it as leaves room for the attachments."""
+    """A reply with no history to replay replays the thread instead, as much of it as leaves room for the attachments.
+
+    A scope whose only stored run errored has a session but nothing to replay either.
+    """
     config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
         context_window=12_000,
     )
+    if errored_run:
+        storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+        failed = replace(_completed_run("run-0"), status=RunStatus.error)
+        seed_session(storage, _session("fresh", runs=[failed]))
     thread_history = [
         make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 3_000, event_id=f"$note-{index}")
         for index in range(10)
@@ -781,6 +792,51 @@ async def test_without_a_context_window_the_prepared_size_holds_the_attachments(
         ]
 
     assert sizes[0] - sizes[1] == MEDIA_ALLOWANCE_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_a_reply_compacts_before_its_first_request_to_make_room_for_its_attachment(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """History under the trigger on its own but over it beside the attachment compacts before the reply is sent."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(reserve_tokens=500),
+        context_window=12_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    # Six runs of about 750 tokens each, under the 9,600-token trigger alone and over it beside a 5,000-token file.
+    runs = [
+        _completed_run(
+            f"run-{index}",
+            messages=[
+                Message(role="user", content=f"run-{index} " + "q" * 3_000),
+                Message(role="assistant", content=f"run-{index} answer"),
+            ],
+        )
+        for index in range(6)
+    ]
+    seed_session(storage, _session("session-1", runs=runs))
+    archive = File(content=b"\x89\xff binary", filename="archive.bin")
+
+    with (
+        _no_memory(),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")),
+    ):
+        await ai_response(
+            replace(
+                make_turn_context("test_agent", session_id="session-1"),
+                prompt="Read the archive.",
+                media=MediaInputs(files=(archive,)),
+            ),
+            runtime_paths,
+            config,
+        )
+
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (archive,)
+    assert any("merged summary" in str(message.content) for message in request.messages)
 
 
 @pytest.mark.asyncio
