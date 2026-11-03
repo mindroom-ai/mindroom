@@ -8,15 +8,10 @@ from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.entitlements import ENDED_STRIPE_STATUSES
 from backend.models import UrlResponse
-from backend.pricing import (
-    get_plan_details,
-    get_stripe_price_id,
-    get_stripe_price_match,
-    get_trial_days,
-    is_trial_enabled_for_plan,
-)
+from backend.pricing import get_plan_details, get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
 from backend.services import provisioner_service
 from backend.services.instance_lifecycle import PENDING_DELETION_BILLING_DETAIL
+from backend.services.subscription_projection import PermanentEventError, plan_from_price
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -98,8 +93,12 @@ def _plan_change_portal_options(subscription: Any, tier: str, price_id: str) -> 
     ):
         return {}
     item = subscription["items"]["data"][0]
-    current = get_stripe_price_match(item["price"]["id"])
-    current_plan = get_plan_details(current.tier) if current else None
+    try:
+        # A price no longer in the pricing config still names its plan in its metadata.
+        current_tier, _ = plan_from_price(item["price"])
+    except PermanentEventError:
+        return {}
+    current_plan = get_plan_details(current_tier)
     plan = get_plan_details(tier)
     if not (
         current_plan

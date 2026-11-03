@@ -353,6 +353,45 @@ class TestStripeRoutesEndpoints:
         }
 
     @pytest.mark.parametrize(
+        ("price_id", "metadata_tier", "tier", "opens_confirmation"),
+        [
+            ("price_retired_hobby", "hobby", "pro", True),
+            ("price_retired_pro", "pro", "hobby", False),
+            ("price_retired_unknown", None, "pro", False),
+            # A configured price ID decides the plan even when its metadata says otherwise.
+            (get_stripe_price_id("pro", "monthly"), "hobby", "pro", False),
+        ],
+    )
+    def test_checkout_finds_the_plan_of_a_price_no_longer_in_the_pricing_config(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        price_id: str,
+        metadata_tier: str | None,
+        tier: str,
+        opens_confirmation: bool,
+    ):
+        """A subscriber kept on an old price upgrades like any other, judged by the plan its metadata names."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"stripe_customer_id": "cus_test_123"}
+        )
+        metadata = {"tier": metadata_tier, "billing_cycle": "monthly"} if metadata_tier else {}
+        mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
+            _subscription("sub_existing", "active", price_id, metadata)
+        ]
+        mock_stripe.billing_portal.Configuration.list.return_value.auto_paging_iter.return_value = []
+        mock_stripe.billing_portal.Configuration.create.return_value = Mock(id="bpc_new")
+        mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
+
+        response = client.post("/stripe/checkout", json={"tier": tier, "billing_cycle": "monthly"})
+
+        assert response.status_code == 200
+        session = mock_stripe.billing_portal.Session.create.call_args.kwargs
+        assert ("flow_data" in session) is opens_confirmation
+
+    @pytest.mark.parametrize(
         ("status", "cancel", "current_tier", "tier", "billing_cycle"),
         [
             ("past_due", {}, "hobby", "pro", "monthly"),
@@ -451,7 +490,9 @@ class TestStripeRoutesEndpoints:
         assert response.status_code == 401
 
 
-def _subscription(subscription_id: str, status: str, price_id: str | None, **fields: object) -> stripe.Subscription:
+def _subscription(
+    subscription_id: str, status: str, price_id: str | None, price_metadata: dict | None = None, **fields: object
+) -> stripe.Subscription:
     """Build a Stripe subscription with one item, read by attribute and by key like the real object."""
     return stripe.Subscription.construct_from(
         {
@@ -462,7 +503,7 @@ def _subscription(subscription_id: str, status: str, price_id: str | None, **fie
             "cancel_at_period_end": False,
             "schedule": None,
             "collection_method": "charge_automatically",
-            "items": {"data": [{"id": "si_existing", "price": {"id": price_id}}]},
+            "items": {"data": [{"id": "si_existing", "price": {"id": price_id, "metadata": price_metadata or {}}}]},
             **fields,
         },
         "sk_test_mock",
