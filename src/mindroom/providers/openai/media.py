@@ -14,7 +14,7 @@ import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.media import image_mime_type, named_mime_type
+from mindroom.llm.media import file_text, image_mime_type, is_text_mime_type, named_mime_type
 from mindroom.providers.media_files import read_media_bytes
 
 if TYPE_CHECKING:
@@ -103,7 +103,8 @@ def _file_part_data_url(file: File, name: str, data: bytes) -> str:
 
     The original filename comes first because a storage path is opaque and may end in ``.bin``. A declared
     ``application/octet-stream`` names no type, and Responses rejects it, so the filename decides then too; a
-    compressed name such as ``report.csv.gz`` names no type either.
+    compressed name such as ``report.csv.gz`` names no type either. A text file carries its text (``file_text``) in
+    UTF-8.
     """
     mime_type = file.mime_type if file.mime_type and file.mime_type != "application/octet-stream" else None
     display_name = file.filename or file.name
@@ -112,6 +113,8 @@ def _file_part_data_url(file: File, name: str, data: bytes) -> str:
     if mime_type is None:
         guessed, encoding = mimetypes.guess_type(file.filepath or name)
         mime_type = guessed if guessed and encoding is None else "application/octet-stream"
+    if is_text_mime_type(mime_type):
+        data = file_text(data).encode("utf-8")
     return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
 
 

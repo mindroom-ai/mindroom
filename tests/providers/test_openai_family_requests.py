@@ -1503,6 +1503,18 @@ def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: s
     assert responses["file_data"] == chat["file"]["file_data"]
 
 
+def test_chat_and_responses_send_a_text_file_that_is_not_utf8_as_its_text_in_utf8() -> None:
+    """A Windows-1252 CSV goes as the UTF-8 of the text it holds, the text Claude and request sizing read."""
+    file = File(content="1;Müller GmbH;3 €\n".encode("cp1252"), mime_type="text/csv", filename="rows.csv")
+    chat = chat_file_part(file, provider="OpenAI Chat")
+    responses = responses_file_part(file, provider="OpenAI Responses")
+
+    assert chat is not None
+    assert responses is not None
+    expected = f"data:text/csv;base64,{base64.b64encode('1;Müller GmbH;3 €\n'.encode()).decode()}"
+    assert chat["file"]["file_data"] == responses["file_data"] == expected
+
+
 def test_a_file_without_any_name_takes_each_wire_s_generic_name() -> None:
     """Chat names such a file part ``file`` and Responses ``document``; a rejection's file names read the same rule."""
     chat = chat_file_part(File(content=b"%PDF"), provider="OpenAI Chat")
