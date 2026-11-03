@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import copy
 import json
 from dataclasses import replace
@@ -133,6 +134,9 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
         ("application/sql", b"SELECT 1;\n"),
         ("application/x-sh", b"echo hi\n"),
         ("application/x-shellscript", b"echo hi\n"),
+        ("application/x-perl", b"print 1;\n"),
+        ("application/x-php", b"<?php echo 1;\n"),
+        ("application/x-ruby", b"puts 1\n"),
         ("application/javascript", b"let a = 1;\n"),
         ("application/ecmascript", b"let a = 1;\n"),
         ("application/ld+json", b'{"@id": "x"}'),
@@ -142,6 +146,7 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
     encoded = [
         ("text/csv", "1;Müller GmbH;3 €\n".encode("cp1252"), "1;Müller GmbH;3 €\n"),
         ("text/x-log", "12:00 ERROR crashed\n".encode("utf-16"), "12:00 ERROR crashed\n"),
+        ("text/x-log", codecs.BOM_UTF16_BE + "12:00 ERROR\n".encode("utf-16-be"), "12:00 ERROR\n"),
         ("text/plain", "﻿Müller".encode(), "Müller"),
     ]
     cases = [(mime_type, data, data.decode()) for mime_type, data in texts] + encoded

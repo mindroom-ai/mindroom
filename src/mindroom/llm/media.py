@@ -222,6 +222,9 @@ _APPLICATION_TEXT_MIME_TYPES = frozenset(
         "application/x-python",
         "application/x-sh",
         "application/x-shellscript",
+        "application/x-perl",
+        "application/x-php",
+        "application/x-ruby",
     },
 )
 # The structured syntax suffixes of text types, as in ``application/ld+json``.
