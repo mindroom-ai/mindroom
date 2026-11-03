@@ -138,7 +138,7 @@ class DelegationChild:
     # LEGACY_COMPAT: Delegation child snapshots stored before a subagent could ask for a dedicated worker.
     # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
     # background job's adapter that lacks `dedicated_worker` and `worker_resource_profile`.
-    # Last legacy release: v2026.11.110; the next, still unreleased, release writes both fields.
+    # Last legacy release: v2026.11.111; the next, still unreleased, release writes both fields.
     # Handling: The defaults read such a child as running on its normal worker with no resource profile, which is how
     # it ran. They stay on the model, because run metadata is rewritten only by a conversation layout step.
     # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
