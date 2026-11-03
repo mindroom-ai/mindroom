@@ -607,7 +607,7 @@ def test_an_attached_text_file_counts_its_text(tmp_path: Path, family: str) -> N
 
 @pytest.mark.parametrize(
     ("family", "page_tokens"),
-    [("anthropic", MEDIA_ALLOWANCE_TOKENS), ("openai_chat", MEDIA_ALLOWANCE_TOKENS), ("gemini", 1_120)],
+    [("anthropic", MEDIA_ALLOWANCE_TOKENS), ("openai_chat", MEDIA_ALLOWANCE_TOKENS), ("gemini", 2_000)],
 )
 def test_an_attached_pdf_counts_its_pages(tmp_path: Path, family: str, page_tokens: int) -> None:
     """A PDF counts the route's most per page for the pages its latest revision holds, so a long report counts long."""
