@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -36,7 +36,10 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
     OAuthCredentialsSnapshot,
+    OAuthGroupConnectResult,
+    OAuthGroupMember,
     exchange_and_store_oauth_credentials,
+    exchange_and_store_oauth_group_credentials,
     load_oauth_credentials_snapshot,
     refresh_oauth_credentials_sync,
     refresh_oauth_credentials_with_result,
@@ -45,11 +48,13 @@ from mindroom.oauth.credential_store import OAuthCredentialTransaction, _oauth_c
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import (
     OAuthClientConfig,
+    OAuthConsentGroup,
     OAuthProvider,
     OAuthProviderError,
     OAuthRefreshRejectedError,
     OAuthTokenResult,
     oauth_connection_required_payload,
+    oauth_consent_group_provider,
 )
 from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
@@ -998,6 +1003,158 @@ async def test_callback_advances_connection_generation_and_rejects_second_callba
             token_url=context.provider.token_url,
             expected_connection_generation=issued_connection_generation,
         )
+
+
+GROUP_SCOPE_A = "https://example.test/auth/a"
+GROUP_SCOPE_B = "https://example.test/auth/b"
+
+
+@dataclass
+class _ConsentGroup:
+    """Two consent group members, the lead built from them, and every code exchange the lead served."""
+
+    lead: OAuthProvider
+    member_a: OAuthGroupMember
+    member_b: OAuthGroupMember
+    exchanges: list[str]
+
+
+def _consent_group(
+    tmp_path: Path,
+    *,
+    granted_scopes: tuple[str, ...] = (GROUP_SCOPE_A, GROUP_SCOPE_B),
+    b_allowed_email_domains: tuple[str, ...] = (),
+) -> _ConsentGroup:
+    """Build members "a" and "b" of one group whose single sign-in grants `granted_scopes` to an example.test account."""
+    exchanges: list[str] = []
+
+    async def exchange(
+        _provider: OAuthProvider,
+        code: str,
+        _client_config: OAuthClientConfig,
+        _runtime_paths: RuntimePaths,
+        _code_verifier: str | None,
+    ) -> OAuthTokenResult:
+        assert credential_lifecycle._oauth_provider_adapter_active.get()
+        exchanges.append(code)
+        return OAuthTokenResult(
+            token_data={"token": "group-access", "refresh_token": "group-refresh", "scopes": list(granted_scopes)},
+            claims={"sub": "subject-1", "email": "user@example.test", "email_verified": True},
+            claims_verified=True,
+        )
+
+    def provider(provider_id: str, scope: str, allowed_email_domains: tuple[str, ...] = ()) -> OAuthProvider:
+        return OAuthProvider(
+            id=provider_id,
+            display_name=provider_id.upper(),
+            authorization_url="https://oauth.example.test/authorize",
+            token_url="https://oauth.example.test/token",  # noqa: S106
+            scopes=(scope,),
+            credential_service=f"{provider_id}_oauth",
+            client_config_services=("group_demo_oauth_client",),
+            allowed_email_domains=allowed_email_domains,
+            token_exchanger=exchange,
+            consent_group=OAuthConsentGroup("demo", "Demo"),
+        )
+
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials(
+        "group_demo_oauth_client",
+        {"client_id": "group-client", "client_secret": "group-secret"},
+    )
+
+    def member(oauth_provider: OAuthProvider) -> OAuthGroupMember:
+        context = OAuthCredentialContext(
+            provider=oauth_provider,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=_worker_target(),
+        )
+        return OAuthGroupMember(context, expected_connection_generation=_connection_generation(context))
+
+    provider_a = provider("a", GROUP_SCOPE_A)
+    provider_b = provider("b", GROUP_SCOPE_B, b_allowed_email_domains)
+    return _ConsentGroup(
+        lead=oauth_consent_group_provider((provider_a, provider_b)),
+        member_a=member(provider_a),
+        member_b=member(provider_b),
+        exchanges=exchanges,
+    )
+
+
+async def _connect_group(group: _ConsentGroup) -> OAuthGroupConnectResult:
+    return await exchange_and_store_oauth_group_credentials(
+        group.lead,
+        [group.member_a, group.member_b],
+        "test-code",
+        None,
+        token_url=group.lead.token_url,
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_stores_each_member_under_its_own_provider(tmp_path: Path) -> None:
+    """One code exchange connects every member, and each stored copy names its own provider."""
+    group = _consent_group(tmp_path)
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a", "b"), skipped=())
+    stored_a, stored_b = _load(group.member_a.context), _load(group.member_b.context)
+    assert stored_a is not None
+    assert stored_b is not None
+    assert stored_a["_oauth_provider"] == "a"
+    assert stored_b["_oauth_provider"] == "b"
+    assert stored_a["refresh_token"] == stored_b["refresh_token"] == "group-refresh"  # noqa: S105
+    assert stored_a["_oauth_claims"] == stored_b["_oauth_claims"]
+    assert group.exchanges == ["test-code"]
+    assert _connection_generation(group.member_a.context) != group.member_a.expected_connection_generation
+    assert _connection_generation(group.member_b.context) != group.member_b.expected_connection_generation
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_skips_a_member_whose_scopes_were_not_granted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A member whose scope the user unticked stays unconnected, and the others still connect."""
+    logger = _CapturingLogger()
+    monkeypatch.setattr(credential_lifecycle, "logger", logger)
+    group = _consent_group(tmp_path, granted_scopes=(GROUP_SCOPE_A,))
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a",), skipped=(("b", "scopes_not_granted"),))
+    assert _load(group.member_a.context) is not None
+    assert _load(group.member_b.context) is None
+    assert logger.info_calls == [("oauth_group_member_skipped", {"provider_id": "b", "reason": "scopes_not_granted"})]
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_skips_a_member_that_rejects_the_account(tmp_path: Path) -> None:
+    """A member whose allowed-domain rules refuse the signed-in account stays unconnected."""
+    group = _consent_group(tmp_path, b_allowed_email_domains=("other.example",))
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a",), skipped=(("b", "account_not_allowed"),))
+    assert _load(group.member_a.context) is not None
+    assert _load(group.member_b.context) is None
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_keeps_a_connection_made_meanwhile(tmp_path: Path) -> None:
+    """A member connected after the flow started keeps its newer connection."""
+    group = _consent_group(tmp_path)
+    _save(group.member_b.context, {"token": "made-meanwhile", "_source": "oauth", "_oauth_provider": "b"})
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a",), skipped=(("b", "changed"),))
+    stored_b = _load(group.member_b.context)
+    assert stored_b is not None
+    assert stored_b["token"] == "made-meanwhile"  # noqa: S105
 
 
 @pytest.mark.asyncio

@@ -172,6 +172,8 @@ These rules apply to built-in providers and to providers that plugins register (
 - `account_claims_reader` (callable, default `None`) takes the token data of a finished code exchange and returns verified account claims, such as `{"login": "octo"}`, for a provider whose token response names no account.
   It runs once per connection, never on refresh, and the callback waits for it, so it should answer within a few seconds; if it raises or returns `{}`, the account still connects, without a label.
   The Connections pages label the account with the claim `email`, else `login`.
+- `consent_group` (`OAuthConsentGroup(key, display_name)`, default `None`) lets services that share one OAuth app connect together from the Connections portal with one sign-in, and should be set only when the provider's refresh tokens stay valid after use and none of its scopes can make the provider refuse or block a combined sign-in.
+  Providers with the same `key`, which uses only letters, numbers, colon, underscore, and hyphen, form one group, and `display_name` names it on the portal's **Connect all** button.
 
 ### Troubleshooting OAuth Connections
 

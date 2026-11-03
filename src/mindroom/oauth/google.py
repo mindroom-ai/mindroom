@@ -23,6 +23,7 @@ from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClaimValidationError,
     OAuthClientConfig,
+    OAuthConsentGroup,
     OAuthProvider,
     OAuthProviderError,
     OAuthRuntimeEndpoints,
@@ -40,6 +41,7 @@ _GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105
 _GOOGLE_CLIENT_CONFIG_SERVICE = "google_oauth_client"
 _GOOGLE_PROVISIONING_PATH = "/v1/local-mindroom/oauth/google-client"
+_GOOGLE_CONSENT_GROUP = OAuthConsentGroup("google", "Google")
 _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY = "_oauth_client_runtime_bootstrap_fetched_at"
 _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS = 60 * 60
 _GOOGLE_IDENTITY_VERIFICATION_TIMEOUT_SECONDS = 20.0
@@ -65,6 +67,9 @@ class _GoogleProviderSpec:
     service_scopes: tuple[str, ...]
     status_capabilities: tuple[str, ...]
     include_granted_scopes: bool = True
+    # The provisioned client is not verified for this scope, so Google warns about or blocks a request that asks for it;
+    # the provider keeps its own sign-in instead of joining the Google consent group.
+    provisioned_client_unverified: bool = False
 
 
 _GOOGLE_PROVIDERS = {
@@ -86,6 +91,7 @@ _GOOGLE_PROVIDERS = {
         service_scopes=("https://www.googleapis.com/auth/cloud-platform.read-only",),
         status_capabilities=("Read-only Google Cloud API access",),
         include_granted_scopes=False,
+        provisioned_client_unverified=True,
     ),
     "google_docs": _GoogleProviderSpec(
         display_name="Google Docs",
@@ -359,6 +365,7 @@ def google_oauth_provider(provider_id: str) -> OAuthProvider:
         token_url=_GOOGLE_TOKEN_URL,
         scopes=(*_GOOGLE_IDENTITY_SCOPES, *spec.service_scopes),
         credential_service=f"{provider_id}_oauth",
+        consent_group=None if spec.provisioned_client_unverified else _GOOGLE_CONSENT_GROUP,
         tool_config_service=spec.tool_config_service,
         client_config_services=(f"{provider_id}_oauth_client",),
         shared_client_config_services=(_GOOGLE_CLIENT_CONFIG_SERVICE,),

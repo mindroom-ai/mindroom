@@ -83,7 +83,7 @@ export function oauthIntegrationProvider(
     }
     return new Promise((resolve, reject) => {
       watchOAuthCompletion(authWindow, {
-        provider: providerId,
+        provider: () => providerId,
         expectedOrigin: () => expectedCompletionOrigin,
         pollIntervalMs: 1000,
         cancellationMessage: `${displayName} authorization was cancelled`,

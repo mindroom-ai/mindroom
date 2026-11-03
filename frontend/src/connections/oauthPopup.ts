@@ -44,15 +44,17 @@ function isAllowedOAuthUrl(url: URL, allowLocalHttp: boolean): boolean {
 
 /**
  * Open the provider's consent page in a popup and settle when it answers.
- * `confirmConnected`, when given, is asked once if the popup closes without
- * answering, so a connection that completed before the answer was read is not
- * reported as cancelled.
+ * A `provider` of null accepts the provider the authorization names, for a
+ * sign-in whose leading provider the server picks.
+ * `confirmConnected`, when given, is asked once about that provider if the
+ * popup closes without answering, so a connection that completed before the
+ * answer was read is not reported as cancelled.
  */
 export async function connectWithPopup(
-  provider: string,
+  provider: string | null,
   authorize: () => Promise<OAuthAuthorization>,
   signal: AbortSignal,
-  confirmConnected?: () => Promise<boolean>,
+  confirmConnected?: (provider: string) => Promise<boolean>,
 ): Promise<void> {
   if (signal.aborted) throw new Error("Authorization was cancelled.");
   const pageUrl = new URL(window.location.href);
@@ -73,17 +75,23 @@ export async function connectWithPopup(
 
   return new Promise((resolve, reject) => {
     let expectedOrigin: string | null = null;
+    let expectedProvider = provider;
     const completion = watchOAuthCompletion(popup, {
-      provider,
+      provider: () => expectedProvider,
       expectedOrigin: () => expectedOrigin,
       pollIntervalMs: 500,
       cancellationMessage: "Authorization was cancelled.",
       errorMessage: "Could not connect. Try again.",
-      confirmConnected,
+      confirmConnected:
+        confirmConnected &&
+        (() =>
+          expectedProvider === null
+            ? Promise.resolve(false)
+            : confirmConnected(expectedProvider)),
       onSettled: (error, popupClosesItself) => {
         window.clearTimeout(deadline);
         signal.removeEventListener("abort", onAbort);
-        // A page that answered closes itself after a moment, so its text can be read.
+        // A page that answered closes itself after a moment, or stays open, so its text can be read.
         if (!popup.closed && !popupClosesItself) popup.close();
         if (error) reject(error);
         else resolve();
@@ -105,12 +113,14 @@ export async function connectWithPopup(
         const authUrl = new URL(data.auth_url);
         const completionUrl = new URL(data.completion_origin);
         if (
-          data.provider !== provider ||
+          !data.provider ||
+          (provider !== null && data.provider !== provider) ||
           !isAllowedOAuthUrl(authUrl, allowLocalHttp) ||
           !isAllowedOAuthUrl(completionUrl, allowLocalHttp)
         )
           throw new Error("Could not start the connection. Try again.");
         expectedOrigin = completionUrl.origin;
+        expectedProvider = data.provider;
         popup.location.href = authUrl.href;
       })
       .catch((error) =>

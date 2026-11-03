@@ -14,8 +14,13 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth import microsoft as microsoft_oauth
 from mindroom.oauth.credential_lifecycle import oauth_account_label
-from mindroom.oauth.microsoft import ACCOUNT_LOOKUP_TIMEOUT_SECONDS, GRAPH_ME_URL, microsoft_oauth_provider
-from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.microsoft import (
+    ACCOUNT_LOOKUP_TIMEOUT_SECONDS,
+    GRAPH_ME_URL,
+    microsoft_oauth_provider,
+    microsoft_oauth_providers,
+)
+from mindroom.oauth.providers import OAuthConsentGroup, OAuthProviderError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -139,6 +144,16 @@ def test_each_provider_declares_a_requester_scoped_graph_contract(
     assert provider.token_endpoint_auth_method == "client_secret_post"
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.requester_scoped_credentials is True
+
+
+def test_microsoft_admin_consent_providers_stay_out_of_the_group() -> None:
+    providers = microsoft_oauth_providers()
+    assert {p.id for p in providers if p.consent_group is None} == {
+        "microsoft_meetings",
+        "microsoft_people",
+        "microsoft_teams",
+    }
+    assert {p.id: p.consent_group for p in providers}["outlook_mail"] == OAuthConsentGroup("microsoft", "Microsoft 365")
 
 
 def test_endpoints_default_to_the_organizations_tenant(tmp_path: Path) -> None:
