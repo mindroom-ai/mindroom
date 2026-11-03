@@ -21,6 +21,7 @@ from mindroom.history.compaction import (
     SummaryModel,
     _emit_compaction_hook,
     _rewrite_working_session_for_compaction,
+    _summarize_chunk,
     compact_scope_history,
     summarize_runs,
 )
@@ -391,7 +392,7 @@ async def test_rewrite_keeps_a_later_run_whole_when_the_full_budget_holds_it(tmp
 
 @pytest.mark.asyncio
 async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> None:
-    """A Claude checkpoint's text stands in for the summary and runs its request replayed; its own run is still summarized."""
+    """A Claude checkpoint's text stands in for the summary and the history its request replayed, its own run's prompt included."""
     run_1 = _completed_run("run-1")
     run_2 = _completed_run(
         "run-2",
@@ -439,9 +440,10 @@ async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> No
     assert summary == "merged summary"
     [call] = summary_mock.await_args_list
     summary_input = call.kwargs["summary_input"]
-    for summarized in ("LATEST CHECKPOINT", "run-3 question", "run-4 question"):
+    for summarized in ("LATEST CHECKPOINT", "run-4 question"):
         assert summarized in summary_input
     for covered in (
+        "run-3 question",
         "PREVIOUS SUMMARY",
         "OLDER CHECKPOINT",
         "OTHER RUNS",
@@ -450,6 +452,34 @@ async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> No
         "run-1 question",
         "run-2 question",
     ):
+        assert covered not in summary_input
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_in_the_first_run_stands_in_for_the_work_before_it() -> None:
+    """The run that checkpointed is read from its checkpoint on, as native replay sends it, yet still folds whole."""
+    run_1 = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="run-1 question"),
+            Message(role="assistant", content="EARLIER TOOL WORK"),
+            checkpointed_answer({"type": "compaction", "content": "RUN-1 SO FAR"}, replay_basis(None, [])),
+            Message(role="assistant", content="LATER TOOL WORK"),
+        ],
+    )
+    run_2 = _completed_run("run-2")
+    summary_mock = AsyncMock(return_value="merged summary")
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
+        chunk = await _summarize_chunk(_summarizer(), None, [run_1, run_2])
+
+    assert chunk is not None
+    # Compaction hooks read the transcript of the folded runs, so the fold keeps each run whole.
+    assert chunk.included_runs == [run_1, run_2]
+    summary_input = summary_mock.await_args.kwargs["summary_input"]
+    for summarized in ("RUN-1 SO FAR", "answer after the checkpoint", "LATER TOOL WORK", "run-2 question"):
+        assert summarized in summary_input
+    for covered in ("run-1 question", "EARLIER TOOL WORK"):
         assert covered not in summary_input
 
 

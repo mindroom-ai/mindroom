@@ -47,7 +47,7 @@ from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, Comp
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
-from mindroom.native_compaction import checkpoint_summary, replay_basis
+from mindroom.native_compaction import checkpoint_summary, checkpoint_tail, replay_basis
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.names import provider_route
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -714,19 +714,22 @@ def _summary_input_tokens(summary_model: ModelProvider) -> Callable[[str], int]:
 
 
 def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRunRecord]) -> _SummarySource | None:
-    """Split off the runs before the latest readable native checkpoint, with its text as their summary.
+    """Split off what the latest readable native checkpoint summarizes, with its text as the summary.
 
     A provider checkpoint summarizes everything its request replayed before it, including the previous summary,
-    whichever model wrote it. It stands in only while that is still ``previous_summary`` and the runs before its run:
-    a run that waited for approval sorts after the turns it waited for, and retiring a summary keeps its runs.
-    Its text also covers its own run's prompt, so that run stays in the input: the summary built on the text then
-    always folds it, and an edit or redaction of that run removes the summary too.
+    whichever model wrote it, and its own run's prompt and work before it. It stands in only while that is still
+    ``previous_summary`` and the runs before its run: a run that waited for approval sorts after the turns it waited
+    for, and retiring a summary keeps its runs. Its own run stays in the input from the checkpoint on, as native replay
+    sends it, so the summary built on the text always folds that run, and an edit or redaction of it removes the
+    summary too.
     """
-    for index in range(len(runs) - 1, 0, -1):
+    for index in range(len(runs) - 1, -1, -1):
         basis = replay_basis(previous_summary, runs[:index])
-        for message in reversed(runs[index].messages):
-            if (summary := checkpoint_summary(message, basis)) is not None:
-                return _SummarySource(list(runs[:index]), summary, list(runs[index:]))
+        messages = runs[index].messages
+        for position in range(len(messages) - 1, -1, -1):
+            if (summary := checkpoint_summary(messages[position], basis)) is not None:
+                tail = replace(runs[index], messages=checkpoint_tail(messages, position))
+                return _SummarySource(list(runs[:index]), summary, [tail, *runs[index + 1 :]])
     return None
 
 
@@ -737,7 +740,8 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
 ) -> _SummaryChunk | None:
     """Summarize the longest prefix of ``runs`` that fits one summary input; None when not even one run fits.
 
-    The runs before the latest readable native checkpoint fold without being read, since its text summarizes them.
+    The runs and messages before the latest readable native checkpoint fold without being read, since its text
+    summarizes them.
 
     A failed attempt retries the same or a smaller input when safe, and a shrunk size carries to later chunks. A
     safeguard refusal from the primary model switches once to the fallback model, rebuilding the input only when it
@@ -892,7 +896,9 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
             duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
         )
         later = replace(summarizer, model=summary_model, fallback=fallback_model, shrunk_budget_tokens=shrunk_budget)
-        return _SummaryChunk(summary=summary, included_runs=[*source.unread_runs, *included_runs], summarizer=later)
+        # The input may hold a checkpoint's run from the checkpoint on; the fold and its hooks take the stored runs.
+        folded = list(runs[: len(source.unread_runs) + len(included_runs)])
+        return _SummaryChunk(summary=summary, included_runs=folded, summarizer=later)
 
 
 def _iso_utc_now() -> str:
