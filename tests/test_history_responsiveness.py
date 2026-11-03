@@ -292,7 +292,9 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     sized: list[ModelRequest] = []
 
     def controlled_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
-        sized.append(request)
+        # A size of what messages add also sizes the request without them, which holds nothing to wait on.
+        if request.messages:
+            sized.append(request)
         # The first size checks the new summary before it is stored; the sizing after the store is the one held.
         if len(sized) > 1:
             loop.call_soon_threadsafe(entered.set)

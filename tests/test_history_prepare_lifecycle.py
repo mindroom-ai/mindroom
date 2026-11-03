@@ -2354,9 +2354,31 @@ async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
     assert state.replay_plan is not None
     assert state.replay_plan.estimated_tokens == 0
     assert state.prepared_context_tokens == prepared.static_tokens
-    # A limit the request exceeds without its history leaves the history no room, whatever the reported size says.
-    plan = replace(prepared.resolved_inputs.execution_plan, limit_tokens=prepared.static_tokens - 1)
-    over = finalize_history_preparation(
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("over", "replays"), [(-1, True), (1, False)], ids=["within", "over"])
+async def test_a_reported_request_within_the_limit_replays_whole_beside_a_larger_static_estimate(
+    tmp_path: Path,
+    over: int,
+    replays: bool,
+) -> None:
+    """The limit bounds the whole request, so a reported size within it keeps the history the static estimate exceeds.
+
+    Over the limit, trimming has no room left beside that estimate.
+    """
+    system_prompt = "s" * 20_000
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 200},
+        recorded_system_prompt=system_prompt,
+        system_prompt=system_prompt,
+    )
+    request_tokens = prepared.compaction_decision.request_tokens
+    assert request_tokens < prepared.static_tokens
+    plan = replace(prepared.resolved_inputs.execution_plan, limit_tokens=request_tokens - over)
+
+    state = finalize_history_preparation(
         prepared_scope_history=replace(
             prepared,
             resolved_inputs=replace(prepared.resolved_inputs, execution_plan=plan),
@@ -2364,8 +2386,9 @@ async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
         frame=request_frame(system=system_prompt),
         pipeline_timing=None,
     )
-    assert over.replay_plan is not None
-    assert over.replay_plan.estimated_tokens == 0
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == ("configured" if replays else "disabled")
 
 
 @pytest.mark.asyncio

@@ -474,23 +474,25 @@ _FUNCTION_TOOL = {
 
 
 @pytest.mark.parametrize(
-    ("family", "tool"),
+    ("family", "authored"),
     [
-        ("anthropic", {"type": "web_search_20250305", "name": "web_search"}),
-        ("openai_chat", _FUNCTION_TOOL),
-        ("deepseek", _FUNCTION_TOOL),
-        ("openai_responses", {"type": "web_search"}),
-        ("ollama", _FUNCTION_TOOL),
+        ("anthropic", {"tools": [{"type": "web_search_20250305", "name": "web_search"}]}),
+        ("anthropic", {"extra_body": {"system": "Answer in French. " * 40}}),
+        ("openai_chat", {"tools": [_FUNCTION_TOOL]}),
+        ("deepseek", {"tools": [_FUNCTION_TOOL]}),
+        ("openai_responses", {"tools": [{"type": "web_search"}]}),
+        ("ollama", {"tools": [_FUNCTION_TOOL]}),
     ],
+    ids=["claude-tools", "claude-system", "chat-tools", "deepseek-tools", "responses-tools", "ollama-tools"],
 )
-def test_a_tool_authored_in_request_params_counts_once_per_reported_request(
+def test_what_request_params_authors_counts_once_per_reported_request(
     tmp_path: Path,
     family: str,
-    tool: dict[str, Any],
+    authored: dict[str, Any],
 ) -> None:
-    """A tool authored in ``request_params`` goes with every request, so an answer's reported size already holds it."""
+    """What ``request_params`` authors goes with every request, so an answer's reported size already holds it."""
     plain = _route(family, tmp_path)
-    authored = _route(family, tmp_path, "-authored", request_params={"tools": [tool]})
+    configured = _route(family, tmp_path, "-authored", request_params=authored)
     answer = Message(
         role="assistant",
         content="Pack a light rain jacket.",
@@ -498,8 +500,8 @@ def test_a_tool_authored_in_request_params_counts_once_per_reported_request(
     )
     request = _conversation(answer)
 
-    assert authored.request_tokens(request) > plain.request_tokens(request)
-    assert authored.request_tokens(request, start=2) == plain.request_tokens(request, start=2)
+    assert configured.request_tokens(request) > plain.request_tokens(request)
+    assert configured.request_tokens(request, start=2) == plain.request_tokens(request, start=2)
 
 
 @pytest.mark.parametrize(("family", "beside"), [("gemini", True), ("gemini_vertexai", False)])
@@ -527,6 +529,20 @@ def test_gemini_counts_function_declarations_and_search_parts_only_where_search_
 
     assert (route.request_tokens(request(_REASONING, "Paris")) > plain) is beside
     assert (route.request_tokens(request("Look something up.", _REASONING)) > plain) is beside
+
+
+def test_gemini_sizes_and_identifies_the_tools_its_generation_config_authors(tmp_path: Path) -> None:
+    """Tools authored in ``generation_config`` go with a request that offers no function tools of its own."""
+
+    def route(description: str, name: str) -> ModelProvider:
+        tool = {"function_declarations": [{"name": "lookup", "description": description}]}
+        return _route("gemini", tmp_path, name, generation_config={"tools": [tool]})
+
+    short, long = route("Look something up.", "-short"), route(_REASONING, "-long")
+    request = ModelRequest(messages=(Message(role="user", content="Look it up."),))
+
+    assert long.request_tokens(request) > short.request_tokens(request)
+    assert long.context_key(request) != short.context_key(request)
 
 
 def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:

@@ -103,7 +103,7 @@ class GeminiProvider:
             request,
             start,
             parts,
-            tools=self._tool_settings(request, authored_tool_config=None).get("tools", ()),
+            tools=self._generation_config(request, None).get("tools", ()),
             server_tool_parts=self._sends_server_tool_parts(request),
         )
 
@@ -175,7 +175,14 @@ class GeminiProvider:
         request: ModelRequest,
         system_instruction: str | list[Any] | None,
     ) -> dict[str, Any] | GenerateContentConfig:
-        """Return the generation config of one request."""
+        """Return the generation config of one request; a decision request keeps its function schemas uncallable."""
+        config = self._generation_config(request, system_instruction)
+        if disables_tools(request.tool_choice):
+            return self._decision_config(config)
+        return config
+
+    def _generation_config(self, request: ModelRequest, system_instruction: str | list[Any] | None) -> dict[str, Any]:
+        """Return the authored and generated generation config of one request, its tools as it sends them."""
         settings = self.settings
         overrides = request.overrides
         dedicated = {
@@ -220,8 +227,6 @@ class GeminiProvider:
         # The request pipeline retries a failed request, so one attempt also overrides SDK retries that the generation
         # config's ``http_options`` authors.
         config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
-        if disables_tools(request.tool_choice):
-            return self._decision_config(config)
         return config
 
     def _sends_server_tool_parts(self, request: ModelRequest) -> bool:

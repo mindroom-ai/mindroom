@@ -605,15 +605,17 @@ def finalize_history_preparation(
             model=model,
         )
         request_size = prepared_scope_history.request_size
-        # The preparation's size of the history, its request's size beyond what that request holds besides it.
-        history_tokens = (
-            max(0, request_size.tokens - prepared_scope_history.static_tokens)
-            if request_size is not None
+        if request_size is not None:
+            # The final request holds the prepared one's history beside what the final frame holds, such as the
+            # prompt's attachments.
+            request_tokens = request_size.tokens + static_tokens - prepared_scope_history.static_tokens
+        else:
             # Only a required compaction leaves no size, and it turned native compaction off.
-            else estimate_history_tokens()
-        )
+            request_tokens = static_tokens + estimate_history_tokens()
+        # The history's share, which a reported size below the static estimate leaves at nothing.
+        history_tokens = max(0, request_tokens - static_tokens)
         limit = execution_plan.limit_tokens
-        if limit is not None and static_tokens + history_tokens > limit:
+        if limit is not None and request_tokens > limit:
             available_history_budget = _fitting_history_budget(
                 limit=limit,
                 static_tokens=static_tokens,

@@ -498,9 +498,12 @@ class ClaudeProvider:
             request = replace(request, deferred_tools=replace(request.deferred_tools, names=deferred - loaded))
         body = self._request_body(request)
         kwargs = sdk_request_body(body.kwargs, _SDK_OPTION_KEYS)
-        if start and not request.tools:
-            # Tools authored in ``request_params``, such as a server tool, went with the request before the answer.
-            kwargs = {key: value for key, value in kwargs.items() if key != "tools"}
+        if start:
+            # A system prompt or tools authored in ``request_params``, such as a server tool, went with the request
+            # before the answer too; only the tools the tail's own searches load are new.
+            kwargs = {
+                key: value for key, value in kwargs.items() if key != "system" and (key != "tools" or request.tools)
+            }
         claude_body_parts(kwargs, body.messages, parts)
         parts.flag(body.flags)
 
