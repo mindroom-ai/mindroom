@@ -286,7 +286,10 @@ async def test_a_person_target_is_asked_by_their_own_personal_agent(tmp_path: Pa
 
     assert record.target == ContactParty(kind="person", id=CAROL, owner=CAROL)
     assert send.await_args.args[:2] == (runtime.clients["mind_carol"], CAROL_ROOM)
-    assert "Never share keys." not in send.await_args.args[2]["body"]
+    body = send.await_args.args[2]["body"]
+    assert "Never share keys." not in body
+    # A person's side has no rules, so the notice offers none.
+    assert body.endswith(f"Contact ID: {record.id}\nReply in this thread to accept or decline.")
 
 
 @pytest.mark.asyncio

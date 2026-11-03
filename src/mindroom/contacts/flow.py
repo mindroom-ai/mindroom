@@ -126,6 +126,8 @@ def _notice_body(config: Config, runtime_paths: RuntimePaths, record: ContactRec
     target = record.target
     asks = "you" if target.kind == "person" else f"your agent {party_name(config, target)} ({target.id})"
     lines = [f"{party_label(config, record.requester)} asks to contact {asks}.", "", f"Reason: {record.reason}", ""]
+    # A person's side has no rules to set.
+    answers = "accept or decline"
     if target.kind == "agent":
         rules, tools = _side_terms(config, runtime_paths, record, "target")
         lines += [
@@ -134,7 +136,8 @@ def _notice_body(config: Config, runtime_paths: RuntimePaths, record: ContactRec
             f"Tools it would use by default: {tools}",
             "",
         ]
-    lines += [f"Contact ID: {record.id}", "Reply in this thread to accept, decline, or set rules."]
+        answers = "accept, decline, or set rules"
+    lines += [f"Contact ID: {record.id}", f"Reply in this thread to {answers}."]
     return "\n".join(lines)
 
 
