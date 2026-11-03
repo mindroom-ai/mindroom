@@ -70,7 +70,8 @@ from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
@@ -594,17 +595,69 @@ async def test_a_reply_replays_recent_stored_history_without_persisting_the_repl
     assert all(message.from_history is False for message in latest_run.messages)
 
 
+# A file that counts the attachment allowance, 5,000 tokens.
+_ARCHIVE = File(content=b"\x89\xff binary", filename="archive.bin")
+
+
+def _uncompacted_config(tmp_path: Path, context_window: int) -> tuple[Config, RuntimePaths]:
+    """Return the test config with automatic compaction off, a 500-token reserve, and ``context_window``."""
+    return _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=context_window,
+    )
+
+
+def _notes(count: int, length: int) -> list[ResolvedVisibleMessage]:
+    """Return ``count`` thread messages ``note-<n>``, each about ``length`` characters long."""
+    return [
+        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * length, event_id=f"$note-{index}")
+        for index in range(count)
+    ]
+
+
+async def _reply_with(
+    attachment: File,
+    provider: _Provider,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    prompt: str,
+    session_id: str = "session-1",
+    thread: Sequence[ResolvedVisibleMessage] | None = None,
+) -> tuple[str, ModelRequest]:
+    """Run one reply to ``prompt`` carrying ``attachment``; return its text and the one request it sent, which carries it.
+
+    With ``thread``, the prompt is the thread's current message ``$current``, after ``thread``.
+    """
+    current = make_visible_message(sender="@alice:localhost", body=prompt, event_id="$current")
+    with _no_memory():
+        response = await ai_response(
+            replace(
+                make_turn_context(
+                    "test_agent",
+                    session_id=session_id,
+                    reply_to_event_id="$current" if thread is not None else None,
+                ),
+                prompt=prompt,
+                thread_history=[*thread, current] if thread is not None else None,
+                media=MediaInputs(files=(attachment,)),
+            ),
+            runtime_paths,
+            config,
+        )
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (attachment,)
+    return response.text, request
+
+
 @pytest.mark.asyncio
 async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
     tmp_path: Path,
     provider: _Provider,
 ) -> None:
     """Without compaction, the history a reply replays leaves room for the attachments its prompt sends."""
-    config, runtime_paths = _make_config(
-        tmp_path,
-        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
-        context_window=12_000,
-    )
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     question = "q" * 3_000
     seed_session(
@@ -625,19 +678,8 @@ async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
     )
     report = File(content=b"%PDF-1.7 report", mime_type="application/pdf", filename="report.pdf")
 
-    with _no_memory():
-        await ai_response(
-            replace(
-                make_turn_context("test_agent", session_id="session-1"),
-                prompt="Summarize the report.",
-                media=MediaInputs(files=(report,)),
-            ),
-            runtime_paths,
-            config,
-        )
+    _, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the report.")
 
-    [request] = provider.model.requests
-    assert request.messages[-1].files == (report,)
     replayed = [str(message.content).split()[0] for message in _after_prompt(request.messages)[:-1]]
     assert "run-7" in replayed
     assert "run-0" not in replayed
@@ -656,36 +698,22 @@ async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attach
 
     A scope whose only stored run errored has a session but nothing to replay either.
     """
-    config, runtime_paths = _make_config(
-        tmp_path,
-        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
-        context_window=12_000,
-    )
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
     if errored_run:
         storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
         failed = replace(_completed_run("run-0"), status=RunStatus.error)
         seed_session(storage, _session("fresh", runs=[failed]))
-    thread_history = [
-        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 3_000, event_id=f"$note-{index}")
-        for index in range(10)
-    ]
-    current = make_visible_message(sender="@alice:localhost", body="Read the archive.", event_id="$current")
-    archive = File(content=b"\x89\xff binary", filename="archive.bin")
 
-    with _no_memory():
-        await ai_response(
-            replace(
-                make_turn_context("test_agent", session_id="fresh", reply_to_event_id="$current"),
-                prompt="Read the archive.",
-                thread_history=[*thread_history, current],
-                media=MediaInputs(files=(archive,)),
-            ),
-            runtime_paths,
-            config,
-        )
+    _, request = await _reply_with(
+        _ARCHIVE,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the archive.",
+        session_id="fresh",
+        thread=_notes(10, 3_000),
+    )
 
-    [request] = provider.model.requests
-    assert request.messages[-1].files == (archive,)
     sent = render_prepared_messages_text(request.messages)
     assert "note-9" in sent
     assert "note-0" not in sent
@@ -695,33 +723,20 @@ async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attach
 @pytest.mark.asyncio
 async def test_a_first_reply_whose_attachment_cannot_fit_keeps_its_thread(tmp_path: Path, provider: _Provider) -> None:
     """An attachment estimated past the limit on its own leaves the thread fallback as it was without it."""
-    config, runtime_paths = _make_config(
-        tmp_path,
-        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
-        context_window=12_000,
-    )
-    thread_history = [
-        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 400, event_id=f"$note-{index}")
-        for index in range(5)
-    ]
-    current = make_visible_message(sender="@alice:localhost", body="Read the report.", event_id="$current")
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
     # Three pages count 15,000 tokens, over the 11,500-token limit.
     report = File(content=blank_pdf(3), mime_type="application/pdf", filename="report.pdf")
 
-    with _no_memory():
-        await ai_response(
-            replace(
-                make_turn_context("test_agent", session_id="fresh", reply_to_event_id="$current"),
-                prompt="Read the report.",
-                thread_history=[*thread_history, current],
-                media=MediaInputs(files=(report,)),
-            ),
-            runtime_paths,
-            config,
-        )
+    _, request = await _reply_with(
+        report,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the report.",
+        session_id="fresh",
+        thread=_notes(5, 400),
+    )
 
-    [request] = provider.model.requests
-    assert request.messages[-1].files == (report,)
     sent = render_prepared_messages_text(request.messages)
     assert all(f"note-{index}" in sent for index in range(5))
 
@@ -732,39 +747,25 @@ async def test_attachments_that_fit_only_without_the_unseen_thread_fail_no_reply
     provider: _Provider,
 ) -> None:
     """The thread messages a stored scope has not seen are part of the turn, which no replay trim shortens."""
-    config, runtime_paths = _make_config(
-        tmp_path,
-        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
-        context_window=14_500,
-    )
+    config, runtime_paths = _uncompacted_config(tmp_path, 14_500)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
     seed_session(storage, session)
     seed_summary(storage, session, _SCOPE, "stored summary")
-    # About 5,000 tokens of thread the scope has not seen, which with the report's 10,000 exceed the 14,000-token limit
-    # that the report and the rest of the turn fit.
-    thread_history = [
-        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 4_000, event_id=f"$note-{index}")
-        for index in range(5)
-    ]
-    current = make_visible_message(sender="@alice:localhost", body="Read the report.", event_id="$current")
     report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
 
-    with _no_memory():
-        response = await ai_response(
-            replace(
-                make_turn_context("test_agent", session_id="session-1", reply_to_event_id="$current"),
-                prompt="Read the report.",
-                thread_history=[*thread_history, current],
-                media=MediaInputs(files=(report,)),
-            ),
-            runtime_paths,
-            config,
-        )
+    # About 5,000 tokens of thread the scope has not seen, which with the report's 10,000 exceed the 14,000-token limit
+    # that the report and the rest of the turn fit.
+    text, request = await _reply_with(
+        report,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the report.",
+        thread=_notes(5, 4_000),
+    )
 
-    assert response.text == "ok"
-    [request] = provider.model.requests
-    assert request.messages[-1].files == (report,)
+    assert text == "ok"
     assert all(f"note-{index}" in render_prepared_messages_text(request.messages) for index in range(5))
 
 
@@ -774,7 +775,6 @@ async def test_without_a_context_window_the_prepared_size_holds_the_attachments(
     config, runtime_paths = _make_config(tmp_path, context_window=None)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
-    archive = File(content=b"\x89\xff binary", filename="archive.bin")
 
     with _no_memory():
         sizes = [
@@ -788,7 +788,7 @@ async def test_without_a_context_window_the_prepared_size_holds_the_attachments(
                     media=MediaInputs(files=files),
                 )
             ).prepared_history.prepared_context_tokens
-            for files in ((archive,), ())
+            for files in ((_ARCHIVE,), ())
         ]
 
     assert sizes[0] - sizes[1] == MEDIA_ALLOWANCE_TOKENS
@@ -818,24 +818,10 @@ async def test_a_reply_compacts_before_its_first_request_to_make_room_for_its_at
         for index in range(6)
     ]
     seed_session(storage, _session("session-1", runs=runs))
-    archive = File(content=b"\x89\xff binary", filename="archive.bin")
 
-    with (
-        _no_memory(),
-        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")),
-    ):
-        await ai_response(
-            replace(
-                make_turn_context("test_agent", session_id="session-1"),
-                prompt="Read the archive.",
-                media=MediaInputs(files=(archive,)),
-            ),
-            runtime_paths,
-            config,
-        )
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
+        _, request = await _reply_with(_ARCHIVE, provider, config, runtime_paths, prompt="Read the archive.")
 
-    [request] = provider.model.requests
-    assert request.messages[-1].files == (archive,)
     assert any("merged summary" in str(message.content) for message in request.messages)
 
 
@@ -845,11 +831,7 @@ async def test_attachments_estimated_past_the_limit_leave_the_summarized_history
     provider: _Provider,
 ) -> None:
     """Attachments that fit the limit only without the summary fail no reply: it replays as without them."""
-    config, runtime_paths = _make_config(
-        tmp_path,
-        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
-        context_window=12_000,
-    )
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
     seed_session(storage, session)
@@ -857,20 +839,9 @@ async def test_attachments_estimated_past_the_limit_leave_the_summarized_history
     seed_summary(storage, session, _SCOPE, "stored summary " * 1_300)
     report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
 
-    with _no_memory():
-        response = await ai_response(
-            replace(
-                make_turn_context("test_agent", session_id="session-1"),
-                prompt="Summarize the report.",
-                media=MediaInputs(files=(report,)),
-            ),
-            runtime_paths,
-            config,
-        )
+    text, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the report.")
 
-    assert response.text == "ok"
-    [request] = provider.model.requests
-    assert request.messages[-1].files == (report,)
+    assert text == "ok"
     history = _after_prompt(request.messages)
     assert is_compaction_summary(history[0])
     assert [message.content for message in history[1:3]] == ["run-1 question", "run-1 answer"]

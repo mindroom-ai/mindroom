@@ -672,15 +672,6 @@ async def _finalize_prepared_history(
     )
 
 
-def _frame_with_media(
-    frame: Callable[[TurnMessages], RequestFrame],
-    media: MediaInputs,
-    turn: TurnMessages,
-) -> RequestFrame:
-    """Return ``frame`` for ``turn`` with ``media`` on its prompt, as the turn's requests send it."""
-    return frame(with_media(turn, media))
-
-
 def _frame_holding_attachments(
     model: ModelProvider,
     frame: Callable[[TurnMessages], RequestFrame],
@@ -699,12 +690,13 @@ def _frame_holding_attachments(
     """
     if not media.has_any():
         return frame
-    media_frame = partial(_frame_with_media, frame, media)
-    if limit is None:
-        return media_frame
+
+    def media_frame(sent: TurnMessages) -> RequestFrame:
+        return frame(with_media(sent, media))
+
     session = scope_context.session if scope_context is not None else None
     summary = session.summary if session is not None else None
-    if model.request_tokens(media_frame(turn).request(summary=summary)) <= limit:
+    if limit is None or model.request_tokens(media_frame(turn).request(summary=summary)) <= limit:
         return media_frame
     return frame
 

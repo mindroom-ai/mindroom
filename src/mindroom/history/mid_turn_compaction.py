@@ -270,8 +270,8 @@ async def _summarize(
     """Fold the history and every exchange of the turn into a summary and rewrite the request.
 
     ``request_tokens`` sized the request before the fold and ``size_request`` estimates a request of given messages.
-    Returns the summary message with the rewritten request's estimate, or None when compaction failed and the request
-    is unchanged.
+    Returns the summary message with the rewritten request's estimate, or None when compaction failed or no summary
+    could fit, and the request is unchanged.
     """
     # Replay limits trim history; the running turn's own tool results must all reach the summary.
     settings = replace(policy.inputs.history_settings, max_tool_calls_from_history=None)
@@ -302,7 +302,7 @@ async def _summarize(
             size_request,
             store=store,
             session=session,
-            max_summary_tokens=max(0, policy.limit - kept_tokens),
+            max_summary_tokens=policy.limit - kept_tokens,
         )
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)

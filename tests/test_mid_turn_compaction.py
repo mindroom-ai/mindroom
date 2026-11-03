@@ -729,25 +729,25 @@ async def test_rewritten_request_within_the_model_window_is_sent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("over_the_window", ["prompt", "attachment"])
+@pytest.mark.parametrize(
+    ("prompt", "files"),
+    # About 4,000 tokens of prompt, or an attachment's 5,000-token allowance, over the 3,500-token limit.
+    [("p" * 16_000, ()), ("Read this archive.", (File(content=b"\x89\xff binary", filename="archive.bin"),))],
+    ids=["prompt", "attachment"],
+)
 async def test_a_prompt_that_fills_the_replay_window_alone_asks_for_no_summary(
     tmp_path: Path,
     summary_calls: SummaryCalls,
-    over_the_window: str,
+    prompt: str,
+    files: tuple[File, ...],
 ) -> None:
     """A prompt or its attachment over the replay window leaves a summary no room, so none is asked for or stored."""
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
     agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
-    # About 4,000 tokens of prompt, or an attachment's 5,000-token allowance, over the 3,500-token limit.
-    archive = File(content=b"\x89\xff binary", filename="archive.bin")
 
-    output = await _run(
-        agent,
-        [Message(role="user", content="p" * 16_000 if over_the_window == "prompt" else "Read this archive.")],
-        media=MediaInputs(files=(archive,)) if over_the_window == "attachment" else None,
-    )
+    output = await _run(agent, [Message(role="user", content=prompt)], media=MediaInputs(files=files))
 
     assert str(output.content).endswith("done")
     assert summary_calls.inputs == []

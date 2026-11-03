@@ -69,12 +69,6 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
         and matches[0].content == text
     ):
         return []
-    position = None
-    if destination is not None:
-        position = next(
-            (index for index, message in enumerate(destination.messages) if _is_notice(message, turn)),
-            None,
-        )
     edited: dict[int, AnyRunRecord] = {}
     for run in runs:
         if _notices(run, turn):
@@ -83,13 +77,14 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
             edited[id(run)] = copy
     if destination is None or text is None:
         return list(edited.values())
+    position = next(index for index, message in enumerate(destination.messages) if _is_notice(message, turn))
     copy = edited[id(destination)]
     persisted = Message(
         role="user",
         content=text,
         provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: _PERSISTED, NOTICE_TURN_KEY: turn},
     )
-    copy.messages.insert(len(copy.messages) if position is None else min(position, len(copy.messages)), persisted)
+    copy.messages.insert(position, persisted)
     return list(edited.values())
 
 

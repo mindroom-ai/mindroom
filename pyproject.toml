@@ -85,7 +85,6 @@ apify = [
 approved_egress = []
 arxiv = [
   "arxiv",
-  "pypdf",
 ]
 atlassian = []
 attachments = []

@@ -3845,7 +3845,6 @@ apify = [
 ]
 arxiv = [
     { name = "arxiv" },
-    { name = "pypdf" },
 ]
 aws-bedrock = [
     { name = "boto3" },
@@ -4370,7 +4369,6 @@ requires-dist = [
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pyobjc-framework-screencapturekit", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pypdf", specifier = ">=6.21.4" },
-    { name = "pypdf", marker = "extra == 'arxiv'" },
     { name = "pytelegrambotapi", marker = "extra == 'telegram'", specifier = ">=4.32" },
     { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2" },
     { name = "python-dotenv", specifier = ">=1" },
