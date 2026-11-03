@@ -64,11 +64,13 @@ class Ask:
     When the run's response is final, or after the fallback timeout, the runner calls ``then`` off the event loop
     with the current config, the thread the text was posted in, and whether the timeout fired.
     Without ``then``, the chain ends once the run does.
+    ``summary`` is pinned as the title of the thread the text was posted in, so no generated summary replaces it.
     """
 
     text: str
     new_thread: bool
     then: Callable[[Config, str, bool], Ask | Done] | None = None
+    summary: str | None = None
 
 
 @dataclass(frozen=True)

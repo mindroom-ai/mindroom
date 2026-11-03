@@ -918,6 +918,7 @@ agents:
   Bind anything a step needs from the check with `functools.partial`.
 - `timed_out` is true when no answer ended within an hour of the prompt being posted; `False` only means the answer ended, which includes a failed run, so check the result before reporting success.
 - The check's `Ask` and every later `Ask` with `new_thread=True` get their own thread and session, even for an agent with `thread_mode: room`; a later `Ask` with `new_thread=False` follows up in the current thread.
+- `Ask(..., summary="...")` pins that text as the title of the thread the prompt is posted in, so no generated summary replaces it; without it, the thread gets the usual automatic summary unless `Done` resolves it first.
 
 `AutomationContext` fields:
 
