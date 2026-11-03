@@ -44,6 +44,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import (
@@ -641,6 +642,29 @@ async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
     assert "run-7" in replayed
     assert "run-0" not in replayed
     assert provider.model.request_tokens(request) <= 12_000 - 500
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
+async def test_without_a_context_window_the_prepared_size_holds_the_attachments(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=None)
+    archive = File(content=b"\x89\xff binary", filename="archive.bin")
+
+    with _no_memory():
+        sizes = [
+            (
+                await prepare_agent_and_prompt_for_test(
+                    make_turn_context("test_agent"),
+                    prompt="Read this.",
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    media=MediaInputs(files=files),
+                )
+            ).prepared_history.prepared_context_tokens
+            for files in ((archive,), ())
+        ]
+
+    assert sizes[0] - sizes[1] == MEDIA_ALLOWANCE_TOKENS
 
 
 @pytest.mark.asyncio
