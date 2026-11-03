@@ -168,6 +168,8 @@ class _QueuedMessageState:
 
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
     mid_turn_gate: MidTurnGate | None = None
+    # The requester of the response that holds the lifecycle lock, when it answers a person's live message.
+    running_requester_id: str | None = None
     _active_response_turns: int = 0
     # Replaced on every change of the queue, so each waiter wakes once per change.
     _changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -333,6 +335,11 @@ class ResponseLifecycleCoordinator:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
         return self._has_active_response_for_thread_key(target.lifecycle_key)
+
+    def running_reply_requester(self, target: MessageTarget) -> str | None:
+        """Return the requester of the response running in one canonical conversation, if one runs."""
+        queued_signal = self._thread_queued_signals.get(target.lifecycle_key)
+        return queued_signal.running_requester_id if queued_signal is not None else None
 
     def has_waiting_messages_from(self, target: MessageTarget, requester_id: str) -> bool:
         """Return whether one requester's messages wait for one canonical conversation's next turn."""
@@ -610,6 +617,9 @@ class ResponseLifecycleCoordinator:
                     queued_signal=queued_signal,
                 )
                 queued_signal.mid_turn_gate = mid_turn_gate
+                # Only a reply to a person's live message can be nudged; a scheduled run's requester is its creator.
+                if response_envelope.origin.may_answer_interactive_prompt:
+                    queued_signal.running_requester_id = response_envelope.requester_id
                 with (
                     # A newer human message also releases the reply's tool waits; other queued turns wait for it.
                     pending_human_messages_context(queued_signal),
@@ -619,6 +629,7 @@ class ResponseLifecycleCoordinator:
                         return await locked_operation(target)
                     finally:
                         queued_signal.mid_turn_gate = None
+                        queued_signal.running_requester_id = None
             finally:
                 await self._release_response_turn_lock(lifecycle_lock, reservation)
         finally:

@@ -321,6 +321,19 @@ class TurnDispatcher:
                     prepared,
                 ):
                     return
+                if len(prepared.handled_turn.source_event_ids) == 1 and self.deps.turn_policy.nudges_running_reply(
+                    turn.room,
+                    turn.event,
+                    prepared.dispatch.envelope,
+                    running_reply_requester_id=self.deps.response_runner.running_reply_requester(
+                        prepared.dispatch.target,
+                    ),
+                ):
+                    # A nudge that arrived just before that reply started; ingress absorbs the later ones. A nudge
+                    # batched with other messages, such as the caption of an upload, is part of their turn.
+                    self.deps.logger.info("Absorbing nudge of the running reply", event_id=turn.event.event_id)
+                    await self.deps.visible_responses.settle_source_events_ignored(prepared.handled_turn)
+                    return
                 message_attachment_ids, trusted_attachment_ids, router_extra_content = _attachment_parts(prepared)
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_start")

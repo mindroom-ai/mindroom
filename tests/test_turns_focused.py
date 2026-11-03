@@ -158,7 +158,7 @@ from tests.conftest import (
 )
 from tests.journal_helpers import admit_dispatch_event
 from tests.runtime_fakes import ready_runtime
-from tests.turn_dispatch_helpers import make_test_turn, nothing_else_queued
+from tests.turn_dispatch_helpers import dispatch_test_turn, make_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Coroutine, Iterable
@@ -224,6 +224,8 @@ class _RecordingResponseRunner:
     answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
     # Whether a pending approval holds every conversation.
     held_for_approval: bool = False
+    # The requester of a reply running in every conversation, if one runs.
+    running_requester: str | None = None
 
     @property
     def inbox(self) -> _RecordingResponseRunner:
@@ -232,6 +234,9 @@ class _RecordingResponseRunner:
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return False
+
+    def running_reply_requester(self, target: MessageTarget) -> str | None:  # noqa: ARG002
+        return self.running_requester
 
     def is_held_for_approval(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return self.held_for_approval
@@ -393,6 +398,9 @@ class _SpyTurnPolicy:
 
     def router_mention_skips(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
         return self.inner.router_mention_skips(room, source)
+
+    def nudges_running_reply(self, *args: Any, **kwargs: Any) -> bool:  # noqa: ANN401
+        return self.inner.nudges_running_reply(*args, **kwargs)
 
     async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
         return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
@@ -2657,6 +2665,76 @@ async def test_policy_ignore_sends_nothing_and_compacts_callback(config: Config,
     assert harness.gateway.sent == []
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True])
+async def test_only_a_lone_nudge_that_reaches_dispatch_after_its_requesters_reply_started_is_absorbed(
+    config: Config,
+    tmp_path: Path,
+    batched: bool,
+) -> None:
+    """A bare mention ingress let through, before the reply it nudges started, settles at dispatch unanswered.
+
+    A turn that batches it with another of the person's messages is that turn's to answer.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    event = _text_event(_entity_user_id(config, "general"), thread_id=_THREAD_ROOT)
+    harness.runner.running_requester = _SENDER
+    handled_turn = TurnRecord.create(["$earlier:localhost", event.event_id]) if batched else None
+
+    await dispatch_test_turn(harness.dispatcher, room, event, _SENDER, handled_turn=handled_turn)
+
+    if batched:
+        assert harness.policy.plan_turn_calls == 1
+        assert len(harness.runner.requests) == 1
+        assert harness.ignored_dispatch_sources == []
+    else:
+        assert harness.policy.plan_turn_calls == 0
+        assert harness.runner.requests == []
+        assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mentioned", [False, True])
+async def test_a_mention_reads_no_context_for_adaptive_debounce(
+    config: Config,
+    tmp_path: Path,
+    mentioned: bool,
+) -> None:
+    """A mention never selects participation, so nothing awaits between its nudge check and its admission."""
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    event = _text_event(_entity_user_id(config, "general") if mentioned else "a thought", thread_id=_THREAD_ROOT)
+    prepared = PreparedIngress(
+        sender=event.sender,
+        event_id=event.event_id,
+        body=event.body,
+        source=event.source,
+        server_timestamp=event.server_timestamp,
+    )
+    unmentioned_context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=True,
+        thread_id=_THREAD_ROOT,
+        thread_history=[],
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    extract_context = AsyncMock(return_value=unmentioned_context)
+
+    with patch.object(harness.ingress.deps.resolver, "extract_dispatch_context", new=extract_context):
+        debounce_seconds = await harness.ingress._adaptive_text_debounce_seconds(
+            prepared,
+            room,
+            facts=make_ingress_facts(_SENDER),
+            key=requester_coalescing_key(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        )
+
+    assert debounce_seconds == 0.0
+    assert extract_context.await_count == (0 if mentioned else 1)
 
 
 @pytest.mark.asyncio

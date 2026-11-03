@@ -20,8 +20,9 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ATTACHMENT_IDS_KEY, ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
@@ -1080,3 +1081,58 @@ async def test_router_pre_ingress_thread_rule_is_its_dispatch_plan_rule(config: 
         _dispatch(_context(thread_id="$thread:localhost", thread_history=history), agent_name=ROUTER_AGENT_NAME),
     )
     assert (plan.kind == "ignore") is owned
+
+
+_OTHER_SENDER = "@other:localhost"
+
+
+@pytest.mark.parametrize(
+    ("body", "mentioned", "sender", "running_requester", "attachment_ids", "nudges"),
+    [
+        pytest.param("{general}", ("general",), _SENDER, _SENDER, (), True, id="bare-matrix-id"),
+        pytest.param("@general ?", ("general",), _SENDER, _SENDER, (), True, id="bare-name"),
+        # A pill's plain body is the agent's display name.
+        pytest.param("General: ", ("general",), _SENDER, _SENDER, (), True, id="bare-pill"),
+        pytest.param("{general} are you stuck?", ("general",), _SENDER, _SENDER, (), False, id="mention-and-text"),
+        # Text that spells the display name after a mention is still text.
+        pytest.param("{general} general!", ("general",), _SENDER, _SENDER, (), False, id="mention-and-name-text"),
+        pytest.param("@general GENERAL", ("general",), _SENDER, _SENDER, (), False, id="name-and-name-text"),
+        pytest.param("General: general", ("general",), _SENDER, _SENDER, (), False, id="pill-and-name-text"),
+        pytest.param("{research}", ("research",), _SENDER, _SENDER, (), False, id="other-agent"),
+        pytest.param("{general} {research}", ("general", "research"), _SENDER, _SENDER, (), False, id="two-agents"),
+        pytest.param("{general}", ("general",), _OTHER_SENDER, _SENDER, (), False, id="other-sender"),
+        pytest.param("{general}", ("general",), _SENDER, _SENDER, ("att_report",), False, id="attachment"),
+        pytest.param("{general}", ("general",), _SENDER, None, (), False, id="no-running-reply"),
+    ],
+)
+def test_only_a_bare_mention_from_the_running_replys_requester_nudges_it(
+    config: Config,
+    body: str,
+    mentioned: tuple[str, ...],
+    sender: str,
+    running_requester: str | None,
+    attachment_ids: tuple[str, ...],
+    nudges: bool,
+) -> None:
+    """A nudge is the running reply's requester mentioning only that agent, with no other text or attachment."""
+    policy = _policy_for(config, "general")
+    ids = {name: _entity_id(config, name).full_id for name in ("general", "research")}
+    room = _room_with_members(_SENDER, _OTHER_SENDER, *ids.values())
+    body = body.format(**ids)
+    content: dict[str, object] = {
+        "msgtype": "m.text",
+        "body": body,
+        "m.mentions": {"user_ids": [ids[name] for name in mentioned]},
+    }
+    if attachment_ids:
+        content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
+    event = PreparedIngress(sender=sender, event_id=_EVENT_ID, body=body, source={"content": content, "sender": sender})
+    envelope = request_envelope(
+        room_id=_ROOM_ID,
+        reply_to_event_id=_EVENT_ID,
+        thread_id="$thread:localhost",
+        user_id=sender,
+        attachment_ids=attachment_ids,
+    )
+
+    assert policy.nudges_running_reply(room, event, envelope, running_reply_requester_id=running_requester) is nudges
