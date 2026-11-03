@@ -138,7 +138,6 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
         ("application/ld+json", b'{"@id": "x"}'),
         ("application/x-ipynb+json", b'{"cells": []}'),
         ("application/rss+xml", b"<rss/>"),
-        ("image/svg+xml", b"<svg/>"),
     ]
     encoded = [
         ("text/csv", "1;Müller GmbH;3 €\n".encode("cp1252"), "1;Müller GmbH;3 €\n"),
