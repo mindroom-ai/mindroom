@@ -165,13 +165,19 @@ def build_request(
     never edits the prepared input a retried attempt reuses. Pass ``summary=None`` when the run replays no stored
     history; a run that replays the summary but no runs passes it with empty ``history``.
     """
-    turn = deepcopy(turn)
-    prompt = turn.prompt
-    prompt.audio = media.audio or None
-    prompt.images = media.images or None
-    prompt.files = media.files or None
-    prompt.videos = media.videos or None
-    return request_layout(summary=summary, history=deepcopy(history), turn=turn)
+    return request_layout(summary=summary, history=deepcopy(history), turn=with_media(deepcopy(turn), media))
+
+
+def with_media(turn: TurnMessages, media: MediaInputs) -> TurnMessages:
+    """Return ``turn`` with ``media`` on a copy of its prompt, as every request of the turn sends it."""
+    prompt = replace(
+        turn.prompt,
+        audio=media.audio or None,
+        images=media.images or None,
+        files=media.files or None,
+        videos=media.videos or None,
+    )
+    return replace(turn, prompt=prompt)
 
 
 def request_layout(
@@ -245,4 +251,5 @@ __all__ = [
     "replayed_history",
     "request_layout",
     "scope_history_messages",
+    "with_media",
 ]

@@ -32,7 +32,7 @@ from mindroom.constants import (
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.conversation_text import thread_context_note
-from mindroom.history.request_messages import TurnMessages
+from mindroom.history.request_messages import TurnMessages, with_media
 from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
@@ -46,6 +46,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
+from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -671,6 +672,15 @@ async def _finalize_prepared_history(
     )
 
 
+def _frame_with_media(
+    frame: Callable[[TurnMessages], RequestFrame],
+    media: MediaInputs,
+    turn: TurnMessages,
+) -> RequestFrame:
+    """Return ``frame`` for ``turn`` with ``media`` on its prompt, as the turn's requests send it."""
+    return frame(with_media(turn, media))
+
+
 def _turn_tokens(model: ModelProvider, frame: Callable[[TurnMessages], RequestFrame], turn: TurnMessages) -> int:
     """Return the size of a request that holds ``turn`` and no history."""
     return model.request_tokens(frame(turn).request())
@@ -703,9 +713,11 @@ async def _prepare_execution_context_common(
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling.
 
     ``timezone`` is the zone the current message's time is written in. ``frame`` holds what the run's requests hold
-    around the scope's history for a turn, and ``sizer`` sizes them. A fallback thread replay stands in for persisted
-    replay, so ``resolved_inputs``' request limit bounds it too.
+    around the scope's history for a turn, and ``sizer`` sizes them; each size holds the media ``ctx`` puts on the
+    prompt. A fallback thread replay stands in for persisted replay, so ``resolved_inputs``' request limit bounds it
+    too.
     """
+    frame = partial(_frame_with_media, frame, ctx.media or MediaInputs())
     turn_tokens = partial(_turn_tokens, sizer.model, frame)
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids

@@ -36,6 +36,7 @@ from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
+from mindroom.llm.media import File
 from mindroom.llm.messages import Message, stable_serialize, system_text
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
@@ -588,6 +589,56 @@ async def test_a_reply_replays_recent_stored_history_without_persisting_the_repl
     latest_run = persisted.runs[-1]
     assert _contents(latest_run.messages) == ["Current prompt", "ok"]
     assert all(message.from_history is False for message in latest_run.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Without compaction, the history a reply replays leaves room for the attachments its prompt sends."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=12_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    question = "q" * 3_000
+    seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[
+                _completed_run(
+                    f"run-{index}",
+                    messages=[
+                        Message(role="user", content=f"run-{index} {question}"),
+                        Message(role="assistant", content=f"run-{index} answer"),
+                    ],
+                )
+                for index in range(8)
+            ],
+        ),
+    )
+    report = File(content=b"%PDF-1.7 report", mime_type="application/pdf", filename="report.pdf")
+
+    with _no_memory():
+        await ai_response(
+            replace(
+                make_turn_context("test_agent", session_id="session-1"),
+                prompt="Summarize the report.",
+                media=MediaInputs(files=(report,)),
+            ),
+            runtime_paths,
+            config,
+        )
+
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (report,)
+    replayed = [str(message.content).split()[0] for message in _after_prompt(request.messages)[:-1]]
+    assert "run-7" in replayed
+    assert "run-0" not in replayed
+    assert provider.model.request_tokens(request) <= 12_000 - 500
 
 
 @pytest.mark.asyncio
