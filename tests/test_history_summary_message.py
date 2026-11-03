@@ -34,7 +34,6 @@ from mindroom.history.types import (
     ScopeSummary,
 )
 from mindroom.llm.messages import Message, system_text
-from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import ResponsePausedForApproval
@@ -152,17 +151,6 @@ def test_a_stored_run_local_summary_does_not_suppress_the_scope_summary_on_resum
     summaries = _owned_summaries(resumed)
     assert [summary.from_history for summary in summaries] == [True, False]
     assert _SUMMARY in str(summaries[0].content)
-
-
-def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() -> None:
-    session = _owned_session(None)
-    messages = [message for run in session.runs for message in run.messages]
-
-    assert ScriptedModel([]).request_tokens(ModelRequest(messages=messages)) == estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=_ALL_HISTORY,
-        model=ScriptedModel([]),
-    )
 
 
 def test_scheduled_history_limits_keep_or_drop_the_summary() -> None:

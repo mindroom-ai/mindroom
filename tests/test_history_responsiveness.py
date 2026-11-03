@@ -239,7 +239,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
     # The history's share of the request: its size beyond the same request without the seeded run.
     history_tokens = model.request_tokens(
         _FRAME.request(summary=None, history=session.runs[0].messages),
-    ) - model.request_tokens(_FRAME.request(summary=None, history=()))
+    ) - model.request_tokens(_FRAME.request())
     counted_history: list[list[str]] = []
     request_tokens = ResponsesAdapter.request_tokens
 

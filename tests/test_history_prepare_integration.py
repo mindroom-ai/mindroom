@@ -354,7 +354,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     assert prepared_run.prompt_text == "\n\n".join(expected)
 
 
-def _turn_text_tokens(_sizer: object, _frame: object, turn: TurnMessages) -> int:
+def _turn_text_tokens(_model: object, _frame: object, turn: TurnMessages) -> int:
     """Size a turn by its text alone, so the thread fallback must fit the window by itself."""
     return quarter_tokens(render_prepared_messages_text(turn.in_request_order()))
 

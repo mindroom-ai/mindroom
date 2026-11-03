@@ -1,4 +1,4 @@
-"""Tests for request and history token estimation as a route that sends messages by role sizes them."""
+"""Tests for history token estimation as a route that sends messages by role sizes it."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from mindroom.history.types import (
     HistoryPolicy,
     ScopeSummary,
 )
-from mindroom.llm.messages import Message, stable_serialize
-from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.session_storage.schema import TableNames
 from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import quarter_tokens
@@ -25,83 +25,6 @@ from tests.session_storage.agno_layout import SESSION_ID, converted_store
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-_SYSTEM_MESSAGE = Message(role="system", content="You are a careful engineer.\n\nStay concise.")
-_SEARCH_PARAMETERS = {
-    "type": "object",
-    "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
-    "required": ["query"],
-}
-_EXPORT_PARAMETERS = {
-    "type": "object",
-    "properties": {"title": {"type": "string"}},
-    "required": ["title"],
-    "additionalProperties": False,
-}
-_SEARCH_DOCS = ToolSpec(
-    name="search_docs",
-    description="Search the engineering docs for a matching answer.",
-    parameters=_SEARCH_PARAMETERS,
-    strict=None,
-)
-_EXPORT_NOTES = ToolSpec(
-    name="export_notes",
-    description="Export the current working notes as markdown.",
-    parameters=_EXPORT_PARAMETERS,
-    strict=True,
-)
-
-
-def _request_tokens(
-    *messages: Message,
-    tools: tuple[ToolSpec, ...] = (),
-    deferred: frozenset[str] = frozenset(),
-) -> int:
-    request = ModelRequest(messages=messages, tools=tools, deferred_tools=DeferredTools(names=deferred))
-    return ScriptedModel([]).request_tokens(request)
-
-
-def test_a_request_counts_its_system_message_and_its_prompt() -> None:
-    prompt = Message(role="user", content="Current prompt")
-
-    assert _request_tokens(_SYSTEM_MESSAGE, prompt) == quarter_tokens(f"{_SYSTEM_MESSAGE.content}{prompt.content}")
-
-
-def test_a_request_counts_each_offered_tool_definition_as_it_sends_it() -> None:
-    """Tool definitions count with every field the tool set; fields it left unset are not sent, so they do not count."""
-    sent_definitions = [
-        {
-            "name": "search_docs",
-            "description": "Search the engineering docs for a matching answer.",
-            "parameters": _SEARCH_PARAMETERS,
-        },
-        {
-            "name": "export_notes",
-            "description": "Export the current working notes as markdown.",
-            "parameters": _EXPORT_PARAMETERS,
-            "strict": True,
-        },
-    ]
-
-    assert _request_tokens(_SYSTEM_MESSAGE, tools=(_SEARCH_DOCS, _EXPORT_NOTES)) == quarter_tokens(
-        str(_SYSTEM_MESSAGE.content) + stable_serialize(sent_definitions),
-    )
-
-
-def test_a_request_leaves_deferred_tools_out() -> None:
-    """A tool that tool search keeps off the request until it is found costs nothing up front."""
-    tools = (_SEARCH_DOCS, _EXPORT_NOTES)
-    nothing_deferred = _request_tokens(_SYSTEM_MESSAGE, tools=tools)
-    export_deferred = _request_tokens(_SYSTEM_MESSAGE, tools=tools, deferred=frozenset({"export_notes"}))
-
-    assert export_deferred < nothing_deferred
-    assert export_deferred == _request_tokens(_SYSTEM_MESSAGE, tools=(_SEARCH_DOCS,))
-    assert _request_tokens(
-        _SYSTEM_MESSAGE,
-        tools=tools,
-        deferred=frozenset({"search_docs", "export_notes"}),
-    ) == _request_tokens(_SYSTEM_MESSAGE)
 
 
 def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages() -> None:

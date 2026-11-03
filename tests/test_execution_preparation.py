@@ -958,7 +958,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     sent = ModelRequest(messages=(*leader_system_messages, *prepared.turn.in_request_order()))
     # Persisted replay is fitted around a request holding the turn as sent; fallback replay records that request's size.
     sized = (
-        model.request_tokens(frames[0].request(summary=None, history=()))
+        model.request_tokens(frames[0].request())
         if replays_persisted_history
         else prepared.prepared_history.prepared_context_tokens
     )

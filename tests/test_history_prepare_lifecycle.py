@@ -99,7 +99,7 @@ if TYPE_CHECKING:
 
 def _turn_tokens(prompt: str = "Current prompt") -> int:
     """Return what a request holding only the turn ``prompt`` counts, as ``estimate_only_model`` sizes it."""
-    return estimate_only_model().request_tokens(ModelRequest(messages=(Message(role="user", content=prompt),)))
+    return estimate_only_model().request_tokens(request_frame(prompt).request())
 
 
 def _plan_with_history_budget(config: Config, runtime_paths: RuntimePaths, budget: int) -> ResolvedHistoryExecutionPlan:
@@ -2180,7 +2180,7 @@ async def test_the_second_reply_sizes_its_history_by_the_first_reply_reported_si
     stamp_request_identity(
         run.messages[-1],
         model,
-        request_frame(system=_SYSTEM_PROMPT, turn=run.messages[0]).request(summary=None, history=()),
+        request_frame(system=_SYSTEM_PROMPT, turn=run.messages[0]).request(),
     )
     seed_session(storage, _session("session-1", runs=[run]))
 

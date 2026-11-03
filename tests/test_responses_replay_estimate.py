@@ -27,8 +27,8 @@ from mindroom.history.replay import (
     estimate_summary_tokens,
     prompt_visible_history,
 )
-from mindroom.history.request_messages import TurnMessages, request_layout
-from mindroom.history.request_size import RequestFrame, request_sizer
+from mindroom.history.request_messages import request_layout
+from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -45,7 +45,7 @@ from mindroom.providers.openai.responses_wire import conversation_digest, respon
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
-from tests.conftest import seed_session
+from tests.conftest import request_frame, seed_session
 from tests.fakes.scripted_model import ScriptedModel
 from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint
 from tests.providers.golden_support import pipeline_provider
@@ -606,15 +606,11 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
         active_model_name=model_name,
         active_context_window=None,
     )
-    frame = RequestFrame(
-        ModelRequest(messages=()),
-        (Message(role="system", content="You answer briefly."),),
-        TurnMessages(prompt=Message(role="user", content="And now?")),
-    )
+    frame = request_frame("And now?", system="You answer briefly.")
     history = prompt_visible_history(session, inputs.history_settings)
     route_size = model.request_tokens(frame.request(summary=None, history=history))
     canonical_size = ScriptedModel([]).request_tokens(frame.request(summary=None, history=history))
-    without_history = model.request_tokens(frame.request(summary=None, history=()))
+    without_history = model.request_tokens(frame.request())
 
     prepared = await prepare_scope_history(
         sizer=request_sizer(model, config, model_name),

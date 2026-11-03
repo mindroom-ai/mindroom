@@ -15,7 +15,7 @@ import httpx2
 import pytest
 
 from mindroom.llm.media import File, Image
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, model_provenance, stable_serialize
 from mindroom.llm.provider import DeferredTools, ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_items
@@ -23,6 +23,7 @@ from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
+from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import quarter_tokens
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
@@ -645,6 +646,86 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
         assert abs(model.request_tokens(request) - model.request_tokens(unsearched) - definition) < 1_000
         assert abs(model.request_tokens(request, start=1) - definition) < 1_000
         assert model.request_tokens(request, start=2) < 1_000
+
+
+_SYSTEM_MESSAGE = Message(role="system", content="You are a careful engineer.\n\nStay concise.")
+_SEARCH_PARAMETERS = {
+    "type": "object",
+    "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+    "required": ["query"],
+}
+_EXPORT_PARAMETERS = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}},
+    "required": ["title"],
+    "additionalProperties": False,
+}
+_SEARCH_DOCS = ToolSpec(
+    name="search_docs",
+    description="Search the engineering docs for a matching answer.",
+    parameters=_SEARCH_PARAMETERS,
+    strict=None,
+)
+_EXPORT_NOTES = ToolSpec(
+    name="export_notes",
+    description="Export the current working notes as markdown.",
+    parameters=_EXPORT_PARAMETERS,
+    strict=True,
+)
+
+
+def _plain_request_tokens(
+    *messages: Message,
+    tools: tuple[ToolSpec, ...] = (),
+    deferred: frozenset[str] = frozenset(),
+) -> int:
+    request = ModelRequest(messages=messages, tools=tools, deferred_tools=DeferredTools(names=deferred))
+    return ScriptedModel([]).request_tokens(request)
+
+
+def test_a_plain_route_counts_a_system_message_and_a_prompt() -> None:
+    """A route that sends messages by role counts each message's text as it sends it."""
+    prompt = Message(role="user", content="Current prompt")
+
+    assert _plain_request_tokens(_SYSTEM_MESSAGE, prompt) == quarter_tokens(
+        f"{_SYSTEM_MESSAGE.content}{prompt.content}",
+    )
+
+
+def test_a_plain_route_counts_each_offered_tool_definition_as_it_sends_it() -> None:
+    """Tool definitions count with every field the tool set; fields it left unset are not sent, so they do not count."""
+    sent_definitions = [
+        {
+            "name": "search_docs",
+            "description": "Search the engineering docs for a matching answer.",
+            "parameters": _SEARCH_PARAMETERS,
+        },
+        {
+            "name": "export_notes",
+            "description": "Export the current working notes as markdown.",
+            "parameters": _EXPORT_PARAMETERS,
+            "strict": True,
+        },
+    ]
+
+    assert _plain_request_tokens(_SYSTEM_MESSAGE, tools=(_SEARCH_DOCS, _EXPORT_NOTES)) == quarter_tokens(
+        str(_SYSTEM_MESSAGE.content) + stable_serialize(sent_definitions),
+    )
+
+
+def test_a_plain_route_leaves_deferred_tools_out() -> None:
+    """A tool that tool search keeps off the request until it is found costs nothing up front."""
+    tools = (_SEARCH_DOCS, _EXPORT_NOTES)
+    nothing_deferred = _plain_request_tokens(_SYSTEM_MESSAGE, tools=tools)
+    export_deferred = _plain_request_tokens(_SYSTEM_MESSAGE, tools=tools, deferred=frozenset({"export_notes"}))
+
+    assert export_deferred < nothing_deferred
+    assert export_deferred == _plain_request_tokens(_SYSTEM_MESSAGE, tools=(_SEARCH_DOCS,))
+    assert _plain_request_tokens(
+        _SYSTEM_MESSAGE,
+        tools=tools,
+        deferred=frozenset({"search_docs", "export_notes"}),
+    ) == _plain_request_tokens(_SYSTEM_MESSAGE)
 
 
 def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:

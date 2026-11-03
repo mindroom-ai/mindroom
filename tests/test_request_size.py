@@ -8,7 +8,6 @@ records it (``llm.request_identity``).
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -29,10 +28,12 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
 from tests.history_helpers import _completed_run, _make_config, _session, stamp_request_identity
-from tests.providers.golden_support import load_golden
+from tests.providers.golden_support import golden_paths, load_golden
 from tests.providers.openai_family_support import golden_provider
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.llm.provider import ModelProvider
 
 _REPORTED = 1_000
@@ -286,11 +287,10 @@ async def test_the_latest_answer_s_replayed_reasoning_counts_before_the_next_rep
 
 def _kimi_route(tmp_path: Path) -> ModelProvider:
     """Return the Kimi Chat adapter one of its goldens configures, without network access."""
-    golden = load_golden(sorted((_FIXTURES / "kimi").glob("*.json"))[0])
+    golden = load_golden(golden_paths(("kimi",))[0])
     root = tmp_path / "kimi"
     root.mkdir()
     return golden_provider(golden, root).adapter
 
 
-_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "agno_parity" / "providers"
 _REASONING = "The forecast says rain in the evening, so a light jacket and closed shoes are the right call. " * 12

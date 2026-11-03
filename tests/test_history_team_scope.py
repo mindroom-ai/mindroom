@@ -175,20 +175,18 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     assert resolved_inputs.history_settings is built.history_settings
     plan = resolved_inputs.execution_plan
     assert (plan.compaction_model_name, plan.replay_window_tokens) == ("default", 1_500)
-    # The provisional first request holds the leader's prompt, every tool it offers, and the turn the run sends.
+    # The provisional first request holds the turn the run sends.
     frame = kwargs["frame"]
-    assert frame.system_messages == tuple(built.spec.leader.system_messages)
-    assert frame.template.tools == tuple(leader_tool_specs(built.spec))
     sent_turn = render_prepared_messages_text(prepared.turn.in_request_order())
     assert render_prepared_messages_text(frame.turn.in_request_order()) == sent_turn
 
 
 @pytest.mark.asyncio
-async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_every_tool_it_offers(
+async def test_the_team_turn_frames_its_requests_with_the_leader_prompt_and_every_tool_it_offers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Preparation sizes the leader's prompt and the tools its requests offer, the delegation tool among them."""
+    """Preparation frames the leader's prompt and the tools its requests offer, the delegation tool among them."""
     config, runtime_paths = _pair_config(tmp_path, teams={"pair": _PAIR})
     leader = ScriptedModel([answer("ok")])
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name="pair", leader=leader)
