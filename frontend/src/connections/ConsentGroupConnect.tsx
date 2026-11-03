@@ -14,7 +14,7 @@ import type {
 
 interface ConnectableGroup {
   group: ConnectionConsentGroup;
-  /** In the agent's service order, so the first is the one whose callback the server finishes. */
+  /** What this page counts; the server picks the members and the leading service itself. */
   candidates: ConnectionService[];
 }
 

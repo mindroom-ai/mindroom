@@ -23,7 +23,7 @@ Assumptions:
   Plugin providers may declare a group too.
   Grouping is never inferred from a shared OAuth client, because copying one refresh token into several connections is safe only for providers whose old refresh tokens stay valid after use (see External constraints).
 - **The server picks the members.**
-  A group connect for an agent takes the agent's services in that group that the requester may connect, that are not connected or awaiting reset, that use no service account, and that resolve to the same OAuth client ID as the first such service.
+  A group connect for an agent takes the agent's services in that group that the requester may connect, that are not connected or awaiting reset, that use no service account, and that resolve to the same OAuth client ID and endpoints as the first such service.
   The browser names only the agent and the group, so a stale page cannot replace a connected account.
 - **One authorization request.**
   The first member in the agent's service order leads: its endpoints, redirect URI, PKCE method, and extra authorization parameters build the request, which asks for the union of every member's scopes in order without duplicates.

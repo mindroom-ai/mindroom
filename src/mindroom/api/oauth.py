@@ -1357,7 +1357,7 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
             allow_connections_session_for_oauth_flow(request)
         await verify_user(request, request.headers.get("authorization"))
     try:
-        stored = await _complete_oauth_callback(
+        completed = await _complete_oauth_callback(
             request,
             provider,
             runtime_paths,
@@ -1368,9 +1368,10 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
         return _oauth_browser_error_response(_OAUTH_STALE_CONNECTION_MESSAGE, status_code=409, notice=notice)
 
     opener_origin = notice.opener_origin if notice is not None else None
-    if isinstance(stored, _GroupCallbackOutcome):
-        return _group_callback_response(stored, _OpenerNotice(provider.id, opener_origin))
-    if not stored:
+    if isinstance(completed, _GroupCallbackOutcome):
+        return _group_callback_response(completed, _OpenerNotice(provider.id, opener_origin))
+    dashboard_flow = completed
+    if not dashboard_flow:
         return _oauth_success_response(provider, opener_origin)
     return RedirectResponse(url=_success_redirect_url(provider, runtime_paths, opener_origin))
 
