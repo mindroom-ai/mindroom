@@ -285,6 +285,13 @@ async def _summarize(
         store, session = scope_fold
         # What the fold keeps is this reply's static prompt, so the summary gets the history budget left beside it.
         kept_tokens = await asyncio.to_thread(size_request, [*messages[: layout.leading], *layout.kept])
+        if kept_tokens >= policy.limit:
+            # What the fold keeps, such as the prompt's attachments, fills the limit alone, so no summary could fit.
+            logger.warning(
+                "Request exceeds the replay window without its history; not compacting",
+                run_id=record.run_id,
+            )
+            return None
         return await _compact_scope(
             compaction,
             inputs,
