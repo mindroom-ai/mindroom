@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 
-from mindroom.llm.tool_search import resolve_call_tool_calls
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec
+from mindroom.llm.tool_search import portable_tool_search_request, resolve_call_tool_calls
 
 
 def _call(call_id: str, name: str, arguments: str) -> dict[str, Any]:
@@ -18,6 +20,25 @@ def _resolved_arguments(arguments: str) -> object:
     [resolved] = resolve_call_tool_calls([_call("c1", "call_tool", arguments)], {"crm_lookup"})
     assert resolved["function"]["name"] == "crm_lookup"
     return json.loads(resolved["function"]["arguments"])
+
+
+def test_a_wrapped_call_leaves_the_namespace_of_the_function_it_wraps() -> None:
+    """``call_tool`` lives in the default namespace, so a namespaced deferred call it wraps drops its namespace.
+
+    Other provider keys beside ``function`` stay, as they do when a call resolves.
+    """
+    call = {**_call("c1", "crm_lookup", '{"id": 7}'), "namespace": "crm", "thought_signature": "sig"}
+    request = ModelRequest(
+        messages=[Message(role="assistant", tool_calls=[call])],
+        tools=[ToolSpec(name="crm_lookup", description=None, parameters={"type": "object"}, strict=None)],
+        deferred_tools=DeferredTools(names=frozenset({"crm_lookup"}), portable=True),
+    )
+
+    [wrapped] = portable_tool_search_request(request).messages[0].tool_calls or []
+
+    assert wrapped["function"]["name"] == "call_tool"
+    assert "namespace" not in wrapped
+    assert (wrapped["id"], wrapped["thought_signature"]) == ("c1", "sig")
 
 
 def test_a_resolved_call_keeps_its_id_and_extra_keys() -> None:

@@ -460,13 +460,19 @@ class ResponsesTurnParts:
 
 
 def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
-    """Return a function-call output item as the turn's tool call, with the ``call_`` id its result references."""
-    return {
+    """Return a function-call output item as the turn's tool call, with the ``call_`` id its result references.
+
+    A call to a tool that a hosted search loaded under a namespace keeps its ``namespace``, which its replay must name.
+    """
+    call: dict[str, Any] = {
         "id": item.id,
         "call_id": item.call_id or item.id,
         "type": "function",
         "function": {"name": item.name, "arguments": item.arguments},
     }
+    if item.namespace:
+        call["namespace"] = item.namespace
+    return call
 
 
 def responses_stop_reason(status: str | None, incomplete_reason: str | None, *, tool_calls: bool) -> StopReason | None:

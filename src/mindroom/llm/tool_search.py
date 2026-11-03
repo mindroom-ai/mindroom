@@ -92,7 +92,9 @@ def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, A
     if function["name"] not in deferred:
         return call
     wrapped = json.dumps({"name": function["name"], "arguments": call_arguments(function)}, ensure_ascii=False)
-    return {**call, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
+    # ``call_tool`` lives in the default namespace, not in the one a hosted search loaded the wrapped function under.
+    kept = {key: value for key, value in call.items() if key != "namespace"}
+    return {**kept, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
 
 
 def resolve_call_tool_calls(tool_calls: list[dict[str, Any]], callable_names: Container[str]) -> list[dict[str, Any]]:
