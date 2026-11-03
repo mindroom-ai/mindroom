@@ -252,16 +252,20 @@ agents:
 | --- | --- |
 | `google_drive_list_files()` | Lists recently modified files. |
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`; PDFs, Office files, and Drawings need a download and a reader for that format. |
-| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
+| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
+| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
 | `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
 | `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
 | `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
-When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, a name containing `/`, or a size over `max_download_size`.
+Use `google_drive_read_file` to read a document or text file, and `google_drive_download_file` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
+Binary files are never returned as text.
+When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
+Files with the same name never overwrite each other, downloading the same file again replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
+On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
@@ -273,10 +277,10 @@ Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API
 | `list_files` | `boolean` | `true` | Enable file listing. |
 | `search_files` | `boolean` | `true` | Enable metadata search. |
 | `read_file` | `boolean` | `true` | Enable content reads. |
-| `download_file` | `boolean` | `false` | Enable downloads and exports into the agent workspace. |
+| `download_file` | `boolean` | `true` | Enable downloads and exports into the agent workspace. |
 | `write` | `boolean` | `true` | Enable upload, content replacement, folder creation, move or rename, and trash; `false` removes all of them. |
-| `max_read_size` | `number` | `10485760` | Largest non-Workspace file to read, in bytes. |
-| `max_download_size` | `number` | `104857600` | Largest file or export to download, in bytes. |
+| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read_file` returns as text, in bytes. |
+| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_download_file` saves, in bytes. |
 
 To require a person to approve each Drive change, add [Tool Approval](https://docs.mindroom.chat/tool-approval/) rules:
 
