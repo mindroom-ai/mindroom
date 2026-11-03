@@ -183,7 +183,7 @@ def test_stored_settings_never_widen_the_agent_entry(tmp_path: Path, monkeypatch
     )
 
     assert tuple(toolkit_function_names(tool)) == atlassian_function_names(write=False)
-    assert tool.instructions == "This agent may use only these Jira spaces: ENG."
+    assert tool.instructions == "The `jira_*` functions may use only these Jira spaces: ENG."
 
 
 def test_model_is_told_the_allowed_spaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,7 +196,8 @@ def test_model_is_told_the_allowed_spaces(tmp_path: Path, monkeypatch: pytest.Mo
     )
 
     assert limited.instructions == (
-        "This agent may use only these Jira spaces: ENG. This agent may use only these Confluence spaces: DOCS, ~alice."
+        "The `jira_*` functions may use only these Jira spaces: ENG. "
+        "The `confluence_*` functions may use only these Confluence spaces: DOCS, ~alice."
     )
     assert unrestricted.instructions is None
 

@@ -116,6 +116,7 @@ def _connection_tool_factory(connection: AtlassianConnectionConfig) -> Callable[
                 credentials_manager: CredentialsManager | None = None,
                 worker_target: ResolvedWorkerTarget | None = None,
                 runtime_config: Config | None = None,
+                write: bool = True,
                 jira_spaces: list[str] | None = None,
                 confluence_spaces: list[str] | None = None,
             ) -> None:
@@ -123,7 +124,8 @@ def _connection_tool_factory(connection: AtlassianConnectionConfig) -> Callable[
                     provider=atlassian_connection_oauth_provider(connection),
                     function_prefix=f"{connection.name}_",
                     products=connection.products,
-                    write=connection.write,
+                    # An agent's tool entry can only narrow the connection's write access.
+                    write=connection.write and write,
                     site_url=connection.site_url,
                     cloud_id=connection.cloud_id,
                     runtime_paths=runtime_paths,
@@ -158,6 +160,9 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
         auth_provider=connection.provider_id,
         icon=base.icon,
         icon_color=base.icon_color,
+        config_fields=[field for field in base.config_fields or () if field.name == "write"]
+        if connection.write
+        else [],
         agent_override_fields=[field for field in base.agent_override_fields or () if field.name in space_fields],
         managed_init_args=base.managed_init_args,
         docs_url=base.docs_url,

@@ -436,7 +436,7 @@ class AtlassianToolkit(Toolkit):
         self._config = runtime_config
         # An empty space list leaves the agent no space of that product, so none of its functions are offered.
         enabled_products = tuple(product for product in products if self._spaces.keys(product) != ())
-        super().__init__(name=provider.id, instructions=self._spaces.instructions(enabled_products))
+        super().__init__(name=provider.id, instructions=self._spaces.instructions(enabled_products, function_prefix))
         functions = {
             "jira_search_issues": self.jira_search_issues,
             "jira_get_issue": self.jira_get_issue,

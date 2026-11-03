@@ -379,7 +379,7 @@ async def test_connection_tools_take_space_limits_for_their_own_products(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An agent entry limits a connection's spaces, and a connection offers only its products' space fields."""
+    """An agent entry can narrow a connection to read access and its products' spaces, but never widen it."""
     config, paths = _plugin(tmp_path)
     manager = save_client_config(paths)
     plugins = publish_test_plugins(config, paths)
@@ -391,7 +391,7 @@ async def test_connection_tools_take_space_limits_for_their_own_products(
         paths,
         worker_target=worker_target(),
         runs_in_worker=False,
-        tool_config_overrides={"confluence_spaces": ["DOCS"]},
+        tool_config_overrides={"write": False, "confluence_spaces": ["DOCS"]},
         tools=plugins.tools,
     )
     assert isinstance(tool, AtlassianToolkit)
@@ -399,8 +399,11 @@ async def test_connection_tools_take_space_limits_for_their_own_products(
     await _call(tool, "partner_confluence_search", cql="type = page")
 
     assert gateway.product_requests()[0].url.params["cql"] == 'space in ("DOCS") AND (type = page)'
-    fields = plugins.tools.entries["partner_atlassian"].agent_override_fields or ()
-    assert [field.name for field in fields] == ["confluence_spaces"]
-    for overrides in ({"write": False}, {"jira_spaces": ["ENG"]}):
+    assert tuple(tool.functions) == atlassian_function_names(("confluence",), write=False, prefix="partner_")
+    # The prompt shows toolkit instructions unnamed, so they name the connection's own functions.
+    assert tool.instructions == "The `partner_confluence_*` functions may use only these Confluence spaces: DOCS."
+    entries = plugins.tools.entries
+    assert [field.name for field in entries["partner_atlassian"].agent_override_fields or ()] == ["confluence_spaces"]
+    for name, overrides in (("partner_atlassian", {"jira_spaces": ["ENG"]}), ("archive_atlassian", {"write": True})):
         with pytest.raises(ToolConfigOverrideError, match="unknown authored override"):
-            validate_authored_tool_entry_overrides("partner_atlassian", overrides, tool_metadata=plugins.tools.entries)
+            validate_authored_tool_entry_overrides(name, overrides, tool_metadata=entries)

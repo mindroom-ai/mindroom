@@ -215,7 +215,7 @@ agents:
           confluence_spaces: [PARTNER]
 ```
 
-A connection's tool entry accepts the space lists of its products, as described in [Limit What An Agent Can Do](#limit-what-an-agent-can-do), while its write access comes from the connection's `write` field.
+A connection's tool entry accepts the space lists of its products and, when the connection's `write` is `True`, `write: false`, as described in [Limit What An Agent Can Do](#limit-what-an-agent-can-do).
 
 | Field | Default | Notes |
 | --- | --- | --- |

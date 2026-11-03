@@ -18,6 +18,7 @@ JIRA_PROJECT_KEY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,254}")
 CONFLUENCE_SPACE_KEY_PATTERN = re.compile(r"~?[A-Za-z0-9_-]{1,255}")
 _KEY_PATTERNS = {"jira": JIRA_PROJECT_KEY_PATTERN, "confluence": CONFLUENCE_SPACE_KEY_PATTERN}
 _QUERY_FIELDS = {"jira": "project", "confluence": "space"}
+_EXAMPLE_KEYS = {"jira": "ENG", "confluence": "DOCS"}
 _ORDER_BY_PATTERN = re.compile(r"order\s+by\b", re.IGNORECASE)
 
 
@@ -32,7 +33,7 @@ def _space_keys(product: AtlassianProduct, value: object) -> tuple[str, ...] | N
     keys: dict[str, str] = {}
     for item in value:
         if not isinstance(item, str) or not _KEY_PATTERNS[product].fullmatch(item.strip()):
-            msg = f"{field_name} must contain {product.capitalize()} space keys such as ENG, not {item!r}"
+            msg = f"{field_name} must contain {product.capitalize()} space keys such as {_EXAMPLE_KEYS[product]}, not {item!r}"
             raise ValueError(msg)
         keys.setdefault(item.strip().casefold(), item.strip())
     return tuple(keys.values())
@@ -60,9 +61,9 @@ def _order_by_start(query: str) -> int | None:
     return None
 
 
-def space_limit_sentence(product: AtlassianProduct, keys: Sequence[str]) -> str:
-    """Say which spaces of one product this agent may use, in its instructions and refusals alike."""
-    return f"This agent may use only these {product.capitalize()} spaces: {', '.join(keys)}."
+def space_limit_sentence(product: AtlassianProduct, keys: Sequence[str], *, subject: str = "This agent") -> str:
+    """Say which spaces of one product ``subject`` may use, in the toolkit's instructions and refusals alike."""
+    return f"{subject} may use only these {product.capitalize()} spaces: {', '.join(keys)}."
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +82,17 @@ class AtlassianSpaces:
         """Return the keys one product may use, or None when it is unrestricted."""
         return self.jira if product == "jira" else self.confluence
 
-    def instructions(self, products: Sequence[AtlassianProduct]) -> str | None:
-        """Name the allowed spaces of each limited product offered, so the model does not reach for others."""
-        limits = [space_limit_sentence(product, keys) for product in products if (keys := self.keys(product))]
+    def instructions(self, products: Sequence[AtlassianProduct], function_prefix: str) -> str | None:
+        """Name the allowed spaces of each limited product offered, so the model does not reach for others.
+
+        The prompt shows every toolkit's instructions without its name, so each sentence names the functions it
+        covers, keeping another Atlassian connection of the same agent unaffected.
+        """
+        limits = [
+            space_limit_sentence(product, keys, subject=f"The `{function_prefix}{product}_*` functions")
+            for product in products
+            if (keys := self.keys(product))
+        ]
         return " ".join(limits) or None
 
     def allows(self, product: AtlassianProduct, key: object) -> bool:
