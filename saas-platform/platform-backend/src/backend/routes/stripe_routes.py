@@ -21,20 +21,85 @@ router = APIRouter()
 class _CustomerSubscriptions:
     """What checkout needs from a Stripe customer's subscription history."""
 
-    unended_subscription_id: str | None
+    unended_subscription: Any | None
     had_trial: bool
 
 
 def _subscription_history(customer_id: str) -> _CustomerSubscriptions:
-    unended_subscription_id = None
+    unended_subscription = None
     had_trial = False
     for sub in stripe.Subscription.list(customer=customer_id, status="all", limit=100).auto_paging_iter():
         had_trial = had_trial or sub.trial_start is not None
         # A past_due, unpaid, paused, or incomplete subscription can still be paid or resumed, so checkout
         # would start a second one; only canceled and incomplete_expired subscriptions are over.
-        if unended_subscription_id is None and sub.status not in ENDED_STRIPE_STATUSES:
-            unended_subscription_id = sub.id
-    return _CustomerSubscriptions(unended_subscription_id, had_trial)
+        if unended_subscription is None and sub.status not in ENDED_STRIPE_STATUSES:
+            unended_subscription = sub
+    return _CustomerSubscriptions(unended_subscription, had_trial)
+
+
+# Identifies the portal configuration created for one plan's prices.
+_PLAN_PORTAL_METADATA_KEY = "mindroom_upgrade_prices"
+
+
+def _plan_portal_configuration(tier: str) -> str:
+    """Return the portal configuration that offers only `tier`'s prices, creating it on first use.
+
+    Every plan's prices share one Stripe product, and a portal configuration may list only one price per billing
+    interval for each product, so the default configuration cannot offer plan changes and each plan gets its own.
+    """
+    prices = [price for cycle in ("monthly", "yearly") if (price := get_stripe_price_id(tier, cycle))]
+    key = ",".join(prices)
+    for configuration in stripe.billing_portal.Configuration.list(active=True, limit=100).auto_paging_iter():
+        if configuration.metadata.get(_PLAN_PORTAL_METADATA_KEY) == key:
+            return configuration.id
+    return stripe.billing_portal.Configuration.create(
+        business_profile={"headline": "Change your MindRoom plan"},
+        default_return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing",
+        features={
+            "subscription_update": {
+                "enabled": True,
+                "default_allowed_updates": ["price"],
+                "products": [{"product": stripe.Price.retrieve(prices[0]).product, "prices": prices}],
+                # The difference is charged at once, so a larger AI budget is paid for when it starts; a trial ends.
+                "proration_behavior": "always_invoice",
+                "trial_update_behavior": "end_trial",
+            },
+            "payment_method_update": {"enabled": True},
+            "invoice_history": {"enabled": True},
+        },
+        metadata={_PLAN_PORTAL_METADATA_KEY: key},
+    ).id
+
+
+def _plan_change_portal_options(subscription: Any, tier: str, price_id: str) -> dict[str, Any]:
+    """Return portal session options that open the confirmation of a switch to `price_id`.
+
+    A subscription that is not active or trialing, or is set to cancel, gets none and opens on the portal home, where
+    it can be paid or renewed first.
+    """
+    if (
+        subscription["status"] not in {"active", "trialing"}
+        or subscription.get("cancel_at")
+        or subscription.get("cancel_at_period_end")
+    ):
+        return {}
+    item = subscription["items"]["data"][0]
+    if item["price"]["id"] == price_id:
+        return {}
+    return {
+        "configuration": _plan_portal_configuration(tier),
+        "flow_data": {
+            "type": "subscription_update_confirm",
+            "subscription_update_confirm": {
+                "subscription": subscription["id"],
+                "items": [{"id": item["id"], "price": price_id, "quantity": 1}],
+            },
+            "after_completion": {
+                "type": "redirect",
+                "redirect": {"return_url": f"https://app.{PLATFORM_DOMAIN}/dashboard/billing"},
+            },
+        },
+    }
 
 
 class CheckoutRequest(BaseModel):
@@ -72,16 +137,18 @@ async def create_checkout_session(
 
     # Check if customer already has a subscription Stripe has not ended, and whether any past one had a trial
     history = await anyio.to_thread.run_sync(_subscription_history, customer_id)
-    if history.unended_subscription_id is not None:
-        # Customer already has a subscription - they should use the portal to manage it
-        logger.warning(
+    if history.unended_subscription is not None:
+        # A second checkout would start a second subscription, so the portal changes the existing one instead.
+        logger.info(
             "Customer %s already has an unended subscription %s, redirecting to portal",
             customer_id,
-            history.unended_subscription_id,
+            history.unended_subscription.id,
         )
-        # Create a portal session instead
+        options = await anyio.to_thread.run_sync(
+            _plan_change_portal_options, history.unended_subscription, payload.tier, price_id
+        )
         portal_session = stripe.billing_portal.Session.create(
-            customer=customer_id, return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing"
+            customer=customer_id, return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing", **options
         )
         return {"url": portal_session.url}
 

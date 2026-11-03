@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import stripe
 from fastapi.testclient import TestClient
 
 
@@ -269,7 +270,7 @@ class TestStripeRoutesEndpoints:
             data={"stripe_customer_id": "cus_test_123"}
         )
         mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
-            Mock(id="sub_existing", status=status, trial_start=None)
+            _subscription("sub_existing", status, "price_test_123")
         ]
         mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
         mock_stripe.checkout.Session.create.return_value = Mock(url="https://checkout.stripe.com/pay/cs_test_123")
@@ -284,6 +285,55 @@ class TestStripeRoutesEndpoints:
         else:
             mock_stripe.billing_portal.Session.create.assert_not_called()
             assert response.json()["url"] == "https://checkout.stripe.com/pay/cs_test_123"
+
+    @pytest.mark.parametrize("configuration_exists", [True, False])
+    def test_checkout_opens_the_plan_change_confirmation_for_a_subscriber(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_stripe: Mock,
+        mock_verify_user: Mock,
+        configuration_exists: bool,
+    ):
+        """A subscriber choosing another plan confirms the switch in a portal configuration offering only that plan."""
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(
+            data={"stripe_customer_id": "cus_test_123"}
+        )
+        mock_stripe.Subscription.list.return_value.auto_paging_iter.return_value = [
+            _subscription("sub_existing", "trialing", "price_hobby_monthly")
+        ]
+        other = Mock(id="bpc_other", metadata={"mindroom_upgrade_prices": "price_hobby_monthly,price_hobby_yearly"})
+        pro = Mock(id="bpc_pro", metadata={"mindroom_upgrade_prices": "price_pro_monthly,price_pro_yearly"})
+        mock_stripe.billing_portal.Configuration.list.return_value.auto_paging_iter.return_value = (
+            [other, pro] if configuration_exists else [other]
+        )
+        mock_stripe.billing_portal.Configuration.create.return_value = Mock(id="bpc_pro")
+        mock_stripe.Price.retrieve.return_value = Mock(product="prod_subscription")
+        mock_stripe.billing_portal.Session.create.return_value = Mock(url="https://billing.stripe.com/session/x")
+
+        def price_id(tier: str, billing_cycle: str) -> str:
+            return f"price_{tier}_{billing_cycle}"
+
+        with patch("backend.routes.stripe_routes.get_stripe_price_id", side_effect=price_id):
+            response = client.post("/stripe/checkout", json={"tier": "pro", "billing_cycle": "monthly"})
+
+        assert response.json() == {"url": "https://billing.stripe.com/session/x"}
+        mock_stripe.checkout.Session.create.assert_not_called()
+        session = mock_stripe.billing_portal.Session.create.call_args.kwargs
+        assert session["configuration"] == "bpc_pro"
+        assert session["flow_data"]["type"] == "subscription_update_confirm"
+        assert session["flow_data"]["subscription_update_confirm"] == {
+            "subscription": "sub_existing",
+            "items": [{"id": "si_existing", "price": "price_pro_monthly", "quantity": 1}],
+        }
+        if configuration_exists:
+            mock_stripe.billing_portal.Configuration.create.assert_not_called()
+        else:
+            created = mock_stripe.billing_portal.Configuration.create.call_args.kwargs
+            assert created["features"]["subscription_update"]["products"] == [
+                {"product": "prod_subscription", "prices": ["price_pro_monthly", "price_pro_yearly"]}
+            ]
+            assert created["metadata"] == {"mindroom_upgrade_prices": "price_pro_monthly,price_pro_yearly"}
 
     def test_checkout_stripe_error(
         self, client: TestClient, mock_supabase: MagicMock, mock_stripe: Mock, mock_verify_user: Mock
@@ -326,3 +376,18 @@ class TestStripeRoutesEndpoints:
         """Test accessing endpoints without authentication."""
         response = client.post("/stripe/checkout", json={"tier": "byok", "billing_cycle": "monthly"})
         assert response.status_code == 401
+
+
+def _subscription(subscription_id: str, status: str, price_id: str) -> stripe.Subscription:
+    """Build a Stripe subscription with one item, read by attribute and by key like the real object."""
+    return stripe.Subscription.construct_from(
+        {
+            "id": subscription_id,
+            "status": status,
+            "trial_start": None,
+            "cancel_at": None,
+            "cancel_at_period_end": False,
+            "items": {"data": [{"id": "si_existing", "price": {"id": price_id}}]},
+        },
+        "sk_test_mock",
+    )
