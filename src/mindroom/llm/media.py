@@ -270,10 +270,7 @@ def is_document_mime_type(mime_type: str | None) -> bool:
 def file_text(data: bytes) -> str:
     """Return the text a text file's bytes hold: UTF-16 or UTF-8 by their byte-order mark, else UTF-8, else Windows-1252.
 
-    Bytes that are not all UTF-8 still read as UTF-8 when they hold more multibyte UTF-8 characters than the
-    replacement characters the decode leaves, as a non-ASCII log cut mid-character does; Windows-1252 text forms
-    such a character only by chance, so a tie reads as Windows-1252. Bytes that do not decode become replacement
-    characters.
+    Bytes that do not decode become replacement characters.
     """
     if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return data.decode("utf-16", errors="replace")
@@ -282,10 +279,7 @@ def file_text(data: bytes) -> str:
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        text = data.decode("utf-8", errors="replace")
-    replaced = text.count("\ufffd")
-    multibyte = len(text) - replaced - len(text.encode("ascii", errors="ignore"))
-    return text if multibyte > replaced else data.decode("cp1252", errors="replace")
+        return data.decode("cp1252", errors="replace")
 
 
 # The longest attachment name or type that model-facing text prints.
