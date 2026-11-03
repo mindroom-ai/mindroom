@@ -80,6 +80,7 @@ class _Bot:
 
     sent: list[dict[str, Any]] = field(default_factory=list)
     client: Any = field(default_factory=lambda: MagicMock(user_id="@mindroom_mind:example.test"))
+    conversation_reader: Any = field(default_factory=MagicMock)
 
     @property
     def hook_context(self) -> _Bot:
@@ -610,6 +611,34 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
     ]
     assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
     assert loops == [asyncio.get_running_loop()]
+
+
+@pytest.mark.asyncio
+async def test_an_ask_with_a_summary_pins_it_as_its_threads_title(tmp_path: Path) -> None:
+    """The summary is written as the pinned title of the thread the prompt starts, so no generated one replaces it."""
+    config, paths, runner, bot = _setup(tmp_path)
+    _use_check(runner, lambda _ctx: Ask("Do the work", new_thread=True, summary="Weekly digest"))
+    with patch.object(runner_module, "set_manual_thread_summary", new=AsyncMock()) as set_summary:
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+
+    set_summary.assert_awaited_once_with(
+        bot.client,
+        ROOM,
+        "$event1",
+        "Weekly digest",
+        config=config,
+        runtime_paths=paths,
+        conversation_reader=bot.conversation_reader,
+        entity_name="mind",
+        membership_index=runner.agent_reply_memberships,
+    )
+
+
+def test_only_an_ask_that_starts_a_thread_can_title_it() -> None:
+    """A follow-up in the current thread cannot set a summary, so it never races the title the thread started with."""
+    with pytest.raises(ValueError, match="new_thread=True"):
+        Ask("Follow up", new_thread=False, summary="Second")
 
 
 @pytest.mark.asyncio
