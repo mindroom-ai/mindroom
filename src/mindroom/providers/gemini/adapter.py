@@ -99,8 +99,13 @@ class GeminiProvider:
         return route_context_key(self.identity, self.token_counter, request, self._parts)
 
     def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
-        tools = self._tool_settings(request, authored_tool_config=None).get("tools", ())
-        gemini_request_parts(request, start, parts, tools=tools)
+        gemini_request_parts(
+            request,
+            start,
+            parts,
+            tools=self._tool_settings(request, authored_tool_config=None).get("tools", ()),
+            server_tool_parts=self._sends_server_tool_parts(request),
+        )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.
@@ -125,7 +130,7 @@ class GeminiProvider:
                 request.messages,
                 MediaRoute(provider, upload),
                 # A decision request asks for no server-side tool parts (``without_tool_selection``).
-                server_tool_parts=self._sends_search_beside_tools(request) and not disables_tools(request.tool_choice),
+                server_tool_parts=self._sends_server_tool_parts(request),
             )
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
@@ -218,6 +223,10 @@ class GeminiProvider:
         if disables_tools(request.tool_choice):
             return self._decision_config(config)
         return config
+
+    def _sends_server_tool_parts(self, request: ModelRequest) -> bool:
+        """Return whether ``request`` replays stored server-side tool parts; a decision request asks for none."""
+        return self._sends_search_beside_tools(request) and not disables_tools(request.tool_choice)
 
     def _sends_search_beside_tools(self, request: ModelRequest) -> bool:
         """Return whether ``request`` sends Google Search beside its function tools, as Gemini 3 and later take it.

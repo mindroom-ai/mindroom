@@ -182,12 +182,13 @@ def gemini_request_parts(
     parts: RequestParts,
     *,
     tools: Sequence[Mapping[str, Any]],
+    server_tool_parts: bool,
 ) -> None:
     """Add what the contents and tools a request sends for ``request`` give the model, its messages from ``start`` on.
 
     The system instruction and text parts count as the model reads them, without the escaping JSON adds; function
-    calls, function responses, and server-side tool parts count as serialized, the last as though the request asked
-    for them. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each reply that
+    calls, function responses, and the server-side tool parts it replays with ``server_tool_parts`` count as
+    serialized. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each reply that
     replays one adds its reasoning tokens. From ``start`` 0 the ``tools`` the request sends count too.
     """
     messages = request.messages[start:]
@@ -196,7 +197,8 @@ def gemini_request_parts(
     for message in messages:
         if message.role == "system":
             continue
-        message_parts = _message_parts(message, _ROLE_MAP.get(message.role, message.role), server_tool_parts=True)
+        role = _ROLE_MAP.get(message.role, message.role)
+        message_parts = _message_parts(message, role, server_tool_parts=server_tool_parts)
         if any("thought_signature" in part for part in message_parts):
             parts.cost(message.metrics.tokens.reasoning_tokens)
         for part in message_parts:

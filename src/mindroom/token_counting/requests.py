@@ -121,11 +121,16 @@ def route_request_tokens(
 def route_context_key(identity: ModelIdentity, counter: TokenCounter, request: ModelRequest, parts_of: _PartsOf) -> str:
     """Identify what ``request`` gives the route's model besides its messages, as ``parts_of`` renders it.
 
-    That is the model, its endpoint, the system prompt, tools, and settings the route renders, and the flags that
-    change how it renders messages.
+    That is the model, its endpoint, the system prompt, tools, and settings the route renders, the flags that change
+    how it renders messages, and each deferred tool's definition, which renders nothing until a tool search loads it.
     """
     parts = RequestParts(counter)
     parts_of(replace(request, messages=()), 0, parts)
+    deferred = [
+        [tool.name, tool.description, tool.parameters, tool.strict]
+        for tool in request.tools
+        if tool.name in request.deferred_tools.names
+    ]
     digest = hashlib.sha256()
     for piece in (
         identity.id,
@@ -133,6 +138,7 @@ def route_context_key(identity: ModelIdentity, counter: TokenCounter, request: M
         identity.endpoint or "",
         *parts.pieces,
         stable_serialize(parts.flags),
+        stable_serialize(deferred),
     ):
         digest.update(piece.encode("utf-8", "surrogatepass"))
         digest.update(b"\0")

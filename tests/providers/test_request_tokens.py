@@ -502,22 +502,31 @@ def test_a_tool_authored_in_request_params_counts_once_per_reported_request(
     assert authored.request_tokens(request, start=2) == plain.request_tokens(request, start=2)
 
 
-@pytest.mark.parametrize(("family", "sends_declarations"), [("gemini", True), ("gemini_vertexai", False)])
-def test_gemini_counts_function_declarations_only_where_search_leaves_them_in(
+@pytest.mark.parametrize(("family", "beside"), [("gemini", True), ("gemini_vertexai", False)])
+def test_gemini_counts_function_declarations_and_search_parts_only_where_search_goes_beside_them(
     tmp_path: Path,
     family: str,
-    sends_declarations: bool,
+    beside: bool,
 ) -> None:
-    """Gemini 3 takes Google Search beside function tools; Vertex AI sends the search in their place."""
+    """Gemini 3 takes Google Search beside function tools and gets its search parts back; Vertex AI takes neither."""
     route = _route(family, tmp_path, search=True)
 
-    def request(description: str) -> ModelRequest:
+    def request(description: str, query: str) -> ModelRequest:
         lookup = ToolSpec(name="lookup", description=description, parameters={"type": "object"}, strict=None)
-        return ModelRequest(messages=(Message(role="user", content="Look it up."),), tools=(lookup,))
+        searched = Message(
+            role="assistant",
+            content="Found it.",
+            provider_data={"gemini_parts": [{"tool_call": {"args": {"query": query}}}, {"text": "Found it."}]},
+        )
+        return ModelRequest(
+            messages=(Message(role="user", content="Look it up."), searched, Message(role="user", content="Thanks.")),
+            tools=(lookup,),
+        )
 
-    grew = route.request_tokens(request(_REASONING)) > route.request_tokens(request("Look something up."))
+    plain = route.request_tokens(request("Look something up.", "Paris"))
 
-    assert grew is sends_declarations
+    assert (route.request_tokens(request(_REASONING, "Paris")) > plain) is beside
+    assert (route.request_tokens(request("Look something up.", _REASONING)) > plain) is beside
 
 
 def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:

@@ -22,7 +22,7 @@ from mindroom.llm.messages import (
     Message,
     model_provenance,
 )
-from mindroom.llm.provider import ModelIdentity, ModelRequest, NativeCompactionReplay, ToolSpec
+from mindroom.llm.provider import DeferredTools, ModelIdentity, ModelRequest, NativeCompactionReplay, ToolSpec
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
@@ -109,6 +109,27 @@ def test_a_changed_request_before_the_answer_is_sized_by_estimate(tmp_path: Path
         model = ScriptedModel([], identity=replace(model.identity, endpoint="http://elsewhere/v1"))
 
     assert _sized(tmp_path, model, request) == RequestSize(model.request_tokens(request), reported=False)
+
+
+def test_a_changed_definition_of_a_deferred_tool_ends_anchoring(tmp_path: Path) -> None:
+    """A deferred tool renders nothing until a search loads it, so its own definition identifies the request."""
+    model = ScriptedModel([])
+
+    def lookup(description: str) -> ToolSpec:
+        return ToolSpec(name="lookup_order", description=description, parameters={"type": "object"}, strict=None)
+
+    first = replace(
+        _first(Message(role="user", content="Where is my order?")),
+        tools=(lookup("Look up an order."),),
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"})),
+    )
+    answer = _answered(model, first, "Found it")
+    later = replace(first, messages=(*first.messages, answer, Message(role="user", content="Thanks")))
+    assert _sized(tmp_path, model, later).reported
+
+    updated = replace(later, tools=(lookup("Look up an order by its id or the buyer's email."),))
+
+    assert not _sized(tmp_path, model, updated).reported
 
 
 def test_a_queued_notice_the_reply_moved_keeps_the_answer_anchoring(tmp_path: Path) -> None:
