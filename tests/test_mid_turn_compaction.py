@@ -58,7 +58,7 @@ from mindroom.llm.provider import (
     TokenCounter,
     ToolSpec,
 )
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -1374,7 +1374,7 @@ async def test_an_answer_after_a_fold_records_the_request_it_answered(tmp_path: 
     answer = output.messages[-1]
     assert answer.content == "done"
     assert answer.provider_data is not None
-    assert answer.provider_data[REQUEST_IDENTITY_KEY] == RequestDigests(model).prefixes(model.requests[-1].request)[-1]
+    assert answer.provider_data[REQUEST_IDENTITY_KEY] == request_prefixes(model, model.requests[-1].request)[-1]
 
 
 @pytest.mark.asyncio

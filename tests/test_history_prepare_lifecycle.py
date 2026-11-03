@@ -57,7 +57,6 @@ from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, NativeCompactionReplay, TokenCounter
-from mindroom.llm.request_identity import RequestDigests
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
@@ -2022,7 +2021,7 @@ async def _prepare_reply(
         ),
         execution_plan=plan,
     )
-    sizer = _RecordingSizer(model=model, configured_provider=None, digests=RequestDigests(model))
+    sizer = _RecordingSizer(model=model, configured_provider=None)
     with (
         patch(
             "mindroom.providers.registry.build_model_provider",

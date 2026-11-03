@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
 
-__all__ = ["REQUEST_IDENTITY_KEY", "RequestDigests"]
+__all__ = ["REQUEST_IDENTITY_KEY", "request_prefixes"]
 
 # ``Message.provider_data`` key holding the identity of the request an assistant message answered.
 REQUEST_IDENTITY_KEY = "mindroom_request"
@@ -29,45 +29,20 @@ REQUEST_IDENTITY_KEY = "mindroom_request"
 _UNSENT_FIELDS = frozenset({"id", "created_at", "from_history", "metrics"})
 
 
-class RequestDigests:
-    """Digest the requests one loop sends to ``model``, each message's digest kept while it is the same object.
+def request_prefixes(model: ModelProvider, request: ModelRequest) -> list[str | None]:
+    """Return, for each index ``i`` up to ``len(request.messages)``, the identity of what precedes message ``i``.
 
-    A message whose media are local files is digested again on every request, so a file rewritten between requests
-    changes the identity; ``invalidate`` drops every kept digest after messages were changed in place.
+    None from the first message that has no identity on.
     """
-
-    def __init__(self, model: ModelProvider) -> None:
-        self._model = model
-        self._kept: dict[int, tuple[Message, bytes | None]] = {}
-
-    def prefixes(self, request: ModelRequest) -> list[str | None]:
-        """Return, for each index ``i`` up to ``len(request.messages)``, the identity of what precedes message ``i``.
-
-        None from the first message that has no identity on.
-        """
-        digest = hashlib.sha256(self._model.context_key(request).encode())
-        identities: list[str | None] = [digest.hexdigest()]
-        for message in request.messages:
-            if identities[-1] is None or (message_digest := self._message_digest(message)) is None:
-                identities.append(None)
-                continue
-            digest.update(message_digest)
-            identities.append(digest.hexdigest())
-        return identities
-
-    def invalidate(self) -> None:
-        """Forget every kept message digest, after the loop's messages were changed in place."""
-        self._kept.clear()
-
-    def _message_digest(self, message: Message) -> bytes | None:
-        # A kept entry holds its message, so no other message can take its ``id`` while it is kept.
-        kept = self._kept.get(id(message))
-        if kept is not None:
-            return kept[1]
-        digest = _digest_of(message)
-        if not any(item.filepath for _kind, item in media_items(message)):
-            self._kept[id(message)] = (message, digest)
-        return digest
+    digest = hashlib.sha256(model.context_key(request).encode())
+    identities: list[str | None] = [digest.hexdigest()]
+    for message in request.messages:
+        if identities[-1] is None or (message_digest := _digest_of(message)) is None:
+            identities.append(None)
+            continue
+        digest.update(message_digest)
+        identities.append(digest.hexdigest())
+    return identities
 
 
 def _digest_of(message: Message) -> bytes | None:

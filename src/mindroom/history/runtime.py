@@ -177,7 +177,7 @@ async def prepare_scope_history(
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
             native_history=configure_native(session=None, runs=()),
-            model=sizer.model,
+            model=model,
             static_tokens=static_tokens,
         )
 
@@ -298,7 +298,7 @@ async def prepare_scope_history(
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
-        model=sizer.model,
+        model=model,
         static_tokens=static_tokens,
         # A compaction rewrote the history that request held.
         request_size=request_size if compaction_decision.mode != "required" else None,
@@ -605,22 +605,26 @@ def finalize_history_preparation(
             model=model,
         )
         request_size = prepared_scope_history.request_size
+        estimated: int | None = None
         if request_size is not None:
             # The final request holds the prepared one's history beside what the final frame holds, such as the
             # prompt's attachments.
             request_tokens = request_size.tokens + static_tokens - prepared_scope_history.static_tokens
         else:
             # Only a required compaction leaves no size, and it turned native compaction off.
-            request_tokens = static_tokens + estimate_history_tokens()
+            estimated = estimate_history_tokens()
+            request_tokens = static_tokens + estimated
         # The history's share, which a reported size below the static estimate leaves at nothing.
         history_tokens = max(0, request_tokens - static_tokens)
         limit = execution_plan.limit_tokens
         if limit is not None and request_tokens > limit:
+            if estimated is None:
+                estimated = estimate_history_tokens()
             available_history_budget = _fitting_history_budget(
                 limit=limit,
                 static_tokens=static_tokens,
                 history_tokens=history_tokens,
-                estimated_history_tokens=(estimated := estimate_history_tokens()),
+                estimated_history_tokens=estimated,
                 reported=request_size is not None and request_size.reported,
             )
             if native_history is not None:

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import request_layout
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.model_usage import message_context_tokens
 from mindroom.native_compaction import checkpoint_items
 
@@ -60,14 +60,10 @@ class RequestSize:
 
 @dataclass(frozen=True, slots=True)
 class RequestSizer:
-    """Size the requests sent to ``model``; ``configured_provider`` is its config's provider, which reads its usage.
-
-    ``digests`` identifies its requests, keeping message digests across the requests of one loop.
-    """
+    """Size the requests sent to ``model``; ``configured_provider`` is its config's provider, which reads its usage."""
 
     model: ModelProvider
     configured_provider: str | None
-    digests: RequestDigests
 
     def size(self, request: ModelRequest) -> RequestSize:
         """Return the size of ``request``, anchored on the latest answer whose request it extends."""
@@ -83,7 +79,7 @@ class RequestSizer:
         The latest native checkpoint for the request's route bounds the search: projection replaced the transcript
         before it, which every earlier answer's size, and the checkpoint's own, still describe.
         """
-        prefixes = self.digests.prefixes(request)
+        prefixes = request_prefixes(self.model, request)
         route = request.native_compaction.route if request.native_compaction is not None else None
         identity = self.model.identity
         for index in range(len(request.messages) - 1, -1, -1):
@@ -104,16 +100,7 @@ class RequestSizer:
         return None
 
 
-def request_sizer(
-    model: ModelProvider,
-    config: Config,
-    model_name: str,
-    digests: RequestDigests | None = None,
-) -> RequestSizer:
-    """Return the sizer of requests to ``model``, configured as ``model_name``; ``digests`` are a loop's own."""
+def request_sizer(model: ModelProvider, config: Config, model_name: str) -> RequestSizer:
+    """Return the sizer of requests to ``model``, configured as ``model_name``."""
     configured = config.models.get(model_name)
-    return RequestSizer(
-        model=model,
-        configured_provider=configured.provider if configured is not None else None,
-        digests=digests if digests is not None else RequestDigests(model),
-    )
+    return RequestSizer(model=model, configured_provider=configured.provider if configured is not None else None)

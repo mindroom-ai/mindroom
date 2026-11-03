@@ -57,7 +57,7 @@ No reply waits for a token count.
 Compaction is enabled by default through `defaults.compaction`.
 It summarizes older history so later replies keep useful context instead of losing it to replay fitting.
 Supported OpenAI and Claude routes use [native compaction](#native-compaction) inside ordinary requests; every other route uses portable text compaction.
-Text compaction runs before a reply when the request, including the system prompt and tools, exceeds the compaction threshold on a route without native compaction, when history exceeds the hard replay budget, or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
+Text compaction runs before a reply when the request, including the system prompt and tools, exceeds the compaction threshold on a route without native compaction, when it exceeds the replay window minus `reserve_tokens`, or when [requested manually](#manual-compaction), and [during a reply](#compaction-during-a-reply) when its next model request would not fit.
 While it runs, the agent posts `Compacting history...` and edits that notice with the result.
 If compaction fails, the notice reads `Compaction failed; continuing without compaction.` with the reason; before a reply, the reply continues with fitted history.
 
@@ -126,8 +126,8 @@ MindRoom supports automatic [OpenAI Responses compaction](https://developers.ope
   An authored `compact_20260112` context-management policy keeps its own trigger and instructions, and `pause_after_compaction: true` is rejected because MindRoom needs the provider to continue its response.
 - Gemini, Chat Completions, and all other providers use text compaction.
 
-Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the hard request limit.
-An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the hard budget uses text compaction instead.
+Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the replay window minus `reserve_tokens`.
+An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the replay window minus `reserve_tokens` uses text compaction instead.
 Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
 When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).

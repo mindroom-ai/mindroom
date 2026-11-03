@@ -239,8 +239,6 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
     if fold is None:
         compaction.stopped = True
         return
-    # The fold rewrote messages in place, so the request digests start over.
-    state.digests.invalidate()
     if policy.native_route is not None:
         # The provider's own compaction could not keep this request within the window.
         logger.warning(
@@ -408,7 +406,7 @@ def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
         limit=plan.limit_tokens,
         fit_limit=context_budget_after_reserve(model_window or plan.replay_window_tokens, plan.reserve_tokens),
         native_route=native.route if native is not None else None,
-        sizer=request_sizer(compaction.model, compaction.config, compaction.model_name, state.digests),
+        sizer=request_sizer(compaction.model, compaction.config, compaction.model_name),
     )
 
 

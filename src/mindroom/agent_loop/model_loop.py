@@ -35,7 +35,7 @@ from mindroom.llm.messages import (
     usage_sums_attempts,
 )
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -70,8 +70,7 @@ class LoopState:
     review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions,
     paused ones included, the loop fills as it goes; ``request_template`` carries the per-run request settings, which a
     hook may replace for the rest of the run (mid-turn compaction turning the provider's compaction off after it
-    compacted as text); ``digests`` identifies the loop's requests, so each answer records which request it answered
-    (``llm.request_identity``).
+    compacted as text).
     """
 
     messages: list[Message]
@@ -81,7 +80,6 @@ class LoopState:
     record: AnyRunRecord
     request_index: int
     request_template: ModelRequest
-    digests: RequestDigests
 
     def request(self, messages: Sequence[Message] | None = None) -> ModelRequest:
         """Return the request the loop sends with ``messages``, the live messages unless given."""
@@ -202,7 +200,6 @@ async def run_model_loop(
         record=record,
         request_index=0,
         request_template=request_template,
-        digests=RequestDigests(model),
     )
     max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
     # A resume continues its run, so the calls that run already made count toward its limit; the refusals that never
@@ -217,7 +214,7 @@ async def run_model_loop(
         request = state.request()
         progress.last_request = request
         turn: TurnCompleted | None = None
-        events = _stream_turn(model, request, messages, metrics, state.digests)
+        events = _stream_turn(model, request, messages, metrics)
         async with closing_async_stream(events):
             async for event in events:
                 # No await or break between taking the turn and asking for the next event: _stream_turn settles
@@ -438,7 +435,6 @@ async def _stream_turn(
     request: ModelRequest,
     messages: list[Message],
     metrics: RunMetrics,
-    digests: RequestDigests,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
@@ -468,7 +464,7 @@ async def _stream_turn(
         if turn is None:
             raise incomplete_stream_error(provider=identity.provider)
         # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
-        request_identity = (await asyncio.to_thread(digests.prefixes, request))[-1]
+        request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
         answered = turn.message.provider_data or {}
         if request_identity is not None and not answered.get(REWRITTEN_ATTEMPT_KEY):
             turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}

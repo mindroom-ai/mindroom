@@ -30,7 +30,7 @@ from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
@@ -128,7 +128,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     # The answer records the model that answered it and the identity of the request it answered.
     assert assistant.provider_data == {
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-        REQUEST_IDENTITY_KEY: RequestDigests(model).prefixes(request)[-1],
+        REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1],
     }
     assert request.messages == tuple(messages[:2])
     assert request.tools == ()
@@ -791,7 +791,7 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     assert messages[-1].metrics == usage(50, 2)
     # Kept or cut off, the usage reads as one request only when it was one; only a kept answer records its request.
     [request] = model.requests
-    identity = {REQUEST_IDENTITY_KEY: RequestDigests(model).prefixes(request)[-1]} if ending == "completes" else {}
+    identity = {REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1]} if ending == "completes" else {}
     assert messages[-1].provider_data == {
         **(marker or {}),
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},

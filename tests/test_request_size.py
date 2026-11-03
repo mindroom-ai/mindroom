@@ -23,7 +23,7 @@ from mindroom.llm.messages import (
     model_provenance,
 )
 from mindroom.llm.provider import DeferredTools, ModelIdentity, ModelRequest, NativeCompactionReplay, ToolSpec
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -205,7 +205,7 @@ def test_media_of_unknown_content_leaves_every_later_request_without_identity(tm
         Message(role="user", content="More"),
     )
 
-    prefixes = RequestDigests(model).prefixes(later)
+    prefixes = request_prefixes(model, later)
 
     assert all(prefixes[: later.messages.index(looked) + 1])
     assert prefixes[later.messages.index(looked) + 1 :] == [None, None, None]

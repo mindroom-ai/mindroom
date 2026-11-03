@@ -21,7 +21,6 @@ from mindroom.agent_loop.tools import PlannedCall, PreparedTools
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelRequest
-from mindroom.llm.request_identity import RequestDigests
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_model_providers
@@ -137,7 +136,6 @@ def checkpoint_loop_state(messages: list[Message], run: RunContext, record: RunR
         record=record,
         request_index=1,
         request_template=EMPTY_REQUEST,
-        digests=RequestDigests(ScriptedModel([])),
     )
 
 
