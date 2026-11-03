@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import aiohttp
 import pytest
 import tiktoken
 
@@ -643,6 +644,23 @@ async def test_an_ask_with_a_summary_pins_it_as_its_threads_title(tmp_path: Path
         entity_name="mind",
         membership_index=runner.agent_reply_memberships,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tag_request_still_titles_the_thread_and_keeps_the_run(
+    tmp_path: Path,
+    set_tag: AsyncMock,
+) -> None:
+    """A transport error while tagging is logged; the prompt keeps its title and its pending run."""
+    _config, _paths, runner, _bot = _setup(tmp_path)
+    set_tag.side_effect = aiohttp.ClientPayloadError("truncated state response")
+    _use_check(runner, lambda _ctx: Ask("Do the work", new_thread=True, summary="Weekly digest"))
+    with patch.object(runner_module, "set_manual_thread_summary", new=AsyncMock()) as set_summary:
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+
+    set_summary.assert_awaited_once()
+    assert ("mind", None) in runner._active
 
 
 def test_only_an_ask_that_starts_a_thread_can_title_it() -> None:

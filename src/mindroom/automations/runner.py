@@ -43,7 +43,7 @@ from mindroom.matrix.state import resolve_room_id
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
-from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
+from mindroom.thread_tags import RESOLVED_THREAD_TAG, set_thread_tag
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
@@ -476,7 +476,8 @@ class AutomationRunner:
             return
         try:
             await set_thread_tag(bot.client, chain.room_id, thread_id, tag, set_by=bot.client.user_id)
-        except ThreadTagsError as exc:
+        # Tagging is best effort: a refused write or a failed request must not undo a prompt that was already posted.
+        except Exception as exc:
             logger.warning(
                 "Automation could not tag its thread",
                 agent=chain.agent_name,
