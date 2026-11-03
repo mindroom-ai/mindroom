@@ -290,6 +290,7 @@ The credential manager connects the account from the Connections page, signed in
 A connect link the agent replies with also works, but on a shared agent whoever opens it first connects their account, so a credential manager should ask for it in a direct message with the agent and open it right away.
 On a `shared` or unscoped agent, the toolkit tells the model that `currentUser()` in JQL or CQL is the shared account, not the requester.
 The built-in `atlassian` tool always stays requester-scoped.
+Disconnect the shared account before setting `requester_scoped` back to `True`; afterwards no page reaches the token left in the agent's store.
 
 ## Approvals For Writes
 
