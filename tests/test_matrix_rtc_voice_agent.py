@@ -223,6 +223,74 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     close_tools.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_bridge_reports_only_caller_audio_that_stays_undecryptable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A late key or a non-member cannot raise the missing-key notice; lasting undecryptable audio does."""
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._INBOUND_KEY_TIMEOUT_S", 0)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            return
+
+        def generate_reply(self, **_kwargs: object) -> None:
+            return
+
+        def on(self, _event: str, _callback: object) -> None:
+            return
+
+        async def aclose(self) -> None:
+            return
+
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: FakeSession())
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=True)
+    room = MagicMock()
+    room.disconnect = AsyncMock()
+    bridge._room = room
+    bridge.set_participant_identities(frozenset({"@alice:example.org:ALICEDEV"}))
+    errors: list[str] = []
+
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_error=errors.append,
+        ),
+    )
+    on_state_changed = next(call.args[1] for call in room.on.call_args_list if call.args[0] == "e2ee_state_changed")
+    alice = SimpleNamespace(identity="@alice:example.org:ALICEDEV")
+
+    on_state_changed(SimpleNamespace(identity="@mallory:example.org:EVILDEV"), rtc.EncryptionState.MISSING_KEY)
+    on_state_changed(alice, rtc.EncryptionState.MISSING_KEY)
+    on_state_changed(alice, rtc.EncryptionState.OK)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert errors == []
+
+    on_state_changed(alice, rtc.EncryptionState.DECRYPTION_FAILED)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(errors) == 1
+    assert "cannot hear you" in errors[0]
+    assert "ALICEDEV" in errors[0]
+
+    await bridge.aclose()
+
+
 def _llm_usage(inputs: int, outputs: int = 10, **counters: int) -> LLMModelUsage:
     return LLMModelUsage(
         provider="openai",

@@ -54,6 +54,9 @@ _KEY_RING_SIZE = 256
 _RATCHET_WINDOW_SIZE = 10
 _SFU_CONNECT_TIMEOUT_S = 10.0
 _SFU_CONNECT_CANCEL_TIMEOUT_S = 1.0
+#: How long a caller's subscribed audio may stay undecryptable before the room
+#: is told the agent cannot hear them; a key that arrives late cancels it.
+_INBOUND_KEY_TIMEOUT_S = 15.0
 _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
@@ -446,6 +449,7 @@ class RealtimeVoiceBridge:
         self._record_realtime_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
         self._audio_input: _AuthorizedParticipantAudioInput | None = None
         self._participant_identities: frozenset[str] = frozenset()
+        self._inbound_key_timers: dict[str, asyncio.Task[None]] = {}
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
         """Restrict SFU subscriptions and published output to the Matrix roster."""
@@ -547,6 +551,9 @@ class RealtimeVoiceBridge:
             msg = "connect() must succeed before start_agent()"
             raise RuntimeError(msg)
         self._session = session
+        if self._e2ee_enabled and options.on_session_error is not None:
+            # Registered before the audio input subscribes to any caller track.
+            self._register_inbound_key_watch(session, rtc_module, options.on_session_error)
         audio_input = _AuthorizedParticipantAudioInput(
             self._room,
             rtc_module,
@@ -572,6 +579,49 @@ class RealtimeVoiceBridge:
             self._owned_speech_resource_closers += (private_sync_close,)
         elif isinstance(options, LiveVoiceAgentOptions):
             _drop_live_backlog_on_caller_speech(session)
+
+    def _register_inbound_key_watch(
+        self,
+        session: AgentSession,
+        rtc_module: ModuleType,
+        on_error: Callable[[str], None],
+    ) -> None:
+        """Explain a caller whose audio reaches the agent without a usable frame key.
+
+        LiveKit reports decryption state only for subscribed tracks, so a caller
+        still connecting to the SFU, with nothing published yet, is never
+        mistaken for a key problem.
+        """
+        undecryptable = {rtc_module.EncryptionState.MISSING_KEY, rtc_module.EncryptionState.DECRYPTION_FAILED}
+
+        async def report_after_timeout(identity: str) -> None:
+            await asyncio.sleep(_INBOUND_KEY_TIMEOUT_S)
+            if self._session is not session or identity not in self._participant_identities:
+                return
+            logger.warning("call_inbound_audio_undecryptable", participant=identity)
+            device_id = identity.rpartition(":")[2]
+            on_error(
+                "Encrypted call setup error: MindRoom receives your microphone audio but has no usable media "
+                f"encryption key for it from your Matrix device ({device_id}), so the agent cannot hear you. "
+                "Leave and rejoin the call after the client has fully synced. If it repeats, restart the Matrix "
+                "client and have the server operator inspect encrypted to-device events, the device's Olm "
+                "session, and its signed one-time-key supply.",
+            )
+
+        def on_state_changed(participant: rtc.Participant | None, state: int) -> None:
+            if self._session is not session or participant is None:
+                return
+            identity = participant.identity
+            if identity not in self._participant_identities:
+                return
+            if state not in undecryptable:
+                timer = self._inbound_key_timers.pop(identity, None)
+                if timer is not None:
+                    timer.cancel()
+            elif identity not in self._inbound_key_timers:
+                self._inbound_key_timers[identity] = asyncio.create_task(report_after_timeout(identity))
+
+        self._room.on("e2ee_state_changed", on_state_changed)
 
     def _log_media_snapshot(self) -> None:
         """Log local publications and remote subscription state for call diagnostics."""
@@ -775,6 +825,9 @@ class RealtimeVoiceBridge:
         """Tear down the agent session and leave the SFU."""
         session = self._session
         self._session = None
+        for timer in self._inbound_key_timers.values():
+            timer.cancel()
+        self._inbound_key_timers.clear()
         speech_resource_closers = self._owned_speech_resource_closers
         self._owned_speech_resource_closers = ()
         audio_input = self._audio_input
