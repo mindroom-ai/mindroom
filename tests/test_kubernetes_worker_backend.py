@@ -42,6 +42,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    subagent_worker_key,
     worker_dir_name,
     worker_id_for_key,
     worker_log_id,
@@ -3395,6 +3396,40 @@ def test_kubernetes_script_worker_mounts_the_owning_private_workspace(tmp_path: 
     assert f"private_instances/{worker_dir_name(worker_key)}/mind" not in set(mount_paths.values())
 
 
+def test_kubernetes_subagent_worker_mounts_its_normal_workers_private_workspace(tmp_path: Path) -> None:
+    """A subagent's own worker mounts the private workspace of its normal worker, and its own worker root."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    state_scope_worker_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
+    worker_key = subagent_worker_key(state_scope_worker_key, "b" * 32)
+    _materialize_private_workspace(backend.storage_root, state_scope_worker_key, "@alice:localhost")
+
+    backend.ensure_worker(
+        _spec(
+            worker_key,
+            private_agent_names=frozenset({"mind"}),
+            state_scope_worker_key=state_scope_worker_key,
+            resource_profile="large",
+        ),
+        now=10.0,
+    )
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in container["volumeMounts"]}
+    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(state_scope_worker_key)}"
+    expected_private_subpath = f"private_instances/{worker_dir_name(state_scope_worker_key)}"
+
+    assert {path: subpath for path, subpath in mount_paths.items() if "private_instances" in path} == {
+        f"{expected_private_root}/mind/mind_data": f"{expected_private_subpath}/mind/mind_data",
+    }
+    assert mount_paths[f"/app/worker/workers/{worker_dir_name(worker_key)}"] == f"workers/{worker_dir_name(worker_key)}"
+    assert container["resources"] == backend.config.script_resource_profiles["large"]
+
+
 def test_kubernetes_script_worker_rejects_an_unrelated_state_scope() -> None:
     """A worker spec cannot use the state-scope field to mount another identity's files."""
     backend, apps_api, _core_api = _backend()
@@ -5027,6 +5062,19 @@ def test_kubernetes_backend_logs_a_script_worker_cold_start_as_script() -> None:
 
     [record] = _cold_start_records(logs)
     assert (record["kind"], record["scope"], record["agent_name"]) == ("script", "user_agent", "code")
+    assert record["worker"] == worker_log_id(worker_key)
+
+
+def test_kubernetes_backend_logs_a_subagent_worker_cold_start_as_subagent() -> None:
+    """A subagent's own worker logs its start as ``subagent`` with its normal worker's scope and agent."""
+    backend, _apps_api, _core_api = _backend()
+    worker_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "c" * 32)
+
+    with capture_logs() as logs:
+        backend.ensure_worker(_spec(worker_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    [record] = _cold_start_records(logs)
+    assert (record["kind"], record["scope"], record["agent_name"]) == ("subagent", "shared", "code")
     assert record["worker"] == worker_log_id(worker_key)
 
 

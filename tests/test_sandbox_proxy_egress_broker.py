@@ -26,6 +26,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_unscoped_worker_key,
     resolve_worker_target,
+    subagent_worker_key,
 )
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, WorkerRoute
@@ -290,6 +291,30 @@ async def test_unscoped_shell_call_signs_routed_worker_key(
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())
     assert target.worker_key is None
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        _call(runtime_paths, config, "shell", target, manager)
+    [payload] = payloads
+    assert _token_worker_key(runtime_paths, payload["execution_env"]) == _ROUTED_UNSCOPED_KEY
+
+
+@pytest.mark.asyncio
+async def test_subagent_worker_shell_call_signs_its_normal_worker_key(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    payloads: list[dict[str, Any]],
+) -> None:
+    """A call routed to a subagent's own worker carries the normal worker's key, the scope the broker serves."""
+
+    def worker_route(**_kwargs: object) -> tuple[WorkerRoute, None]:
+        return WorkerRoute(
+            protocol=WORKER_PROTOCOL_VERSION,
+            worker_key=subagent_worker_key(_ROUTED_UNSCOPED_KEY, "e" * 32),
+        ), None
+
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
+    config = _config(*_KEYS_AGENT_TOOLS)
+    manager = CredentialsManager(runtime_paths.storage_root / "credentials")
+    target = resolve_worker_target(None, "code", _identity())
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         _call(runtime_paths, config, "shell", target, manager)
     [payload] = payloads

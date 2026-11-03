@@ -34,6 +34,9 @@ WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 # Spotify connection. MCP registry tools are supported on every scope: OAuth-backed servers follow the configured
 # worker scope, and non-OAuth servers always execute through the shared server session without requester credentials.
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "spotify_oauth", "homeassistant"})
+_SUBAGENT_PIN_PREFIX = "subagent="
+_SUBAGENT_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+_SUBAGENT_PIN_PATTERN = re.compile(rf"{re.escape(_SUBAGENT_PIN_PREFIX)}[0-9a-f]{{32}}")
 
 
 @dataclass(frozen=True)
@@ -385,6 +388,32 @@ def resolve_unscoped_worker_key(
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
 
+def subagent_worker_key(state_scope_worker_key: str, subagent_id: str) -> str:
+    """Pin one subagent's own worker below the normal worker key whose workspaces and credentials it serves.
+
+    The pin is one ``subagent=<id>`` part before the normal key's last part, the shape
+    ``resolve_state_scope_worker_key`` validates. No generated tenant, agent, or requester part contains ``=``, so
+    ``subagent_worker_state_scope_key`` can find the pin even though requester parts contain ``:``.
+    """
+    if not _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
+        msg = "A subagent worker key requires a 32-character lowercase hex subagent ID."
+        raise ValueError(msg)
+    if resolved_worker_key_scope(state_scope_worker_key) is None or "=" in state_scope_worker_key:
+        msg = "A subagent worker key requires a resolved, unpinned worker key."
+        raise ValueError(msg)
+    parts = state_scope_worker_key.split(":")
+    return ":".join((*parts[:-1], f"{_SUBAGENT_PIN_PREFIX}{subagent_id}", parts[-1]))
+
+
+def subagent_worker_state_scope_key(worker_key: str) -> str | None:
+    """Return the normal worker key a subagent-pinned key serves, or None for a key without a subagent pin."""
+    parts = worker_key.split(":")
+    if len(parts) < 5 or not _SUBAGENT_PIN_PATTERN.fullmatch(parts[-2]):
+        return None
+    state_scope_worker_key = ":".join((*parts[:-2], parts[-1]))
+    return state_scope_worker_key if resolved_worker_key_scope(state_scope_worker_key) is not None else None
+
+
 def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     """Return the parsed scope discriminator for one resolved worker key."""
     parts = worker_key.split(":")
@@ -407,10 +436,11 @@ def worker_key_agent_name(worker_key: str) -> str | None:
     if scope is None or scope == "user":
         return None
     parts = worker_key.split(":")
-    # A scoped key has at least four parts; a user_agent key also names its requester before the agent.
+    # The agent is a key's last part; a user_agent key also names its requester before it, and a subagent-pinned
+    # key its pin.
     if scope == "user_agent":
         return parts[-1] if len(parts) >= 5 else None
-    return parts[3]
+    return parts[-1]
 
 
 def _resolve_execution_identity_for_worker_scope(
@@ -556,6 +586,8 @@ def visible_workspace_roots(
     agent in ``private_agent_names`` sees only that private workspace, so a stale
     policy never widens it to the shared one.
     """
+    # A subagent-pinned worker sees what its normal worker sees, from that worker's private scope.
+    worker_key = subagent_worker_state_scope_key(worker_key) or worker_key
     scope = resolved_worker_key_scope(worker_key)
     if scope == "user":
         return tuple(

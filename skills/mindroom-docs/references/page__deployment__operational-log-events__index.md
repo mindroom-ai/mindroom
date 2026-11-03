@@ -232,7 +232,7 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 |-------|---------|
 | `worker` | The worker's log ID, the hash other worker logs name it by and the end of its state directory name |
 | `backend` | `kubernetes` or `docker` |
-| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, otherwise `tool` |
+| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, otherwise `tool` |
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |

@@ -6903,6 +6903,8 @@ expose = [
     "resolved_worker_key_scope",
     "shared_storage_root",
     "serialize_tool_execution_identity",
+    "subagent_worker_key",
+    "subagent_worker_state_scope_key",
     "supports_tool_name_for_worker_scope",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",

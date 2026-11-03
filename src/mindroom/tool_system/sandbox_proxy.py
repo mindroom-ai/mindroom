@@ -13,7 +13,7 @@ import math
 import secrets
 import weakref
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -49,9 +49,12 @@ from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     resolve_unscoped_worker_key,
     serialize_tool_execution_identity,
+    subagent_worker_key,
+    subagent_worker_state_scope_key,
 )
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.placements import placement_for_session
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     CallEnvironment,
@@ -305,9 +308,8 @@ def _worker_route(
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
     private_agent_names: frozenset[str] | None = None
-    worker_handle: WorkerHandle | None = None
+    spec: WorkerSpec | None = None
     if worker_scope is None:
-        worker_key: str | None = None
         if worker_backend_kind(runtime_paths).dedicated:
             if worker_target is None or routing_agent_name is None:
                 msg = (
@@ -315,12 +317,13 @@ def _worker_route(
                     "when using a dedicated worker backend."
                 )
                 raise RuntimeError(msg)
-            worker_key = resolve_unscoped_worker_key(
-                agent_name=routing_agent_name,
-                tenant_id=worker_target.tenant_id,
-                account_id=worker_target.account_id,
+            spec = WorkerSpec(
+                resolve_unscoped_worker_key(
+                    agent_name=routing_agent_name,
+                    tenant_id=worker_target.tenant_id,
+                    account_id=worker_target.account_id,
+                ),
             )
-            worker_handle = worker_manager.ensure_worker(WorkerSpec(worker_key), progress_sink=progress_sink)
         else:
             # The shared runner is the only backend that is not dedicated, and an unscoped call reaches it without a
             # worker handle, so its protocol check happens here.
@@ -335,18 +338,28 @@ def _worker_route(
                 "requires explicit private visibility."
             )
             raise RuntimeError(msg)
-        worker_key = worker_target.worker_key
-        if worker_key is None:
+        if worker_target.worker_key is None:
             msg = (
                 f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
                 "could not be resolved from the current execution identity."
             )
             raise RuntimeError(msg)
         private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
-        worker_handle = worker_manager.ensure_worker(
-            WorkerSpec(worker_key, private_agent_names=private_agent_names),
-            progress_sink=progress_sink,
+        spec = WorkerSpec(worker_target.worker_key, private_agent_names=private_agent_names)
+    placement = placement_for_session(execution_identity.session_id) if execution_identity is not None else None
+    if placement is not None:
+        if spec is None or not worker_backend_kind(runtime_paths).dedicated:
+            msg = "Dedicated subagent workers require the docker or kubernetes worker backend."
+            raise RuntimeError(msg)
+        # The subagent's own worker serves its normal worker's workspaces and credentials, in a runtime of its own.
+        spec = replace(
+            spec,
+            worker_key=subagent_worker_key(spec.worker_key, placement.subagent_id),
+            state_scope_worker_key=spec.worker_key,
+            resource_profile=placement.resource_profile,
         )
+    worker_key = spec.worker_key if spec is not None else None
+    worker_handle = worker_manager.ensure_worker(spec, progress_sink=progress_sink) if spec is not None else None
     route = WorkerRoute(
         protocol=WORKER_PROTOCOL_VERSION,
         worker_key=worker_key,
@@ -787,7 +800,12 @@ def _call_proxy_sync(
                     runtime_paths,
                     config=runtime_config,
                     worker_target=worker_target,
-                    routed_worker_key=route.worker_key,
+                    # The broker signs the normal worker's scope, also for a subagent's own worker.
+                    routed_worker_key=(
+                        subagent_worker_state_scope_key(route.worker_key) or route.worker_key
+                        if route.worker_key is not None
+                        else None
+                    ),
                     call_env=execution_env,
                 ),
             }
