@@ -636,6 +636,17 @@ def test_an_attached_path_that_is_not_a_regular_file_is_never_read(tmp_path: Pat
     assert _with_file(route, File(filepath=str(fifo))) - _with_file(route, None) == MEDIA_ALLOWANCE_TOKENS
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+def test_an_attached_file_the_runtime_may_not_read_counts_the_allowance(tmp_path: Path) -> None:
+    """A file the wires would refuse to read fails no count."""
+    route = _route("anthropic", tmp_path)
+    locked = tmp_path / "locked.log"
+    locked.write_text("secret notes\n" * 1_000)
+    locked.chmod(0)
+
+    assert _with_file(route, File(filepath=str(locked))) - _with_file(route, None) == MEDIA_ALLOWANCE_TOKENS
+
+
 # About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.
 _SEARCHED_TOOL = ToolSpec(name="big_tool", description="word " * 20_000, parameters={}, strict=None)
 
