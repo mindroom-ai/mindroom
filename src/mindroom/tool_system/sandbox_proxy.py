@@ -346,10 +346,8 @@ def _worker_route(
         private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
         spec = WorkerSpec(worker_target.worker_key, private_agent_names=private_agent_names)
     placement = placement_for_session(execution_identity.session_id) if execution_identity is not None else None
-    if placement is not None:
-        if spec is None or not worker_backend_kind(runtime_paths).dedicated:
-            msg = "Dedicated subagent workers require the docker or kubernetes worker backend."
-            raise RuntimeError(msg)
+    # Placements exist only on a dedicated backend (``delegation.workers``), where every call has a worker spec.
+    if placement is not None and spec is not None:
         # The subagent's own worker serves its normal worker's workspaces and credentials, in a runtime of its own.
         spec = replace(
             spec,

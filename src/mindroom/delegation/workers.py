@@ -45,7 +45,7 @@ def dedicated_worker_refusal(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    resource_profile: str | None,
+    resource_profile: object,
 ) -> str | None:
     """Return why ``caller_name`` cannot run a subagent in a dedicated worker with ``resource_profile``, or None."""
     caller = config.agents.get(caller_name)
@@ -58,7 +58,7 @@ def dedicated_worker_refusal(
         )
     if resource_profile is None:
         return None
-    if resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
+    if not isinstance(resource_profile, str) or resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
         return "Cannot delegate: resource_profile must be small, standard, or large."
     if not resource_profiles_available(runtime_paths):
         return "Cannot delegate: resource_profile requires the kubernetes worker backend."

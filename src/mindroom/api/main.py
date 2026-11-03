@@ -241,45 +241,30 @@ async def _worker_cleanup_loop(
     touch_live_workers: Callable[[WorkerBackend], None],
     idle_poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Periodically clean idle workers using the app's current runtime paths."""
+    """Periodically clean idle workers using the app's current runtime paths, owning this process's cleanup meanwhile."""
     with idle_worker_cleanup_owner():
-        await _clean_workers_until_stopped(
-            stop_event,
-            api_app,
-            touch_live_workers=touch_live_workers,
-            idle_poll_interval_seconds=idle_poll_interval_seconds,
-        )
-
-
-async def _clean_workers_until_stopped(
-    stop_event: asyncio.Event,
-    api_app: FastAPI,
-    *,
-    touch_live_workers: Callable[[WorkerBackend], None],
-    idle_poll_interval_seconds: float,
-) -> None:
-    while not stop_event.is_set():
-        runtime_paths = _app_runtime_paths(api_app)
-        interval_seconds = worker_cleanup_interval_seconds(runtime_paths)
-        if interval_seconds <= 0:
+        while not stop_event.is_set():
+            runtime_paths = _app_runtime_paths(api_app)
+            interval_seconds = worker_cleanup_interval_seconds(runtime_paths)
+            if interval_seconds <= 0:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=idle_poll_interval_seconds)
+                    break
+                except TimeoutError:
+                    continue
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=idle_poll_interval_seconds)
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
                 break
             except TimeoutError:
-                continue
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
-            break
-        except TimeoutError:
-            try:
-                await asyncio.to_thread(
-                    _cleanup_workers_once,
-                    _app_runtime_paths(api_app),
-                    touch_live_workers=touch_live_workers,
-                    computer_worker_keys=active_computer_worker_keys(api_app),
-                )
-            except Exception:
-                logger.exception("Background worker cleanup failed")
+                try:
+                    await asyncio.to_thread(
+                        _cleanup_workers_once,
+                        _app_runtime_paths(api_app),
+                        touch_live_workers=touch_live_workers,
+                        computer_worker_keys=active_computer_worker_keys(api_app),
+                    )
+                except Exception:
+                    logger.exception("Background worker cleanup failed")
 
 
 def _app_context(api_app: FastAPI) -> ApiSnapshot:

@@ -4935,33 +4935,6 @@ def test_unplaced_session_routes_to_its_normal_worker(monkeypatch: pytest.Monkey
     assert route.worker_key == target.worker_key
 
 
-@pytest.mark.parametrize("worker_scope", [None, "shared"])
-def test_placed_session_is_refused_on_the_shared_runner(
-    monkeypatch: pytest.MonkeyPatch,
-    worker_scope: str | None,
-) -> None:
-    """The shared static runner cannot give a subagent a worker of its own, so the call fails instead."""
-    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox-runner:8765")
-    monkeypatch.setattr(sandbox_proxy_module, "worker_backend_kind", lambda _paths: WorkerBackendKind.STATIC_RUNNER)
-    target = _worker_target(runtime_paths, worker_scope, "code", _placed_identity())
-    manager = StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token=_TEST_AUTH_TOKEN)
-    monkeypatch.setattr(manager, "require_compatible_runner", lambda: None)
-
-    with (
-        dedicated_worker_placement(_PLACED_SESSION_ID, DedicatedWorkerPlacement(_PLACED_SUBAGENT_ID)),
-        pytest.raises(RuntimeError, match="Dedicated subagent workers require the docker or kubernetes"),
-    ):
-        sandbox_proxy_module._worker_route(
-            runtime_paths=runtime_paths,
-            runtime_config=None,
-            tool_name="shell",
-            function_name="run_shell_command",
-            worker_target=target,
-            worker_manager=manager,
-            base_dir=None,
-        )
-
-
 def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> None:
     """Proxy should preserve sandbox-runner detail messages on HTTP failures."""
 

@@ -60,7 +60,7 @@ Who a grant covers depends on the agent's effective [worker scope](https://docs.
 | `shared` or unset | That agent's worker |
 | `user` | Not supported; the request fails with `approved egress is not supported for worker_scope=user` |
 
-A grant that a subagent running in a [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope.
+A grant that a subagent running in a [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope, and grants made for the agent or its normal worker do not apply there, so the subagent requests its own.
 
 ### Temporary Full Access
 

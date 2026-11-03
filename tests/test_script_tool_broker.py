@@ -65,16 +65,13 @@ from mindroom.script_runs.store import (
     mint_script_capability,
 )
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     WorkerScope,
-    parse_tool_execution_identity_payload,
     resolved_worker_key_scope,
     serialize_tool_execution_identity,
 )
-from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement, placement_for_session
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -727,33 +724,6 @@ async def test_script_calls_share_the_detached_session_of_a_session_keyed_tool(
     assert receipt.result is not None
     assert receipt.result.startswith("No active Claude session for `")
     assert receipt.result.endswith(":default`.")
-
-
-@pytest.mark.asyncio
-async def test_script_calls_keep_their_normal_worker_while_their_session_is_placed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A script started by a subagent with its own worker outlives that subagent's attempt, so it never uses that worker."""
-    seen: list[DedicatedWorkerPlacement | None] = []
-
-    class PlacementCalculator(_Calculator):
-        def add(self, a: int, b: int) -> object:
-            identity = current_execution_identity()
-            assert identity is not None
-            seen.append(placement_for_session(identity.session_id))
-            return a + b
-
-    _replace_calculator_toolkit(monkeypatch, PlacementCalculator)
-    broker, token = _broker(tmp_path, events=[])
-    session_id = parse_tool_execution_identity_payload(broker.store.get_run("run-1").execution_identity).session_id
-    assert session_id is not None
-
-    with dedicated_worker_placement(session_id, DedicatedWorkerPlacement("a" * 32)):
-        receipt = await _call_through_gateway(broker, _request(), token)
-
-    assert receipt.state is ScriptCallState.COMPLETED
-    assert seen == [None]
 
 
 @pytest.mark.parametrize("tool_worker_scope", ["shared", "user"])

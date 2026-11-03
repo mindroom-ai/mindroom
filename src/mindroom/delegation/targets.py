@@ -230,8 +230,6 @@ def _dedicated_worker_request(
         return "Cannot delegate: resource_profile requires dedicated_worker=true."
     if not dedicated_worker:
         return False, None
-    if resource_profile is not None and not isinstance(resource_profile, str):
-        return "Cannot delegate: resource_profile must be small, standard, or large."
     refusal = dedicated_worker_refusal(
         caller_name,
         live_delegation_config(config),
