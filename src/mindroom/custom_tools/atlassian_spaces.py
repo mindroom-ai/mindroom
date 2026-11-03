@@ -60,6 +60,11 @@ def _order_by_start(query: str) -> int | None:
     return None
 
 
+def space_limit_sentence(product: AtlassianProduct, keys: Sequence[str]) -> str:
+    """Say which spaces of one product this agent may use, in its instructions and refusals alike."""
+    return f"This agent may use only these {product.capitalize()} spaces: {', '.join(keys)}."
+
+
 @dataclass(frozen=True, slots=True)
 class AtlassianSpaces:
     """Space keys each product may use; None leaves that product unrestricted, and no keys disables it."""
@@ -77,9 +82,9 @@ class AtlassianSpaces:
         return self.jira if product == "jira" else self.confluence
 
     def instructions(self, products: Sequence[AtlassianProduct]) -> str | None:
-        """Name the allowed spaces of the offered products, so the model does not reach for others."""
-        limits = [f"{product.capitalize()}: {', '.join(keys)}" for product in products if (keys := self.keys(product))]
-        return f"This agent may use only these Atlassian spaces. {'. '.join(limits)}." if limits else None
+        """Name the allowed spaces of each limited product offered, so the model does not reach for others."""
+        limits = [space_limit_sentence(product, keys) for product in products if (keys := self.keys(product))]
+        return " ".join(limits) or None
 
     def allows(self, product: AtlassianProduct, key: object) -> bool:
         """Return whether a space key reported by Atlassian or given by the model is one this agent may use."""

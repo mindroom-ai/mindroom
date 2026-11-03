@@ -140,11 +140,11 @@ agents:
 - With a list, searches return only results in those spaces, and reads, downloads, and writes of anything elsewhere return `space_not_allowed` and change nothing.
 - The agent still acts as the requester, so it reaches only spaces that are both listed and open to that requester in Atlassian.
 - A space key is the part after `/spaces/` in a space's URL, such as `DOCS` in `https://example.atlassian.net/wiki/spaces/DOCS`, and every Jira issue key starts with its space key.
-- Config validation rejects an entry that is not a space key, such as a space's name.
+- Config validation rejects an entry that cannot be a space key, such as a name with spaces in it.
 - An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, and creating or updating an issue can set a parent in another space.
-- `write` can also be set in `defaults.tools` or the tool's dashboard settings, while the space lists can be set only on an agent's tool entry; a value on the agent's tool entry wins over dashboard settings.
+- `write` combines with `defaults.tools` and dashboard settings like any [tool setting](https://docs.mindroom.chat/tools/#how-settings-combine), while the space lists can be set only on an agent's tool entry.
 - Changing these options needs no reconnect.
-- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service or the API-token `jira` and `confluence` tools, which reach every space the account can.
+- These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, the API-token `jira` and `confluence` tools, or code-execution tools that run outside a worker, which reach every space the account can.
 
 ## Connect An Account
 
@@ -296,7 +296,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 
 | Result | Cause and fix |
 | --- | --- |
-| `space_not_allowed` | The item is outside the agent's `jira_spaces` or `confluence_spaces`, which the result lists in `allowed_spaces`; add the space to the agent's tool entry if the agent should use it. |
+| `space_not_allowed` | The item is outside the agent's `jira_spaces` or `confluence_spaces`, which the result lists in `allowed_spaces`; check that each entry is the space key from the space's URL rather than its name, and add the space to the agent's tool entry if the agent should use it. |
 | `scope_mismatch` | Atlassian rejected a request for a scope the app does not grant; reconnecting grants the same scopes again, so an administrator must add the scopes in [Scopes](#scopes) to the app. |
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
 | `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |

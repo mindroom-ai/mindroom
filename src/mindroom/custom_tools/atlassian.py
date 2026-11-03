@@ -32,6 +32,7 @@ from mindroom.custom_tools.atlassian_spaces import (
     CONFLUENCE_SPACE_KEY_PATTERN,
     JIRA_PROJECT_KEY_PATTERN,
     AtlassianSpaces,
+    space_limit_sentence,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.media import canonical_mime_type
@@ -108,7 +109,7 @@ class _SpaceNotAllowedError(AtlassianError):
     def __init__(self, product: AtlassianProduct, allowed: Sequence[str]) -> None:
         super().__init__(
             code="space_not_allowed",
-            message=f"This agent may use only these {product.capitalize()} spaces: {', '.join(allowed)}.",
+            message=space_limit_sentence(product, allowed),
             allowed_spaces=list(allowed),
         )
 

@@ -183,7 +183,7 @@ def test_stored_settings_never_widen_the_agent_entry(tmp_path: Path, monkeypatch
     )
 
     assert tuple(toolkit_function_names(tool)) == atlassian_function_names(write=False)
-    assert tool.instructions == "This agent may use only these Atlassian spaces. Jira: ENG."
+    assert tool.instructions == "This agent may use only these Jira spaces: ENG."
 
 
 def test_model_is_told_the_allowed_spaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,8 +195,8 @@ def test_model_is_told_the_allowed_spaces(tmp_path: Path, monkeypatch: pytest.Mo
         worker_target=worker_target(),
     )
 
-    assert (
-        limited.instructions == "This agent may use only these Atlassian spaces. Jira: ENG. Confluence: DOCS, ~alice."
+    assert limited.instructions == (
+        "This agent may use only these Jira spaces: ENG. This agent may use only these Confluence spaces: DOCS, ~alice."
     )
     assert unrestricted.instructions is None
 
@@ -479,3 +479,57 @@ async def test_confluence_create_page_checks_its_space_and_parent(
     assert (result["status"], len(posts)) == (("ok", 1) if created else ("error", 0))
     if not created:
         assert result["code"] == "space_not_allowed"
+
+
+# One call per function, each naming an item in a space the agent may not use.
+_OUTSIDE_CALLS: dict[str, dict[str, object]] = {
+    "jira_search_issues": {"jql": "status = Done"},
+    "jira_get_issue": {"issue_key": "OPS-1"},
+    "jira_create_issue": {"project_key": "OPS", "summary": "New"},
+    "jira_update_issue": {"issue_key": "OPS-1", "summary": "Renamed"},
+    "jira_add_comment": {"issue_key": "OPS-1", "comment": "Done."},
+    "jira_transition_issue": {"issue_key": "OPS-1", "transition": "31"},
+    "confluence_search": {"cql": "type = page"},
+    "confluence_get_page": {"page_id": "123"},
+    "confluence_list_attachments": {"page_id": "123"},
+    "confluence_download_attachment": {"page_id": "123", "attachment_id": "att456"},
+    "confluence_create_page": {"space_key": "OPS", "title": "T", "body_storage": "<p>x</p>", "parent_page_id": "12"},
+    "confluence_update_page": {"page_id": "123", "title": "T", "body_storage": "<p>x</p>", "version_number": 2},
+    "confluence_add_comment": {"page_id": "123", "body_storage": "<p>x</p>"},
+}
+
+
+def test_every_function_has_an_outside_space_call() -> None:
+    """A new function fails here until the outside-space check below covers it."""
+    assert set(_OUTSIDE_CALLS) == set(atlassian_function_names())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("function_name", sorted(_OUTSIDE_CALLS))
+async def test_no_function_reaches_outside_the_allowed_spaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    function_name: str,
+) -> None:
+    """Every function refuses, or returns nothing, for items Atlassian reports in another space, and only looks them up."""
+    tool, gateway = _connected(tmp_path, monkeypatch, jira_spaces=["ENG"], confluence_spaces=["DOCS"])
+    lookups = {
+        ("POST", gateway_url("jira", "/rest/api/3/search/jql")): {"issues": [_issue("OPS-1", "OPS")], "isLast": True},
+        ("GET", gateway_url("jira", "/rest/api/3/issue/OPS-1")): _issue("OPS-1", "OPS"),
+        ("GET", gateway_url("confluence", "/wiki/rest/api/search")): {
+            "results": [{"content": {"id": "123", "type": "page", "space": {"key": "OPS"}}, "title": "Other"}],
+        },
+        ("GET", CONTENT_SEARCH): _page_in("OPS"),
+    }
+    for (method, url), body in lookups.items():
+        gateway.route(method, url, body)
+
+    with tool_runtime_context(tool_context(runtime_paths(tmp_path), tmp_path / "storage")):
+        result = await _call(tool, function_name, **_OUTSIDE_CALLS[function_name])
+
+    if function_name.endswith(("_search", "_search_issues")):
+        assert (result["status"], result.get("issues", result.get("results"))) == ("ok", [])
+    else:
+        assert result["code"] == "space_not_allowed"
+    requests = {(request.method, str(request.url.copy_with(query=None))) for request in gateway.product_requests()}
+    assert requests <= set(lookups)
