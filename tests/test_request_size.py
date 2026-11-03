@@ -138,18 +138,20 @@ def test_an_answer_to_a_rewritten_attempt_never_anchors(tmp_path: Path) -> None:
 
 
 def test_a_rewritten_attachment_ends_anchoring(tmp_path: Path) -> None:
+    """A loop's sizer reads a local file again on every request, since a tool can rewrite it between two."""
     model = ScriptedModel([])
+    sizer = request_sizer(model, _config(tmp_path), "default")
     path = tmp_path / "notes.txt"
     path.write_text("short")
     prompt = Message(role="user", content="Read this", files=[File(filepath=str(path))])
     first = _first(prompt)
     answer = _answered(model, first, "Read")
     later = replace(first, messages=(*first.messages, answer, Message(role="user", content="And now?")))
-    assert _sized(tmp_path, model, later).reported
+    assert sizer.size(later).reported
 
     path.write_text("a much longer file than before")
 
-    assert not _sized(tmp_path, model, later).reported
+    assert not sizer.size(later).reported
 
 
 def test_a_rewritten_inline_attachment_ends_anchoring(tmp_path: Path) -> None:
@@ -166,10 +168,14 @@ def test_a_rewritten_inline_attachment_ends_anchoring(tmp_path: Path) -> None:
     assert not _sized(tmp_path, model, later).reported
 
 
-def test_media_at_a_url_leaves_every_later_request_without_identity(tmp_path: Path) -> None:
-    """Media fetched from a URL can change between requests unseen, so no answer after it anchors."""
+@pytest.mark.parametrize("media", ["url", "gone file"])
+def test_media_of_unknown_content_leaves_every_later_request_without_identity(tmp_path: Path, media: str) -> None:
+    """Media at a URL, or a local file that is gone, can change between requests unseen, so no answer after it anchors."""
     model = ScriptedModel([])
-    looked = Message(role="user", content="Look", images=[Image(url="https://example.org/a.png")])
+    if media == "url":
+        looked = Message(role="user", content="Look", images=[Image(url="https://example.org/a.png")])
+    else:
+        looked = Message(role="user", content="Look", files=[File(filepath=str(tmp_path / "removed.txt"))])
     later = _first(
         Message(role="user", content="Hi"),
         Message(role="assistant", content="Hello"),
@@ -203,6 +209,21 @@ def test_what_storing_an_earlier_answer_adds_keeps_a_later_answer_anchoring(tmp_
 
     assert expected == RequestSize(_REPORTED + 50 + model.request_tokens(later, start=4), reported=True)
     assert _sized(tmp_path, model, later) == expected
+
+
+def test_an_answer_without_a_reported_size_leaves_an_earlier_answer_anchoring(tmp_path: Path) -> None:
+    model = ScriptedModel([])
+    first = _first(Message(role="user", content="Hi"))
+    earlier = _answered(model, first, "Hello")
+    second = replace(first, messages=(*first.messages, earlier, Message(role="user", content="More")))
+    unreported = _answered(model, second, "Sure")
+    # A server that reports no usage.
+    unreported.metrics = MessageMetrics()
+    later = replace(second, messages=(*second.messages, unreported, Message(role="user", content="Thanks")))
+
+    size = _sized(tmp_path, model, later)
+
+    assert size == RequestSize(_REPORTED + model.request_tokens(later, start=len(first.messages)), reported=True)
 
 
 def test_a_native_checkpoint_bounds_the_answers_that_anchor(tmp_path: Path) -> None:

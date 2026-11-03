@@ -28,7 +28,7 @@ from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.replay import configured_replay_plan, estimate_summary_text_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.request_size import RequestSizer
+from mindroom.history.request_size import RequestSize, RequestSizer
 from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
 from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
@@ -58,6 +58,7 @@ from mindroom.llm.provider import (
     TokenCounter,
     ToolSpec,
 )
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, RequestDigests
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -487,6 +488,25 @@ async def test_request_sizing_leaves_out_reasoning_the_route_never_resends(
     await _run(_Agent(model, config, paths), "Do the task")
 
     assert summary_calls.inputs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("over", "compacts"), [(0, False), (1, True)], ids=["at-the-limit", "over-the-limit"])
+async def test_a_request_compacts_only_once_its_size_exceeds_the_limit(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    monkeypatch: pytest.MonkeyPatch,
+    over: int,
+    compacts: bool,
+) -> None:
+    config, paths = _config(tmp_path)
+    # The model's window minus the reserve.
+    limit = 3_500
+    monkeypatch.setattr(RequestSizer, "size", lambda _self, _request: RequestSize(limit + over, reported=True))
+
+    await _run(_Agent(ToolLoopModel(tool_rounds=2), config, paths), "Do the task")
+
+    assert bool(summary_calls.inputs) is compacts
 
 
 @pytest.mark.asyncio
@@ -1338,6 +1358,23 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
     assert stored.summary is not None
     assert stored.summary.text == rows[-1].summary
     assert [run.run_id for run in stored.runs] == [output.run_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_an_answer_after_a_fold_records_the_request_it_answered(tmp_path: Path) -> None:
+    """A fold marks the prompt in place, so the next reply's sizing finds the answer only if it digested the change."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+
+    output = await _run(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    assert _ends_with_prompt_then_summary(_first_compacted(model))
+    answer = output.messages[-1]
+    assert answer.content == "done"
+    assert answer.provider_data is not None
+    assert answer.provider_data[REQUEST_IDENTITY_KEY] == RequestDigests(model).prefixes(model.requests[-1].request)[-1]
 
 
 @pytest.mark.asyncio
