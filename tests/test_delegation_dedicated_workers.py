@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock
 
@@ -13,7 +13,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import delegate as delegate_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import direct as direct_module
-from mindroom.delegation.lifecycle import prepare_child_turn
+from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.delegation.state import DelegationChild, DelegationState
 from mindroom.delegation.targets import resolve_fresh_target
 from mindroom.delegation.workers import child_placement, dedicated_worker_refusal
@@ -299,6 +299,33 @@ def test_a_child_whose_caller_lost_the_setting_runs_on_its_normal_worker(tmp_pat
     without_caller = _config(paths)
     del without_caller.agents["leader"]
     assert child_placement(child, without_caller, paths) is None
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_follows_the_live_setting_not_its_responses_snapshot(tmp_path: Path) -> None:
+    """A caller whose setting an operator turned off runs its child's next attempt on the normal worker."""
+    paths = _paths(tmp_path, _KUBERNETES)
+    snapshot, live = _config(paths), _config(paths, allowed=False)
+    child = _child(snapshot, paths, dedicated_worker=True)
+    await start_child_turn(
+        child,
+        parent_run_id="parent",
+        config=snapshot,
+        runtime_paths=paths,
+        caller_execution_identity=_identity(),
+    )
+    runtime = replace(
+        _delegate_runtime_context(snapshot, paths, execution_identity=_identity()),
+        config_provider=lambda: live,
+    )
+
+    with tool_runtime_context(runtime):
+        async with child_run_context(child, config=snapshot, runtime_paths=paths):
+            assert placement_for_session(child.session_id) is None
+        runtime = replace(runtime, config_provider=lambda: snapshot)
+        with tool_runtime_context(runtime):
+            async with child_run_context(child, config=snapshot, runtime_paths=paths):
+                assert placement_for_session(child.session_id) == DedicatedWorkerPlacement(child.subagent_id)
 
 
 def test_child_snapshot_without_worker_fields_runs_on_its_normal_worker(tmp_path: Path) -> None:

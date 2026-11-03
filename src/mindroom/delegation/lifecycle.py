@@ -260,7 +260,9 @@ async def child_run_context(
     observation = ChildRunObservation(child, audit, parent=_CHILD_RUN.get())
     token = _CHILD_RUN.set(observation)
     try:
-        with dedicated_worker_placement(child.session_id, child_placement(child, config, runtime_paths)):
+        # The operator's current setting decides, not the snapshot the parent's response started with.
+        placement = child_placement(child, live_delegation_config(config), runtime_paths)
+        with dedicated_worker_placement(child.session_id, placement):
             yield observation
     finally:
         try:

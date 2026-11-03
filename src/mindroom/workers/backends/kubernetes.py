@@ -476,11 +476,13 @@ class KubernetesWorkerBackend:
             ) as state:
                 self._invalidate_ready_worker(worker_key)
                 self._resources.delete_service(worker_id)
+                self._resources.delete_secret(worker_id)
+                # The Deployment goes last among the cluster objects, so a failure before it leaves the worker for
+                # idle cleanup, which finds workers by their Deployments, to retire again.
                 self._resources.delete_deployment(
                     worker_id,
                     timeout_seconds=self.config.ready_timeout_seconds,
                 )
-                self._resources.delete_secret(worker_id)
                 state.remove()
         except WorkerBackendError:
             raise

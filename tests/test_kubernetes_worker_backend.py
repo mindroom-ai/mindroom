@@ -3865,6 +3865,38 @@ def test_kubernetes_cleanup_goes_on_when_a_subagent_worker_cannot_be_removed(
     ]
 
 
+def test_kubernetes_cleanup_retries_a_subagent_worker_whose_removal_failed_midway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A removal that fails after it started keeps the Deployment, so the next pass removes the rest."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    _expire(apps_api, subagent.worker_id, replicas=0)
+    subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
+    delete_secret = backend._resources.delete_secret
+
+    def fail_once(worker_id: str) -> None:
+        monkeypatch.setattr(backend._resources, "delete_secret", delete_secret)
+        msg = f"secret of {worker_id} not deleted"
+        raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(backend._resources, "delete_secret", fail_once)
+
+    assert backend.cleanup_idle_workers(now=10.0) == []
+    assert subagent.worker_id in apps_api.deployments
+    assert subagent_root.is_dir()
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=11.0)] == [subagent_key]
+    assert subagent.worker_id not in apps_api.deployments
+    assert subagent_root.exists() is False
+
+
 def test_kubernetes_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(tmp_path: Path) -> None:
     """A subagent's own worker used within the idle timeout keeps running."""
     runtime_paths = resolve_primary_runtime_paths(
