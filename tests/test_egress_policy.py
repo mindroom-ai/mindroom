@@ -279,6 +279,7 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
         requester_id = "@user:server"
         config = real_config
         execution_identity = identity
+        session_id = identity.session_id
 
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: Context())
