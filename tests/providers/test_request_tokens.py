@@ -7,6 +7,7 @@ so whatever a route sends for a message, a tool, or a setting is what its size c
 from __future__ import annotations
 
 import json
+import zlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,7 @@ from tests.providers.golden_support import golden_id, golden_paths, golden_reque
 from tests.providers.openai_family_support import OPENAI_FAMILIES, golden_provider, responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
@@ -555,6 +557,75 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     message = Message(role="user", content="Summarize the attached report.", files=[pdf])
 
     assert model.request_tokens(ModelRequest(messages=(message,))) < 10_000
+
+
+def _pdf(pages: int, *, packed: Callable[[bytes], bytes] | None = None) -> bytes:
+    """Return a PDF of ``pages`` page objects, stored as they are or ``packed`` into an object stream as pdfTeX does."""
+    page_objects = b"".join(b"<< /Type /Page /Parent 2 0 R >>\n" for _ in range(pages))
+    tree = b"%PDF-1.7\n" + b"2 0 obj << /Type /Pages /Count %d >> endobj\n" % pages
+    if packed is None:
+        return tree + page_objects
+    objects = packed(page_objects)
+    header = b"3 0 obj << /Type /ObjStm /N %d /First 0 /Length %d /Filter /FlateDecode >>\nstream\n" % (
+        pages,
+        len(objects),
+    )
+    return tree + header + objects + b"\nendstream\nendobj\n"
+
+
+def _with_file(route: ModelProvider, file: File | None) -> int:
+    """Return the size of a request whose prompt carries ``file``."""
+    files = [file] if file is not None else None
+    return route.request_tokens(ModelRequest(messages=(Message(role="user", content="Read this.", files=files),)))
+
+
+@pytest.mark.parametrize("family", ["anthropic", "gemini", "openai_chat"])
+def test_an_attached_text_file_counts_its_text(tmp_path: Path, family: str) -> None:
+    """A route reads a text file as text, so a long log counts far beyond the allowance, and a short note far below."""
+    route = _route(family, tmp_path)
+    log = "2026-11-02 12:00:00 ERROR worker 7 crashed while reading the queue\n" * 5_000
+    path = tmp_path / "server.log"
+    path.write_text(log)
+    without = _with_file(route, None)
+
+    assert _with_file(route, File(filepath=str(path), mime_type="text/plain")) - without == count(
+        route.token_counter,
+        log,
+    )
+    assert _with_file(route, File(content="Meet at noon.", mime_type="text/plain")) - without < 100
+    # A file that is not text, or whose bytes are gone, counts the allowance.
+    assert _with_file(route, File(content=b"\x89\xff\x00binary", filename="data.bin")) - without == (
+        MEDIA_ALLOWANCE_TOKENS
+    )
+    assert _with_file(route, File(filepath=str(tmp_path / "removed.log"))) - without == MEDIA_ALLOWANCE_TOKENS
+    assert _with_file(route, File(url="https://example.com/notes.txt")) - without == MEDIA_ALLOWANCE_TOKENS
+
+
+@pytest.mark.parametrize("family", ["anthropic", "gemini", "openai_chat"])
+@pytest.mark.parametrize("packed", [None, zlib.compress, bytes], ids=["plain", "compressed", "uncompressed-stream"])
+def test_an_attached_pdf_counts_the_allowance_per_page(
+    tmp_path: Path,
+    family: str,
+    packed: Callable[[bytes], bytes] | None,
+) -> None:
+    """Claude and Gemini price a PDF per page, so an 80-page report counts 80 allowances, however it stores its pages."""
+    route = _route(family, tmp_path)
+    without = _with_file(route, None)
+
+    def pdf(pages: int) -> File:
+        return File(content=_pdf(pages, packed=packed), mime_type="application/pdf", filename="report.pdf")
+
+    assert _with_file(route, pdf(1)) - without == MEDIA_ALLOWANCE_TOKENS
+    assert _with_file(route, pdf(80)) - without == 80 * MEDIA_ALLOWANCE_TOKENS
+
+
+def test_counting_a_pdfs_pages_inflates_a_bounded_amount(tmp_path: Path) -> None:
+    """Object streams that inflate past the bound are not read, so a crafted PDF counts at least one page, quickly."""
+    route = _route("anthropic", tmp_path)
+    padding = _pdf(0, packed=lambda _objects: zlib.compress(b" " * (17 << 20)))
+    report = File(content=padding + _pdf(80, packed=zlib.compress), mime_type="application/pdf")
+
+    assert _with_file(route, report) - _with_file(route, None) == MEDIA_ALLOWANCE_TOKENS
 
 
 # About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.

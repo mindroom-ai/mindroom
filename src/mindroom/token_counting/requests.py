@@ -10,9 +10,14 @@ route's size and its identity read one rendering.
 from __future__ import annotations
 
 import hashlib
+import re
+import zlib
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.llm.media import File
 from mindroom.llm.messages import media_items, stable_serialize
 from mindroom.native_compaction import native_replay_messages
 from mindroom.token_counting.counts import count
@@ -31,8 +36,16 @@ __all__ = [
     "route_request_tokens",
 ]
 
-# What one media item counts while its real cost is unknown: an image, audio clip, video, or file a request sends.
+# What one media item counts while its real cost is unknown: an image, audio clip, video, or file a request sends, and
+# each page of a PDF, which Claude reads as 1,500 to 3,000 tokens of text beside the page's image, Gemini as a few
+# hundred.
 MEDIA_ALLOWANCE_TOKENS = 5_000
+# A PDF's page object, which its page tree (``/Pages``) does not match, and the start of an object stream's data, where
+# a compressed PDF keeps its page objects.
+_PDF_PAGE = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
+_PDF_OBJECT_STREAM = re.compile(rb"/Type\s*/ObjStm\b[^>]*>>\s*stream\r?\n")
+# The most a PDF's object streams inflate to while its pages are counted, so a crafted file cannot stall a count.
+_MAX_INFLATED_BYTES = 1 << 24
 
 
 @dataclass(slots=True)
@@ -75,16 +88,64 @@ class RequestParts:
 type _PartsOf = Callable[["ModelRequest", int, RequestParts], None]
 
 
-def _media_allowance_tokens(messages: Sequence[Message], *, keep_images: bool = False) -> int:
-    """Return the allowance of the media ``messages`` carry, images left out when the route prices them itself."""
-    items = sum(
-        1 for message in messages for kind, _item in media_items(message) if not (keep_images and kind == "image")
+def _file_bytes(file: File) -> bytes | None:
+    """Return a file's bytes, or None for one whose bytes are not here, such as a file given by URL or since removed."""
+    if file.content is not None:
+        return file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+    if file.filepath is None:
+        return None
+    try:
+        return Path(file.filepath).read_bytes()
+    except OSError:
+        return None
+
+
+def _pdf_pages(data: bytes) -> int:
+    """Return how many pages a PDF holds, by its page objects and those its object streams compress, at least one."""
+    view = memoryview(data)
+    pages = len(_PDF_PAGE.findall(data))
+    room = _MAX_INFLATED_BYTES
+    for stream in _PDF_OBJECT_STREAM.finditer(data):
+        if not room:
+            break
+        with suppress(zlib.error):
+            objects = zlib.decompressobj().decompress(view[stream.end() : data.find(b"endstream", stream.end())], room)
+            room -= len(objects)
+            pages += len(_PDF_PAGE.findall(objects))
+    return max(pages, 1)
+
+
+def _file_tokens(counter: TokenCounter, file: File) -> int:
+    """Return what ``file`` counts: a PDF the allowance per page, UTF-8 text its text, and any other file the allowance.
+
+    Every route sends a text file as text or as a document its provider reads as text.
+    """
+    data = _file_bytes(file)
+    if data is None:
+        return MEDIA_ALLOWANCE_TOKENS
+    if data.startswith(b"%PDF-"):
+        return _pdf_pages(data) * MEDIA_ALLOWANCE_TOKENS
+    try:
+        return count(counter, data.decode("utf-8"))
+    except UnicodeDecodeError:
+        return MEDIA_ALLOWANCE_TOKENS
+
+
+def _media_tokens(counter: TokenCounter, messages: Sequence[Message], *, keep_images: bool = False) -> int:
+    """Return what the media ``messages`` carry count: a file by its bytes, any other item the allowance.
+
+    Images are left out when the route prices them itself.
+    """
+    return sum(
+        _file_tokens(counter, item) if isinstance(item, File) else MEDIA_ALLOWANCE_TOKENS
+        for message in messages
+        for kind, item in media_items(message)
+        if not (keep_images and kind == "image")
     )
-    return items * MEDIA_ALLOWANCE_TOKENS
 
 
 def _without_media(messages: Sequence[Message], *, keep_images: bool = False) -> list[Message]:
-    """Return ``messages`` without the media the allowance prices, so a route's map renders no media bytes."""
+    """Return ``messages`` without the media ``_media_tokens`` prices, so a route's map renders no media bytes."""
     stripped: list[Message] = []
     for message in messages:
         updates = {
@@ -111,13 +172,13 @@ def route_request_tokens(
 ) -> int:
     """Return what ``request`` gives the route's model from message ``start`` on, as ``parts_of`` renders it.
 
-    Media are priced at their allowance, for the messages the request sends after its latest native checkpoint
+    Media are priced by ``_media_tokens``, for the messages the request sends after its latest native checkpoint
     replaced what precedes it; ``keep_images`` leaves the images to a route that prices them itself.
     """
     parts = RequestParts(counter)
     route = request.native_compaction.route if request.native_compaction is not None else None
     sent = native_replay_messages(request.messages[start:], route)
-    parts.cost(_media_allowance_tokens(sent, keep_images=keep_images))
+    parts.cost(_media_tokens(counter, sent, keep_images=keep_images))
     parts_of(replace(request, messages=_without_media(request.messages, keep_images=keep_images)), start, parts)
     return parts.counted()
 
