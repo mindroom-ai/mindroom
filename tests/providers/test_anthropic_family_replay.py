@@ -138,6 +138,7 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
         ("application/ld+json", b'{"@id": "x"}'),
         ("application/x-ipynb+json", b'{"cells": []}'),
         ("application/rss+xml", b"<rss/>"),
+        ("image/svg+xml", b"<svg/>"),
     ]
     encoded = [
         ("text/csv", "1;Müller GmbH;3 €\n".encode("cp1252"), "1;Müller GmbH;3 €\n"),
@@ -162,9 +163,21 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mime_type", ["Application/PDF", "application/pdf; name=report.pdf"])
-async def test_a_pdf_typed_with_case_or_parameters_reaches_claude_as_a_pdf(tmp_path: Path, mime_type: str) -> None:
+@pytest.mark.parametrize("source", ["content", "filepath"])
+async def test_a_pdf_typed_with_case_or_parameters_reaches_claude_as_a_pdf(
+    tmp_path: Path,
+    mime_type: str,
+    source: str,
+) -> None:
     """A tool's PDF typed ``Application/PDF`` or with parameters goes as the PDF document Claude reads."""
-    turn = Message(role="user", content="Read it.", files=[File(content=_PDF, mime_type=mime_type)])
+    path = tmp_path / "report.bin"
+    path.write_bytes(_PDF)
+    file = (
+        File(content=_PDF, mime_type=mime_type)
+        if source == "content"
+        else File(filepath=str(path), mime_type=mime_type)
+    )
+    turn = Message(role="user", content="Read it.", files=[file])
     wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
 
     blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))

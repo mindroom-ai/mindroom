@@ -934,7 +934,8 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
         "config.yaml": b"replicas: 3\n",
         "Dockerfile": b"FROM python:3.13\n",
         "report.pdf": b"%PDF-1.7\n",
-        "blob": b"\x00\x01\xffbinary",
+        "blob": b"\x00\x01binary",
+        "image": b"\x89\xff\xfebinary",
         "notes.txt.gz": b"\x1f\x8b\x08\x00binary",
     }
     client = make_matrix_client_mock()
@@ -962,6 +963,7 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
     assert [(typed[name].mime_type, typed[name].local_path.suffix) for name in payloads if name != "config.yaml"] == [
         ("text/plain", ".txt"),
         ("application/pdf", ".pdf"),
+        (declared, ".bin"),
         (declared, ".bin"),
         (declared, ".bin"),
     ]

@@ -225,7 +225,7 @@ _APPLICATION_TEXT_MIME_TYPES = frozenset(
     },
 )
 # The structured syntax suffixes of text types, as in ``application/ld+json``.
-_TEXT_SUFFIXES = ("+json", "+xml", "+yaml")
+_TEXT_SUFFIXES = ("+json", "+xml")
 # The types of the binary documents a tool may return a file as for the model to read.
 _BINARY_DOCUMENT_MIME_TYPES = frozenset(
     {
@@ -246,14 +246,12 @@ _BINARY_DOCUMENT_MIME_TYPES = frozenset(
 def is_text_mime_type(mime_type: str | None) -> bool:
     """Return whether a file of ``mime_type`` holds text, which Claude and Gemini read as plain text.
 
-    That is any ``text/*`` type and the text types outside ``text/``, such as JSON, YAML, and any
-    ``application/*+json``, whatever their parameters.
+    That is any ``text/*`` type and the text types outside ``text/``, such as JSON, YAML, and any ``+json`` or
+    ``+xml`` type, whatever their parameters.
     """
     canonical = canonical_mime_type(mime_type) or ""
     return (
-        canonical.startswith("text/")
-        or canonical in _APPLICATION_TEXT_MIME_TYPES
-        or (canonical.startswith("application/") and canonical.endswith(_TEXT_SUFFIXES))
+        canonical.startswith("text/") or canonical in _APPLICATION_TEXT_MIME_TYPES or canonical.endswith(_TEXT_SUFFIXES)
     )
 
 
