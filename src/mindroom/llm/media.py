@@ -207,6 +207,27 @@ def canonical_mime_type(mime_type: str | None) -> str | None:
     return normalized or None
 
 
+_APPLICATION_TEXT_MIME_TYPES = frozenset(
+    {
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/x-javascript",
+        "application/x-python",
+    },
+)
+
+
+def is_text_mime_type(mime_type: str | None) -> bool:
+    """Return whether a file of ``mime_type`` holds text, which Claude and Gemini read as plain text.
+
+    That is any ``text/*`` type and the text types outside ``text/``, such as JSON and YAML, whatever their parameters.
+    """
+    canonical = canonical_mime_type(mime_type) or ""
+    return canonical.startswith("text/") or canonical in _APPLICATION_TEXT_MIME_TYPES
+
+
 # The longest attachment name or type that model-facing text prints.
 _MAX_RENDERED_LABEL_LENGTH = 80
 _RENDERED_LABEL_REPLACEMENTS = str.maketrans({'"': "'", "<": "\u2039", ">": "\u203a"})
@@ -411,6 +432,7 @@ __all__ = [
     "canonical_mime_type",
     "image_format",
     "image_mime_type",
+    "is_text_mime_type",
     "named_by_resource",
     "rendered_label",
     "url_file_name",

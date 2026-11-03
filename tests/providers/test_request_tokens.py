@@ -578,6 +578,12 @@ def test_an_attached_text_file_counts_its_text(tmp_path: Path, family: str) -> N
         log,
     )
     assert _with_file(route, File(content="Meet at noon.", mime_type="text/plain")) - without < 100
+    # A text file that is not UTF-8, such as a Windows-1252 CSV export, counts its UTF-8 decode with replacements.
+    export = ("1;Müller GmbH;Zürich;3 €\n" * 2_000).encode("cp1252")
+    assert _with_file(route, File(content=export, mime_type="text/csv")) - without == count(
+        route.token_counter,
+        export.decode("utf-8", errors="replace"),
+    )
     # A file that is not text, or whose bytes are gone, counts the allowance.
     assert _with_file(route, File(content=b"\x89\xff\x00binary", filename="data.bin")) - without == (
         MEDIA_ALLOWANCE_TOKENS

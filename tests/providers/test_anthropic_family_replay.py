@@ -118,6 +118,31 @@ async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tm
 
 
 @pytest.mark.asyncio
+async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path: Path) -> None:
+    """A text file of any text type, its type's parameters aside, goes as plain text that Claude reads inline."""
+    texts = {
+        "text/tab-separated-values": b"a\tb\n",
+        "application/x-yaml": b"key: value\n",
+        "text/x-log": b"12:00 ERROR crashed\n",
+        "text/plain; charset=utf-8": b"Plain notes.",
+        "application/json; charset=utf-8": b'{"key": "value"}',
+    }
+    turn = Message(
+        role="user",
+        content="Summarize the attachments.",
+        files=[File(content=data, mime_type=mime_type) for mime_type, data in texts.items()],
+    )
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
+
+    blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))
+
+    assert [block["source"] for block in blocks if block["type"] == "document"] == [
+        {"type": "text", "media_type": "text/plain", "data": data.decode()} for data in texts.values()
+    ]
+    assert _notes(blocks) == []
+
+
+@pytest.mark.asyncio
 async def test_images_are_typed_by_their_bytes_when_claude_does_not_name_their_type(tmp_path: Path) -> None:
     """The bytes decide an image's type, even against its file name; an image of another type is logged."""
     # An upload announced as image/jpg is retained without a usable suffix; a tool saved a PNG under a .jpg name.

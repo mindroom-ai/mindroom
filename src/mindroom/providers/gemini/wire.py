@@ -27,7 +27,7 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import canonical_mime_type, image_mime_type, rendered_label
+from mindroom.llm.media import canonical_mime_type, image_mime_type, is_text_mime_type, rendered_label
 from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
@@ -75,17 +75,6 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
-# Text types outside ``text/``, which Gemini reads as plain text.
-_TEXT_FILE_MIME_TYPES = frozenset(
-    {
-        "application/json",
-        "application/xml",
-        "application/yaml",
-        "application/x-yaml",
-        "application/x-javascript",
-        "application/x-python",
-    },
-)
 # How Gemini rejects one media type, as reported for an SVG image: "Unsupported MIME type: image/svg+xml"
 # (https://github.com/google/adk-python/issues/5693). Its other rejection of media, "Request contains an invalid
 # argument.", which the Gemini API sent in October 2026 for an inline DOCX, names no attachment.
@@ -381,7 +370,7 @@ def _sent_file_type(mime_type: str) -> str | None:
     Gemini reads PDFs, text, images, audio, and video; it rejects other types, such as ``application/octet-stream``.
     """
     canonical = canonical_mime_type(mime_type) or ""
-    if canonical.startswith("text/") or canonical in _TEXT_FILE_MIME_TYPES:
+    if is_text_mime_type(canonical):
         return "text/plain"
     if canonical == "application/pdf" or canonical.startswith(("image/", "audio/", "video/")):
         return canonical
