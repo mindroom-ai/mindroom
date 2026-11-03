@@ -47,7 +47,7 @@ from mindroom.hooks import (
     render_enrichment_block,
 )
 from mindroom.llm.events import RunFinished
-from mindroom.llm.media import Image
+from mindroom.llm.media import File, Image
 from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -729,23 +729,29 @@ async def test_rewritten_request_within_the_model_window_is_sent(
 
 
 @pytest.mark.asyncio
-async def test_a_fold_beside_a_prompt_that_fills_the_replay_window_is_not_stored(
+@pytest.mark.parametrize(
+    ("prompt", "files"),
+    # About 4,000 tokens of prompt, or an attachment's 5,000-token allowance, over the 3,500-token limit.
+    [("p" * 16_000, ()), ("Read this archive.", (File(content=b"\x89\xff binary", filename="archive.bin"),))],
+    ids=["prompt", "attachment"],
+)
+async def test_a_prompt_that_fills_the_replay_window_alone_asks_for_no_summary(
     tmp_path: Path,
     summary_calls: SummaryCalls,
+    prompt: str,
+    files: tuple[File, ...],
 ) -> None:
-    """A prompt over the replay window leaves no history budget, so the fold stores nothing and the turn continues."""
+    """A prompt or its attachment over the replay window leaves a summary no room, so none is asked for or stored."""
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
     agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
 
-    output = await _run(agent, [Message(role="user", content="p" * 16_000)])
+    output = await _run(agent, [Message(role="user", content=prompt)], media=MediaInputs(files=files))
 
     assert str(output.content).endswith("done")
-    # A failed fold stops compacting for the turn.
-    assert len(summary_calls.inputs) == 1
-    [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
-    assert failure.failure_reason.endswith("; 0 available).")
+    assert summary_calls.inputs == []
+    assert lifecycle.events == []
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
 
 

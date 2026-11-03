@@ -32,6 +32,9 @@ _GEMINI_MARGIN = 1.35
 _OPENAI_MARGIN = 1.0
 _OTHER_MARGIN = 1.25
 _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-", "codex-")
+# What Gemini charges for a PDF page, on any route that serves it: at most 1,120 tokens for the page's image, by its
+# media resolution, plus the page's native text, under 900 on a typical page of prose.
+_GEMINI_PDF_PAGE_TOKENS = 2_000
 # tiktoken's cost grows with the square of a run without whitespace, so text is encoded in pieces of at most this many
 # characters, each cut after a newline or before a word where one is near; a hard cut can add a token.
 _PIECE_CHARS = 8_192
@@ -199,7 +202,11 @@ def counter_for_model(
     name = identity.id.lower().rsplit("/", 1)[-1]
     if local_encoder and (encoding := _own_encoding(name)) is not None:
         return TokenCounter(estimate=partial(_encoding_tokens, encoding))
-    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(family or name)))
+    served = family or name
+    return TokenCounter(
+        estimate=partial(_scaled_o200k_tokens, _margin(served)),
+        pdf_page_tokens=_GEMINI_PDF_PAGE_TOKENS if "gemini" in served else None,
+    )
 
 
 def openai_model_counter(model_id: str) -> TokenCounter:

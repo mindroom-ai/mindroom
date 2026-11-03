@@ -53,6 +53,8 @@ dependencies = [
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
   "pyjwt>=2.13",
+  # Request sizing reads a PDF attachment's page count (token_counting/requests.py).
+  "pypdf>=6.21.4",
   "python-dotenv>=1",
   "python-multipart>=0.0.27",
   "pyyaml>=6",
@@ -83,7 +85,6 @@ apify = [
 approved_egress = []
 arxiv = [
   "arxiv",
-  "pypdf",
 ]
 atlassian = []
 attachments = []

@@ -157,6 +157,7 @@ The exporter's drift check reads at most 8 MiB of a room's `index.json` and rebu
 Workspace todo templates have the size, render, and listing limits documented in [`todo`](../tools/project-management.md#todo), and they render in a short-lived, memory-limited child process instead of the primary, because sandboxed Jinja alone does not bound their cost.
 
 Workspace `SKILL.md` and subagent profile frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, `%TAG` directives, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](../skills.md#skillmd-format-openclaw-compatible) lists the exact limits.
+Request sizing reads the page count of a PDF a request carries, an attachment or a tool's result, with pypdf in the primary, so a crafted PDF costs the parse time pypdf allows; the dependency floor follows pypdf's denial-of-service fixes.
 
 ## Hosted tenant isolation
 

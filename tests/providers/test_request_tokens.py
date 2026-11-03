@@ -7,6 +7,7 @@ so whatever a route sends for a message, a tool, or a setting is what its size c
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +26,7 @@ from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
 from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import quarter_tokens
-from tests.history_helpers import record_native_checkpoint
+from tests.history_helpers import blank_pdf, record_native_checkpoint
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
 from tests.providers.gemini_ollama_support import FAMILIES as GEMINI_OLLAMA_FAMILIES
@@ -555,6 +556,78 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     message = Message(role="user", content="Summarize the attached report.", files=[pdf])
 
     assert model.request_tokens(ModelRequest(messages=(message,))) < 10_000
+
+
+def _with_file(route: ModelProvider, file: File | None) -> int:
+    """Return the size of a request whose prompt carries ``file``."""
+    files = [file] if file is not None else None
+    return route.request_tokens(ModelRequest(messages=(Message(role="user", content="Read this.", files=files),)))
+
+
+@pytest.mark.parametrize("family", ["anthropic", "gemini", "openai_chat"])
+def test_an_attached_text_file_counts_its_text(tmp_path: Path, family: str) -> None:
+    """A route reads a text file as text, so a long log counts far beyond the allowance, and a short note far below."""
+    route = _route(family, tmp_path)
+    log = "2026-11-02 12:00:00 ERROR worker 7 crashed while reading the queue\n" * 5_000
+    path = tmp_path / "server.log"
+    path.write_text(log)
+    without = _with_file(route, None)
+
+    assert _with_file(route, File(filepath=str(path), mime_type="text/plain")) - without == count(
+        route.token_counter,
+        log,
+    )
+    assert _with_file(route, File(content="Meet at noon.", mime_type="text/plain")) - without < 100
+    # A file that is not text, or whose bytes are gone, counts the allowance.
+    assert _with_file(route, File(content=b"\x89\xff\x00binary", filename="data.bin")) - without == (
+        MEDIA_ALLOWANCE_TOKENS
+    )
+    assert _with_file(route, File(filepath=str(tmp_path / "removed.log"))) - without == MEDIA_ALLOWANCE_TOKENS
+    assert _with_file(route, File(url="https://example.com/notes.txt")) - without == MEDIA_ALLOWANCE_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("family", "page_tokens"),
+    [("anthropic", MEDIA_ALLOWANCE_TOKENS), ("openai_chat", MEDIA_ALLOWANCE_TOKENS), ("gemini", 2_000)],
+)
+def test_an_attached_pdf_counts_its_pages(tmp_path: Path, family: str, page_tokens: int) -> None:
+    """A PDF counts the route's most per page for the pages its latest revision holds, so a long report counts long."""
+    route = _route(family, tmp_path)
+    without = _with_file(route, None)
+
+    def counted(content: bytes) -> int:
+        return _with_file(route, File(content=content, mime_type="application/pdf", filename="report.pdf")) - without
+
+    assert counted(blank_pdf(1)) == page_tokens
+    assert counted(blank_pdf(80)) == 80 * page_tokens
+    # An incremental save that deleted pages keeps their objects, which the latest page tree no longer counts.
+    assert counted(blank_pdf(80, delete=79)) == page_tokens
+    # A PDF the parser cannot read, or whose page tree declares no page count, counts one page.
+    assert counted(b"%PDF-1.7\ndamaged") == page_tokens
+    # A cross-reference table cut off before its trailer, which pypdf before 6.21.4 read forever.
+    assert counted(b"%PDF-1.4\nstartxref\n28\n%%EOF\nxref\n1 0\naaa") == page_tokens
+    assert counted(blank_pdf(1).replace(b"/Count 1", b"/Count /X")) == page_tokens
+    assert counted(blank_pdf(1).replace(b"/Count 1", b"/Count -7")) == page_tokens
+
+
+def test_an_attached_path_that_is_not_a_regular_file_is_never_read(tmp_path: Path) -> None:
+    """A FIFO, which no wire sends, counts the allowance without blocking the count on a read."""
+    route = _route("anthropic", tmp_path)
+    fifo = tmp_path / "pipe.log"
+    os.mkfifo(fifo)
+
+    assert _with_file(route, File(filepath=str(fifo))) - _with_file(route, None) == MEDIA_ALLOWANCE_TOKENS
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+def test_an_attached_file_the_runtime_may_not_read_counts_the_allowance(tmp_path: Path) -> None:
+    """A file the wires would refuse to read fails no count."""
+    route = _route("anthropic", tmp_path)
+    locked = tmp_path / "locked.log"
+    locked.write_text("secret notes\n" * 1_000)
+    locked.chmod(0)
+
+    assert _with_file(route, File(filepath=str(locked))) - _with_file(route, None) == MEDIA_ALLOWANCE_TOKENS
 
 
 # About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.

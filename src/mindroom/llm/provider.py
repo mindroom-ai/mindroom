@@ -64,9 +64,11 @@ class TokenCounter:
     """How a route estimates the tokens of text its model receives; ``mindroom.token_counting`` reads it for every count.
 
     ``estimate`` counts locally, never over the network, and returns None while its encoder is still loading.
+    ``pdf_page_tokens`` is the most the model charges for a PDF page, when that is less than the media allowance.
     """
 
     estimate: Callable[[str], int | None]
+    pdf_page_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
