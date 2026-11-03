@@ -101,7 +101,7 @@ async def _request_decision(model: ModelProvider, gate: ParticipationGate, state
     try:
         turn = await complete(
             model,
-            replace(state.request_template, messages=decision_messages, tools=state.tools, tool_choice="none"),
+            replace(state.request(decision_messages), tool_choice="none"),
         )
         assert state.record.metrics is not None
         identity = model.identity

@@ -61,12 +61,11 @@ def call_arguments(function: Mapping[str, Any]) -> dict[str, Any]:
 
 def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with its deferred tools hidden behind ``call_tool`` when its tool search is portable."""
-    return inner.stream(portable_tool_search_request(inner, request))
+    return inner.stream(portable_tool_search_request(request))
 
 
-def portable_tool_search_request(inner: ModelProvider, request: ModelRequest) -> ModelRequest:
-    """Return ``request`` as portable tool search sends it to ``inner``: deferred schemas dropped, their calls wrapped."""
-    del inner
+def portable_tool_search_request(request: ModelRequest) -> ModelRequest:
+    """Return ``request`` as portable tool search sends it: deferred schemas dropped, their calls wrapped."""
     if not (deferred := request.deferred_tools).portable:
         return request
     return replace(

@@ -45,4 +45,8 @@ def wrap_provider(
         partial(media_fallback_stream, fallback_prompt=media_fallback_prompt),
         media_fallback_projection(media_fallback_prompt),
     )
-    return WrappedProvider(provider, portable_tool_search_stream, RequestProjection(portable_tool_search_request))
+    return WrappedProvider(
+        provider,
+        portable_tool_search_stream,
+        RequestProjection(lambda _inner, request: portable_tool_search_request(request)),
+    )

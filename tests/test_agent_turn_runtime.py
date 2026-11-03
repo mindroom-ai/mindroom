@@ -72,6 +72,9 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.thread_models import resolve_thread_model_override
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -107,6 +110,7 @@ from tests.scripted_agent_helpers import (
     registered_toolkit,
     streamed_text,
 )
+from tests.tool_job_helpers import tool_job_runtime
 from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage, usage_rows
 
 if TYPE_CHECKING:
@@ -202,10 +206,12 @@ def _reply(
     plugins: Sequence[object] = (),
     max_tool_calls_per_turn: int | None = None,
     context_window: int | None = None,
+    background_jobs: bool = False,
 ) -> _Reply:
     """Build the reply of a one-agent config whose model is the scripted provider.
 
-    A ``context_window`` turns on compaction with a ``summary`` model, which the test supplies.
+    A ``context_window`` turns on compaction with a ``summary`` model, which the test supplies; ``background_jobs``
+    lets calls become jobs, which needs the process's job runtime registered.
     """
     agent: dict[str, Any] = {"display_name": "Assistant", "role": "Answer questions.", "tools": list(tools)}
     if max_tool_calls_per_turn is not None:
@@ -224,7 +230,7 @@ def _reply(
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     # An approval-gated call pauses the reply, which only a reply without background tool jobs does.
-    config.background_tool_jobs.enabled = False
+    config.background_tool_jobs.enabled = background_jobs
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     model = ScriptedModel([list(turn) for turn in turns])
@@ -2006,6 +2012,37 @@ async def test_the_next_reply_sizes_its_first_request_from_the_previous_answer_s
     await _stream(reply, prompt="Hello", run_id="run-1")
     await _stream(reply, prompt="And now?", run_id="run-2")
 
+    stored = _stored(reply, "run-2").metadata or {}
+    compaction = stored[AI_RUN_METADATA_KEY]["compaction"]
+    assert 50_000 < compaction["request_tokens"] < 50_500
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_next_reply_anchors_on_the_tools_job_starts_offer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where calls can become jobs, each request offers the wait budget, so the check before a reply sizes with it too."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [answer("First answer.", usage(50_000, 5)), answer("Second answer.", usage(50_100, 5))],
+        context_window=128_000,
+        background_jobs=True,
+    )
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(reply.config, reply.runtime_paths)
+    register_background_runtime(reply.runtime_paths, runtime)
+    try:
+        async with execution_resources():
+            await _stream(reply, prompt="Hello", run_id="run-1")
+            await _stream(reply, prompt="And now?", run_id="run-2")
+    finally:
+        await runtime.shutdown()
+
+    offered = {tool.name: tool.parameters["properties"] for tool in reply.model.requests[1].tools}
+    assert "background_after" in offered["touch"]
     stored = _stored(reply, "run-2").metadata or {}
     compaction = stored[AI_RUN_METADATA_KEY]["compaction"]
     assert 50_000 < compaction["request_tokens"] < 50_500

@@ -62,7 +62,7 @@ if TYPE_CHECKING:
         ResolvedReplayPlan,
     )
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, ModelRequest
+    from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.run_storage import RunStorage
@@ -215,7 +215,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         return
     messages = state.messages
     # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
-    request_size = await asyncio.to_thread(policy.sizer.size, _request(state, messages))
+    request_size = await asyncio.to_thread(policy.sizer.size, state.request(messages))
     if request_size.tokens <= policy.limit:
         return
     scope_fold = compaction.scope_fold
@@ -233,7 +233,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         request_size.tokens,
         # The rewritten request replays no checkpoint, which the summary replaced.
         lambda rewritten: policy.sizer.model.request_tokens(
-            replace(_request(state, rewritten), native_compaction=None),
+            replace(state.request(rewritten), native_compaction=None),
         ),
     )
     if fold is None:
@@ -259,11 +259,6 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
             run_id=state.record.run_id,
         )
         compaction.stopped = True
-
-
-def _request(state: LoopState, messages: Sequence[Message]) -> ModelRequest:
-    """Return the request the loop sends with ``messages``, as it builds each request."""
-    return replace(state.request_template, messages=tuple(messages), tools=state.tools)
 
 
 async def _summarize(

@@ -70,8 +70,8 @@ class LoopState:
     review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions,
     paused ones included, the loop fills as it goes; ``request_template`` carries the per-run request settings, which a
     hook may replace for the rest of the run (mid-turn compaction turning the provider's compaction off after it
-    compacted as text); ``digests`` identifies
-    the loop's requests, so each answer records which request it answered (``llm.request_identity``).
+    compacted as text); ``digests`` identifies the loop's requests, so each answer records which request it answered
+    (``llm.request_identity``).
     """
 
     messages: list[Message]
@@ -82,6 +82,11 @@ class LoopState:
     request_index: int
     request_template: ModelRequest
     digests: RequestDigests
+
+    def request(self, messages: Sequence[Message] | None = None) -> ModelRequest:
+        """Return the request the loop sends with ``messages``, the live messages unless given."""
+        sent = self.messages if messages is None else messages
+        return replace(self.request_template, messages=tuple(sent), tools=self.tools)
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +214,7 @@ async def run_model_loop(
     while not (progress.stopped or progress.paused):
         if not await _before_request(hooks, state, max_requests=max_requests):
             break
-        request = replace(state.request_template, messages=tuple(state.messages), tools=state.tools)
+        request = state.request()
         progress.last_request = request
         turn: TurnCompleted | None = None
         events = _stream_turn(model, request, messages, metrics, state.digests)
