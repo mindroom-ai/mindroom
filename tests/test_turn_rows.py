@@ -936,10 +936,11 @@ class TestRetention:
         store: EventJournalStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Choosing what to drop holds no write, so other writes go on, and a candidate written meanwhile stays."""
+        """Choosing what to retain holds no write, so other writes go on, and a candidate written meanwhile is untouched."""
         for event_id in ("$old", "$touched"):
             await write(store, turn_rows.record_turn, TurnRecord.create([event_id]), room_id=ROOM)
             await self._age(store, event_id, 1.0)
+        await write(store, turn_rows.record_prepared_voice, room_id=ROOM, source_event_id="$voice", prepared=VOICE)
         scanning, resume = threading.Event(), threading.Event()
         load_rows = turn_rows._load_rows
 
@@ -954,13 +955,15 @@ class TestRetention:
         try:
             assert await asyncio.to_thread(scanning.wait, 10)
             await asyncio.wait_for(self._age(store, "$touched", 999_999.0), timeout=5)
+            await self._age(store, "$voice", 999_999.0)
         finally:
             resume.set()
         result = await retention
 
         assert await lookup(store, "$old") is None
         assert await lookup(store, "$touched") is not None
-        assert result.dropped_turn_count == 1
+        assert await read(store, turn_rows.prepared_voice, "$voice") == VOICE
+        assert result == turn_rows.RetentionResult(dropped_turn_count=1, cleared_voice_turn_count=0)
 
     async def test_a_settled_checkpoint_loses_its_plaintext_but_keeps_its_echo(self, store: EventJournalStore) -> None:
         """A settled checkpoint loses its plaintext but keeps its echo."""

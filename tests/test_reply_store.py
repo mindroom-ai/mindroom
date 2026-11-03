@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -31,6 +32,7 @@ from mindroom.event_journal.replies import (
     ReplyRowRequest,
     WakeApproval,
 )
+from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
 from mindroom.reply_lifecycle import (
     ApprovalFailureKind,
     ClaimContext,
@@ -53,6 +55,7 @@ from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from mindroom.cancellation import TaskCancelSource
     from mindroom.event_journal import EventJournalStore
@@ -1529,6 +1532,18 @@ async def test_retention_chooses_replies_on_a_read_and_keeps_one_written_since(
     assert await principal.replies.forget_finished(before_ns=1_000) == 0
     monkeypatch.undo()
     assert await principal.replies.load(reply.reply_id) is not None
+
+
+async def test_a_full_retention_batch_looks_each_reply_up_by_key(tmp_path: Path) -> None:
+    """A batch of chosen replies is re-checked one key lookup each, not by walking every finished reply again."""
+    database = sqlite3.connect(tmp_path / "forget-plan.db")
+    for statement in schema_statements(SQLITE_DIALECT):
+        database.execute(statement)
+    sql = reply_messages._forgettable_among(500)
+
+    plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x",) * sql.count("?")))
+
+    assert "SEARCH reply USING INDEX sqlite_autoindex_reply_messages_1 (principal_id=? AND reply_id=?)" in plan, plan
 
 
 async def _stop_waiting_for_the_create(journal_store: EventJournalStore, stop_room: str = ROOM) -> PrincipalStore:

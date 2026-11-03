@@ -1642,8 +1642,8 @@ class TurnRecordStore:
         dropped = cleared = 0
         for batch in batched(plan.dropped.items(), _CHUNK, strict=False):
             dropped += await self.write(_drop_unchanged, dict(batch), unsettled=unsettled)
-        for batch in batched(plan.cleared, _CHUNK, strict=False):
-            cleared += await self.write(_clear_settled_voice, batch, unsettled=unsettled)
+        for batch in batched(plan.cleared.items(), _CHUNK, strict=False):
+            cleared += await self.write(_clear_settled_voice, dict(batch), unsettled=unsettled)
         return RetentionResult(dropped_turn_count=dropped, cleared_voice_turn_count=cleared)
 
 
@@ -1742,10 +1742,10 @@ def _clearable(rows: _Rows, unsettled: frozenset[str]) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _RetentionPlan:
-    """What one snapshot decided: each turn to drop, with the ``updated_at`` it had then, and each turn to clear."""
+    """What one snapshot decided: each turn to drop and each turn to clear, with the ``updated_at`` it had then."""
 
     dropped: dict[str, float]
-    cleared: tuple[str, ...]
+    cleared: dict[str, float]
 
 
 def _plan_retention(
@@ -1778,8 +1778,14 @@ def _plan_retention(
     kept = {rows.turn.turn_key for rows in fresh}
     return _RetentionPlan(
         dropped={key: loaded[key].turn.updated_at for key in keys if key not in kept},
-        cleared=tuple(rows.turn.turn_key for rows in fresh if _clearable(rows, unsettled)),
+        cleared={rows.turn.turn_key: rows.turn.updated_at for rows in fresh if _clearable(rows, unsettled)},
     )
+
+
+def _unchanged(transaction: Transaction, agent_name: str, planned: Mapping[str, float]) -> list[_Rows]:
+    """Load the planned turns still at the ``updated_at`` their plan read; any write since moves it."""
+    loaded = _load_rows(transaction, agent_name, planned)
+    return [rows for key, rows in loaded.items() if rows.turn.updated_at == planned[key]]
 
 
 def _drop_unchanged(
@@ -1789,9 +1795,8 @@ def _drop_unchanged(
     *,
     unsettled: frozenset[str],
 ) -> int:
-    """Drop each planned turn still at the ``updated_at`` its plan read and still owning no unfinished work."""
-    loaded = _load_rows(transaction, agent_name, planned)
-    unchanged = [rows for key, rows in loaded.items() if rows.turn.updated_at == planned[key]]
+    """Drop each planned turn unchanged since its plan and still owning no unfinished work."""
+    unchanged = _unchanged(transaction, agent_name, planned)
     needed = _required(transaction, agent_name, unchanged, unsettled)
     dropped = [rows.turn.turn_key for rows in unchanged if rows.turn.turn_key not in needed]
     for batch in batched(dropped, _CHUNK, strict=False):
@@ -1805,12 +1810,14 @@ def _drop_unchanged(
 def _clear_settled_voice(
     transaction: Transaction,
     agent_name: str,
-    planned: Collection[str],
+    planned: Mapping[str, float],
     *,
     unsettled: frozenset[str],
 ) -> int:
-    """Clear the voice checkpoints of each planned turn that still qualifies."""
-    cleared = [key for key, rows in _load_rows(transaction, agent_name, planned).items() if _clearable(rows, unsettled)]
+    """Clear the voice checkpoints of each planned turn unchanged since its plan and still qualifying."""
+    cleared = [
+        rows.turn.turn_key for rows in _unchanged(transaction, agent_name, planned) if _clearable(rows, unsettled)
+    ]
     for batch in batched(cleared, _CHUNK, strict=False):
         transaction.execute(
             f"UPDATE turn_sources SET prepared_voice_json = NULL "  # noqa: S608

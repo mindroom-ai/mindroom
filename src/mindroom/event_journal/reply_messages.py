@@ -291,9 +291,9 @@ def take_deletion_endings(transaction: Transaction, principal_id: str) -> tuple[
     return tuple(sorted(endings, key=lambda ending: ending.reply_id))
 
 
+# Whether the finished reply `reply` is forgettable; the one parameter is ``before_ns``.
 _FORGETTABLE = """
-    SELECT reply.reply_id FROM reply_messages AS reply
-    WHERE reply.principal_id = ? AND reply.state IN ('completed', 'cancelled', 'failed', 'gone')
+    reply.state IN ('completed', 'cancelled', 'failed', 'gone')
       AND reply.updated_at_ns < ?
       AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL
       AND NOT EXISTS (
@@ -317,16 +317,32 @@ def forgettable_replies(transaction: Transaction, principal_id: str, *, before_n
     to apply, and that no continuation names, superseded or not: its cleanup
     reads the reply.
     """
-    return tuple(str(row["reply_id"]) for row in transaction.fetchall(_FORGETTABLE, (principal_id, before_ns)))
+    rows = transaction.fetchall(
+        f"SELECT reply.reply_id FROM reply_messages AS reply WHERE reply.principal_id = ? AND {_FORGETTABLE}",  # noqa: S608
+        (principal_id, before_ns),
+    )
+    return tuple(str(row["reply_id"]) for row in rows)
+
+
+def _forgettable_among(count: int) -> str:
+    """Select which of ``count`` chosen replies are still forgettable, one key lookup each.
+
+    Given the ids as an ``IN`` list as long as a batch, SQLite prefers
+    ``reply_messages_state`` and tests every finished reply of the principal,
+    on the writer, before it reaches the list. ``CROSS JOIN`` keeps the chosen
+    ids as SQLite's outer loop.
+    """
+    chosen = ", ".join("(?)" for _ in range(count))
+    return (
+        f"WITH chosen (reply_id) AS (VALUES {chosen}) "  # noqa: S608 - fixed predicate and placeholders
+        "SELECT reply.reply_id FROM chosen CROSS JOIN reply_messages AS reply "
+        f"WHERE reply.principal_id = ? AND reply.reply_id = chosen.reply_id AND {_FORGETTABLE}"
+    )
 
 
 def forget_replies(transaction: Transaction, principal_id: str, *, before_ns: int, reply_ids: tuple[str, ...]) -> int:
     """Delete those of ``reply_ids`` that are still forgettable, with their spans; return how many."""
-    placeholders = ", ".join("?" for _ in reply_ids)
-    rows = transaction.fetchall(
-        f"{_FORGETTABLE} AND reply.reply_id IN ({placeholders})",
-        (principal_id, before_ns, *reply_ids),
-    )
+    rows = transaction.fetchall(_forgettable_among(len(reply_ids)), (*reply_ids, principal_id, before_ns))
     forgettable = tuple(str(row["reply_id"]) for row in rows)
     if forgettable:
         placeholders = ", ".join("?" for _ in forgettable)
