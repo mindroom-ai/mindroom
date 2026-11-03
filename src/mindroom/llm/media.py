@@ -401,10 +401,20 @@ class File:
 MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
+# Types Python's MIME table lacks or names differently, so the host's MIME table must not decide them; OpenAI's
+# Responses API reads a shell script typed ``text/x-sh``, not Python's ``application/x-sh``.
+_SUFFIX_MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".sh": "text/x-sh",
+}
+
+
 def named_mime_type(name: str) -> str | None:
     """Return the type a file name names; a compressed name, such as ``report.csv.gz``, names none."""
     named, encoding = mimetypes.guess_type(name)
-    return named if encoding is None else None
+    return _SUFFIX_MIME_TYPES.get(PurePosixPath(name).suffix.lower(), named) if encoding is None else None
 
 
 def named_by_resource[T: Image | Audio | Video | File](

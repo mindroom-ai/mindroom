@@ -1440,6 +1440,7 @@ def test_rebuilding_a_request_leaves_a_message_s_content_list_unchanged() -> Non
         ("report.pdf", "application/octet-stream", "application/pdf"),
         ("notes.md", "text/markdown; charset=utf-8", "text/markdown"),
         ("script.sh", "text/x-sh", "text/x-sh"),
+        ("script.sh", None, "text/x-sh"),
         ("report.pdf", None, "application/pdf"),
         ("report.docx", None, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         ("report.pptx", None, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),

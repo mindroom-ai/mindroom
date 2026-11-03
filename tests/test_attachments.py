@@ -933,6 +933,7 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
     payloads = {
         "config.yaml": b"replicas: 3\n",
         "Dockerfile": b"FROM python:3.13\n",
+        "setup.sh": b"echo hi\n",
         "report.pdf": b"%PDF-1.7\n",
         "blob": b"\x00\x01binary",
         "image": b"\x89\xff\xfebinary",
@@ -957,10 +958,15 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
     assert await attachments_module.wait_for_attachment_cleanup_tasks()
 
     typed = {record.filename: record for record in records if record is not None}
-    # Whether a file name such as ``config.yaml`` names a type depends on the host's MIME table.
+    # Whether a file name such as ``config.yaml`` names a type, and which suffix ``text/x-sh`` takes, depend on the
+    # host's MIME table.
     assert is_text_mime_type(typed["config.yaml"].mime_type)
+    assert typed["setup.sh"].mime_type == "text/x-sh"
     declared = canonical_mime_type((info or {}).get("mimetype"))
-    assert [(typed[name].mime_type, typed[name].local_path.suffix) for name in payloads if name != "config.yaml"] == [
+    host_dependent = {"config.yaml", "setup.sh"}
+    assert [
+        (typed[name].mime_type, typed[name].local_path.suffix) for name in payloads if name not in host_dependent
+    ] == [
         ("text/plain", ".txt"),
         ("application/pdf", ".pdf"),
         (declared, ".bin"),
