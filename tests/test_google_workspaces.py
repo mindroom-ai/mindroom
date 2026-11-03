@@ -23,7 +23,7 @@ from mindroom.oauth.credential_lifecycle import (
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.google import google_oauth_provider
-from mindroom.oauth.providers import OAuthClaimValidationError, OAuthTokenResult
+from mindroom.oauth.providers import OAuthClaimValidationError, OAuthConsentGroup, OAuthTokenResult
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, google_workspace_oauth_providers
@@ -367,3 +367,17 @@ def test_workspace_providers_ask_google_for_the_account_picker() -> None:
     )
 
     assert google_workspace_oauth_providers(config)[0].extra_auth_params["prompt"] == "consent select_account"
+
+
+def test_workspace_providers_form_their_own_consent_group() -> None:
+    """A workspace connects together under its own sign-in, apart from the built-in Google connection."""
+    workspace = GoogleWorkspaceConfig(
+        name="acme",
+        display_name="Acme",
+        client_config_service="acme_oauth_client",
+        allowed_hosted_domains=("acme.example",),
+    )
+
+    assert {p.consent_group for p in google_workspace_oauth_providers(workspace)} == {
+        OAuthConsentGroup("google_acme", "Acme"),
+    }

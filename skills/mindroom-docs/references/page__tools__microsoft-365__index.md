@@ -97,6 +97,7 @@ The scopes stay the same with `write: false`, so turning writes back on does not
 When a requester has not connected a tool's service yet, each of its functions returns `oauth_connection_required: true` with a `connect_url` for that requester.
 The requester opens the link, signs in to Microsoft, approves the requested permissions, and retries the request.
 Users can also connect and disconnect from the dashboard Integrations page, where each service is a separate connection.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows) can connect most of an agent's unconnected Microsoft 365 services with one sign-in.
 
 Tokens belong to the requester and are never shared with other users or stored globally.
 A call without a concrete requester always asks for a connection instead of using another account.

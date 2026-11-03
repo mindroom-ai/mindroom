@@ -64,11 +64,19 @@ class Ask:
     When the run's response is final, or after the fallback timeout, the runner calls ``then`` off the event loop
     with the current config, the thread the text was posted in, and whether the timeout fired.
     Without ``then``, the chain ends once the run does.
+    ``summary`` is pinned as the title of the thread a ``new_thread`` prompt starts, so no generated summary replaces it.
     """
 
     text: str
     new_thread: bool
     then: Callable[[Config, str, bool], Ask | Done] | None = None
+    summary: str | None = None
+
+    def __post_init__(self) -> None:
+        """Let only the prompt that starts a thread title it, so two steps never race to title the same thread."""
+        if self.summary is not None and not self.new_thread:
+            msg = "Ask.summary titles the thread the prompt starts, so it needs new_thread=True"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True)

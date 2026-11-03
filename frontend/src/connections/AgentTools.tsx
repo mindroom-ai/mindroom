@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { ConnectionServiceRows } from "./ConnectionServiceRows";
+import { ConsentGroupConnect } from "./ConsentGroupConnect";
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import { ToolExposure, ToolName } from "./ToolRow";
 import type { AgentConnections, ConnectionStatus } from "./types";
@@ -25,6 +26,17 @@ export function AgentTools({
   ) => void;
 }) {
   const [otherOpen, setOtherOpen] = useState(false);
+  const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>(
+    {},
+  );
+  // Stable, because each service row reloads its status whenever this changes.
+  const onStatus = useCallback(
+    (agentName: string, provider: string, status: ConnectionStatus) => {
+      setStatuses((known) => ({ ...known, [provider]: status }));
+      onAccountStatus?.(agentName, provider, status);
+    },
+    [onAccountStatus],
+  );
   const otherTools = agent.tools.filter((tool) => tool.provider === null);
   if (!agent.tools.length)
     return (
@@ -34,6 +46,11 @@ export function AgentTools({
     );
   return (
     <div className="overflow-x-auto">
+      <ConsentGroupConnect
+        agent={agent}
+        statuses={statuses}
+        onConnectionChange={onConnectionChange}
+      />
       <table
         aria-label={`${agent.agent_display_name} tools`}
         className={`w-full text-sm sm:min-w-[640px] ${STACKED.table}`}
@@ -66,7 +83,7 @@ export function AgentTools({
               mcp={mcp}
               refreshVersion={refreshVersion}
               onConnectionChange={onConnectionChange}
-              onStatus={onAccountStatus}
+              onStatus={onStatus}
             />
           ))}
           {otherTools.length > 0 && (

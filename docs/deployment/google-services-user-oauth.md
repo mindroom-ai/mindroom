@@ -14,7 +14,7 @@ That page also lists the scopes each Google tool requests and how to restrict wh
 ## Choose Providers
 
 Add only the Google tools your agents need.
-Each Google Workspace tool connects and asks for Google approval separately.
+Each Google Workspace tool has its own connection, and the [Connections portal](../connections-portal.md#what-the-portal-shows) can connect all of an agent's Google Workspace tools with one sign-in.
 Google Cloud tools such as `google_bigquery` use one Google Cloud connection instead; see [Providers](google-services-oauth.md#providers).
 
 ```yaml

@@ -52,6 +52,7 @@ from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthCallbackRefusedError,
     OAuthClientConfig,
+    OAuthConsentGroup,
     OAuthProviderError,
     OAuthRefreshRejectedError,
     OAuthRuntimeEndpoints,
@@ -291,7 +292,12 @@ def _fake_provider(
     client_config_services: tuple[str, ...] = ("test_drive_oauth_client",),
     shared_client_config_services: tuple[str, ...] = (),
     requester_scoped_credentials: bool = False,
+    consent_group: OAuthConsentGroup | None = None,
+    granted_scopes: tuple[str, ...] | None = None,
+    display_name: str = "Test Drive",
 ) -> OAuthProvider:
+    """Build a provider whose exchange grants `granted_scopes`, or every scope it asked for when None."""
+
     async def _exchange(
         provider: OAuthProvider,
         code: str,
@@ -306,7 +312,7 @@ def _fake_provider(
             "token": f"{provider.id}-access-token",
             "token_uri": provider.token_url,
             "client_id": client_config.client_id,
-            "scopes": list(provider.scopes),
+            "scopes": list(provider.scopes if granted_scopes is None else granted_scopes),
             "_source": "oauth",
             "_oauth_provider": provider.id,
         }
@@ -325,7 +331,7 @@ def _fake_provider(
 
     return OAuthProvider(
         id=provider_id,
-        display_name="Test Drive",
+        display_name=display_name,
         authorization_url=f"https://auth.example.test/{provider_id}/authorize",
         token_url=f"https://auth.example.test/{provider_id}/token",
         scopes=scopes,
@@ -338,6 +344,7 @@ def _fake_provider(
         status_capabilities=("Test files",),
         token_exchanger=_exchange,
         requester_scoped_credentials=requester_scoped_credentials,
+        consent_group=consent_group,
     )
 
 
@@ -4424,6 +4431,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         code_verifier=None,
         token_url=provider.token_url,
         credential_service=None,
+        group_members=(),
     )
 
     async def allow_request(_request: StarletteRequest, _authorization: str | None) -> None:
@@ -4505,6 +4513,7 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
         code_verifier=None,
         token_url=provider.token_url,
         credential_service=None,
+        group_members=(),
     )
     verification_started = asyncio.Event()
     release_verification = asyncio.Event()

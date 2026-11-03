@@ -42,6 +42,7 @@ from mindroom.matrix.personal_room_store import personal_room_record_path, read_
 from mindroom.matrix.state import resolve_room_id
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, set_thread_tag
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
@@ -431,6 +432,8 @@ class AutomationRunner:
                     requester=chain.requester_id,
                     error=str(exc),
                 )
+        if ask.summary is not None:
+            await self._set_summary(config, bot, chain, thread, ask.summary)
         logger.info(
             "Automation prompt posted",
             agent=chain.agent_name,
@@ -439,6 +442,30 @@ class AutomationRunner:
             new_thread=ask.new_thread,
         )
         return True
+
+    async def _set_summary(self, config: Config, bot: AgentBot, chain: _Chain, thread_id: str, summary: str) -> None:
+        """Pin ``summary`` as the title of a prompt's thread."""
+        if bot.client is None:
+            return
+        try:
+            await set_manual_thread_summary(
+                bot.client,
+                chain.room_id,
+                thread_id,
+                summary,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                conversation_reader=bot.conversation_reader,
+                entity_name=chain.agent_name,
+                membership_index=self.agent_reply_memberships,
+            )
+        except ThreadSummaryWriteError as exc:
+            logger.warning(
+                "Automation could not set its thread summary",
+                agent=chain.agent_name,
+                requester=chain.requester_id,
+                error=str(exc),
+            )
 
     async def _resolve_thread(self, bot: AgentBot, chain: _Chain, thread_id: str) -> None:
         """Mark a finished chain's thread as resolved."""

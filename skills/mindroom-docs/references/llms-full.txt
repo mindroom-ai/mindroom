@@ -13742,6 +13742,7 @@ The scopes stay the same with `write: false`, so turning writes back on does not
 When a requester has not connected a tool's service yet, each of its functions returns `oauth_connection_required: true` with a `connect_url` for that requester.
 The requester opens the link, signs in to Microsoft, approves the requested permissions, and retries the request.
 Users can also connect and disconnect from the dashboard Integrations page, where each service is a separate connection.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows) can connect most of an agent's unconnected Microsoft 365 services with one sign-in.
 
 Tokens belong to the requester and are never shared with other users or stored globally.
 A call without a concrete requester always asks for a connection instead of using another account.
@@ -15945,6 +15946,8 @@ These rules apply to built-in providers and to providers that plugins register (
 - `account_claims_reader` (callable, default `None`) takes the token data of a finished code exchange and returns verified account claims, such as `{"login": "octo"}`, for a provider whose token response names no account.
   It runs once per connection, never on refresh, and the callback waits for it, so it should answer within a few seconds; if it raises or returns `{}`, the account still connects, without a label.
   The Connections pages label the account with the claim `email`, else `login`.
+- `consent_group` (`OAuthConsentGroup(key, display_name)`, default `None`) lets services that share one OAuth app connect together from the Connections portal with one sign-in, and should be set only when the provider's refresh tokens stay valid after use and none of its scopes can make the provider refuse or block a combined sign-in.
+  Providers with the same `key`, which uses only letters, numbers, colon, underscore, and hyphen, form one group, and `display_name` names it on the portal's **Connect all** button.
 
 ### Troubleshooting OAuth Connections
 
@@ -16061,6 +16064,9 @@ The portal groups OAuth services by agent, covering every agent the user may use
 Services come from each agent's tools, including deferred tools and plugin or MCP OAuth providers; tools that need no browser sign-in are listed too, and room-dependent tools are marked **MindRoom only**.
 The agent list shows at once, and each agent's counts of connected accounts and set keys fill in as they load.
 Each service's status loads independently, so one failing or unconnected service does not block the others.
+When an agent has two or more unconnected Google Workspace services, services of an additional Google workspace, or Microsoft 365 services, a **Connect all** button above its tools, such as **Connect all Google services**, connects them with one sign-in.
+Google Cloud, Microsoft Teams, Teams Meetings, and People keep their own **Connect** button, because Google can block a sign-in that asks for Google Cloud access and Microsoft refuses one that needs administrator consent.
+Services whose access the user does not grant on the consent screen stay unconnected, and the result page names them.
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
@@ -16144,7 +16150,7 @@ That page also lists the scopes each Google tool requests and how to restrict wh
 ## Choose Providers
 
 Add only the Google tools your agents need.
-Each Google Workspace tool connects and asks for Google approval separately.
+Each Google Workspace tool has its own connection, and the [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows) can connect all of an agent's Google Workspace tools with one sign-in.
 Google Cloud tools such as `google_bigquery` use one Google Cloud connection instead; see [Providers](https://docs.mindroom.chat/deployment/google-services-oauth/#providers).
 
 ```yaml
@@ -16212,7 +16218,7 @@ How connections are made, stored per credential scope, disconnected, and reset i
 
 ## Providers
 
-Each Google Workspace tool has its own provider, so users connect and approve each service separately.
+Each Google Workspace tool has its own provider, so users can approve each service separately or connect all of an agent's Google Workspace services at once from the [Connections portal](https://docs.mindroom.chat/connections-portal/#what-the-portal-shows).
 Google Cloud is the exception: one read-only provider serves every Google Cloud tool, such as `google_bigquery`, so users connect once for all of them.
 
 | Tool | Provider ID | Token service | Client config service | Settings service | Google scopes |
@@ -16412,6 +16418,7 @@ A service can also take its secret from an OAuth account that a user connected (
 The broker uses such an account for a service only after someone allowed Agent Keys to use it, an opt-in kept primary-only beside the connection, so connecting an account for its tools, whose writes may ask for approval, never by itself lets an agent's commands act as it.
 A user's own service on a personal agent can instead have an account of its own (`oauth_separate_account`), stored and allowed the same way beside the tools' connection, which the provider's tools never use.
 An opt-in allowed read only, for a service that declares `read_only`, gets the token only for `GET`, `HEAD`, and `POST` to the service's listed read paths, and never for a WebSocket upgrade or a request with a method-override header; that limit holds only as far as the upstream API keeps its writes off those methods and paths.
+A group sign-in on the Connections portal (**Connect all**) stores one token per member service, and each token carries every scope of that sign-in, so an Agent Keys allowance for one member acts with the whole grant on the hosts that service allows.
 The primary fetches and refreshes those access tokens through the OAuth credential lifecycle and the broker injects them as the matched rule's auth type; workers never receive an OAuth access token or a refresh token, only the proxy token and placeholder values, and the broker's logs and audit records never contain them.
 Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers follow the agent's worker scope.
 The broker uses a requester-scoped account only on `user` and `user_agent` workers that run on a dedicated (Docker or Kubernetes) worker backend by default.
@@ -17728,6 +17735,8 @@ agents:
   Bind anything a step needs from the check with `functools.partial`.
 - `timed_out` is true when no answer ended within an hour of the prompt being posted; `False` only means the answer ended, which includes a failed run, so check the result before reporting success.
 - The check's `Ask` and every later `Ask` with `new_thread=True` get their own thread and session, even for an agent with `thread_mode: room`; a later `Ask` with `new_thread=False` follows up in the current thread.
+- `Ask(..., new_thread=True, summary="...")` pins that text as the title of the thread the prompt starts, so no generated summary replaces it; without it, the thread gets the usual automatic summary unless `Done` resolves it first.
+  `summary` with `new_thread=False` raises `ValueError`, since only the step that starts a thread titles it.
 
 `AutomationContext` fields:
 
