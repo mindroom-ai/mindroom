@@ -543,7 +543,7 @@ class ClaudeProvider:
         )
 
     def _prepare(self, request: ModelRequest) -> tuple[_AsyncClaudeClient, _RequestBody]:
-        """Build the wire body and the SDK client of one request, the body first."""
+        """Build the wire body and the SDK client of one request."""
         body = self._request_body(request)
         return self._client(), body
 

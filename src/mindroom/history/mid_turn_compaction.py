@@ -201,8 +201,6 @@ class _Policy:
     limit: int
     # The model's own window minus the reserve; a rewritten request over it would fail at the provider.
     fit_limit: int
-    # Set while the request asks the provider to compact; the hook then only falls back to text when it cannot fit.
-    native_route: str | None
     # How the requests of the run's loop are sized.
     sizer: RequestSizer
 
@@ -210,12 +208,12 @@ class _Policy:
 async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> None:
     if compaction.stopped:
         return
-    policy = _policy(compaction, state)
+    policy = _policy(compaction)
     if policy is None:
         return
     messages = state.messages
     # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
-    request_size = await asyncio.to_thread(policy.sizer.size, state.request(messages))
+    request_size = await asyncio.to_thread(policy.sizer.size, state.request())
     if request_size.tokens <= policy.limit:
         return
     scope_fold = compaction.scope_fold
@@ -232,14 +230,14 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         scope_fold,
         request_size.tokens,
         # The rewritten request replays no checkpoint, which the summary replaced.
-        lambda rewritten: policy.sizer.model.request_tokens(
+        lambda rewritten: compaction.model.request_tokens(
             replace(state.request(rewritten), native_compaction=None),
         ),
     )
     if fold is None:
         compaction.stopped = True
         return
-    if policy.native_route is not None:
+    if state.request_template.native_compaction is not None:
         # The provider's own compaction could not keep this request within the window.
         logger.warning(
             "Native compaction left the request over its limit; compacted as text",
@@ -386,7 +384,7 @@ def _folded_calls(fold: Fold) -> set[str]:
     )
 
 
-def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
+def _policy(compaction: _MidTurnCompaction) -> _Policy | None:
     """Return the limit text compaction keeps requests under, or None when it cannot run for this request."""
     inputs = resolve_entity_preparation_inputs(
         config=compaction.config,
@@ -400,12 +398,10 @@ def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
         return None
     assert plan.replay_window_tokens is not None
     model_window = compaction.config.get_model_context_window(compaction.model_name)
-    native = state.request_template.native_compaction
     return _Policy(
         inputs=inputs,
         limit=plan.limit_tokens,
         fit_limit=context_budget_after_reserve(model_window or plan.replay_window_tokens, plan.reserve_tokens),
-        native_route=native.route if native is not None else None,
         sizer=request_sizer(compaction.model, compaction.config, compaction.model_name),
     )
 

@@ -239,7 +239,6 @@ async def media_fallback_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with unsupported media replaced, retrying without what a rejection names, then media-free."""
     identity = inner.identity
-    route = _route(inner)
     present = _media_kinds(request.messages)
     known = _unsupported_kinds(inner) & present
     remaining = present - known
@@ -277,4 +276,4 @@ async def media_fallback_stream(
             yield event
     # Only a request without any of the media isolates what the model lacks; one without some of it proves nothing.
     if sent_broad and failure is not None and _names_capability_gap(failure, remaining):
-        _LEARNED_UNSUPPORTED.setdefault(route, set()).update(remaining)
+        _LEARNED_UNSUPPORTED.setdefault(_route(inner), set()).update(remaining)

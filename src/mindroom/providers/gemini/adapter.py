@@ -100,11 +100,11 @@ class GeminiProvider:
 
     def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
         gemini_request_parts(
-            request,
-            start,
+            request.messages[start:],
             parts,
             tools=self._generation_config(request, None).get("tools", ()),
             server_tool_parts=self._sends_server_tool_parts(request),
+            static=not start,
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:

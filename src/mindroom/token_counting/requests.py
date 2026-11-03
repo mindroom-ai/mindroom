@@ -13,7 +13,7 @@ import hashlib
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from mindroom.llm.messages import stable_serialize
+from mindroom.llm.messages import media_items, stable_serialize
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
@@ -76,9 +76,9 @@ type _PartsOf = Callable[["ModelRequest", int, RequestParts], None]
 
 def _media_allowance_tokens(messages: Sequence[Message], *, keep_images: bool = False) -> int:
     """Return the allowance of the media ``messages`` carry, images left out when the route prices them itself."""
-    items = sum(len(message.files or ()) + len(message.audio or ()) + len(message.videos or ()) for message in messages)
-    if not keep_images:
-        items += sum(len(message.images or ()) for message in messages)
+    items = sum(
+        1 for message in messages for kind, _item in media_items(message) if not (keep_images and kind == "image")
+    )
     return items * MEDIA_ALLOWANCE_TOKENS
 
 
@@ -152,10 +152,7 @@ def plain_request_parts(request: ModelRequest, start: int, parts: RequestParts) 
     nothing.
     """
     for message in request.messages[start:]:
-        if isinstance(message.content, str):
-            parts.text(message.content)
-        else:
-            parts.value(message.content)
+        parts.value(message.content)
         parts.value(message.tool_calls)
     if not start:
         deferred = request.deferred_tools.names

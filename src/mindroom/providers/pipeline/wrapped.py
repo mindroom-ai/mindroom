@@ -44,7 +44,6 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import (
         Capabilities,
         ModelIdentity,
@@ -167,7 +166,9 @@ async def attempts(
                     committed = committed or _commits_attempt(event)
                     finished = finished or isinstance(event, TurnCompleted)
                     if isinstance(event, TurnCompleted) and request is not sent:
-                        _mark_rewritten(event.message)
+                        # The attempt was another request than the caller's, so its usage sizes none of the caller's.
+                        message = event.message
+                        message.provider_data = {**(message.provider_data or {}), REWRITTEN_ATTEMPT_KEY: True}
                     yield _with_carried_usage(event, carried)
             if finished:
                 return
@@ -181,11 +182,6 @@ async def attempts(
             await asyncio.sleep(reissue.delay_seconds)
         carried = add_usage(carried, usage.settled)
         request = reissue.request
-
-
-def _mark_rewritten(message: Message) -> None:
-    """Mark a turn whose attempt was another request than the caller's, so its usage sizes no request of the caller's."""
-    message.provider_data = {**(message.provider_data or {}), REWRITTEN_ATTEMPT_KEY: True}
 
 
 def _commits_attempt(event: StreamEvent) -> bool:

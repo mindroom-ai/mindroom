@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
-    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
+    from mindroom.llm.provider import StopReason, StreamEvent, ToolSpec
     from mindroom.token_counting.requests import RequestParts
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
@@ -177,22 +177,21 @@ async def format_contents(
 
 
 def gemini_request_parts(
-    request: ModelRequest,
-    start: int,
+    messages: Sequence[Message],
     parts: RequestParts,
     *,
     tools: Sequence[Mapping[str, Any]],
     server_tool_parts: bool,
+    static: bool,
 ) -> None:
-    """Add what the contents and tools a request sends for ``request`` give the model, its messages from ``start`` on.
+    """Add what the contents a request sends for ``messages`` give the model, and with ``static`` its system and tools.
 
     The system instruction and text parts count as the model reads them, without the escaping JSON adds; function
     calls, function responses, and the server-side tool parts it replays with ``server_tool_parts`` count as
     serialized. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each reply that
-    replays one adds its reasoning tokens. From ``start`` 0 the ``tools`` the request sends count too.
+    replays one adds its reasoning tokens.
     """
-    messages = request.messages[start:]
-    if not start:
+    if static:
         parts.text(system_text(messages))
     for message in messages:
         if message.role == "system":
@@ -206,7 +205,7 @@ def gemini_request_parts(
                 parts.text(part["text"])
             else:
                 parts.value({key: value for key, value in part.items() if key != "thought_signature"})
-    if not start:
+    if static:
         for tool in tools:
             parts.value(tool)
 

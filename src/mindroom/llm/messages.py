@@ -110,8 +110,7 @@ QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 
 def is_queued_notice_message(message: Message) -> bool:
     """Return whether a message is a queued-message notice MindRoom wrote."""
-    provider_data = message.provider_data
-    marker = provider_data.get(QUEUED_MESSAGE_NOTICE_MARKER_KEY) if isinstance(provider_data, dict) else None
+    marker = (message.provider_data or {}).get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
     # LEGACY_COMPAT: Queued-message notices marked "persisted" after delivery.
     # Legacy format: a stored notice whose marker is ``"persisted"`` instead of ``True``; once a reply was delivered,
     # MindRoom rewrote the notices its stored runs held into one marked so, and a reply that opened a scope rewrote a

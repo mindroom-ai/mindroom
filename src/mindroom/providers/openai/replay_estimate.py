@@ -12,7 +12,7 @@ import base64
 import io
 import math
 import struct
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
 from mindroom.providers.openai.response_replay import recorded_output
@@ -77,15 +77,6 @@ def responses_body_parts(
         parts.value([tool for tool in body.get("tools") or () if not tool.get("defer_loading")])
 
 
-def _image_content_for_token_estimation(value: object) -> object:
-    """Remove transport fields only from a typed image block, retaining its shape."""
-    if isinstance(value, dict):
-        block = cast("dict[object, object]", value)
-        if block.get("type") == "input_image":
-            return {key: item for key, item in block.items() if key not in {"image_url", "file_id"}}
-    return value
-
-
 def _replayed_reasoning_ids(items: Sequence[Any]) -> set[object]:
     return {
         item["id"]
@@ -105,13 +96,16 @@ def _without_image_transport(items: list[Any], model_id: str) -> tuple[list[Any]
         projected = dict(item) if isinstance(item, dict) else item
         for field_name in ("content", "output"):
             content = item.get(field_name) if isinstance(item, dict) else None
-            if isinstance(content, list):
-                projected[field_name] = [_image_content_for_token_estimation(block) for block in content]
-                image_tokens += sum(
-                    _image_tokens(block, model_id)
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "input_image"
-                )
+            if not isinstance(content, list):
+                continue
+            blocks: list[Any] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "input_image":
+                    image_tokens += _image_tokens(block, model_id)
+                    blocks.append({key: value for key, value in block.items() if key not in {"image_url", "file_id"}})
+                else:
+                    blocks.append(block)
+            projected[field_name] = blocks
         projected_items.append(projected)
     return projected_items, image_tokens
 
