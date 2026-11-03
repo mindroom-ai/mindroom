@@ -436,7 +436,21 @@ class AtlassianToolkit(Toolkit):
         self._config = runtime_config
         # An empty space list leaves the agent no space of that product, so none of its functions are offered.
         enabled_products = tuple(product for product in products if self._spaces.keys(product) != ())
-        super().__init__(name=provider.id, instructions=self._spaces.instructions(enabled_products, function_prefix))
+        instructions = self._spaces.instructions(enabled_products, function_prefix)
+        # On a user or user_agent agent each requester still connects their own account.
+        if (
+            not provider.requester_scoped_credentials
+            and enabled_products
+            and worker_target is not None
+            and worker_target.worker_scope not in {"user", "user_agent"}
+        ):
+            subjects = " and ".join(f"`{function_prefix}{product}_*`" for product in enabled_products)
+            shared = (
+                f"The {subjects} functions act as one Atlassian account shared by every requester, "
+                "so currentUser() in JQL or CQL is that account, not the requester."
+            )
+            instructions = f"{instructions} {shared}" if instructions else shared
+        super().__init__(name=provider.id, instructions=instructions)
         functions = {
             "jira_search_issues": self.jira_search_issues,
             "jira_get_issue": self.jira_get_issue,
@@ -482,7 +496,8 @@ class AtlassianToolkit(Toolkit):
         """Return a current access token for the requester, refreshing it when it is about to expire."""
         context = self._credential_context()
         if context.worker_target is None:
-            # Requester-only credentials never fall back to a shared or global store.
+            # Without a worker target there is no agent or requester to bind, so refuse rather than read an
+            # installation-level store.
             raise await self._connection_required(context)
         try:
             refreshed = await refresh_oauth_credentials_with_result(context)

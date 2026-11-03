@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
@@ -12,6 +13,8 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.custom_tools.atlassian import AtlassianToolkit
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
+from mindroom.oauth.credential_binding import oauth_credential_binding
+from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.atlassian_connections import (
@@ -25,14 +28,19 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.atlassian_test_support import (
+    ALICE,
+    BOB,
     CLOUD_ID,
     OTHER_CLOUD_ID,
     OTHER_SITE_URL,
     SITE_URL,
     FakeGateway,
     bearer,
+    execution_identity,
     gateway_url,
+    grant,
     publish_grant,
     runtime_paths,
     save_client_config,
@@ -40,13 +48,14 @@ from tests.atlassian_test_support import (
     worker_target,
 )
 from tests.conftest import publish_test_plugins
-from tests.oauth_test_utils import oauth_authorization_url
+from tests.oauth_test_utils import oauth_authorization_url, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.plugins import ConfigPlugins
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 DEFAULT_TOKEN = "default-connection-token"  # noqa: S105
 PARTNER_TOKEN = "partner-connection-token"  # noqa: S105
@@ -180,6 +189,8 @@ def test_plugin_registers_prefixed_tools_and_providers_beside_the_builtin(tmp_pa
     assert plugins.tools.entries["atlassian"].function_names == builtin_functions
     assert {"atlassian", "partner_atlassian", "archive_atlassian"} <= set(providers)
     assert providers["archive_atlassian"].shared_client_config_services == ("archive_atlassian_oauth_client",)
+    assert partner.helper_text is not None
+    assert partner.helper_text.startswith("Each user connects their own")
     assert "write:jira-work" not in providers["archive_atlassian"].scopes
 
     assert "partner_atlassian" not in config_plugins(Config(), paths).tools
@@ -409,3 +420,115 @@ async def test_connection_tools_take_space_limits_for_their_own_products(
     for name, overrides in (("partner_atlassian", {"jira_spaces": ["ENG"]}), ("archive_atlassian", {"write": True})):
         with pytest.raises(ToolConfigOverrideError, match="unknown authored override"):
             validate_authored_tool_entry_overrides(name, overrides, tool_metadata=entries)
+
+
+SHARED_CONNECTION = """
+from mindroom.tool_system.atlassian_connections import (
+    AtlassianConnectionConfig,
+    atlassian_connection_oauth_provider,
+    register_atlassian_connection_tools,
+)
+
+TEAM = AtlassianConnectionConfig(
+    name="team",
+    display_name="Team Confluence",
+    site_url="https://acme.atlassian.net",
+    products=("confluence",),
+    write=False,
+    requester_scoped=False,
+    client_config_service="atlassian_oauth_client",
+)
+register_atlassian_connection_tools(TEAM)
+
+
+def register_oauth_providers(settings, runtime_paths):
+    return [atlassian_connection_oauth_provider(TEAM)]
+"""
+
+
+def test_only_an_opted_out_connection_follows_the_agent_worker_scope() -> None:
+    """requester_scoped=False stores a connection's tokens under the agent's worker scope; nothing else changes."""
+    assert atlassian_oauth_provider().requester_scoped_credentials is True
+    assert atlassian_connection_oauth_provider(_connection()).requester_scoped_credentials is True
+    assert (
+        atlassian_connection_oauth_provider(_connection(requester_scoped=False)).requester_scoped_credentials is False
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope", "bob_served", "other_agent_served"),
+    [("shared", True, False), ("user", False, False), ("user_agent", False, False), (None, True, True)],
+)
+async def test_shared_connection_follows_the_agent_worker_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: WorkerScope | None,
+    bob_served: bool,
+    other_agent_served: bool,
+) -> None:
+    """Alice's grant serves Bob only on a shared or unscoped agent, and another agent only when both are unscoped.
+
+    Connecting or resetting a binding that is not requester-owned needs an administrator or credential manager.
+    """
+    config, paths = _plugin(tmp_path, SHARED_CONNECTION)
+    manager = save_client_config(paths)
+    gateway = FakeGateway(sites_by_token={PARTNER_TOKEN: [site(OTHER_CLOUD_ID, OTHER_SITE_URL)]}).install(monkeypatch)
+    gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search", OTHER_CLOUD_ID), {"results": []})
+    plugins = publish_test_plugins(config, paths)
+    provider = plugins.oauth_providers["team_atlassian"]
+    tool_metadata = plugins.tools.entries["team_atlassian"]
+
+    def target(requester_id: str, agent_name: str = "assistant") -> ResolvedWorkerTarget:
+        identity = replace(execution_identity(requester_id), agent_name=agent_name)
+        return resolve_worker_target(scope, agent_name, execution_identity=identity)
+
+    async def served(requester_id: str, agent_name: str = "assistant") -> bool:
+        tool = get_tool_by_name(
+            "team_atlassian",
+            paths,
+            worker_target=target(requester_id, agent_name),
+            runs_in_worker=False,
+            tools=plugins.tools,
+        )
+        assert isinstance(tool, AtlassianToolkit)
+        assert ("currentUser() in JQL or CQL is that account" in (tool.instructions or "")) is bob_served
+        assert tool_metadata.helper_text is not None
+        assert tool_metadata.helper_text.startswith("The Team Confluence account follows the agent's worker scope")
+        result = await _call(tool, "team_confluence_search", cql="type = page")
+        if result.get("oauth_connection_required"):
+            return False
+        assert result["site"]["cloud_id"] == OTHER_CLOUD_ID
+        return True
+
+    publish_oauth_credentials(
+        provider,
+        grant(PARTNER_TOKEN, provider),
+        credentials_manager=manager,
+        worker_target=target(ALICE),
+    )
+
+    credential_target = oauth_credentials_worker_target(provider, paths, target(ALICE))
+    assert oauth_credential_binding(provider, credential_target).requester_owned is (not bob_served)
+    assert await served(ALICE) is True
+    assert await served(BOB) is bob_served
+    assert await served(BOB, agent_name="other") is other_agent_served
+
+
+def test_requester_scoped_toolkit_does_not_claim_a_shared_account(tmp_path: Path) -> None:
+    """Only a connection that is not requester-scoped says currentUser() is not the requester, even on a shared agent."""
+    paths = runtime_paths(tmp_path)
+    toolkit = AtlassianToolkit(
+        provider=atlassian_oauth_provider(),
+        function_prefix="",
+        products=("confluence",),
+        write=True,
+        site_url=SITE_URL,
+        cloud_id=None,
+        runtime_paths=paths,
+        credentials_manager=save_client_config(paths),
+        worker_target=resolve_worker_target("shared", "assistant", execution_identity=execution_identity()),
+        runtime_config=None,
+    )
+
+    assert "currentUser()" not in (toolkit.instructions or "")

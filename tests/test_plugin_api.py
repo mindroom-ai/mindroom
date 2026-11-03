@@ -146,7 +146,7 @@ _SIGNATURES = {
         "(agent_name, config, runtime_paths, entry, options, settings, requester_id, execution_identity, workspace, "
         "state_dir)"
     ),
-    "AtlassianConnectionConfig": "(*, name, display_name, site_url, cloud_id, products, write, client_config_service)",
+    "AtlassianConnectionConfig": "(*, name, display_name, site_url, cloud_id, products, write, requester_scoped, client_config_service)",
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
