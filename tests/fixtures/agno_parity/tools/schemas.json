@@ -14319,7 +14319,7 @@
       },
       {
         "name": "google_drive_download_file",
-        "description": "Save a Drive file, such as audio, video, an image, a PDF, or an archive, into the agent workspace.\nReturns the saved path, its size in bytes, and its MIME type. Each Drive file gets its own\ngoogle-drive-downloads/<file_id>/ directory, so files with the same name never overwrite each other,\nwhile downloading the same file again replaces its earlier copy. Google Workspace files are exported\nto a native format such as .docx or .xlsx.",
+        "description": "Save a Drive file, such as audio, video, an image, a PDF, or an archive, into the agent workspace.\nReturns the saved path, its size in bytes, and its MIME type. Each Drive file gets its own\ngoogle-drive-downloads/<file_id>/ directory, so files with the same name never overwrite each other,\nwhile downloading the same file again under the same name replaces its earlier copy. Google Workspace\nfiles are exported to a native format such as .docx or .xlsx.",
         "parameters": {
           "type": "object",
           "properties": {

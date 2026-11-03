@@ -1572,7 +1572,7 @@ def test_google_drive_download_rejects_symlink_escape(
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
-    assert result["error"] == "A link inside google-drive-downloads blocks this download"
+    assert result["error"] == "A link in the google-drive-downloads path blocks this download"
     assert outside_path.read_text() == "outside"
     assert service.files_resource.get_media_kwargs is None
     assert service.files_resource.export_media_kwargs is None

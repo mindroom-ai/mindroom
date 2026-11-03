@@ -610,8 +610,8 @@ class GoogleDriveTools(
 
         Returns the saved path, its size in bytes, and its MIME type. Each Drive file gets its own
         google-drive-downloads/<file_id>/ directory, so files with the same name never overwrite each other,
-        while downloading the same file again replaces its earlier copy. Google Workspace files are exported
-        to a native format such as .docx or .xlsx.
+        while downloading the same file again under the same name replaces its earlier copy. Google Workspace
+        files are exported to a native format such as .docx or .xlsx.
 
         Args:
             file_id: The Drive file ID.
@@ -636,7 +636,7 @@ class GoogleDriveTools(
             path = _download_path(self._workspace_root, file_id, metadata["name"], ext)
             if path is None:
                 return json.dumps(
-                    {"error": f"A link inside {_DOWNLOAD_DIRECTORY} blocks this download", "file": metadata},
+                    {"error": f"A link in the {_DOWNLOAD_DIRECTORY} path blocks this download", "file": metadata},
                 )
             with (
                 open_directory_within_root(self._workspace_root, path.parent, create=True) as directory_fd,

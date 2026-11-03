@@ -264,7 +264,7 @@ Use `google_drive_read_file` to read a document or text file, and `google_drive_
 Binary files are never returned as text.
 When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
-Files with the same name never overwrite each other, downloading the same file again replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
+Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
 On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
