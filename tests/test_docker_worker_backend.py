@@ -49,6 +49,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    subagent_worker_key,
     worker_dir_name,
     worker_log_id,
     worker_root_path,
@@ -3278,6 +3279,61 @@ def test_docker_backend_cleanup_stops_idle_workers(
     worker_file.parent.mkdir(parents=True, exist_ok=True)
     worker_file.write_text("still here", encoding="utf-8")
     assert worker_file.read_text(encoding="utf-8") == "still here"
+
+
+def _expire_docker_worker(tmp_path: Path, worker_key: str) -> None:
+    metadata_path = _control_metadata_path(tmp_path, worker_key)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["last_used_at"] = 0.0
+    metadata["status"] = "ready"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def test_docker_cleanup_removes_an_expired_subagent_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A subagent's own worker idle past the timeout is removed with its state, while its normal worker is stopped."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    base_key = "v1:t:user_agent:alice:watcher"
+    subagent_key = subagent_worker_key(base_key, "d" * 32)
+    ordinary = backend.ensure_worker(_spec(backend, base_key, private_agent_names=frozenset()), now=0.0)
+    subagent = backend.ensure_worker(
+        _spec(backend, subagent_key, private_agent_names=frozenset(), state_scope_worker_key=base_key),
+        now=0.0,
+    )
+    for key in (base_key, subagent_key):
+        _expire_docker_worker(tmp_path, key)
+
+    cleaned = backend.cleanup_idle_workers(now=100.0)
+
+    assert {worker.worker_key for worker in cleaned} == {base_key, subagent_key}
+    assert fake_client.containers.by_name[subagent.worker_id].removed == 1
+    assert worker_root_path(tmp_path, subagent_key).exists() is False
+    assert fake_client.containers.by_name[ordinary.worker_id].removed == 0
+    assert fake_client.containers.by_name[ordinary.worker_id].stopped == 1
+    assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
+
+
+def test_docker_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A subagent's own worker used within the idle timeout keeps running."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    base_key = "v1:t:user_agent:alice:watcher"
+    subagent = backend.ensure_worker(
+        _spec(
+            backend,
+            subagent_worker_key(base_key, "d" * 32),
+            private_agent_names=frozenset(),
+            state_scope_worker_key=base_key,
+        ),
+        now=50.0,
+    )
+
+    assert backend.cleanup_idle_workers(now=100.0) == []
+    assert fake_client.containers.by_name[subagent.worker_id].stopped == 0
 
 
 def test_docker_backend_retires_only_one_exact_run_worker_idempotently(

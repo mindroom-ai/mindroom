@@ -23,6 +23,7 @@ from mindroom.tool_system.worker_routing import (
     private_instances_root_path,
     resolved_worker_key_scope,
     shared_storage_root,
+    subagent_worker_state_scope_key,
     visible_workspace_roots,
     worker_key_agent_name,
     worker_log_id,
@@ -30,11 +31,12 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
+    from mindroom.workers.models import WorkerHandle
 
 __all__ = [
     "ScopedWorkspaceMount",
@@ -44,8 +46,10 @@ __all__ = [
     "plan_scoped_workspace_mounts",
     "plan_shared_directory_mounts",
     "resolve_state_scope_worker_key",
+    "retire_subagent_worker",
     "stable_json_digest",
     "stable_signature_json",
+    "subagent_worker_expired",
     "validate_dedicated_worker_extra_env",
     "validate_private_user_agent_visibility",
     "validate_unique_worker_visible_paths",
@@ -92,6 +96,24 @@ def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str 
         return state_scope_worker_key
     msg = f"Worker state scope does not own the requested worker key: {worker_log_id(worker_key)}"
     raise WorkerBackendError(msg)
+
+
+def subagent_worker_expired(handle: WorkerHandle, idle_timeout_seconds: float, *, now: float) -> bool:
+    """Return whether ``handle`` is a subagent's own worker, running or stopped, unused for the idle timeout."""
+    return (
+        subagent_worker_state_scope_key(handle.worker_key) is not None
+        and now - handle.last_used_at >= idle_timeout_seconds
+    )
+
+
+def retire_subagent_worker(retire_locked: Callable[[str], None], worker_key: str) -> bool:
+    """Remove an expired subagent worker under the lock its caller holds; a failure is logged so cleanup goes on."""
+    try:
+        retire_locked(worker_key)
+    except WorkerBackendError:
+        logger.warning("subagent_worker_retire_failed", worker=worker_log_id(worker_key), exc_info=True)
+        return False
+    return True
 
 
 def validate_private_user_agent_visibility(

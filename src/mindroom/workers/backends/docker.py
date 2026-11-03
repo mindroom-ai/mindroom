@@ -8,7 +8,7 @@ import importlib
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -48,7 +48,9 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
+    retire_subagent_worker,
     stable_json_digest,
+    subagent_worker_expired,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
 )
@@ -655,7 +657,11 @@ class DockerWorkerBackend:
                 container = self._read_owned_container(metadata.worker_key)
                 handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
                 idle_timed_out = timestamp - metadata.lifecycle.last_used_at >= self.idle_timeout_seconds
-                if handle.status == "idle" and self._container_is_running(container):
+                if subagent_worker_expired(handle, self.idle_timeout_seconds, now=timestamp):
+                    # A subagent's own worker serves no one once idle, so it is removed instead of kept stopped.
+                    if retire_subagent_worker(self._retire_worker_locked, metadata.worker_key):
+                        cleaned.append(replace(handle, status="idle"))
+                elif handle.status == "idle" and self._container_is_running(container):
                     self._stop_container(container)
                     metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
                     self._save_metadata(paths, metadata)
@@ -673,48 +679,51 @@ class DockerWorkerBackend:
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Docker worker container and all backend-owned state."""
         with self._worker_locks.for_key(worker_key):
-            worker_name = worker_dir_name(worker_key)
-            try:
-                with (
-                    open_worker_state_root(
-                        self._workers_root,
-                        workers_subpath=(),
-                        worker_name=worker_name,
-                    ) as state,
-                    open_worker_state_root(
-                        self._control_root,
-                        workers_subpath=(),
-                        worker_name=worker_name,
-                        expected_worker_key=worker_key,
-                        identity_path=("metadata", "worker.json"),
-                        identity_field_path=("worker_key",),
-                    ) as control,
+            self._retire_worker_locked(worker_key)
+
+    def _retire_worker_locked(self, worker_key: str) -> None:
+        worker_name = worker_dir_name(worker_key)
+        try:
+            with (
+                open_worker_state_root(
+                    self._workers_root,
+                    workers_subpath=(),
+                    worker_name=worker_name,
+                ) as state,
+                open_worker_state_root(
+                    self._control_root,
+                    workers_subpath=(),
+                    worker_name=worker_name,
+                    expected_worker_key=worker_key,
+                    identity_path=("metadata", "worker.json"),
+                    identity_field_path=("worker_key",),
+                ) as control,
+            ):
+                if state.exists and not control.exists:
+                    msg = (
+                        f"Docker worker '{worker_log_id(worker_key)}' is missing the control identity metadata "
+                        "required to retire its state root."
+                    )
+                    raise WorkerBackendError(msg)
+                container_name = self._container_name_for_worker(worker_key)
+                container = self._read_container(container_name)
+                if container is not None and not self._container_ownership_matches(
+                    container,
+                    container_name=container_name,
+                    worker_key=worker_key,
                 ):
-                    if state.exists and not control.exists:
-                        msg = (
-                            f"Docker worker '{worker_log_id(worker_key)}' is missing the control identity metadata "
-                            "required to retire its state root."
-                        )
-                        raise WorkerBackendError(msg)
-                    container_name = self._container_name_for_worker(worker_key)
-                    container = self._read_container(container_name)
-                    if container is not None and not self._container_ownership_matches(
-                        container,
-                        container_name=container_name,
-                        worker_key=worker_key,
-                    ):
-                        msg = f"Docker worker container does not match retirement key '{worker_log_id(worker_key)}'."
-                        raise WorkerBackendError(msg)
-                    self._remove_container(container)
-                    if self._read_container(container_name) is not None:
-                        msg = f"Docker worker '{worker_log_id(worker_key)}' still exists after retirement."
-                        raise WorkerBackendError(msg)
-                    self._projection_manager.retire_worker_projection(worker_name)
-                    state.remove()
-                    control.remove()
-            except (OSError, RecursionError, TypeError, ValueError) as exc:
-                msg = f"Failed to retire Docker worker '{worker_log_id(worker_key)}': {exc}"
-                raise WorkerBackendError(msg) from exc
+                    msg = f"Docker worker container does not match retirement key '{worker_log_id(worker_key)}'."
+                    raise WorkerBackendError(msg)
+                self._remove_container(container)
+                if self._read_container(container_name) is not None:
+                    msg = f"Docker worker '{worker_log_id(worker_key)}' still exists after retirement."
+                    raise WorkerBackendError(msg)
+                self._projection_manager.retire_worker_projection(worker_name)
+                state.remove()
+                control.remove()
+        except (OSError, RecursionError, TypeError, ValueError) as exc:
+            msg = f"Failed to retire Docker worker '{worker_log_id(worker_key)}': {exc}"
+            raise WorkerBackendError(msg) from exc
 
     def record_failure(
         self,

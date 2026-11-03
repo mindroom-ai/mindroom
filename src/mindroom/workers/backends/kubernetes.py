@@ -29,7 +29,9 @@ from mindroom.workers.backends._dedicated_worker_common import (
     SharedDirectoryMount,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
+    retire_subagent_worker,
     stable_json_digest,
+    subagent_worker_expired,
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -441,47 +443,50 @@ class KubernetesWorkerBackend:
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Kubernetes worker and all backend-owned state."""
         with self._worker_locks.for_key(worker_key):
-            worker_id = self._worker_id(worker_key)
-            state_subpath = self._state_subpath(worker_key)
-            state_parts = tuple(part for part in state_subpath.split("/") if part)
-            if not state_parts:
-                msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
+            self._retire_worker_locked(worker_key)
+
+    def _retire_worker_locked(self, worker_key: str) -> None:
+        worker_id = self._worker_id(worker_key)
+        state_subpath = self._state_subpath(worker_key)
+        state_parts = tuple(part for part in state_subpath.split("/") if part)
+        if not state_parts:
+            msg = f"Kubernetes worker state path is invalid for retirement: {state_subpath!r}."
+            raise WorkerBackendError(msg)
+        deployment = self._resources.read_deployment(worker_id)
+        if deployment is not None:
+            annotations = dict(deployment.metadata.annotations or {})
+            if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
+                msg = f"Kubernetes worker Deployment does not match retirement key '{worker_log_id(worker_key)}'."
                 raise WorkerBackendError(msg)
-            deployment = self._resources.read_deployment(worker_id)
-            if deployment is not None:
-                annotations = dict(deployment.metadata.annotations or {})
-                if annotations.get(resources.ANNOTATION_WORKER_KEY) != worker_key:
-                    msg = f"Kubernetes worker Deployment does not match retirement key '{worker_log_id(worker_key)}'."
-                    raise WorkerBackendError(msg)
-                if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
-                    msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_log_id(worker_key)}'."
-                    raise WorkerBackendError(msg)
-            try:
-                with open_worker_state_root(
-                    self.storage_root,
-                    workers_subpath=state_parts[:-1],
-                    worker_name=state_parts[-1],
-                    expected_worker_key=worker_key,
-                    identity_path=(".runtime", "startup_manifest.json"),
-                    identity_field_path=(
-                        "runtime_paths",
-                        "process_env",
-                        SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
-                    ),
-                ) as state:
-                    self._invalidate_ready_worker(worker_key)
-                    self._resources.delete_service(worker_id)
-                    self._resources.delete_deployment(
-                        worker_id,
-                        timeout_seconds=self.config.ready_timeout_seconds,
-                    )
-                    self._resources.delete_secret(worker_id)
-                    state.remove()
-            except WorkerBackendError:
-                raise
-            except (OSError, RecursionError, TypeError, ValueError) as exc:
-                msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
-                raise WorkerBackendError(msg) from exc
+            if annotations.get(resources.ANNOTATION_STATE_SUBPATH) != state_subpath:
+                msg = f"Kubernetes worker Deployment does not match retirement state for '{worker_log_id(worker_key)}'."
+                raise WorkerBackendError(msg)
+        try:
+            with open_worker_state_root(
+                self.storage_root,
+                workers_subpath=state_parts[:-1],
+                worker_name=state_parts[-1],
+                expected_worker_key=worker_key,
+                identity_path=(".runtime", "startup_manifest.json"),
+                identity_field_path=(
+                    "runtime_paths",
+                    "process_env",
+                    SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
+                ),
+            ) as state:
+                self._invalidate_ready_worker(worker_key)
+                self._resources.delete_service(worker_id)
+                self._resources.delete_deployment(
+                    worker_id,
+                    timeout_seconds=self.config.ready_timeout_seconds,
+                )
+                self._resources.delete_secret(worker_id)
+                state.remove()
+        except WorkerBackendError:
+            raise
+        except (OSError, RecursionError, TypeError, ValueError) as exc:
+            msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
+            raise WorkerBackendError(msg) from exc
 
     def _cleanup_idle_deployments(
         self,
@@ -493,7 +498,8 @@ class KubernetesWorkerBackend:
         cleaned: list[WorkerHandle] = []
         for deployment in deployments:
             handle = self._handle_from_deployment(deployment, now=now)
-            if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
+            expired_subagent_worker = subagent_worker_expired(handle, self.idle_timeout_seconds, now=now)
+            if not expired_subagent_worker and (handle.status != "idle" or int(deployment.spec.replicas or 0) == 0):
                 continue
             worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
@@ -503,6 +509,11 @@ class KubernetesWorkerBackend:
                 if live is None:
                     continue
                 handle = self._handle_from_deployment(live, now=now)
+                if subagent_worker_expired(handle, self.idle_timeout_seconds, now=now):
+                    # A subagent's own worker serves no one once idle, so it is removed instead of kept scaled down.
+                    if retire_subagent_worker(self._retire_worker_locked, handle.worker_key):
+                        cleaned.append(self._handle_from_deployment(live, now=now, replicas_override=0))
+                    continue
                 if handle.status != "idle" or int(live.spec.replicas or 0) == 0:
                     continue
                 annotations = resources.with_lifecycle_transition(
