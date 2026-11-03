@@ -207,7 +207,6 @@ def canonical_mime_type(mime_type: str | None) -> str | None:
     return normalized or None
 
 
-# Text types outside ``text/``.
 _APPLICATION_TEXT_MIME_TYPES = frozenset(
     {
         "application/json",

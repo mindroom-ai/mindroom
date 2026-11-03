@@ -121,11 +121,11 @@ def _file_tokens(counter: TokenCounter, file: File) -> int:
         return MEDIA_ALLOWANCE_TOKENS
     if data.startswith(b"%PDF-"):
         return _pdf_pages(data) * (counter.pdf_page_tokens or MEDIA_ALLOWANCE_TOKENS)
+    if is_text_mime_type(file.mime_type):
+        return count(counter, data.decode("utf-8", errors="replace"))
     try:
         return count(counter, data.decode("utf-8"))
     except UnicodeDecodeError:
-        if is_text_mime_type(file.mime_type):
-            return count(counter, data.decode("utf-8", errors="replace"))
         return MEDIA_ALLOWANCE_TOKENS
 
 

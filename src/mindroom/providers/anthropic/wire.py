@@ -276,10 +276,10 @@ def _document_block(file: File, provider: str) -> dict[str, Any] | None:
     else:
         return None
     if is_text_mime_type(media_type):
-        # The text document source accepts only text/plain; other text types are sent as plain text. Any other type
-        # is a base64 document, which the API accepts for PDF only.
+        # The text document source accepts only text/plain; other text types are sent as plain text.
         source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
     else:
+        # Any other type is a base64 document, which the API accepts for PDF only.
         source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
     return {"type": "document", "source": source}
 
