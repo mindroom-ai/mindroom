@@ -27,7 +27,7 @@ from google.genai.types import (
 )
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
-from mindroom.llm.media import canonical_mime_type, image_mime_type, is_text_mime_type, rendered_label
+from mindroom.llm.media import canonical_mime_type, file_text, image_mime_type, is_text_mime_type, rendered_label
 from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
@@ -290,6 +290,9 @@ def _function_call_part(call: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _inline(data: bytes, mime_type: str) -> dict[str, Any]:
+    """Return the inline part of ``data``; a text part carries the file's text (``file_text``) in UTF-8."""
+    if mime_type == "text/plain":
+        data = file_text(data).encode("utf-8")
     return {"inline_data": {"data": data, "mime_type": mime_type}}
 
 

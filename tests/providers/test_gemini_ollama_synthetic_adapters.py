@@ -1816,6 +1816,42 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
 
 
 @pytest.mark.asyncio
+async def test_gemini_sends_a_text_file_that_is_not_utf8_as_its_text_in_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows-1252 CSV and a UTF-16 log go as the UTF-8 of the text they hold, the text Claude reads."""
+    log = tmp_path / "build.log"
+    log.write_bytes("Build ✓ done\n".encode("utf-16"))
+    message = Message(
+        role="user",
+        content="Summarize",
+        files=[
+            File(content="1;Müller GmbH;3 €\n".encode("cp1252"), mime_type="text/csv", filename="rows.csv"),
+            File(filepath=str(log), mime_type="text/plain", filename="build.log"),
+        ],
+    )
+    server = _MediaServer()
+
+    await _stream_media(GEMINI_VERTEX, _request(message), tmp_path, server, monkeypatch)
+
+    assert _user_parts(server)[1:] == [
+        {
+            "inlineData": {
+                "data": base64.urlsafe_b64encode("1;Müller GmbH;3 €\n".encode()).decode(),
+                "mime_type": "text/plain",
+            },
+        },
+        {
+            "inlineData": {
+                "data": base64.urlsafe_b64encode("Build ✓ done\n".encode()).decode(),
+                "mime_type": "text/plain",
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_gemini_names_a_file_it_cannot_read_on_one_line_whatever_its_sender_named_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

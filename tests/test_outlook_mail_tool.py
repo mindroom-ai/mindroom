@@ -631,6 +631,23 @@ def test_create_draft_posts_a_text_message_with_inline_attachments(
     assert result["message"]["is_draft"] is True
 
 
+def test_a_draft_attachment_is_typed_by_its_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Word file is typed as Word on every host, and a compressed file by no type its inner name names."""
+    _workspace_file(tmp_path, "report.docx", b"PK\x03\x04")
+    _workspace_file(tmp_path, "rows.csv.gz", b"\x1f\x8b\x08\x00")
+    mail = _Graph()
+    mail.write = httpx.Response(201, json=_message(isDraft=True, isRead=True))
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    tools.outlook_mail_create_draft(["sam@contoso.com"], "s", "b", attachments=["report.docx", "rows.csv.gz"])
+
+    [request] = graph.requests
+    assert [attachment["contentType"] for attachment in json.loads(request.content)["attachments"]] == [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/octet-stream",
+    ]
+
+
 def test_an_attachment_over_the_inline_limit_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _workspace_file(tmp_path, "big.bin", b"x" * (outlook_mail._MAX_ATTACHMENT_BYTES + 1))
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())

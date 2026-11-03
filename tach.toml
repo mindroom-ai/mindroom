@@ -3906,7 +3906,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.matrix.client_delivery"
-depends_on = ["mindroom.matrix.guarded_rooms"]
+depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms"]
 visibility = [
     "mindroom.custom_tools.thread_move",
     "mindroom.matrix.personal_rooms",
