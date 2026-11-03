@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.llm.messages import media_items, stable_serialize
+from mindroom.native_compaction import native_replay_messages
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
@@ -110,10 +111,13 @@ def route_request_tokens(
 ) -> int:
     """Return what ``request`` gives the route's model from message ``start`` on, as ``parts_of`` renders it.
 
-    Media are priced at their allowance; ``keep_images`` leaves the images to a route that prices them itself.
+    Media are priced at their allowance, for the messages the request sends after its latest native checkpoint
+    replaced what precedes it; ``keep_images`` leaves the images to a route that prices them itself.
     """
     parts = RequestParts(counter)
-    parts.cost(_media_allowance_tokens(request.messages[start:], keep_images=keep_images))
+    route = request.native_compaction.route if request.native_compaction is not None else None
+    sent = native_replay_messages(request.messages[start:], route)
+    parts.cost(_media_allowance_tokens(sent, keep_images=keep_images))
     parts_of(replace(request, messages=_without_media(request.messages, keep_images=keep_images)), start, parts)
     return parts.counted()
 

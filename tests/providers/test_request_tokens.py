@@ -25,6 +25,7 @@ from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
 from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import quarter_tokens
+from tests.history_helpers import record_native_checkpoint
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
 from tests.providers.gemini_ollama_support import FAMILIES as GEMINI_OLLAMA_FAMILIES
@@ -726,6 +727,47 @@ def test_a_plain_route_leaves_deferred_tools_out() -> None:
         tools=tools,
         deferred=frozenset({"search_docs", "export_notes"}),
     ) == _plain_request_tokens(_SYSTEM_MESSAGE)
+
+
+@pytest.mark.parametrize(
+    ("family", "checkpoint"),
+    [
+        ("anthropic", {"type": "compaction", "content": "Earlier turns, summarized."}),
+        ("openai_responses", {"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque-checkpoint"}),
+    ],
+)
+def test_media_a_native_checkpoint_replaced_counts_nothing(
+    tmp_path: Path,
+    family: str,
+    checkpoint: dict[str, Any],
+) -> None:
+    """A checkpoint replaces the transcript before it, so the files that transcript held go too; a later one counts."""
+    route = _route(family, tmp_path)
+    assert route.native_history_route is not None
+    native = route.native_history_route.native_compaction_settings(
+        threshold=60_000,
+        history_generation="",
+        allow_authored=False,
+    )
+    assert native is not None
+    compacted = Message(role="assistant", content="Ready.")
+    record_native_checkpoint(compacted, [checkpoint], native)
+
+    def sized(*, before: bool, after: bool) -> int:
+        report = [File(content=b"%PDF-1.7 report", mime_type="application/pdf", filename="report.pdf")]
+        return route.request_tokens(
+            ModelRequest(
+                messages=(
+                    Message(role="user", content="Read this.", files=report if before else None),
+                    compacted,
+                    Message(role="user", content="And this?", files=report if after else None),
+                ),
+                native_compaction=native,
+            ),
+        )
+
+    assert sized(before=True, after=False) == sized(before=False, after=False)
+    assert sized(before=False, after=True) > sized(before=False, after=False)
 
 
 def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:
