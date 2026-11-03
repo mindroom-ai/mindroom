@@ -67,6 +67,9 @@ class _GoogleProviderSpec:
     service_scopes: tuple[str, ...]
     status_capabilities: tuple[str, ...]
     include_granted_scopes: bool = True
+    # The provisioned client is not verified for this scope, so Google warns about or blocks a request that asks for it;
+    # the provider keeps its own sign-in instead of joining the Google consent group.
+    provisioned_client_unverified: bool = False
 
 
 _GOOGLE_PROVIDERS = {
@@ -88,6 +91,7 @@ _GOOGLE_PROVIDERS = {
         service_scopes=("https://www.googleapis.com/auth/cloud-platform.read-only",),
         status_capabilities=("Read-only Google Cloud API access",),
         include_granted_scopes=False,
+        provisioned_client_unverified=True,
     ),
     "google_docs": _GoogleProviderSpec(
         display_name="Google Docs",
@@ -361,7 +365,7 @@ def google_oauth_provider(provider_id: str) -> OAuthProvider:
         token_url=_GOOGLE_TOKEN_URL,
         scopes=(*_GOOGLE_IDENTITY_SCOPES, *spec.service_scopes),
         credential_service=f"{provider_id}_oauth",
-        consent_group=_GOOGLE_CONSENT_GROUP,
+        consent_group=None if spec.provisioned_client_unverified else _GOOGLE_CONSENT_GROUP,
         tool_config_service=spec.tool_config_service,
         client_config_services=(f"{provider_id}_oauth_client",),
         shared_client_config_services=(_GOOGLE_CLIENT_CONFIG_SERVICE,),

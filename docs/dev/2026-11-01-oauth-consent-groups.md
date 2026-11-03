@@ -19,7 +19,7 @@ Assumptions:
 
 - **Providers opt in with a consent group.**
   `OAuthProvider` gains an optional consent group with a key and a display name.
-  The built-in Google providers, Google Cloud included, form the `google` group; each [additional Google workspace](../plugins.md#additional-google-workspaces) forms its own group named after the workspace, so its account picker and hosted-domain rule stay separate from the built-in connection; the Microsoft 365 providers form the `microsoft` group, except Teams, Teams Meetings, and People, whose `ChannelMessage.Read.All`, `OnlineMeetingTranscript.Read.All`, and `User.Read.All` scopes need admin consent.
+  The built-in Google Workspace providers form the `google` group, without Google Cloud, whose `cloud-platform.read-only` scope the provisioned client is not verified for, so Google warns about or blocks a whole request that asks for it; each [additional Google workspace](../plugins.md#additional-google-workspaces) forms its own group named after the workspace, so its account picker and hosted-domain rule stay separate from the built-in connection; the Microsoft 365 providers form the `microsoft` group, except Teams, Teams Meetings, and People, whose `ChannelMessage.Read.All`, `OnlineMeetingTranscript.Read.All`, and `User.Read.All` scopes need admin consent.
   Plugin providers may declare a group too.
   Grouping is never inferred from a shared OAuth client, because copying one refresh token into several connections is safe only for providers whose old refresh tokens stay valid after use (see External constraints).
 - **The server picks the members.**
@@ -51,7 +51,7 @@ Assumptions:
 ## Security
 
 - Every copy from a group sign-in carries every scope of that sign-in.
-  Separately connected Drive, Gmail, Calendar, and Sheets tokens already carry scopes the account granted earlier, through `include_granted_scopes`, and a group sign-in led by one of them does the same; Docs, Tasks, and Google Cloud tokens, which opt out of that today, become as broad when connected in a group.
+  Separately connected Drive, Gmail, Calendar, and Sheets tokens already carry scopes the account granted earlier, through `include_granted_scopes`, and a group sign-in led by one of them does the same; Docs and Tasks tokens, which opt out of that today, become as broad when connected in a group.
   The difference reaches agent code only through an Agent Keys allowance for one of those services, which then acts with the whole grant on the hosts that service allows; users who want narrow tokens keep connecting services one by one.
   `docs/architecture/security-posture.md` records this beside the Agent Keys entries.
 - Tokens stay in the primary runtime as before; no worker sees them.

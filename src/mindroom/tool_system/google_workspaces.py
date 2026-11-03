@@ -74,6 +74,7 @@ def google_workspace_oauth_providers(workspace: GoogleWorkspaceConfig) -> tuple[
                 id=f"{workspace.name}_{base.id}",
                 display_name=f"{workspace.display_name} {base.display_name}",
                 credential_service=f"{workspace.name}_{base.credential_service}",
+                # The Connections portal shows the Google logo for a group whose key starts with `google_`.
                 consent_group=OAuthConsentGroup(f"google_{workspace.name}", workspace.display_name),
                 tool_config_service=f"{workspace.name}_{service}",
                 client_config_services=(),

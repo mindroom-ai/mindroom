@@ -188,9 +188,11 @@ def test_each_google_provider_declares_its_service_on_the_shared_google_contract
     assert provider.token_parser is _google_token_parser
 
 
-def test_every_builtin_google_provider_joins_the_google_consent_group() -> None:
-    """Google Cloud included, every built-in Google provider connects together."""
-    assert {p.consent_group for p in google_oauth_providers()} == {OAuthConsentGroup("google", "Google")}
+def test_builtin_google_workspace_providers_join_the_google_consent_group() -> None:
+    """Google Cloud keeps its own sign-in, as the provisioned client is not verified for its scope."""
+    groups = {p.id: p.consent_group for p in google_oauth_providers()}
+    assert groups.pop("google_cloud") is None
+    assert set(groups.values()) == {OAuthConsentGroup("google", "Google")}
 
 
 def test_consent_group_provider_asks_for_every_member_scope_once() -> None:

@@ -18,7 +18,7 @@ interface ConnectableGroup {
   candidates: ConnectionService[];
 }
 
-/** The logo of a built-in group: Google, each additional Google workspace, or Microsoft 365; none for a plugin's. */
+/** The Google logo for `google` and every `google_` group (each additional Google workspace), the Microsoft logo for `microsoft`, else none. */
 function GroupLogo({ groupKey }: { groupKey: string }) {
   const props = {
     "aria-hidden": true,
