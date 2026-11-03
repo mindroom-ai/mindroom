@@ -716,6 +716,47 @@ async def test_a_first_reply_whose_attachment_cannot_fit_keeps_its_thread(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_attachments_that_fit_only_without_the_unseen_thread_fail_no_reply(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """The thread messages a stored scope has not seen are part of the turn, which no replay trim shortens."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=12_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    seed_session(storage, session)
+    seed_summary(storage, session, _SCOPE, "stored summary")
+    # About 5,000 tokens of thread the scope has not seen, beside the report's 10,000.
+    thread_history = [
+        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 4_000, event_id=f"$note-{index}")
+        for index in range(5)
+    ]
+    current = make_visible_message(sender="@alice:localhost", body="Read the report.", event_id="$current")
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+
+    with _no_memory():
+        response = await ai_response(
+            replace(
+                make_turn_context("test_agent", session_id="session-1", reply_to_event_id="$current"),
+                prompt="Read the report.",
+                thread_history=[*thread_history, current],
+                media=MediaInputs(files=(report,)),
+            ),
+            runtime_paths,
+            config,
+        )
+
+    assert response.text == "ok"
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (report,)
+    assert all(f"note-{index}" in render_prepared_messages_text(request.messages) for index in range(5))
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("provider")
 async def test_without_a_context_window_the_prepared_size_holds_the_attachments(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=None)
