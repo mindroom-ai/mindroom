@@ -886,7 +886,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     """Above the trigger budget only an active native route may leave history uncompacted.
 
     A scheduled run with a history limit disallows native compaction, and a text-only route (OpenRouter, Gemini, a
-    local model) never had it; neither has anything that compacts between the trigger and hard budgets.
+    local model) never had it; neither has anything that compacts between the trigger and the limit.
     """
     config, runtime_paths = _make_config(
         tmp_path,
@@ -915,10 +915,10 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         model=estimate_only_model(),
     )
     trigger_budget = history_tokens // 2
-    hard_budget = history_tokens * 2
+    limit = history_tokens * 2
     execution_plan = _compaction_plan(
         trigger_history=trigger_budget,
-        limit_history=hard_budget,
+        limit_history=limit,
         summary_input_budget=50_000,
         explicit_compaction_model=False,
         trigger_threshold_tokens=trigger_budget,
@@ -987,9 +987,9 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
 @pytest.mark.parametrize(
     ("run_chars", "summary_words", "stored"),
     [
-        # History over the hard budget, and a summary that would not fit it either.
+        # History over the limit, and a summary that would not fit it either.
         (4_000, 2_000, False),
-        # History over the trigger only, and a summary above the trigger that still fits the hard budget.
+        # History over the trigger only, and a summary above the trigger that still fits the limit.
         (2_400, 1_200, True),
     ],
 )
@@ -1652,10 +1652,10 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_replays_history_between_trigger_and_hard_budget_on_a_native_route(
+async def test_prepare_history_for_run_replays_history_between_trigger_and_limit_on_a_native_route(
     tmp_path: Path,
 ) -> None:
-    """Native compaction owns history above the trigger, so replay is fitted only to the hard budget."""
+    """Native compaction owns history above the trigger, so replay is fitted only to the limit."""
     config, runtime_paths = _make_config(
         tmp_path,
         context_window=20_000,
@@ -1689,7 +1689,7 @@ async def test_prepare_history_for_run_replays_history_between_trigger_and_hard_
         session=session,
     )
 
-    # The three 200-token runs exceed the 400-token trigger but fit the hard budget, about half the 20,000-token window.
+    # The three 200-token runs exceed the 400-token trigger but fit the limit, about half the 20,000-token window.
     assert prepared.compaction_decision.reason == "within_limit"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.estimated_tokens == 600
