@@ -14,16 +14,22 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.contacts.turns import _ContactAdmission, contact_admission
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import current_entity_id
+from mindroom.event_journal import SemanticConsumer
+from mindroom.hooks import EVENT_REACTION_RECEIVED, HookRegistry, HookRegistryState, ReactionReceivedContext, hook
+from mindroom.hooks.context import HookContextSupport
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import TurnPolicy, TurnPolicyDeps
-from tests.conftest import test_runtime_paths
+from tests.bot_helpers import _hook_plugin
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.runtime_fakes import ready_runtime
 from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal, _with_template
@@ -334,6 +340,81 @@ async def test_a_message_in_a_removed_contacts_room_starts_nothing(tmp_path: Pat
             assert not await _precheck(validator, event, facts)
         assert [log["event"] for log in logs] == ["contact_room_sender_refused"]
     assert validator.deps.turn_store.record_turn.await_count == len(events)
+
+
+def _reaction_dispatcher(
+    config: Config,
+    paths: RuntimePaths,
+    semantic_consumer: SemanticConsumer | None,
+) -> tuple[ReactionDispatcher, list[str]]:
+    """Return Bob's agent's reaction dispatcher with a recording `reaction:received` hook, and the senders it saw."""
+    validator = _validator(config, paths)
+    runtime = validator.deps.runtime
+    runtime.client = make_matrix_client_mock(user_id=validator.deps.matrix_id.full_id)
+    seen: list[str] = []
+
+    @hook(EVENT_REACTION_RECEIVED)
+    async def record(ctx: ReactionReceivedContext) -> None:
+        seen.append(ctx.sender_id)
+
+    journal = MagicMock()
+    journal.semantic_consumer.return_value = semantic_consumer
+    journal.claim_semantic_consumer = AsyncMock()
+    journal.claim_interactive_reaction = AsyncMock(return_value=None)
+    resolver = MagicMock()
+    resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort = AsyncMock(return_value=None)
+    deps = ReactionDispatcherDeps(
+        runtime=runtime,
+        logger=get_logger(__name__),
+        runtime_paths=paths,
+        agent_name="mind_bob",
+        journal_dispatcher=journal,
+        user_stop_reconciler=MagicMock(),
+        ingress=validator,
+        reserve_prompt_ingress_order=MagicMock(),
+        enqueue_interactive_selection=AsyncMock(),
+        hook_context=HookContextSupport(
+            runtime=runtime,
+            runtime_paths=paths,
+            agent_name="mind_bob",
+            hook_registry_state=HookRegistryState(HookRegistry.from_plugins([_hook_plugin("hooked", [record])])),
+            conversation_reader=make_conversation_reader_mock(),
+            logger=get_logger(__name__),
+        ),
+        resolver=resolver,
+        config_confirmation=MagicMock(),
+    )
+    return ReactionDispatcher(deps), seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("semantic_consumer", [None, SemanticConsumer.REACTION_HOOKS])
+async def test_a_reaction_from_anyone_else_in_a_contact_room_runs_no_hook(
+    tmp_path: Path,
+    semantic_consumer: SemanticConsumer | None,
+) -> None:
+    """Access admits an administrator, yet their reaction in a contact room runs no hook, while the owner's does."""
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    dispatcher, seen = _reaction_dispatcher(config, paths, semantic_consumer)
+    room = nio.MatrixRoom(CONTACT_ROOM, dispatcher.deps.ingress.deps.matrix_id.full_id)
+
+    for sender in (ADMIN, CO_OWNER):
+        reaction = nio.ReactionEvent.from_dict(
+            {
+                "event_id": f"$reaction-{sender}",
+                "sender": sender,
+                "origin_server_ts": 1,
+                "type": "m.reaction",
+                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$message", "key": "👍"}},
+            },
+        )
+        with capture_logs() as logs:
+            assert await dispatcher.dispatch(room, reaction) is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+        assert seen == ([] if sender == ADMIN else [CO_OWNER])
+        refused = [log["event"] for log in logs if log["event"] == "contact_room_sender_refused"]
+        assert refused == (["contact_room_sender_refused"] if sender == ADMIN else [])
 
 
 def _later(sender: str, event_id: str, **content: object) -> ResolvedVisibleMessage:
