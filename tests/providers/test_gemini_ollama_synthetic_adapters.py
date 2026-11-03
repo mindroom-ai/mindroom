@@ -1793,6 +1793,7 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
             File(url="https://media.test/archive.zip", mime_type="application/zip", filename="archive.zip"),
             File(url="http://media.test/backup.zip", mime_type="application/zip", filename="backup.zip"),
             File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
+            File(content=b'name = "app"', mime_type="application/toml", filename="pyproject.toml"),
             File(content=b"a,b", filename="table.csv"),
             File(content=b"%PDF", filename="a.pdf"),
         ],
@@ -1808,6 +1809,7 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
         {"text": "[Attachment omitted: archive.zip (application/zip) is a file type Gemini cannot read]"},
         {"text": "[Attachment omitted: backup.zip (application/zip) is a file type Gemini cannot read]"},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"key: value").decode(), "mime_type": "text/plain"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b'name = "app"').decode(), "mime_type": "text/plain"}},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"a,b").decode(), "mime_type": "text/plain"}},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"%PDF").decode(), "mime_type": "application/pdf"}},
     ]

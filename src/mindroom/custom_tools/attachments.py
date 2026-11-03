@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import mimetypes
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -21,7 +20,7 @@ from mindroom.attachments.storage import (
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import resolve_agent_file
-from mindroom.llm.media import DOCUMENT_MIME_TYPES, Audio, File, Video
+from mindroom.llm.media import Audio, File, Video, is_document_mime_type, named_mime_type
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
 from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
@@ -72,7 +71,7 @@ def _attachment_tool_payload(status: str, **kwargs: object) -> str:
 
 def _infer_local_attachment_metadata(local_path: Path) -> tuple[_LocalAttachmentKind, str | None]:
     """Infer the attachment kind and MIME type of a local file registered by path."""
-    mime_type, _encoding = mimetypes.guess_type(local_path.name)
+    mime_type = named_mime_type(local_path.name)
     if mime_type is None:
         return "file", None
     media_type = mime_type.split("/", 1)[0].lower()
@@ -239,7 +238,7 @@ def _view_attachment(  # noqa: PLR0911
         return ToolValue(content=content, audios=(Audio(content=payload, mime_type=mime_type, format=media_format),))
     if attachment.kind == "video":
         return ToolValue(content=content, videos=(Video(content=payload, mime_type=mime_type, format=media_format),))
-    if mime_type in DOCUMENT_MIME_TYPES:
+    if is_document_mime_type(mime_type):
         return ToolValue(
             content=content,
             files=(File(content=payload, mime_type=mime_type, filename=filename, format=media_format),),

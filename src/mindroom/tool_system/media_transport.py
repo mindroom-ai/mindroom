@@ -9,7 +9,7 @@ import math
 from dataclasses import dataclass, fields
 from typing import Any, cast, get_args, get_origin, get_type_hints
 
-from mindroom.llm.media import DOCUMENT_MIME_TYPES, MEDIA_MIME_FAMILIES, Audio, File, Image, Video
+from mindroom.llm.media import MEDIA_MIME_FAMILIES, Audio, File, Image, Video, is_document_mime_type
 from mindroom.tool_system.tool_function import ToolValue
 
 MAX_MEDIA_COUNT = 8
@@ -139,7 +139,7 @@ def _validate_media_entry(entry: object, model: type[_Media]) -> tuple[dict[str,
             "/" not in mime
             or any(character.isspace() for character in mime)
             or (family is not None and not mime.startswith(family))
-            or (model is File and mime not in DOCUMENT_MIME_TYPES)
+            or (model is File and not is_document_mime_type(mime))
         ):
             raise _invalid()
     return attributes, encoded

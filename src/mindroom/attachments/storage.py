@@ -25,7 +25,7 @@ import nio
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.llm.media import canonical_mime_type, rendered_label
+from mindroom.llm.media import canonical_mime_type, named_mime_type, rendered_label
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -917,6 +917,26 @@ async def _register_media_attachment(
     )
 
 
+def _is_utf8_text(data: bytes) -> bool:
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return b"\0" not in data
+
+
+def _received_file_type(declared: str | None, filename: str | None, data: bytes | None) -> str | None:
+    """Return a received file's type: the declared one, else its filename's, else ``text/plain`` for UTF-8 text.
+
+    Clients leave the type out, or declare ``application/octet-stream``, for an extension the browser cannot type,
+    such as ``.yaml``, so that type names none. A file whose type stays unknown keeps the declared one.
+    """
+    for candidate in (canonical_mime_type(declared), named_mime_type(filename or "")):
+        if candidate not in {None, "application/octet-stream"}:
+            return candidate
+    return "text/plain" if data is not None and _is_utf8_text(data) else declared
+
+
 async def _register_file_or_video_attachment(
     client: nio.AsyncClient,
     storage_path: Path,
@@ -928,16 +948,17 @@ async def _register_file_or_video_attachment(
     """Persist a file/video event and register it as an attachment record."""
     media_bytes = await download_media_bytes(client, event)
     kind: _AttachmentKind = "video" if is_video_message_event(event) else "file"
+    filename = _filename_for_media_event(event)
     return await _register_media_attachment(
         storage_path=storage_path,
         event_id=event.event_id,
         media_bytes=media_bytes,
-        mime_type=media_mime_type(event),
+        mime_type=_received_file_type(media_mime_type(event), filename, media_bytes),
         room_id=room_id,
         thread_id=thread_id,
         sender=event.sender,
         event_timestamp=event.server_timestamp,
-        filename=_filename_for_media_event(event),
+        filename=filename,
         kind=kind,
     )
 

@@ -42,6 +42,8 @@ def test_downloaded_media_keeps_the_type_its_source_names(
         (File(url="https://media.test/download?id=7", filename="rows.txt"), "text/csv", ("rows.txt", "text/csv")),
         (File(url="https://media.test/export/notes.txt"), "image/png", ("notes.txt", "text/plain")),
         (File(url="https://media.test/export/report.csv.gz"), None, ("report.csv.gz", None)),
+        (File(url="https://media.test/settings.yaml"), "application/x-yaml", ("settings.yaml", "application/x-yaml")),
+        (File(url="https://media.test/feed"), "application/rss+xml", ("feed", "application/rss+xml")),
     ],
 )
 def test_a_downloaded_file_takes_a_document_type_and_its_url_s_name(

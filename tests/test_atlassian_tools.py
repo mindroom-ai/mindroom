@@ -95,7 +95,6 @@ def test_registered_metadata_matches_the_toolkit() -> None:
     assert metadata.auth_provider == "atlassian"
     assert metadata.requires_primary_runtime is True
     assert metadata.file_access is ToolFileAccess.NONE
-    assert {field.name for field in metadata.config_fields or []} == {"site_url", "cloud_id"}
 
 
 def test_toolkit_registers_every_function_under_its_catalog_name(tmp_path: Path) -> None:

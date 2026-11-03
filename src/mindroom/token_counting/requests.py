@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.llm.media import File, is_text_mime_type
+from mindroom.llm.media import File, file_text, is_text_mime_type
 from mindroom.llm.messages import media_items, stable_serialize
 from mindroom.native_compaction import native_replay_messages
 from mindroom.token_counting.counts import count
@@ -113,8 +113,8 @@ def _file_tokens(counter: TokenCounter, file: File) -> int:
     """Return what ``file`` counts: a PDF the model's page price per page, text its text, any other the allowance.
 
     Claude, Gemini, and OpenAI's Responses API read a text file as its text. Bytes that are not UTF-8 are text only in
-    a file of a text type, such as a Windows-1252 CSV, which counts its UTF-8 decode with replacement characters, the
-    text Claude sends.
+    a file of a text type, such as a Windows-1252 CSV or a UTF-16 log, which counts the text Claude sends
+    (``file_text``).
     """
     data = _file_bytes(file)
     if data is None:
@@ -122,7 +122,7 @@ def _file_tokens(counter: TokenCounter, file: File) -> int:
     if data.startswith(b"%PDF-"):
         return _pdf_pages(data) * (counter.pdf_page_tokens or MEDIA_ALLOWANCE_TOKENS)
     if is_text_mime_type(file.mime_type):
-        return count(counter, data.decode("utf-8", errors="replace"))
+        return count(counter, file_text(data))
     try:
         return count(counter, data.decode("utf-8"))
     except UnicodeDecodeError:
