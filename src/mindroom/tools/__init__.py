@@ -142,6 +142,7 @@ from mindroom.tools.shell import shell_tools
 from mindroom.tools.shopify import shopify_tools
 from mindroom.tools.slack import slack_tools
 from mindroom.tools.sleep import sleep_tools
+from mindroom.tools.smartsheet import smartsheet_tools
 from mindroom.tools.spider import spider_tools
 from mindroom.tools.spotify import spotify_tools
 from mindroom.tools.sql import sql_tools

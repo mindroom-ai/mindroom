@@ -121,7 +121,7 @@ See [Authorization](authorization.md#platform-and-credential-authority) for admi
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, Slack, and Smartsheet, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -132,7 +132,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, Slack, and Spotify OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, Slack, Smartsheet, and Spotify OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -140,6 +140,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | --- | --- |
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](tools/project-management.md#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](tools/atlassian.md) |
+| Smartsheet | [Smartsheet OAuth Setup](tools/project-management.md#smartsheet-oauth-setup) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](deployment/google-services-oauth.md) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](tools/microsoft-365.md) |
 | Slack (each person's own Slack account) | [Slack](tools/slack.md#set-up-the-slack-app) |
