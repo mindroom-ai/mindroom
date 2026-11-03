@@ -225,6 +225,8 @@ _APPLICATION_TEXT_MIME_TYPES = frozenset(
         "application/x-perl",
         "application/x-php",
         "application/x-ruby",
+        "application/x-tex",
+        "application/x-latex",
     },
 )
 # The types of the binary documents a tool may return a file as for the model to read.

@@ -138,6 +138,8 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
         ("application/x-perl", b"print 1;\n"),
         ("application/x-php", b"<?php echo 1;\n"),
         ("application/x-ruby", b"puts 1\n"),
+        ("application/x-tex", b"\\section{Intro}\n"),
+        ("application/x-latex", b"\\begin{document}\n"),
         ("application/javascript", b"let a = 1;\n"),
         ("application/ecmascript", b"let a = 1;\n"),
         ("application/ld+json", b'{"@id": "x"}'),
