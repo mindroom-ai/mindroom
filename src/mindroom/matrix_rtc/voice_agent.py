@@ -454,6 +454,9 @@ class RealtimeVoiceBridge:
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
         """Restrict SFU subscriptions and published output to the Matrix roster."""
         self._participant_identities = participant_identities
+        # A departed caller's timer must not report on, or block, a later rejoin.
+        for identity in self._inbound_key_timers.keys() - participant_identities:
+            self._inbound_key_timers.pop(identity).cancel()
         if self._audio_input is not None:
             self._audio_input.set_participant_identities(participant_identities)
         self._apply_output_permissions()
@@ -595,9 +598,8 @@ class RealtimeVoiceBridge:
         undecryptable = {rtc_module.EncryptionState.MISSING_KEY, rtc_module.EncryptionState.DECRYPTION_FAILED}
 
         async def report_after_timeout(identity: str) -> None:
+            # Roster departures and aclose cancel this timer, so no guard is needed after the sleep.
             await asyncio.sleep(_INBOUND_KEY_TIMEOUT_S)
-            if self._session is not session or identity not in self._participant_identities:
-                return
             logger.warning("call_inbound_audio_undecryptable", participant=identity)
             device_id = identity.rpartition(":")[2]
             on_error(

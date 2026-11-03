@@ -225,7 +225,7 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 async def test_bridge_reports_only_caller_audio_that_stays_undecryptable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A late key or a non-member cannot raise the missing-key notice; lasting undecryptable audio does."""
+    """A late key, a non-member, or a departed caller posts nothing; lasting undecryptable audio does, also after a rejoin."""
     monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._INBOUND_KEY_TIMEOUT_S", 0)
 
     class FakeSession:
@@ -280,6 +280,22 @@ async def test_bridge_reports_only_caller_audio_that_stays_undecryptable(monkeyp
     for _ in range(5):
         await asyncio.sleep(0)
     assert errors == []
+
+    # Left and rejoined before the timeout: the old timer cannot report on the new participation.
+    on_state_changed(alice, rtc.EncryptionState.MISSING_KEY)
+    bridge.set_participant_identities(frozenset())
+    bridge.set_participant_identities(frozenset({alice.identity}))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert errors == []
+
+    # Still away when the timeout passes: the expired timer cannot block the rejoined caller's next one.
+    on_state_changed(alice, rtc.EncryptionState.MISSING_KEY)
+    bridge.set_participant_identities(frozenset())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert errors == []
+    bridge.set_participant_identities(frozenset({alice.identity}))
 
     on_state_changed(alice, rtc.EncryptionState.DECRYPTION_FAILED)
     for _ in range(5):
