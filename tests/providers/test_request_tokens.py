@@ -6,14 +6,16 @@ so whatever a route sends for a message, a tool, or a setting is what its size c
 
 from __future__ import annotations
 
+import io
 import json
-import zlib
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import httpx2
 import pytest
+from pypdf import PdfWriter
 
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message, model_provenance, stable_serialize
@@ -35,7 +37,6 @@ from tests.providers.golden_support import golden_id, golden_paths, golden_reque
 from tests.providers.openai_family_support import OPENAI_FAMILIES, golden_provider, responses_adapter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
@@ -559,18 +560,21 @@ def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None
     assert model.request_tokens(ModelRequest(messages=(message,))) < 10_000
 
 
-def _pdf(pages: int, *, packed: Callable[[bytes], bytes] | None = None) -> bytes:
-    """Return a PDF of ``pages`` page objects, stored as they are or ``packed`` into an object stream as pdfTeX does."""
-    page_objects = b"".join(b"<< /Type /Page /Parent 2 0 R >>\n" for _ in range(pages))
-    tree = b"%PDF-1.7\n" + b"2 0 obj << /Type /Pages /Count %d >> endobj\n" % pages
-    if packed is None:
-        return tree + page_objects
-    objects = packed(page_objects)
-    header = b"3 0 obj << /Type /ObjStm /N %d /First 0 /Length %d /Filter /FlateDecode >>\nstream\n" % (
-        pages,
-        len(objects),
-    )
-    return tree + header + objects + b"\nendstream\nendobj\n"
+def _pdf(pages: int, *, delete: int = 0) -> bytes:
+    """Return a PDF of ``pages`` blank pages, then an incremental save that deletes the last ``delete`` of them."""
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=612, height=792)
+    written = io.BytesIO()
+    writer.write(written)
+    if not delete:
+        return written.getvalue()
+    edited = PdfWriter(io.BytesIO(written.getvalue()), incremental=True)
+    for _ in range(delete):
+        del edited.pages[-1]
+    saved = io.BytesIO()
+    edited.write(saved)
+    return saved.getvalue()
 
 
 def _with_file(route: ModelProvider, file: File | None) -> int:
@@ -601,31 +605,35 @@ def test_an_attached_text_file_counts_its_text(tmp_path: Path, family: str) -> N
     assert _with_file(route, File(url="https://example.com/notes.txt")) - without == MEDIA_ALLOWANCE_TOKENS
 
 
-@pytest.mark.parametrize("family", ["anthropic", "gemini", "openai_chat"])
-@pytest.mark.parametrize("packed", [None, zlib.compress, bytes], ids=["plain", "compressed", "uncompressed-stream"])
-def test_an_attached_pdf_counts_the_allowance_per_page(
-    tmp_path: Path,
-    family: str,
-    packed: Callable[[bytes], bytes] | None,
-) -> None:
-    """Claude and Gemini price a PDF per page, so an 80-page report counts 80 allowances, however it stores its pages."""
+@pytest.mark.parametrize(
+    ("family", "page_tokens"),
+    [("anthropic", MEDIA_ALLOWANCE_TOKENS), ("openai_chat", MEDIA_ALLOWANCE_TOKENS), ("gemini", 1_120)],
+)
+def test_an_attached_pdf_counts_its_pages(tmp_path: Path, family: str, page_tokens: int) -> None:
+    """A PDF counts the route's most per page for the pages its latest revision holds, so a long report counts long."""
     route = _route(family, tmp_path)
     without = _with_file(route, None)
 
-    def pdf(pages: int) -> File:
-        return File(content=_pdf(pages, packed=packed), mime_type="application/pdf", filename="report.pdf")
+    def counted(content: bytes) -> int:
+        return _with_file(route, File(content=content, mime_type="application/pdf", filename="report.pdf")) - without
 
-    assert _with_file(route, pdf(1)) - without == MEDIA_ALLOWANCE_TOKENS
-    assert _with_file(route, pdf(80)) - without == 80 * MEDIA_ALLOWANCE_TOKENS
+    assert counted(_pdf(1)) == page_tokens
+    assert counted(_pdf(80)) == 80 * page_tokens
+    # An incremental save that deleted pages keeps their objects, which the latest page tree no longer counts.
+    assert counted(_pdf(80, delete=79)) == page_tokens
+    # A PDF the parser cannot read, or whose page tree declares no page count, counts one page.
+    assert counted(b"%PDF-1.7\ndamaged") == page_tokens
+    assert counted(_pdf(1).replace(b"/Count 1", b"/Count /X")) == page_tokens
+    assert counted(_pdf(1).replace(b"/Count 1", b"/Count -7")) == page_tokens
 
 
-def test_counting_a_pdfs_pages_inflates_a_bounded_amount(tmp_path: Path) -> None:
-    """Object streams that inflate past the bound are not read, so a crafted PDF counts at least one page, quickly."""
+def test_an_attached_path_that_is_not_a_regular_file_is_never_read(tmp_path: Path) -> None:
+    """A FIFO, which no wire sends, counts the allowance without blocking the count on a read."""
     route = _route("anthropic", tmp_path)
-    padding = _pdf(0, packed=lambda _objects: zlib.compress(b" " * (17 << 20)))
-    report = File(content=padding + _pdf(80, packed=zlib.compress), mime_type="application/pdf")
+    fifo = tmp_path / "pipe.log"
+    os.mkfifo(fifo)
 
-    assert _with_file(route, report) - _with_file(route, None) == MEDIA_ALLOWANCE_TOKENS
+    assert _with_file(route, File(filepath=str(fifo))) - _with_file(route, None) == MEDIA_ALLOWANCE_TOKENS
 
 
 # About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.

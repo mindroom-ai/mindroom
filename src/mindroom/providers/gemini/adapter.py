@@ -67,6 +67,9 @@ _NO_API_KEY_ERROR = "No API key was provided."
 # The generation a Gemini model id names, as in ``gemini-3.1-pro-preview`` or ``models/gemini-4-pro``; an alias
 # such as ``gemini-flash-latest`` names none.
 _GEMINI_GENERATION = re.compile(r"gemini-(\d+)(?:[.-]|$)")
+# The most Gemini charges for a PDF page: 258 tokens, or 280, 560, or 1,120 by its media resolution on Gemini 3 and
+# later.
+_PDF_PAGE_TOKENS = 1_120
 
 
 @dataclass(slots=True, kw_only=True)
@@ -92,7 +95,7 @@ class GeminiProvider:
 
     def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
         """Estimate what ``request`` gives the model, from the parts and declarations ``stream`` sends for it."""
-        return route_request_tokens(self.token_counter, request, start, self._parts)
+        return route_request_tokens(self.token_counter, request, start, self._parts, page_tokens=_PDF_PAGE_TOKENS)
 
     def context_key(self, request: ModelRequest) -> str:
         """Identify the tools ``stream`` sends for ``request``."""
