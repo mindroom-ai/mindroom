@@ -8,7 +8,13 @@ from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.entitlements import ENDED_STRIPE_STATUSES
 from backend.models import UrlResponse
-from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
+from backend.pricing import (
+    get_plan_details,
+    get_stripe_price_id,
+    get_stripe_price_match,
+    get_trial_days,
+    is_trial_enabled_for_plan,
+)
 from backend.services import provisioner_service
 from backend.services.instance_lifecycle import PENDING_DELETION_BILLING_DETAIL
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -49,33 +55,37 @@ def _plan_portal_configuration(tier: str) -> str:
     """
     prices = [price for cycle in ("monthly", "yearly") if (price := get_stripe_price_id(tier, cycle))]
     key = ",".join(prices)
-    for configuration in stripe.billing_portal.Configuration.list(active=True, limit=100).auto_paging_iter():
-        if configuration.metadata.get(_PLAN_PORTAL_METADATA_KEY) == key:
-            return configuration.id
-    return stripe.billing_portal.Configuration.create(
-        business_profile={"headline": "Change your MindRoom plan"},
-        default_return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing",
-        features={
+    params = {
+        "business_profile": {"headline": "Change your MindRoom plan"},
+        "default_return_url": f"https://app.{PLATFORM_DOMAIN}/dashboard/billing",
+        "features": {
             "subscription_update": {
                 "enabled": True,
                 "default_allowed_updates": ["price"],
                 "products": [{"product": stripe.Price.retrieve(prices[0]).product, "prices": prices}],
-                # The difference is charged at once, so a larger AI budget is paid for when it starts; a trial ends.
+                # The new plan starts a full billing period now, charged at once less the unused time of the old one,
+                # because its whole monthly AI budget is available at once; a trial ends.
+                "billing_cycle_anchor": "now",
                 "proration_behavior": "always_invoice",
                 "trial_update_behavior": "end_trial",
             },
             "payment_method_update": {"enabled": True},
             "invoice_history": {"enabled": True},
         },
-        metadata={_PLAN_PORTAL_METADATA_KEY: key},
-    ).id
+    }
+    for configuration in stripe.billing_portal.Configuration.list(active=True, limit=100).auto_paging_iter():
+        if configuration.metadata.get(_PLAN_PORTAL_METADATA_KEY) == key:
+            # Rewritten on each use, so a configuration an earlier release created gets these parameters.
+            return stripe.billing_portal.Configuration.modify(configuration.id, **params).id
+    return stripe.billing_portal.Configuration.create(**params, metadata={_PLAN_PORTAL_METADATA_KEY: key}).id
 
 
 def _plan_change_portal_options(subscription: Any, tier: str, price_id: str) -> dict[str, Any]:
-    """Return portal session options that open the confirmation of a switch to `price_id`.
+    """Return portal session options that open the confirmation of an upgrade to `price_id`.
 
     A subscription that is not active or trialing, or is set to cancel, gets none and opens on the portal home, where
-    it can be paid or renewed first.
+    it can be paid or renewed first. So does a move to a plan that does not cost more: a downgrade would credit the
+    unused time of a plan whose AI budget may already be spent.
     """
     if (
         subscription["status"] not in {"active", "trialing"}
@@ -84,7 +94,16 @@ def _plan_change_portal_options(subscription: Any, tier: str, price_id: str) -> 
     ):
         return {}
     item = subscription["items"]["data"][0]
-    if item["price"]["id"] == price_id:
+    current = get_stripe_price_match(item["price"]["id"])
+    current_plan = get_plan_details(current.tier) if current else None
+    plan = get_plan_details(tier)
+    if not (
+        current_plan
+        and plan
+        and isinstance(current_plan.price_monthly, int)
+        and isinstance(plan.price_monthly, int)
+        and plan.price_monthly > current_plan.price_monthly
+    ):
         return {}
     return {
         "configuration": _plan_portal_configuration(tier),
