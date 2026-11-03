@@ -665,7 +665,8 @@ class KubernetesResourceManager:
         return self.core_api
 
     @property
-    def _api_exception(self) -> type[_ApiStatusError]:
+    def api_exception(self) -> type[_ApiStatusError]:
+        """Return the exception type the loaded API clients raise for a failed request."""
         self._load_clients()
         assert self.api_exception_cls is not None
         return self.api_exception_cls
@@ -673,10 +674,6 @@ class KubernetesResourceManager:
     def api_clients(self) -> tuple[_AppsApiProtocol, _CoreApiProtocol]:
         """Return the loaded apps and core API clients."""
         return self._apps, self._core
-
-    def api_error(self) -> type[_ApiStatusError]:
-        """Return the exception type the loaded API clients raise for a failed request."""
-        return self._api_exception
 
     def list_deployments(self, *, request_timeout: float | None = None) -> list[KubernetesDeployment]:
         """List lightweight worker snapshots without Kubernetes model deserialization."""
@@ -702,7 +699,7 @@ class KubernetesResourceManager:
         """Read one Deployment, returning ``None`` for 404s."""
         try:
             return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
-        except self._api_exception as exc:
+        except self.api_exception as exc:
             if exc.status == 404:
                 return None
             raise
@@ -729,12 +726,12 @@ class KubernetesResourceManager:
         manifest = self._auth_secret_manifest(worker_key=worker_key, worker_id=worker_id)
         try:
             self._core.read_namespaced_secret(worker_id, self.config.namespace)
-        except self._api_exception as exc:
+        except self.api_exception as exc:
             if exc.status != 404:
                 raise
             try:
                 self._core.create_namespaced_secret(self.config.namespace, manifest)
-            except self._api_exception as create_exc:
+            except self.api_exception as create_exc:
                 if create_exc.status != 409:
                     raise
                 self._patch_secret_merge(worker_id, self._auth_secret_patch(worker_key=worker_key, worker_id=worker_id))
@@ -816,7 +813,7 @@ class KubernetesResourceManager:
                 self.config.namespace,
                 {"metadata": {"annotations": annotations}},
             )
-        except self._api_exception as exc:
+        except self.api_exception as exc:
             if exc.status == 404:
                 return False
             raise
@@ -830,7 +827,7 @@ class KubernetesResourceManager:
                 self.config.namespace,
                 propagation_policy="Foreground",
             )
-        except self._api_exception as exc:
+        except self.api_exception as exc:
             if exc.status != 404:
                 raise
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
@@ -909,7 +906,7 @@ class KubernetesResourceManager:
                         },
                     },
                 )
-            except self._api_exception as exc:
+            except self.api_exception as exc:
                 if exc.status != 404:
                     raise
             return
@@ -952,7 +949,7 @@ class KubernetesResourceManager:
         while True:
             try:
                 self._apps.create_namespaced_deployment(self.config.namespace, manifest)
-            except self._api_exception as exc:
+            except self.api_exception as exc:
                 if exc.status != 409:
                     raise
                 if time.time() >= deadline:
@@ -1032,12 +1029,12 @@ class KubernetesResourceManager:
     ) -> None:
         try:
             read_fn(resource_name, self.config.namespace)
-        except self._api_exception as exc:
+        except self.api_exception as exc:
             if exc.status != 404:
                 raise
             try:
                 create_fn(self.config.namespace, manifest)
-            except self._api_exception as create_exc:
+            except self.api_exception as create_exc:
                 if create_exc.status != 409:
                     raise
                 patch_fn(resource_name, self.config.namespace, manifest)
@@ -1047,7 +1044,7 @@ class KubernetesResourceManager:
     def _delete_object(self, delete_fn: Callable[[str, str], None], resource_name: str) -> None:
         try:
             delete_fn(resource_name, self.config.namespace)
-        except self._api_exception as exc:
+        except self.api_exception as exc:
             if exc.status != 404:
                 raise
 
@@ -1557,7 +1554,7 @@ class KubernetesResourceManager:
             return None
         try:
             pod = self._core.read_namespaced_pod(pod_name, self.config.namespace)
-        except self._api_exception as exc:
+        except self.api_exception as exc:
             if exc.status != 404:
                 raise
             pod = None

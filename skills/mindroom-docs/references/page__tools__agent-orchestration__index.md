@@ -145,7 +145,7 @@ The worker sees the same workspace, shared directories, and knowledge as the sub
 Settings saved inside the normal worker and packages installed into its environment are not there, so a subagent that needs extra packages installs them again or uses a virtual environment in the workspace.
 The subagent's first worker call waits for the new worker to start, and `continue_subagent` follow-ups use the same worker while it exists.
 The worker is removed once it has been idle for the worker idle timeout, also while the subagent waits for an approval (`MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` or `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`, 30 minutes by default), which stops any process the subagent left running there; a later follow-up starts a new one.
-If the calling agent loses the setting or the backend stops supporting dedicated workers, the subagent's later turns use its normal worker.
+If the calling agent loses the setting or the backend stops supporting dedicated workers, the subagent's next attempt, including a call it resumes after an approval, uses its normal worker.
 A [background script](https://docs.mindroom.chat/tools/background-scripts/) the subagent starts calls its tools on the subagent's normal worker, because it outlives the subagent's turn.
 MindRoom Chat's Computer panel for [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) shows the agent's normal worker, never a subagent's dedicated one.
 

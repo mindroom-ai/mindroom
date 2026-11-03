@@ -18,6 +18,7 @@ from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
 from mindroom.egress.policy import EgressGrantSubject
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, subagent_worker_key
@@ -349,20 +350,19 @@ def test_a_subagent_with_its_own_worker_is_granted_access_for_that_worker(
     """The proxy knows a subagent's own worker by its key, so its grant names that key instead of its agent."""
     subagent_id = "a" * 32
     session_id = f"delegate:assistant:assistant:{subagent_id}"
+    config = Config(agents={"assistant": AgentConfig(display_name="Assistant", worker_scope=worker_scope)})
+    identity = ToolExecutionIdentity("matrix", "assistant", "@user:server", "!room:server", None, None, session_id)
+    runtime_paths = _runtime_paths(tmp_path)
     context = SimpleNamespace(
         agent_name="assistant",
         session_id=session_id,
-        config=Config(agents={"assistant": AgentConfig(display_name="Assistant", worker_scope=worker_scope)}),
-        execution_identity=ToolExecutionIdentity(
-            "matrix",
-            "assistant",
-            "@user:server",
-            "!room:server",
-            None,
-            None,
-            session_id,
+        config=config,
+        execution_identity=identity,
+        runtime_paths=runtime_paths,
+        # As ToolRuntimeContext.resolve_worker_target resolves it for an agent dispatch.
+        resolve_worker_target=lambda: (
+            resolve_agent_execution("assistant", config, runtime_paths, identity).worker_target
         ),
-        runtime_paths=_runtime_paths(tmp_path),
     )
 
     with dedicated_worker_placement(session_id, DedicatedWorkerPlacement(subagent_id)):

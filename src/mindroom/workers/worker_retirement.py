@@ -191,7 +191,9 @@ def _remove_tree(parent_fd: int, name: str) -> None:
     for _path, _dirnames, _filenames, directory_fd in os.fwalk(name, dir_fd=parent_fd, follow_symlinks=False):
         mode = stat.S_IMODE(os.fstat(directory_fd).st_mode)
         if mode & stat.S_IRWXU != stat.S_IRWXU:
-            os.fchmod(directory_fd, mode | stat.S_IRWXU)
+            # A directory owned by someone else keeps its mode, and rmtree removes it as before when it is empty.
+            with suppress(PermissionError):
+                os.fchmod(directory_fd, mode | stat.S_IRWXU)
     shutil.rmtree(name, dir_fd=parent_fd)
 
 

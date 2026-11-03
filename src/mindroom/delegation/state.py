@@ -149,7 +149,10 @@ class DelegationChild:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:
-        """Read a snapshot written by ``dataclasses.asdict``; ``legacy_snapshots`` rewrites older ones at startup."""
+        """Read a snapshot written by ``dataclasses.asdict``; ``legacy_snapshots`` rewrites older ones at startup.
+
+        The worker fields are defaulted on the model instead (see their ``LEGACY_COMPAT`` marker).
+        """
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona")
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))

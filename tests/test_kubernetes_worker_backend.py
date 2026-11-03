@@ -3881,15 +3881,15 @@ def test_kubernetes_cleanup_retries_a_subagent_worker_whose_removal_failed_midwa
     subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
     normal = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
     _expire(apps_api, normal.worker_id, replicas=1)
-    delete_deployment = apps_api.delete_namespaced_deployment
+    delete_secret = backend._resources.delete_secret
 
-    def unavailable_once(name: str, namespace: str, **kwargs: object) -> None:
-        # The cluster answers 503 once, as an API server under load does.
-        monkeypatch.setattr(apps_api, "delete_namespaced_deployment", delete_deployment)
-        del name, namespace, kwargs
+    def unavailable_once(secret_name: str) -> None:
+        # The cluster answers 503 once, as an API server under load does, after the Service is already gone.
+        monkeypatch.setattr(backend._resources, "delete_secret", delete_secret)
+        del secret_name
         raise _FakeApiError(503)
 
-    monkeypatch.setattr(apps_api, "delete_namespaced_deployment", unavailable_once)
+    monkeypatch.setattr(backend._resources, "delete_secret", unavailable_once)
 
     assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [_TEST_SCOPED_WORKER_KEY_B]
     assert apps_api.deployments[normal.worker_id].spec.replicas == 0

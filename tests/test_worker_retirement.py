@@ -6,10 +6,13 @@ import os
 import stat
 from typing import TYPE_CHECKING
 
+from mindroom.workers import worker_retirement
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pytest
 
 
 def _remove(root: Path, name: str) -> None:
@@ -50,3 +53,21 @@ def test_removal_never_changes_a_directory_a_link_points_to(tmp_path: Path) -> N
         assert (outside / "keep.txt").read_text(encoding="utf-8") == "primary file\n"
     finally:
         outside.chmod(0o700)
+
+
+def test_a_read_only_directory_whose_mode_cannot_change_is_still_removed_when_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory someone else owns keeps its mode, and an empty one is removed as before."""
+    empty = tmp_path / "worker" / "empty"
+    empty.mkdir(parents=True)
+    empty.chmod(0o555)
+
+    def refuse(_fd: int, _mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(worker_retirement.os, "fchmod", refuse)
+    _remove(tmp_path, "worker")
+
+    assert not (tmp_path / "worker").exists()
