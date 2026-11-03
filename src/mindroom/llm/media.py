@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import codecs
 import mimetypes
+import re
 from dataclasses import dataclass, field, fields, replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -227,8 +228,6 @@ _APPLICATION_TEXT_MIME_TYPES = frozenset(
         "application/x-ruby",
     },
 )
-# The structured syntax suffixes of text types, as in ``application/ld+json``.
-_TEXT_SUFFIXES = ("+json", "+xml")
 # The types of the binary documents a tool may return a file as for the model to read.
 _BINARY_DOCUMENT_MIME_TYPES = frozenset(
     {
@@ -249,15 +248,15 @@ _BINARY_DOCUMENT_MIME_TYPES = frozenset(
 def is_text_mime_type(mime_type: str | None) -> bool:
     """Return whether a file of ``mime_type`` holds text, which Claude and Gemini read as plain text.
 
-    That is any ``text/*`` type and the text types outside ``text/``, such as JSON, YAML, and any
-    ``application/*+json`` or ``application/*+xml``, whatever their parameters.
+    That is any ``text/*`` type, the text types outside ``text/`` such as JSON and YAML, any ``application/*+json``,
+    and any ``application/*+xml`` outside the vendor tree, whose ``+xml`` types include ZIP packages such as Visio's,
+    whatever their parameters.
     """
     canonical = canonical_mime_type(mime_type) or ""
-    return (
-        canonical.startswith("text/")
-        or canonical in _APPLICATION_TEXT_MIME_TYPES
-        or (canonical.startswith("application/") and canonical.endswith(_TEXT_SUFFIXES))
+    structured = canonical.startswith("application/") and (
+        canonical.endswith("+json") or (canonical.endswith("+xml") and not canonical.startswith("application/vnd."))
     )
+    return canonical.startswith("text/") or canonical in _APPLICATION_TEXT_MIME_TYPES or structured
 
 
 def is_document_mime_type(mime_type: str | None) -> bool:
@@ -269,10 +268,15 @@ def is_document_mime_type(mime_type: str | None) -> bool:
     return is_text_mime_type(mime_type) or canonical_mime_type(mime_type) in _BINARY_DOCUMENT_MIME_TYPES
 
 
+# A character only a valid multibyte UTF-8 sequence decodes to; Windows-1252 text almost never forms one.
+_UTF8_MULTIBYTE_CHARACTER = re.compile("[^\x00-\x7f\ufffd]")
+
+
 def file_text(data: bytes) -> str:
     """Return the text a text file's bytes hold: UTF-16 or UTF-8 by their byte-order mark, else UTF-8, else Windows-1252.
 
-    Bytes that do not decode become replacement characters.
+    Bytes that are not all UTF-8 still read as UTF-8 when they hold a multibyte UTF-8 character, as a log cut
+    mid-character does. Bytes that do not decode become replacement characters.
     """
     if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return data.decode("utf-16", errors="replace")
@@ -281,7 +285,8 @@ def file_text(data: bytes) -> str:
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        return data.decode("cp1252", errors="replace")
+        text = data.decode("utf-8", errors="replace")
+    return text if _UTF8_MULTIBYTE_CHARACTER.search(text) else data.decode("cp1252", errors="replace")
 
 
 # The longest attachment name or type that model-facing text prints.

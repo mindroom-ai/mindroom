@@ -51,6 +51,7 @@ _UNSUPPORTED_FILES = {
     "deck.pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "sheet.xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "bundle.zip": "application/zip",
+    "network.vsdx": "application/vnd.ms-visio.drawing.main+xml",
 }
 _CHECKPOINT = {"type": "compaction", "content": "Launch port 4321.", "encrypted_content": "opaque"}
 _TEXT = {"type": "text", "text": "Ready"}
@@ -122,7 +123,7 @@ async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tm
 async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path: Path) -> None:
     """A text file of any text type, its type's parameters aside, goes as plain text that Claude reads inline.
 
-    Its text is decoded as its byte-order mark says, else as UTF-8, else as Windows-1252.
+    Its text is decoded as its byte-order mark says, else as UTF-8, also when only some of it is, else as Windows-1252.
     """
     texts = [
         ("text/tab-separated-values", b"a\tb\n"),
@@ -147,7 +148,8 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
         ("text/csv", "1;Müller GmbH;3 €\n".encode("cp1252"), "1;Müller GmbH;3 €\n"),
         ("text/x-log", "12:00 ERROR crashed\n".encode("utf-16"), "12:00 ERROR crashed\n"),
         ("text/x-log", codecs.BOM_UTF16_BE + "12:00 ERROR\n".encode("utf-16-be"), "12:00 ERROR\n"),
-        ("text/plain", "﻿Müller".encode(), "Müller"),
+        ("text/plain", "\ufeffMüller".encode(), "Müller"),
+        ("text/x-log", "→ Grüße 完成".encode()[1:-1], "\ufffd\ufffd Grüße 完\ufffd"),
     ]
     cases = [(mime_type, data, data.decode()) for mime_type, data in texts] + encoded
     turn = Message(
