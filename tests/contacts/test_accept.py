@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
 import yaml
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
@@ -20,13 +21,14 @@ from mindroom.contacts.store import _contacts_path, contact_room_ids
 from mindroom.contacts.turns import _ContactAdmission, contact_admission, contact_room
 from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.entity_resolution import current_entity_id
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import TEST_PASSWORD, make_matrix_client_mock
 from tests.contacts.test_tools import (
+    BOB_ROOM,
     CAROL,
     CONTACT_ROOM,
     ORIGIN_ROOM,
@@ -286,14 +288,24 @@ async def test_accept_saves_rules_and_tools_after_validation(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_accept_kicks_off_requesting_agent_as_its_owner(tmp_path: Path) -> None:
-    """The requesting agent mentions itself in its thread, for its owner, naming the target by ID, not a chosen name."""
+    """The requesting agent mentions itself in its thread, for its owner, naming the target by ID, not a chosen name.
+
+    Its logs name that thread, not the accepting turn's.
+    """
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
+    log_contexts = []
 
-    with _matrix():
+    async def send(*_args: object, **_kwargs: object) -> str:
+        log_contexts.append(structlog.contextvars.get_contextvars())
+        return "$origin-notice"
+
+    runtime.sent("mind_alice").side_effect = send
+    with _matrix(), bound_log_context(room_id=BOB_ROOM, thread_id="$accepting"):
         await _accept(config, paths, runtime, record.id)
 
+    assert log_contexts == [{"room_id": ORIGIN_ROOM, "thread_id": ORIGIN_THREAD}]
     runtime.sent("mind_alice").assert_awaited_once_with(
         ORIGIN_ROOM,
         f"@mind_alice mind_bob accepted your contact request. Continue the task in the contact room {CONTACT_ROOM}: "

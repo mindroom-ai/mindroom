@@ -35,7 +35,7 @@ from mindroom.contacts.store import (
 )
 from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.entity_resolution import current_entity_id
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import create_room, invite_to_room, kick_from_room
 from mindroom.matrix.message_builder import build_message_content
@@ -453,16 +453,18 @@ async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecor
         bot = _bot(context, requester.id)
         kickoff = None
         if bot is not None:
-            kickoff = await bot.hook_context.send_message(
-                record.origin_room_id,
-                # Only a mentioned agent answers a message in a room with other responders.
-                f"@{requester.id} {target} accepted your contact request. "
-                f"Continue the task in the contact room {record.room_id}: {record.reason}",
-                record.origin_thread_id,
-                _SOURCE_HOOK,
-                {ORIGINAL_SENDER_KEY: requester.owner},
-                trigger_dispatch=True,
-            )
+            # Its logs name the requester's thread it goes to, not the accepting turn's.
+            with bound_log_context(room_id=record.origin_room_id, thread_id=record.origin_thread_id):
+                kickoff = await bot.hook_context.send_message(
+                    record.origin_room_id,
+                    # Only a mentioned agent answers a message in a room with other responders.
+                    f"@{requester.id} {target} accepted your contact request. "
+                    f"Continue the task in the contact room {record.room_id}: {record.reason}",
+                    record.origin_thread_id,
+                    _SOURCE_HOOK,
+                    {ORIGINAL_SENDER_KEY: requester.owner},
+                    trigger_dispatch=True,
+                )
         if kickoff is None:
             logger.warning("contact_origin_post_failed", contact_id=record.id, agent_name=requester.id)
         return
