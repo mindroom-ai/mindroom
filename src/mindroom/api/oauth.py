@@ -1161,8 +1161,12 @@ def _group_callback_response(outcome: _GroupCallbackOutcome, notice: _OpenerNoti
     A page that names a skipped member stays open, as the opener shows only which services connected, not why not.
     """
     names = outcome.service_names
+    # Members skipped for one reason share it, as one account usually fails every member's domain rules alike.
+    skipped_by_reason: dict[OAuthGroupSkipReason, list[str]] = {}
+    for provider_id, reason in outcome.result.skipped:
+        skipped_by_reason.setdefault(reason, []).append(names[provider_id])
     skipped = "; ".join(
-        f"{names[provider_id]} ({_GROUP_SKIP_REASONS[reason]})" for provider_id, reason in outcome.result.skipped
+        f"{', '.join(services)} ({_GROUP_SKIP_REASONS[reason]})" for reason, services in skipped_by_reason.items()
     )
     if not outcome.result.connected:
         return _oauth_browser_page(

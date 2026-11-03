@@ -100,34 +100,38 @@ function ConsentGroupRow({
 
   return (
     <div className="border-b border-border/60 px-5 py-3 max-sm:px-4">
-      <div className="flex flex-wrap items-center gap-3">
+      {/* The action lines up with the Actions column of the service rows below. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           {`${candidates.length} ${group.display_name} services are not connected.`}
         </p>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={busy}
-          onClick={() =>
-            candidates.some((service) => service.is_shared)
-              ? setSharedOpen(true)
-              : void connect()
-          }
-        >
-          {busy ? "Connecting…" : `Connect all ${group.display_name} services`}
-        </Button>
-        {busy && (
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
-            variant="ghost"
-            onClick={() => {
-              operation.current?.abort();
-              setBusy(false);
-            }}
+            disabled={busy}
+            onClick={() =>
+              candidates.some((service) => service.is_shared)
+                ? setSharedOpen(true)
+                : void connect()
+            }
           >
-            Cancel
+            {busy
+              ? "Connecting…"
+              : `Connect all ${group.display_name} services`}
           </Button>
-        )}
+          {busy && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                operation.current?.abort();
+                setBusy(false);
+              }}
+            >
+              Cancel
+            </Button>
+          )}
+        </div>
       </div>
       {error && (
         <Alert variant="destructive" className="mt-2 p-2">

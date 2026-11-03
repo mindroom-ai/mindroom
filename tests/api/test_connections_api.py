@@ -1419,10 +1419,7 @@ def test_group_connect_that_connects_nothing_is_an_error_page(
     page = _finish_group_connect(google_group_portal, "alice")
     assert page.status_code == 400, page.text
     assert "<title>Google not connected</title>" in page.text
-    assert (
-        "Nothing was connected: Test Drive (this account is not allowed); "
-        "Test Sheets (this account is not allowed)." in page.text
-    )
+    assert "Nothing was connected: Test Drive, Test Sheets (this account is not allowed)." in page.text
     assert '"status": "error", "provider": "google_drive"' in page.text
     assert _POPUP_SELF_CLOSE not in page.text
     for provider in ("google_drive", "google_sheets"):
