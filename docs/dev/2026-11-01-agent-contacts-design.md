@@ -65,6 +65,7 @@ It holds both parties and both owners, and leaves the router out, because the ro
 The target agent creates it, or the requesting agent when the target is a person, because the creator stays in the room and must therefore be a party.
 The pending contact names its room before anyone is invited, because a room the store does not know yet would run an owner's early message as a normal turn, and a setup that crashes would leave it unrecognized.
 A retried acceptance keeps the room of the attempt it replaces as a removed contact's room, because an agent whose leave failed may still be in it and would otherwise run ordinary turns there.
+An acceptance that abandons its room withdraws the owners' invitations before its agents leave, because only a member with kick power can withdraw them, and a pending invitation would lead an owner to a dead room named like the real one.
 Agent parties keep the room across restarts through cleanup exclusions read from the contacts store, which stays the single source of truth.
 The invited-rooms store was rejected for this, because it is not persisted for agents whose `accept_invites` is false.
 Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite like any other, and would otherwise rejoin a removed contact's room at its next start.
@@ -209,6 +210,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - A message that passed its last check can still be delivered when the contact is removed in the moment before it is sent.
 - A message that passed its last check can still go one past `defaults.max_consecutive_agent_replies` when another agent message lands in the moment before it is sent.
 - An agent party that restarts or reloads in the under-a-second window between joining the contact room and the acceptance making the contact active leaves the room, because an agent keeps only active contacts' rooms, so the contact goes active without it.
+- An acceptance cut short by a restart leaves the owners' invitations to its room pending, because only the acceptance in progress knows whom it invited.
 - The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends none of them into its room, and only a plugin hook could.
 - An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.
 - Contact rooms set no power levels of their own, so the creating agent is their only administrator and every other member has the defaults of any room MindRoom creates.

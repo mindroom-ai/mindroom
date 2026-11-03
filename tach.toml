@@ -6619,6 +6619,7 @@ expose = [
     "get_room_name",
     "invite_to_room",
     "join_room",
+    "kick_from_room",
     "leave_room",
     "resolve_room_reference",
     "room_admin_power_user",

@@ -37,7 +37,7 @@ from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_room_admin import create_room, invite_to_room
+from mindroom.matrix.client_room_admin import create_room, invite_to_room, kick_from_room
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 
@@ -374,13 +374,19 @@ async def _seat_parties(
     record: ContactRecord,
     room_id: str,
     agents: dict[str, tuple[AgentBot, nio.AsyncClient]],
+    invited: list[str],
 ) -> None:
-    """Invite everyone who speaks for either party, then make each agent party join the room."""
+    """Invite everyone who speaks for either party, then make each agent party join the room.
+
+    Each user goes into ``invited`` before being asked, so a setup that stops, cancelled mid-request included, knows
+    whose invitation may stand.
+    """
     paths = context.runtime_paths
     creator = _room_creator(record)
     _, client = agents[creator]
     speakers = party_matrix_ids(record.requester, paths) | party_matrix_ids(record.target, paths)
     for user_id in sorted(speakers - {current_entity_id(creator, paths).full_id}):
+        invited.append(user_id)
         if not await invite_to_room(client, room_id, user_id):
             msg = f"{user_id} could not be invited to the contact room; accept again to retry"
             raise ValueError(msg)
@@ -389,6 +395,32 @@ async def _seat_parties(
         if not await bot.change_local_membership(room_id, "join"):
             msg = f"{name} could not join the contact room; accept again to retry"
             raise ValueError(msg)
+
+
+async def _withdraw_owner_invites(
+    client: nio.AsyncClient,
+    record: ContactRecord,
+    room_id: str,
+    invited: list[str],
+) -> None:
+    """Withdraw the owners' invitations to an abandoned contact room, so none leads them to a dead room.
+
+    Only the creating agent, which is still in the room, can withdraw them; invited agents leave on their own.
+    A withdrawal that fails or raises is only logged, so the agents still leave.
+    """
+    owners = {record.requester.owner, record.target.owner}
+    for user_id in invited:
+        if user_id not in owners:
+            continue
+        try:
+            await kick_from_room(client, room_id, user_id)
+        except Exception:
+            logger.exception(
+                "contact_room_invite_withdrawal_failed",
+                contact_id=record.id,
+                user_id=user_id,
+                room_id=room_id,
+            )
 
 
 async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord, room_id: str) -> None:
@@ -482,8 +514,9 @@ async def accept_contact(
 
     The target side keeps any rules or tools left out. Both agent parties keep the room while the contact is active.
     The pending contact names the room before anyone is invited, so the room refuses every turn until it is active.
-    A room that cannot be fully set up is left again and the request stays pending, to be replaced by the next room;
-    the room it replaces stays a removed contact's, because an agent whose leave failed may still be in it.
+    A room that cannot be fully set up is left again, with the owners' invitations withdrawn, and the request stays
+    pending, to be replaced by the next room; the room it replaces stays a removed contact's, because an agent whose
+    leave failed may still be in it.
     """
     config, paths = context.current_config, context.runtime_paths
     record = await _pending_request(context, agent_name, contact_id, "accept")
@@ -517,15 +550,17 @@ async def accept_contact(
         _change_side(current.target_side, rules, checked)
         return current.model_copy(deep=True)
 
+    invited: list[str] = []
     try:
         await run_blocking_until_complete(update_contacts, paths, register)
-        await _seat_parties(context, record, room_id, agents)
+        await _seat_parties(context, record, room_id, agents, invited)
         accepted = await run_blocking_until_complete(update_contacts, paths, activate)
     # Any failure, a cancellation included, leaves the room unless the store already made it the active contact's:
     # the store write finishes before a cancellation propagates, and agents never rejoin a contact room on their own.
     except BaseException:
         current = _by_id(await run_blocking_until_complete(read_contacts, paths), contact_id)
         if current.status != "active" or current.room_id != room_id:
+            await _withdraw_owner_invites(client, record, room_id, invited)
             await _leave_contact_room(context, record, room_id)
         raise
     await _announce_acceptance(context, accepted, agent_name)

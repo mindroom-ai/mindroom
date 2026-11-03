@@ -64,14 +64,19 @@ ADHOC_ROOM = "!adhoc:localhost"
 
 @dataclass
 class _Matrix:
-    """The stand-ins for creating the contact room and inviting to it."""
+    """The stand-ins for creating the contact room, inviting to it, and withdrawing an invitation."""
 
     create: AsyncMock
     invite: AsyncMock
+    kick: AsyncMock
 
     def invited(self) -> set[tuple[Any, ...]]:
         """Return each invite as its client, room, and user."""
         return {call.args for call in self.invite.await_args_list}
+
+    def withdrawn(self) -> list[tuple[Any, ...]]:
+        """Return each withdrawn invitation as its client, room, and user."""
+        return [call.args for call in self.kick.await_args_list]
 
 
 @contextmanager
@@ -80,8 +85,14 @@ def _matrix(room_id: str | None = CONTACT_ROOM, *, invited: bool = True) -> Iter
     with (
         patch("mindroom.contacts.flow.create_room", new=AsyncMock(return_value=room_id)) as create,
         patch("mindroom.contacts.flow.invite_to_room", new=AsyncMock(return_value=invited)) as invite,
+        patch("mindroom.contacts.flow.kick_from_room", new=AsyncMock(return_value=True)) as kick,
     ):
-        yield _Matrix(create, invite)
+        yield _Matrix(create, invite, kick)
+
+
+def _owners_withdrawn(runtime: _Runtime, *owners: str, room_id: str = CONTACT_ROOM) -> list[tuple[Any, ...]]:
+    """Return how the room's creator, Bob's agent, withdraws the invitations of ``owners``."""
+    return [(runtime.clients["mind_bob"], room_id, owner) for owner in owners]
 
 
 async def _accept(
@@ -206,6 +217,7 @@ async def test_accept_creates_room_invites_and_joins(tmp_path: Path) -> None:
     assert _joined(runtime) == _kept(config, paths) == {"mind_alice", "mind_bob"}
     assert (accepted.status, accepted.room_id) == ("active", CONTACT_ROOM)
     assert _stored(paths) == [accepted]
+    assert matrix.withdrawn() == []
 
 
 @pytest.mark.asyncio
@@ -362,7 +374,10 @@ async def test_accept_refuses_non_pending(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pending(tmp_path: Path) -> None:
-    """A stopped agent creates nothing; a failed creation, invite, or join leaves the room and keeps the request."""
+    """A stopped agent creates nothing; a failed creation, invite, or join leaves the room and keeps the request.
+
+    The owners' invitations to a room left that way are withdrawn, so none leads to a dead room named like the next.
+    """
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
@@ -373,19 +388,27 @@ async def test_a_room_that_cannot_be_set_up_is_left_and_the_request_stays_pendin
     matrix.create.assert_not_awaited()
     runtime.bots["mind_alice"].running = True
 
-    with _matrix(None), pytest.raises(ValueError, match=r"^The contact room could not be created"):
+    with _matrix(None) as matrix, pytest.raises(ValueError, match=r"^The contact room could not be created"):
         await _accept(config, paths, runtime, record.id)
+    assert matrix.withdrawn() == []
 
-    with _matrix(invited=False), pytest.raises(ValueError, match=r"could not be invited to the contact room"):
+    # The first invitation, Alice's, fails, and may still have reached the server.
+    with (
+        _matrix(invited=False) as matrix,
+        pytest.raises(ValueError, match=r"could not be invited to the contact room"),
+    ):
         await _accept(config, paths, runtime, record.id)
+    assert matrix.withdrawn() == _owners_withdrawn(runtime, OWNER)
     assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert _joined(runtime) == set()
     for name in ("mind_alice", "mind_bob"):
         runtime.bots[name].change_local_membership.reset_mock()
 
     runtime.bots["mind_bob"].change_local_membership.return_value = False
-    with _matrix(), pytest.raises(ValueError, match=r"^mind_bob could not join the contact room"):
+    with _matrix() as matrix, pytest.raises(ValueError, match=r"^mind_bob could not join the contact room"):
         await _accept(config, paths, runtime, record.id)
+    # Both owners were invited; the invited agent leaves on its own.
+    assert matrix.withdrawn() == _owners_withdrawn(runtime, OWNER, CO_OWNER)
     assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     for client in runtime.clients.values():
         client.room_leave.assert_not_awaited()
@@ -409,9 +432,10 @@ async def test_a_join_that_fails_unexpectedly_also_leaves_the_room(tmp_path: Pat
         return True
 
     runtime.bots["mind_bob"].change_local_membership.side_effect = change
-    with _matrix(), pytest.raises(type(failure)):
+    with _matrix() as matrix, pytest.raises(type(failure)):
         await _accept(config, paths, runtime, record.id)
 
+    assert matrix.withdrawn() == _owners_withdrawn(runtime, OWNER, CO_OWNER)
     assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert _kept(config, paths) == set()
     assert [stored.status for stored in _stored(paths)] == ["pending"]
@@ -426,13 +450,14 @@ async def test_an_acceptance_that_cannot_be_stored_leaves_the_room(tmp_path: Pat
     record = await _pending(config, paths, runtime)
 
     with (
-        _matrix(),
+        _matrix() as matrix,
         # The write naming the room passes, and the one activating the contact fails.
         patch("mindroom.contacts.flow.update_contacts", side_effect=[None, OSError("disk full")]),
         pytest.raises(OSError, match=r"^disk full$"),
     ):
         await _accept(config, paths, runtime, record.id)
 
+    assert matrix.withdrawn() == _owners_withdrawn(runtime, OWNER, CO_OWNER)
     assert _joined(runtime) == _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert [stored.status for stored in _stored(paths)] == ["pending"]
     runtime.sent("mind_alice").assert_not_awaited()
@@ -500,16 +525,19 @@ async def test_a_retried_acceptance_keeps_the_room_it_replaces_as_a_removed_cont
 
 @pytest.mark.asyncio
 async def test_a_leave_that_fails_during_cleanup_still_lets_the_other_agent_leave(tmp_path: Path) -> None:
-    """One agent's failed leave neither keeps the other in the room nor hides the failure that stopped the setup."""
+    """A failed withdrawal or leave keeps no agent in the room and does not hide the failure that stopped the setup."""
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
     runtime.bots["mind_alice"].change_local_membership.side_effect = _failing_membership(fails_on="leave")
     runtime.bots["mind_bob"].change_local_membership.side_effect = _failing_membership(fails_on="join")
 
-    with _matrix(), pytest.raises(RuntimeError, match=r"^join failed$"):
-        await _accept(config, paths, runtime, record.id)
+    with _matrix() as matrix:
+        matrix.kick.side_effect = [RuntimeError("kick failed"), False]
+        with pytest.raises(RuntimeError, match=r"^join failed$"):
+            await _accept(config, paths, runtime, record.id)
 
+    assert matrix.withdrawn() == _owners_withdrawn(runtime, OWNER, CO_OWNER)
     assert _memberships(runtime, "leave") == {"mind_alice", "mind_bob"}
     assert [stored.status for stored in _stored(paths)] == ["pending"]
 
@@ -530,7 +558,7 @@ async def test_a_cancellation_during_the_store_write_keeps_the_contact_it_activa
             release.wait(timeout=10)
         return store(runtime_paths, change)
 
-    with _matrix(), patch("mindroom.contacts.flow.update_contacts", side_effect=slow_update):
+    with _matrix() as matrix, patch("mindroom.contacts.flow.update_contacts", side_effect=slow_update):
         accepting = asyncio.create_task(_accept(config, paths, runtime, record.id))
         assert await asyncio.to_thread(writing.wait, 10)
         accepting.cancel()
@@ -541,6 +569,7 @@ async def test_a_cancellation_during_the_store_write_keeps_the_contact_it_activa
     assert [(stored.status, stored.room_id) for stored in _stored(paths)] == [("active", CONTACT_ROOM)]
     assert _joined(runtime) == _kept(config, paths) == {"mind_alice", "mind_bob"}
     assert _memberships(runtime, "leave") == set()
+    assert matrix.withdrawn() == []
 
 
 @pytest.mark.asyncio
