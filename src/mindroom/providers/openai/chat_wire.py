@@ -386,13 +386,13 @@ def chat_request_kwargs(
 _REASONING_DETAIL_TEXT_FIELDS = ("text", "summary")
 
 
-def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts) -> None:
+def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts, *, static: bool) -> None:
     """Add what a Chat request body gives its model to ``parts``.
 
     ``body`` is the body ``chat_request_kwargs`` built from ``messages`` with ``extra_body`` merged
     (``sdk_request_body``), so its messages are ``with_joined_system(messages)`` one for one. Message text, reasoning
-    text, and tool-result text count as text, and tool calls and tool definitions as JSON; encrypted reasoning details
-    count the reasoning tokens their answer reported.
+    text, and tool-result text count as text, and tool calls and, with ``static``, tool definitions as JSON; encrypted
+    reasoning details count the reasoning tokens their answer reported.
     """
     sent = body.get("messages") or []
     for formatted, source in zip(sent, with_joined_system(messages), strict=True):
@@ -414,7 +414,8 @@ def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts:
         if any(detail.get("data") for detail in details):
             parts.cost(source.metrics.tokens.reasoning_tokens)
         parts.value(formatted.get("tool_calls"))
-    parts.value(body.get("tools"))
+    if static:
+        parts.value(body.get("tools"))
 
 
 # --- Replies --------------------------------------------------------------------------------------------------

@@ -351,16 +351,13 @@ def test_claude_counts_a_web_search_result_s_page_ciphertext_a_quarter_token_per
     assert _difference(route, answer("Q" * 8_000), answer("Q" * 4)) == opaque_tokens(8_000) - opaque_tokens(4)
 
 
-@pytest.mark.parametrize("searched", ["before", "after"])
+@pytest.mark.parametrize("searched", ["before", "after", "both"])
 def test_claude_counts_a_deferred_tool_in_the_tail_only_when_the_tail_loads_it(tmp_path: Path, searched: str) -> None:
-    """A tool search before the answer a request is sized from loaded its tool into what that answer reported."""
+    """A tool search before the answer a request is sized from loaded its tool into what that answer reported.
+
+    A later search that finds the tool again sends its reference beside no new definition.
+    """
     route = _route("anthropic", tmp_path)
-    lookup = ToolSpec(
-        name="lookup_order",
-        description="Look up an order by its id.",
-        parameters={"type": "object", "properties": {"order_id": {"type": "string"}}},
-        strict=None,
-    )
     search = {
         "type": "server_tool_use",
         "id": "srvtoolu_1",
@@ -377,23 +374,37 @@ def test_claude_counts_a_deferred_tool_in_the_tail_only_when_the_tail_loads_it(t
     }
     searching = _claude_answer(route, search, found, {"type": "text", "text": "Found the order tool."})
     plain = _claude_answer(route, {"type": "text", "text": "Pack a light rain jacket."})
-    first, second = (searching, plain) if searched == "before" else (plain, searching)
-    request = ModelRequest(
-        messages=(
-            Message(role="user", content="Where is my order?"),
-            first,
-            Message(role="user", content="And the weather?"),
-            second,
-            Message(role="user", content="Thanks."),
-        ),
-        tools=(lookup,),
-        deferred_tools=DeferredTools(names=frozenset({"lookup_order"})),
-    )
+    first, second = {"before": (searching, plain), "after": (plain, searching), "both": (searching, searching)}[
+        searched
+    ]
 
-    tail = route.request_tokens(request, start=3)
-    without_the_tool = route.request_tokens(replace(request, tools=()), start=3)
+    def request(description: str) -> ModelRequest:
+        lookup = ToolSpec(
+            name="lookup_order",
+            description=description,
+            parameters={"type": "object", "properties": {"order_id": {"type": "string"}}},
+            strict=None,
+        )
+        return ModelRequest(
+            messages=(
+                Message(role="user", content="Where is my order?"),
+                first,
+                Message(role="user", content="And the weather?"),
+                second,
+                Message(role="user", content="Thanks."),
+            ),
+            tools=(lookup,),
+            deferred_tools=DeferredTools(names=frozenset({"lookup_order"})),
+        )
 
-    assert tail == without_the_tool if searched == "before" else tail > without_the_tool
+    short, long = request("Look up an order by its id."), request(_REASONING)
+    whole = route.request_tokens(short)
+    prefix = route.request_tokens(replace(short, messages=short.messages[:3]))
+    tail = route.request_tokens(short, start=3)
+
+    assert whole <= prefix + tail <= whole + 4
+    # Only a tail whose own search loads the tool first counts its definition.
+    assert (route.request_tokens(long, start=3) > tail) is (searched == "after")
 
 
 @pytest.mark.parametrize("thinking", [{"type": "disabled"}, {"type": "enabled", "budget_tokens": 2_048}])
@@ -531,12 +542,13 @@ def test_gemini_counts_function_declarations_and_search_parts_only_where_search_
     assert (route.request_tokens(request("Look something up.", _REASONING)) > plain) is beside
 
 
-def test_gemini_sizes_and_identifies_the_tools_its_generation_config_authors(tmp_path: Path) -> None:
-    """Tools authored in ``generation_config`` go with a request that offers no function tools of its own."""
+@pytest.mark.parametrize("field", ["generation_config", "generative_model_kwargs"])
+def test_gemini_sizes_and_identifies_the_tools_its_generation_config_authors(tmp_path: Path, field: str) -> None:
+    """Tools authored in the generation config go with a request that offers no function tools of its own."""
 
     def route(description: str, name: str) -> ModelProvider:
         tool = {"function_declarations": [{"name": "lookup", "description": description}]}
-        return _route("gemini", tmp_path, name, generation_config={"tools": [tool]})
+        return _route("gemini", tmp_path, name, **{field: {"tools": [tool]}})
 
     short, long = route("Look something up.", "-short"), route(_REASONING, "-long")
     request = ModelRequest(messages=(Message(role="user", content="Look it up."),))

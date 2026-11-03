@@ -108,14 +108,10 @@ class ChatAdapter:
 
     def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
         # Each message renders alone, so the answer at ``start`` and what follows it render without the messages before
-        # them, and without the tools and output schema the request before them already sent, authored ones included.
-        rendered = (
-            replace(request, messages=request.messages[start:], tools=(), output_schema=None) if start else request
-        )
+        # them and count only themselves: the tools, authored ones included, went with the request before them too.
+        rendered = replace(request, messages=request.messages[start:]) if start else request
         body = sdk_request_body(self._request_kwargs(rendered), SDK_OPTION_KEYS)
-        if start:
-            body = {key: value for key, value in body.items() if key != "tools"}
-        chat_body_parts(body, rendered.messages, parts)
+        chat_body_parts(body, rendered.messages, parts, static=not start)
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = chat_request_kwargs(

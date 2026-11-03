@@ -38,7 +38,6 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     Capabilities,
-    DeferredTools,
     ModelIdentity,
     ModelRequest,
     NativeCompactionReplay,
@@ -477,34 +476,20 @@ class ClaudeProvider:
     def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
         """Add what the body for ``request`` gives the model, its messages from ``start`` on.
 
-        The answer at ``start`` and what follows it render without the messages before them, which merges no turn
-        across them and moves the earlier-thinking boundary no earlier; tool definitions their tool searches load
-        count as the tools of that rendering. A deferred tool the request loaded counts as an offered one.
+        The body renders as sent. The answer at ``start`` and what follows it render without the messages before them,
+        which merges no turn across them and moves the earlier-thinking boundary no earlier, and count only themselves
+        and the deferred tools their own searches load first: everything else the body sends, such as the system prompt
+        and tools, authored ones included, went with the request before the answer too.
         """
-        deferred = request.deferred_tools.names
-        if start:
-            loaded = claude_loaded_tool_names(request.messages[start:]) - claude_loaded_tool_names(
-                request.messages[:start],
-            )
-            request = replace(
-                request,
-                messages=request.messages[start:],
-                tools=tuple(tool for tool in request.tools if tool.name in loaded & deferred),
-                deferred_tools=DeferredTools(),
-                output_schema=None,
-            )
-        elif deferred:
-            loaded = claude_loaded_tool_names(request.messages)
-            request = replace(request, deferred_tools=replace(request.deferred_tools, names=deferred - loaded))
-        body = self._request_body(request)
-        kwargs = sdk_request_body(body.kwargs, _SDK_OPTION_KEYS)
-        if start:
-            # A system prompt or tools authored in ``request_params``, such as a server tool, went with the request
-            # before the answer too; only the tools the tail's own searches load are new.
-            kwargs = {
-                key: value for key, value in kwargs.items() if key != "system" and (key != "tools" or request.tools)
-            }
-        claude_body_parts(kwargs, body.messages, parts)
+        loaded = claude_loaded_tool_names(request.messages[start:]) - claude_loaded_tool_names(request.messages[:start])
+        body = self._request_body(replace(request, messages=request.messages[start:]) if start else request)
+        claude_body_parts(
+            sdk_request_body(body.kwargs, _SDK_OPTION_KEYS),
+            body.messages,
+            parts,
+            loaded=loaded,
+            static=not start,
+        )
         parts.flag(body.flags)
 
     def _request_body(self, request: ModelRequest) -> _RequestBody:

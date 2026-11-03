@@ -349,15 +349,23 @@ _TRANSPORT_BLOCK_FIELDS = frozenset(
 )
 
 
-def claude_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts) -> None:
+def claude_body_parts(
+    body: Mapping[str, Any],
+    messages: Sequence[Message],
+    parts: RequestParts,
+    *,
+    loaded: frozenset[str],
+    static: bool,
+) -> None:
     """Add what a Claude request body built from ``messages`` gives its model to ``parts``.
 
-    System and message text count as text, tool inputs, results, and definitions as JSON, and a deferred tool only
-    once a tool search in the request loaded it, as the API loads it then. A replayed ``thinking`` or
-    ``redacted_thinking`` block is ciphertext beside a summary, so each answer whose thinking the body replays counts
-    its reported output beyond its visible part, or its thinking text when that is larger.
+    System and message text count as text, and tool inputs, results, and definitions as JSON. With ``static`` the
+    system text and the offered tools count; a deferred tool counts once a tool search loaded it (``loaded``), as the
+    API loads it then. A replayed ``thinking`` or ``redacted_thinking`` block is ciphertext beside a summary, so each
+    answer whose thinking the body replays counts its reported output beyond its visible part, or its thinking text
+    when that is larger.
     """
-    system = body.get("system")
+    system = body.get("system") if static else None
     if isinstance(system, str):
         parts.text(system)
     for block in system if isinstance(system, list) else ():
@@ -370,8 +378,8 @@ def claude_body_parts(body: Mapping[str, Any], messages: Sequence[Message], part
         if message.role == "assistant":
             _thinking_parts(message, parts, replayed)
     for tool in body.get("tools") or ():
-        if not tool.get("defer_loading"):
-            parts.value({key: value for key, value in tool.items() if key != "cache_control"})
+        if tool.get("name") in loaded if tool.get("defer_loading") else static:
+            parts.value({key: value for key, value in tool.items() if key not in {"cache_control", "defer_loading"}})
 
 
 def _block_parts(block: Mapping[str, Any], parts: RequestParts, replayed: set[str]) -> None:
