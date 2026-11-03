@@ -32,6 +32,7 @@ from mindroom.custom_tools.atlassian_spaces import (
     CONFLUENCE_SPACE_KEY_PATTERN,
     JIRA_PROJECT_KEY_PATTERN,
     AtlassianSpaces,
+    UnconfinableQueryError,
     space_limit_sentence,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -536,6 +537,17 @@ class AtlassianToolkit(Toolkit):
         if allowed is not None and not self._spaces.allows(product, key):
             raise _SpaceNotAllowedError(product, allowed)
 
+    def _restricted_query(self, product: AtlassianProduct, query: str, field_name: str) -> str:
+        """Confine a search query to the allowed spaces, refusing one whose structure could escape them."""
+        try:
+            return self._spaces.restrict_query(product, query)
+        except UnconfinableQueryError as exc:
+            msg = (
+                f"{field_name} has {exc}. With this agent's {product.capitalize()} spaces limited, a query needs "
+                "matched parentheses and closed quotes, and no backslash outside quotes."
+            )
+            raise _InvalidArgumentError(msg) from None
+
     def _adds_space_field(self, fields: list[str]) -> bool:
         """Return whether issue reads must also request each issue's space, so results can be checked."""
         return self._spaces.jira is not None and not _PROJECT_FIELD_SELECTORS & set(fields)
@@ -587,7 +599,7 @@ class AtlassianToolkit(Toolkit):
             requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_FIELDS)
             adds_space_field = self._adds_space_field(requested)
             body: dict[str, object] = {
-                "jql": self._spaces.restrict_query("jira", _required_text(jql, "jql")),
+                "jql": self._restricted_query("jira", _required_text(jql, "jql"), "jql"),
                 "maxResults": _page_size(max_results),
                 "fields": [*requested, "project"] if adds_space_field else requested,
             }
@@ -810,7 +822,7 @@ class AtlassianToolkit(Toolkit):
         try:
             expand = "content.history,content.history.ownedBy,content.version"
             params: dict[str, str | int] = {
-                "cql": self._spaces.restrict_query("confluence", _required_text(cql, "cql")),
+                "cql": self._restricted_query("confluence", _required_text(cql, "cql"), "cql"),
                 "limit": _page_size(limit),
                 "excerpt": "indexed",
                 "expand": f"{expand},content.space" if self._spaces.confluence is not None else expand,

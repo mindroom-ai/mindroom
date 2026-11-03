@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from mindroom.custom_tools.atlassian import AtlassianTools
-from mindroom.custom_tools.atlassian_spaces import AtlassianSpaces
+from mindroom.custom_tools.atlassian_spaces import AtlassianSpaces, UnconfinableQueryError
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import (
@@ -97,7 +97,13 @@ def _page_in(space_key: str) -> dict[str, object]:
         ),
         ("confluence", "ORDER BY lastmodified", 'space in ("DOCS", "~alice") ORDER BY lastmodified'),
         ("confluence", "text ~ reorder by", 'space in ("DOCS", "~alice") AND (text ~ reorder by)'),
-        ("jira", "x) OR (project = OPS", 'project in ("ENG") AND (x) OR (project = OPS)'),
+        (
+            "jira",
+            'summary ~ "a ) b" AND (status = Done OR status = Open) ORDER BY key',
+            'project in ("ENG") AND (summary ~ "a ) b" AND (status = Done OR status = Open)) ORDER BY key',
+        ),
+        ("jira", "(x) ORDER BY key", 'project in ("ENG") AND ((x)) ORDER BY key'),
+        ("jira", "(status = Done ORDER BY key)", 'project in ("ENG") AND ((status = Done ORDER BY key))'),
     ],
 )
 def test_queries_are_limited_to_allowed_spaces_with_order_by_last(product: str, query: str, expected: str) -> None:
@@ -106,6 +112,55 @@ def test_queries_are_limited_to_allowed_spaces_with_order_by_last(product: str, 
 
     assert spaces.restrict_query(product, query) == expected  # type: ignore[arg-type]
     assert AtlassianSpaces().restrict_query(product, query) == query  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        'key = ENG-1) OR (project = OPS AND summary ~ "acquisition"',
+        "status = Done) OR (project = OPS",
+        "(status = Done",
+        'summary ~ "unclosed',
+        "summary ~ don't) OR (project = OPS AND summary ~ 'x",
+        "summary ~ a\\(b\\)",
+        "status = Done ORDER BY key) OR (project = OPS",
+    ],
+)
+def test_queries_that_could_escape_the_space_clause_are_refused(query: str) -> None:
+    """Only a query that is one closed operand is limited, so no query can probe other spaces through paging."""
+    spaces = AtlassianSpaces.from_config(jira_spaces=["ENG"], confluence_spaces=None)
+
+    if "don't" in query:
+        # Quotes pair up inside a word too, so this is one balanced query whose second quote closes the first.
+        assert spaces.restrict_query("jira", query).startswith('project in ("ENG") AND (')
+        return
+    with pytest.raises(UnconfinableQueryError):
+        spaces.restrict_query("jira", query)
+    assert spaces.restrict_query("confluence", query) == query
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("function_name", "kwargs"),
+    [
+        ("jira_search_issues", {"jql": 'key = ENG-1) OR (project = OPS AND summary ~ "acquisition"', "max_results": 1}),
+        ("confluence_search", {"cql": 'id = 1) OR (space = OPS AND text ~ "acquisition"', "limit": 1}),
+    ],
+)
+async def test_escaping_search_is_refused_before_any_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    function_name: str,
+    kwargs: dict[str, object],
+) -> None:
+    """A search that would close the space clause's parentheses never reaches Atlassian, so paging reveals nothing."""
+    tool, gateway = _connected(tmp_path, monkeypatch, jira_spaces=["ENG"], confluence_spaces=["DOCS"])
+
+    result = await _call(tool, function_name, **kwargs)
+
+    assert result["code"] == "invalid_argument"
+    assert "a closing parenthesis without an opening one" in result["message"]
+    assert gateway.requests == []
 
 
 @pytest.mark.parametrize(

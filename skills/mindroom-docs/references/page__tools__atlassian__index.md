@@ -141,7 +141,8 @@ agents:
 - The agent still acts as the requester, so it reaches only spaces that are both listed and open to that requester in Atlassian.
 - A space key is the part after `/spaces/` in a space's URL, such as `DOCS` in `https://example.atlassian.net/wiki/spaces/DOCS`, and every Jira issue key starts with its space key.
 - Config validation rejects an entry that cannot be a space key, such as a name with spaces in it.
-- An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, and creating or updating an issue can set a parent in another space.
+- An issue in an allowed space can still name issues elsewhere: its links, parent, and subtasks show their keys and summaries, searches can select allowed issues by such relations, and creating or updating an issue can set a parent in another space.
+- A refusal tells the agent that an item exists outside the allowed spaces, but nothing of what it holds.
 - `write` combines with `defaults.tools` and dashboard settings like any [tool setting](https://docs.mindroom.chat/tools/#how-settings-combine), while the space lists can be set only on an agent's tool entry.
 - Changing these options needs no reconnect.
 - These limits apply only to this tool, so do not also give a limited agent the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) `atlassian` service, the API-token `jira` and `confluence` tools, code-execution tools that run outside a worker, or `delegate_to` agents whose Atlassian tool is not limited the same way, which reach every space the account can.

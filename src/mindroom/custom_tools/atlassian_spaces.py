@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from mindroom.oauth.atlassian import AtlassianProduct
 
@@ -39,26 +39,66 @@ def _space_keys(product: AtlassianProduct, value: object) -> tuple[str, ...] | N
     return tuple(keys.values())
 
 
-def _order_by_start(query: str) -> int | None:
-    """Return where a JQL or CQL ORDER BY clause starts outside quoted text, or None without one."""
+class UnconfinableQueryError(ValueError):
+    """A JQL or CQL query whose structure could reach outside the parentheses that confine it to the spaces."""
+
+
+def _unquoted(query: str) -> Iterator[tuple[int, str]]:
+    """Yield each character outside quoted text with its index, then refuse an unclosed quote.
+
+    Jira and Confluence open a string at any quote, even inside a word, and a backslash inside a string escapes
+    the next character, which is how this reads them too.
+    """
     quote: str | None = None
     escaped = False
     for index, char in enumerate(query):
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-        elif char in "\"'":
-            quote = char
-        elif (index == 0 or not (query[index - 1].isalnum() or query[index - 1] == "_")) and _ORDER_BY_PATTERN.match(
-            query,
-            index,
-        ):
-            return index
-    return None
+        if quote is None:
+            if char in "\"'":
+                quote = char
+            else:
+                yield index, char
+        elif escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            quote = None
+    if quote is not None:
+        msg = "an unclosed quote"
+        raise UnconfinableQueryError(msg)
+
+
+def _starts_order_by(query: str, index: int) -> bool:
+    return (index == 0 or not (query[index - 1].isalnum() or query[index - 1] == "_")) and bool(
+        _ORDER_BY_PATTERN.match(query, index),
+    )
+
+
+def _order_by_start(query: str) -> int | None:
+    """Return where a top-level JQL or CQL ORDER BY clause starts, or None without one.
+
+    Raises ``UnconfinableQueryError`` unless every parenthesis outside quoted text is matched, every quote is
+    closed, and no backslash appears outside quotes: only then is the whole condition one parenthesized operand
+    that cannot close the parentheses around it, so the space clause cannot be escaped, not even to probe other
+    spaces through result counts or paging.
+    """
+    depth = 0
+    order_by: int | None = None
+    for index, char in _unquoted(query):
+        if char == "\\":
+            msg = "a backslash outside quoted text"
+            raise UnconfinableQueryError(msg)
+        if char in "()":
+            depth += 1 if char == "(" else -1
+            if depth < 0:
+                msg = "a closing parenthesis without an opening one"
+                raise UnconfinableQueryError(msg)
+        elif order_by is None and depth == 0 and _starts_order_by(query, index):
+            order_by = index
+    if depth:
+        msg = "an opening parenthesis without a closing one"
+        raise UnconfinableQueryError(msg)
+    return order_by
 
 
 def space_limit_sentence(product: AtlassianProduct, keys: Sequence[str], *, subject: str = "This agent") -> str:
@@ -103,8 +143,8 @@ class AtlassianSpaces:
     def restrict_query(self, product: AtlassianProduct, query: str) -> str:
         """Limit a JQL or CQL query to the allowed spaces, keeping its ORDER BY clause last.
 
-        This only narrows what Atlassian returns: a query can still close the parentheses, so callers also drop
-        every result outside the allowed spaces.
+        Raises ``UnconfinableQueryError`` for a query that could escape the space clause. Callers still drop every
+        result outside the allowed spaces, in case Atlassian parses a query differently.
         """
         keys = self.keys(product)
         if keys is None:
