@@ -635,6 +635,12 @@ async def test_an_ask_with_a_summary_pins_it_as_its_threads_title(tmp_path: Path
     )
 
 
+def test_only_an_ask_that_starts_a_thread_can_title_it() -> None:
+    """A follow-up in the current thread cannot set a summary, so it never races the title the thread started with."""
+    with pytest.raises(ValueError, match="new_thread=True"):
+        Ask("Follow up", new_thread=False, summary="Second")
+
+
 @pytest.mark.asyncio
 async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: Path) -> None:
     """The dream and review each get a thread of their own, both are recorded as the automation's, and approval applies."""
