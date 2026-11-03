@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import copy
 import json
 from dataclasses import replace
@@ -50,6 +51,7 @@ _UNSUPPORTED_FILES = {
     "deck.pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "sheet.xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "bundle.zip": "application/zip",
+    "network.vsdx": "application/vnd.ms-visio.drawing.main+xml",
 }
 _CHECKPOINT = {"type": "compaction", "content": "Launch port 4321.", "encrypted_content": "opaque"}
 _TEXT = {"type": "text", "text": "Ready"}
@@ -119,25 +121,79 @@ async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tm
 
 @pytest.mark.asyncio
 async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path: Path) -> None:
-    """A text file of any text type, its type's parameters aside, goes as plain text that Claude reads inline."""
-    texts = {
-        "text/tab-separated-values": b"a\tb\n",
-        "application/x-yaml": b"key: value\n",
-        "text/x-log": b"12:00 ERROR crashed\n",
-        "text/plain; charset=utf-8": b"Plain notes.",
-        "application/json; charset=utf-8": b'{"key": "value"}',
-    }
+    """A text file of any text type, its type's parameters aside, goes as plain text that Claude reads inline.
+
+    Its text is decoded as its byte-order mark says, else as UTF-8, else as Windows-1252.
+    """
+    texts = [
+        ("text/tab-separated-values", b"a\tb\n"),
+        ("application/x-yaml", b"key: value\n"),
+        ("text/x-log", b"12:00 ERROR crashed\n"),
+        ("text/plain; charset=utf-8", b"Plain notes."),
+        ("application/json; charset=utf-8", b'{"key": "value"}'),
+        ("application/toml", b'name = "app"\n'),
+        ("application/sql", b"SELECT 1;\n"),
+        ("application/x-sh", b"echo hi\n"),
+        ("application/x-shellscript", b"echo hi\n"),
+        ("application/x-perl", b"print 1;\n"),
+        ("application/x-php", b"<?php echo 1;\n"),
+        ("application/x-ruby", b"puts 1\n"),
+        ("application/x-tex", b"\\section{Intro}\n"),
+        ("application/x-latex", b"\\begin{document}\n"),
+        ("application/javascript", b"let a = 1;\n"),
+        ("application/ecmascript", b"let a = 1;\n"),
+        ("application/ld+json", b'{"@id": "x"}'),
+        ("application/x-ipynb+json", b'{"cells": []}'),
+        ("application/rss+xml", b"<rss/>"),
+    ]
+    encoded = [
+        ("text/csv", "1;Müller GmbH;3 €\n".encode("cp1252"), "1;Müller GmbH;3 €\n"),
+        # Windows-1252 text whose bytes for ß and “ form one valid multibyte UTF-8 character by chance.
+        ("text/plain", "„Gruß“ Jürgen Müller".encode("cp1252"), "„Gruß“ Jürgen Müller"),
+        ("text/csv", "id;message\n1;„Gruß“\n".encode("cp1252"), "id;message\n1;„Gruß“\n"),
+        ("text/x-log", "12:00 ERROR crashed\n".encode("utf-16"), "12:00 ERROR crashed\n"),
+        ("text/x-log", codecs.BOM_UTF16_BE + "12:00 ERROR\n".encode("utf-16-be"), "12:00 ERROR\n"),
+        ("text/plain", "\ufeffMüller".encode(), "Müller"),
+    ]
+    cases = [(mime_type, data, data.decode()) for mime_type, data in texts] + encoded
     turn = Message(
         role="user",
         content="Summarize the attachments.",
-        files=[File(content=data, mime_type=mime_type) for mime_type, data in texts.items()],
+        files=[File(content=data, mime_type=mime_type) for mime_type, data, _ in cases],
     )
     wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
 
     blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))
 
     assert [block["source"] for block in blocks if block["type"] == "document"] == [
-        {"type": "text", "media_type": "text/plain", "data": data.decode()} for data in texts.values()
+        {"type": "text", "media_type": "text/plain", "data": text} for _, _, text in cases
+    ]
+    assert _notes(blocks) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mime_type", ["Application/PDF", "application/pdf; name=report.pdf"])
+@pytest.mark.parametrize("source", ["content", "filepath"])
+async def test_a_pdf_typed_with_case_or_parameters_reaches_claude_as_a_pdf(
+    tmp_path: Path,
+    mime_type: str,
+    source: str,
+) -> None:
+    """A tool's PDF typed ``Application/PDF`` or with parameters goes as the PDF document Claude reads."""
+    path = tmp_path / "report.bin"
+    path.write_bytes(_PDF)
+    file = (
+        File(content=_PDF, mime_type=mime_type)
+        if source == "content"
+        else File(filepath=str(path), mime_type=mime_type)
+    )
+    turn = Message(role="user", content="Read it.", files=[file])
+    wire = Wire(sse_reply([{"type": "text", "text": "Read."}]))
+
+    blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))
+
+    assert [block["source"] for block in blocks if block["type"] == "document"] == [
+        {"type": "base64", "media_type": "application/pdf", "data": base64.b64encode(_PDF).decode()},
     ]
     assert _notes(blocks) == []
 

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from anthropic.types.beta import BetaMessage, BetaUsage
 
-from mindroom.llm.media import image_format, is_text_mime_type
+from mindroom.llm.media import canonical_mime_type, file_text, image_format, is_text_mime_type
 from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
@@ -269,15 +269,15 @@ def _document_block(file: File, provider: str) -> dict[str, Any] | None:
         if data is None:
             # The file is empty, which its reader already logged.
             return None
-        media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+        media_type = canonical_mime_type(file.mime_type) or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
     elif file.content is not None:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        media_type = file.mime_type or "application/pdf"
+        media_type = canonical_mime_type(file.mime_type) or "application/pdf"
     else:
         return None
     if is_text_mime_type(media_type):
         # The text document source accepts only text/plain; other text types are sent as plain text.
-        source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
+        source = {"type": "text", "media_type": "text/plain", "data": file_text(data)}
     else:
         # Any other type is a base64 document, which the API accepts for PDF only.
         source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
