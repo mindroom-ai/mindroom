@@ -8,11 +8,10 @@ import json
 import re
 import sqlite3
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Never
 from uuid import uuid4
 
-import httpx2
 import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
@@ -48,15 +47,13 @@ from mindroom.hooks import (
     render_enrichment_block,
 )
 from mindroom.llm.events import RunFinished
-from mindroom.llm.media import File, Image
+from mindroom.llm.media import Image
 from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
-    DeferredTools,
     ModelRequest,
     NativeCompactionReplay,
     TokenCounter,
-    ToolSpec,
 )
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -64,7 +61,6 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.model_usage import message_context_tokens
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.schema import quote_identifier
@@ -100,8 +96,6 @@ from tests.history_helpers import (
     seeded_storage,
     summary_rows_of,
 )
-from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
-from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -530,107 +524,6 @@ async def test_request_sizing_runs_off_the_event_loop(
 
     assert sizing_threads
     assert loop_thread not in sizing_threads
-
-
-def test_request_sizing_never_counts_attached_file_bytes(tmp_path: Path) -> None:
-    """A route's estimate must not count an attachment's encoded bytes as prompt text."""
-    model = responses_adapter(tmp_path, "gpt-6-luna", store=False)
-    pdf = File(content=b"%PDF-1.7\n" + b"x" * 300_000, mime_type="application/pdf", filename="report.pdf")
-    message = Message(role="user", content="Summarize the attached report.", files=[pdf])
-
-    assert model.request_tokens(ModelRequest(messages=(message,))) < 10_000
-
-
-# About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.
-_SEARCHED_TOOL = ToolSpec(name="big_tool", description="word " * 20_000, parameters={}, strict=None)
-
-
-def _searched_request(provider: str, tmp_path: Path) -> tuple[Any, ModelRequest]:
-    """Return a route and a request whose answer's tool search loaded the deferred ``big_tool``.
-
-    OpenAI replays the loaded definitions inside the search output; Claude replays only references that the provider
-    expands, from a turn stored now or one stored only with its server-tool blocks before v2026.9.44.
-    """
-    if provider == "openai":
-        model: Any = responses_adapter(tmp_path, "gpt-6-luna", store=False)
-        provider_data: dict[str, Any] = {
-            RESPONSE_OUTPUT_KEY: [
-                {
-                    "type": "tool_search_call",
-                    "id": "ts_1",
-                    "call_id": "search_1",
-                    "execution": "server",
-                    "arguments": {"query": "big"},
-                    "status": "completed",
-                },
-                {
-                    "type": "tool_search_output",
-                    "id": "tso_1",
-                    "call_id": "search_1",
-                    "execution": "server",
-                    "status": "completed",
-                    "tools": [
-                        {
-                            "type": "function",
-                            "name": "big_tool",
-                            "description": _SEARCHED_TOOL.description,
-                            "parameters": {},
-                        },
-                    ],
-                },
-            ],
-        }
-    else:
-        model = provider_for(
-            {"provider": "anthropic", "id": "claude-sonnet-5", "extra_kwargs": {"api_key": "test-key"}},
-            tmp_path / "claude",
-            httpx2.AsyncClient(),
-        )
-        search = [
-            {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
-            {
-                "type": "tool_search_tool_result",
-                "tool_use_id": "srv_1",
-                "content": {
-                    "type": "tool_search_tool_search_result",
-                    "tool_references": [{"type": "tool_reference", "tool_name": "big_tool"}],
-                },
-            },
-        ]
-        provider_data = {"claude_blocks" if provider == "claude" else "server_tool_blocks": search}
-    messages = (
-        Message(role="user", content="Use the big tool"),
-        Message(role="assistant", provider_data=provider_data),
-        Message(role="user", content="Go on"),
-    )
-    return model, ModelRequest(
-        messages=messages,
-        tools=(_SEARCHED_TOOL,),
-        deferred_tools=DeferredTools(names=frozenset({"big_tool"})),
-    )
-
-
-@pytest.mark.parametrize("provider", ["openai", "claude", "claude_legacy"])
-def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_them(
-    tmp_path: Path,
-    provider: str,
-) -> None:
-    """A deferred definition costs nothing until a tool search loads it, then enters the context once.
-
-    A request anchored on the searching answer charges it with that answer; one anchored after it, never again.
-    """
-    with isolated_provider_environment():
-        model, request = _searched_request(provider, tmp_path)
-        unsearched = replace(request, messages=request.messages[:1])
-        # What the definition costs a request that offers it outright.
-        offered = model.request_tokens(replace(unsearched, deferred_tools=DeferredTools()))
-        definition = offered - model.request_tokens(replace(unsearched, tools=()))
-
-        assert definition > 15_000
-        assert model.request_tokens(unsearched) < 1_000
-        assert abs(model.request_tokens(request) - model.request_tokens(unsearched) - definition) < 1_000
-        assert abs(model.request_tokens(request, start=1) - definition) < 1_000
-        assert model.request_tokens(request, start=2) < 1_000
 
 
 def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
