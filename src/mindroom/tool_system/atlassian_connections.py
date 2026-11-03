@@ -46,6 +46,7 @@ class AtlassianConnectionConfig(BaseModel):
     cloud_id: str | None = None
     products: tuple[AtlassianProduct, ...] = ATLASSIAN_PRODUCTS
     write: bool = True
+    requester_scoped: bool = True
     client_config_service: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*_oauth_client$")
 
     @field_validator("site_url")
@@ -99,6 +100,7 @@ def atlassian_connection_oauth_provider(connection: AtlassianConnectionConfig) -
         products=connection.products,
         write=connection.write,
         client_config_service=connection.oauth_client_service,
+        requester_scoped=connection.requester_scoped,
     )
 
 

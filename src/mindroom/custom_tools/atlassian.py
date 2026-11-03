@@ -482,7 +482,7 @@ class AtlassianToolkit(Toolkit):
         """Return a current access token for the requester, refreshing it when it is about to expire."""
         context = self._credential_context()
         if context.worker_target is None:
-            # Requester-only credentials never fall back to a shared or global store.
+            # Without a worker target, no store matches this call, so never fall back to a global one.
             raise await self._connection_required(context)
         try:
             refreshed = await refresh_oauth_credentials_with_result(context)

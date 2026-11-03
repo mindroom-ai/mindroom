@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
@@ -25,14 +26,19 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.atlassian_test_support import (
+    ALICE,
+    BOB,
     CLOUD_ID,
     OTHER_CLOUD_ID,
     OTHER_SITE_URL,
     SITE_URL,
     FakeGateway,
     bearer,
+    execution_identity,
     gateway_url,
+    grant,
     publish_grant,
     runtime_paths,
     save_client_config,
@@ -40,13 +46,14 @@ from tests.atlassian_test_support import (
     worker_target,
 )
 from tests.conftest import publish_test_plugins
-from tests.oauth_test_utils import oauth_authorization_url
+from tests.oauth_test_utils import oauth_authorization_url, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.plugins import ConfigPlugins
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 DEFAULT_TOKEN = "default-connection-token"  # noqa: S105
 PARTNER_TOKEN = "partner-connection-token"  # noqa: S105
@@ -409,3 +416,80 @@ async def test_connection_tools_take_space_limits_for_their_own_products(
     for name, overrides in (("partner_atlassian", {"jira_spaces": ["ENG"]}), ("archive_atlassian", {"write": True})):
         with pytest.raises(ToolConfigOverrideError, match="unknown authored override"):
             validate_authored_tool_entry_overrides(name, overrides, tool_metadata=entries)
+
+
+SHARED_CONNECTION = """
+from mindroom.tool_system.atlassian_connections import (
+    AtlassianConnectionConfig,
+    atlassian_connection_oauth_provider,
+    register_atlassian_connection_tools,
+)
+
+TEAM = AtlassianConnectionConfig(
+    name="team",
+    display_name="Team Confluence",
+    site_url="https://acme.atlassian.net",
+    products=("confluence",),
+    write=False,
+    requester_scoped=False,
+    client_config_service="atlassian_oauth_client",
+)
+register_atlassian_connection_tools(TEAM)
+
+
+def register_oauth_providers(settings, runtime_paths):
+    return [atlassian_connection_oauth_provider(TEAM)]
+"""
+
+
+def test_only_an_opted_out_connection_follows_the_agent_worker_scope() -> None:
+    """requester_scoped=False stores a connection's tokens under the agent's worker scope; nothing else changes."""
+    assert atlassian_oauth_provider().requester_scoped_credentials is True
+    assert atlassian_connection_oauth_provider(_connection()).requester_scoped_credentials is True
+    assert (
+        atlassian_connection_oauth_provider(_connection(requester_scoped=False)).requester_scoped_credentials is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_connection_serves_every_requester_of_a_shared_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One grant stored for a shared agent answers every requester of that agent, and only that agent."""
+    config, paths = _plugin(tmp_path, SHARED_CONNECTION)
+    manager = save_client_config(paths)
+    gateway = FakeGateway(sites_by_token={PARTNER_TOKEN: [site(OTHER_CLOUD_ID, OTHER_SITE_URL)]}).install(monkeypatch)
+    gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search", OTHER_CLOUD_ID), {"results": []})
+    plugins = publish_test_plugins(config, paths)
+    provider = plugins.oauth_providers["team_atlassian"]
+
+    def shared(requester_id: str, agent_name: str = "assistant") -> ResolvedWorkerTarget:
+        identity = replace(execution_identity(requester_id), agent_name=agent_name)
+        return resolve_worker_target("shared", agent_name, execution_identity=identity)
+
+    def build(target: ResolvedWorkerTarget) -> AtlassianToolkit:
+        tool = get_tool_by_name(
+            "team_atlassian",
+            paths,
+            worker_target=target,
+            runs_in_worker=False,
+            tools=plugins.tools,
+        )
+        assert isinstance(tool, AtlassianToolkit)
+        return tool
+
+    publish_oauth_credentials(
+        provider,
+        grant(PARTNER_TOKEN, provider),
+        credentials_manager=manager,
+        worker_target=shared(ALICE),
+    )
+    results = [
+        await _call(build(shared(requester)), "team_confluence_search", cql="type = page") for requester in (ALICE, BOB)
+    ]
+    other_agent = await _call(build(shared(BOB, agent_name="other")), "team_confluence_search", cql="type = page")
+
+    assert [result["site"]["cloud_id"] for result in results] == [OTHER_CLOUD_ID, OTHER_CLOUD_ID]
+    assert other_agent["oauth_connection_required"] is True
+    assert [bearer(request) for request in gateway.product_requests()] == [PARTNER_TOKEN, PARTNER_TOKEN]

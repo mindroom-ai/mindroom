@@ -159,6 +159,7 @@ Users can also connect and disconnect from the dashboard Integrations page.
 
 Tokens belong to the requester and are never shared with other users or stored globally.
 A call without a concrete requester always asks for a connection instead of using another account.
+Only a separately registered connection with `requester_scoped=False` shares one account, as described in [Share One Account](#share-one-account).
 A connection that has not been used for 90 days expires, and the requester then reconnects.
 
 ## Add More Connections
@@ -226,6 +227,7 @@ A connection's tool entry accepts the space lists of its products and, when the 
 | `cloud_id` | `null` | Cloud ID (a UUID) of the site; when `site_url` is also set, both must name the same site. |
 | `products` | `("jira", "confluence")` | Non-empty, duplicate-free products whose functions and scopes this connection enables. |
 | `write` | `True` | Set to `False` to register only read functions and request only read scopes. |
+| `requester_scoped` | `True` | Set to `False` to store the connection's tokens under the agent's worker scope, as in [Share One Account](#share-one-account). |
 | `client_config_service` | `<name>_atlassian_oauth_client` | Credential service holding the connection's app client ID and secret; the name must end in `_oauth_client`. |
 
 Every connection requires `site_url` or `cloud_id`, so a named connection always acts on one pinned site.
@@ -248,6 +250,42 @@ Atlassian records consent per user and app, so with a shared app the default con
 Revoking the shared app in Atlassian disconnects every connection that uses it.
 
 Each connection has its own card on the Integrations page and its own connect link.
+
+### Share One Account
+
+By default every requester connects their own Atlassian account.
+With `requester_scoped=False`, a connection's tokens follow the agent's [worker scope](../configuration/agents.md) instead, like Google's:
+
+- On an agent with `worker_scope: shared`, one account serves every requester. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
+- On an agent with `worker_scope: user` or `user_agent`, each requester still connects their own account.
+- On an agent without a `worker_scope`, one installation-level connection serves every requester, as described in [Where Connections Are Stored](../oauth-framework.md#where-connections-are-stored).
+
+Everyone who may use the agent then reads what that account can see, so connect a dedicated account, not a person's.
+Set `write=False` on the connection, so the app requests only read scopes and Atlassian itself refuses writes, and limit the agent's tool entry to the spaces it needs:
+
+```python
+AtlassianConnectionConfig(
+    name="team",
+    display_name="Team Confluence",
+    site_url="https://example.atlassian.net",
+    products=("confluence",),
+    write=False,
+    requester_scoped=False,
+)
+```
+
+```yaml
+agents:
+  docs_helper:
+    worker_scope: shared
+    credential_managers: ["@kim:example.org"]
+    tools:
+      - team_atlassian:
+          confluence_spaces: [DOCS]
+```
+
+The credential manager connects the account from the Connections page, or opens the connect link the agent replies with, signed in to Atlassian as the dedicated account.
+The built-in `atlassian` tool always stays requester-scoped.
 
 ## Approvals For Writes
 
