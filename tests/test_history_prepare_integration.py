@@ -724,13 +724,14 @@ async def test_attachments_that_fit_only_without_the_unseen_thread_fail_no_reply
     config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
-        context_window=12_000,
+        context_window=12_200,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session("session-1", runs=[_completed_run("run-1")])
     seed_session(storage, session)
     seed_summary(storage, session, _SCOPE, "stored summary")
-    # About 5,000 tokens of thread the scope has not seen, beside the report's 10,000.
+    # About 5,000 tokens of thread the scope has not seen, which with the report's 10,000 exceed the 11,700-token limit
+    # that the report and the rest of the turn fit.
     thread_history = [
         make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * 4_000, event_id=f"$note-{index}")
         for index in range(5)
