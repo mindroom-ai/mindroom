@@ -13281,7 +13281,7 @@ By default every requester connects their own Atlassian account.
 With `requester_scoped=False`, a connection's tokens follow the agent's effective worker scope instead (`private.per`, then the agent's `worker_scope`, then `defaults.worker_scope`), like Google's:
 
 - On a `shared` agent, one account serves every requester of that agent. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
-- On a `user` or `user_agent` agent, each requester still connects their own account.
+- On a `user` or `user_agent` agent, each requester still connects their own account, but, as for Google, the egress broker no longer withholds those tokens from [shared sandboxes](https://docs.mindroom.chat/deployment/egress-broker/#personal-accounts-and-shared-sandboxes), so use the built-in tool or a requester-scoped connection there.
 - Without an effective worker scope, one installation-level connection serves every unscoped agent that lists the tool, and a credential manager of any of them can replace it, as described in [Where Connections Are Stored](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored). Give each agent `worker_scope: shared` so it gets its own; that also moves the agent's other agent-scoped credentials, such as Google connections and egress keys, to a per-agent store, where they are connected again.
 
 Everyone who may use the agent then reads what that account can see, so connect a dedicated account, not a person's.
@@ -16504,9 +16504,9 @@ A user's own service on a personal agent can instead have an account of its own 
 An opt-in allowed read only, for a service that declares `read_only`, gets the token only for `GET`, `HEAD`, and `POST` to the service's listed read paths, and never for a WebSocket upgrade or a request with a method-override header; that limit holds only as far as the upstream API keeps its writes off those methods and paths.
 A group sign-in on the Connections portal (**Connect all**) stores one token per member service, and each token carries every scope of that sign-in, so an Agent Keys allowance for one member acts with the whole grant on the hosts that service allows.
 The primary fetches and refreshes those access tokens through the OAuth credential lifecycle and the broker injects them as the matched rule's auth type; workers never receive an OAuth access token or a refresh token, only the proxy token and placeholder values, and the broker's logs and audit records never contain them.
-Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers follow the agent's worker scope.
+Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers, and Atlassian connections registered with `requester_scoped=False`, follow the agent's worker scope.
 The broker uses a requester-scoped account only on `user` and `user_agent` workers that run on a dedicated (Docker or Kubernetes) worker backend by default.
-A `shared` or unscoped worker, and every worker on the static runner, runs every requester's commands in one sandbox, where a later command from another user can read an earlier caller's proxy token (for example from the environment of a process left running) and act with that caller's account until the token expires, so there the broker injects no GitHub or Atlassian account, adds no placeholder for it, and offers no connect link.
+A `shared` or unscoped worker, and every worker on the static runner, runs every requester's commands in one sandbox, where a later command from another user can read an earlier caller's proxy token (for example from the environment of a process left running) and act with that caller's account until the token expires, so there the broker injects no requester-scoped GitHub or Atlassian account, adds no placeholder for it, and offers no connect link.
 A service's `oauth_on_shared_workers: true` removes that gate: every user of such a shared sandbox can then act with any other user's connected account until that user's proxy token expires.
 The `connect_url` that a 403 response carries goes only to the worker whose proxy token has that scope; it is the same short-lived single-use connect link that conversation OAuth uses, and it starts a connection for that one scope after the recheck of the requester's permission.
 The link also requires the browser to be signed in to MindRoom as that requester.
@@ -20294,7 +20294,7 @@ Adding, removing, or re-scoping a `worker_scope: user` agent changes every user 
 
 The dashboard's generic credential forms work only for unscoped agents and agents with `worker_scope: shared`.
 OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](https://docs.mindroom.chat/oauth-framework/) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime, except Spotify, which, like the Home Assistant integration, stays shared-only.
-GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
+GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`, except an Atlassian connection registered with `requester_scoped=False` ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
 Saved tool settings are stored by the primary per agent for `shared`, per requester across agents for `user`, and per requester-agent pair for `user_agent`, and reach worker-routed calls through [credential leases](#credential-leases).
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so configure them in authored config (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) or through shared settings granted with `defaults.worker_grantable_credentials`.
 Only unscoped and `shared` agents are available through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/#model-selection).
@@ -20759,8 +20759,8 @@ The matched rule's auth type then formats the token like any other secret, so a 
 
 - The account follows the provider's own credential policy.
   GitHub and Atlassian are requester-scoped: the broker uses the requester named in the worker's verified token, so each user's requests use that user's own account.
-  An Atlassian connection registered with `requester_scoped=False` follows the worker scope like the Google providers ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
   In shared sandboxes the broker does not use them by default; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
+  An Atlassian connection registered with `requester_scoped=False` follows the worker scope like the Google providers instead ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
 - The Google providers follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
 - A call without a requester has no requester-scoped account (GitHub or Atlassian) to use.
 
@@ -20781,10 +20781,10 @@ Every other sandbox is shared:
 A proxy token minted for one user's call stays readable in a shared sandbox for its lifetime (for example in the environment of a process that call left running), so a later command from another user could use it to act with the first user's GitHub or Atlassian account until the token expires; keep `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` short where that matters.
 
 So in a shared sandbox the broker does not use requester-scoped accounts at all.
-It injects no GitHub or Atlassian account and adds no placeholder variables for it, a matched request without an API key gets 403 `credential_not_configured` with no connect link, and the egress pages, the connect routes, and the [`egress_credentials` tool](#agent-tool) offer no connection for it.
+It injects no requester-scoped GitHub or Atlassian account and adds no placeholder variables for it, a matched request without an API key gets 403 `credential_not_configured` with no connect link, and the egress pages, the connect routes, and the [`egress_credentials` tool](#agent-tool) offer no connection for it.
 
 Give those agents an API key instead, or run the agents whose users need their own account with worker scope `user` or `user_agent` on the Docker or Kubernetes worker backend, and make them `private` if other requesters can use them (see [Shared workspaces on non-private agents](#shared-workspaces-on-non-private-agents)).
-The Google providers are not affected: their connection on a shared agent is the agent's own, maintained by its credential managers.
+The Google providers and Atlassian connections with `requester_scoped=False` are not affected: their connection on a shared agent is the agent's own, maintained by its credential managers.
 
 An operator who accepts the risk can set `oauth_on_shared_workers: true` on the service.
 The broker then injects the calling requester's own account in shared sandboxes as well, and anyone who can run commands in such a sandbox can act with any other user's connected account until that user's proxy token expires (`MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS`, default 7 days).

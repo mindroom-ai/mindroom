@@ -189,6 +189,8 @@ def test_plugin_registers_prefixed_tools_and_providers_beside_the_builtin(tmp_pa
     assert plugins.tools.entries["atlassian"].function_names == builtin_functions
     assert {"atlassian", "partner_atlassian", "archive_atlassian"} <= set(providers)
     assert providers["archive_atlassian"].shared_client_config_services == ("archive_atlassian_oauth_client",)
+    assert partner.helper_text is not None
+    assert partner.helper_text.startswith("Each user connects their own")
     assert "write:jira-work" not in providers["archive_atlassian"].scopes
 
     assert "partner_atlassian" not in config_plugins(Config(), paths).tools
@@ -475,6 +477,7 @@ async def test_shared_connection_follows_the_agent_worker_scope(
     gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search", OTHER_CLOUD_ID), {"results": []})
     plugins = publish_test_plugins(config, paths)
     provider = plugins.oauth_providers["team_atlassian"]
+    tool_metadata = plugins.tools.entries["team_atlassian"]
 
     def target(requester_id: str, agent_name: str = "assistant") -> ResolvedWorkerTarget:
         identity = replace(execution_identity(requester_id), agent_name=agent_name)
@@ -490,6 +493,8 @@ async def test_shared_connection_follows_the_agent_worker_scope(
         )
         assert isinstance(tool, AtlassianToolkit)
         assert ("currentUser() in JQL or CQL is that account" in (tool.instructions or "")) is bob_served
+        assert tool_metadata.helper_text is not None
+        assert tool_metadata.helper_text.startswith("The Team Confluence account follows the agent's worker scope")
         result = await _call(tool, "team_confluence_search", cql="type = page")
         if result.get("oauth_connection_required"):
             return False
@@ -508,3 +513,22 @@ async def test_shared_connection_follows_the_agent_worker_scope(
     assert await served(ALICE) is True
     assert await served(BOB) is bob_served
     assert await served(BOB, agent_name="other") is other_agent_served
+
+
+def test_requester_scoped_toolkit_does_not_claim_a_shared_account(tmp_path: Path) -> None:
+    """Only a connection that is not requester-scoped says currentUser() is not the requester, even on a shared agent."""
+    paths = runtime_paths(tmp_path)
+    toolkit = AtlassianToolkit(
+        provider=atlassian_oauth_provider(),
+        function_prefix="",
+        products=("confluence",),
+        write=True,
+        site_url=SITE_URL,
+        cloud_id=None,
+        runtime_paths=paths,
+        credentials_manager=save_client_config(paths),
+        worker_target=resolve_worker_target("shared", "assistant", execution_identity=execution_identity()),
+        runtime_config=None,
+    )
+
+    assert "currentUser()" not in (toolkit.instructions or "")

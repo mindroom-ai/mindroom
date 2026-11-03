@@ -257,7 +257,7 @@ By default every requester connects their own Atlassian account.
 With `requester_scoped=False`, a connection's tokens follow the agent's effective worker scope instead (`private.per`, then the agent's `worker_scope`, then `defaults.worker_scope`), like Google's:
 
 - On a `shared` agent, one account serves every requester of that agent. Only administrators and the agent's `credential_managers` can connect, replace, or disconnect it.
-- On a `user` or `user_agent` agent, each requester still connects their own account.
+- On a `user` or `user_agent` agent, each requester still connects their own account, but, as for Google, the egress broker no longer withholds those tokens from [shared sandboxes](../deployment/egress-broker.md#personal-accounts-and-shared-sandboxes), so use the built-in tool or a requester-scoped connection there.
 - Without an effective worker scope, one installation-level connection serves every unscoped agent that lists the tool, and a credential manager of any of them can replace it, as described in [Where Connections Are Stored](../oauth-framework.md#where-connections-are-stored). Give each agent `worker_scope: shared` so it gets its own; that also moves the agent's other agent-scoped credentials, such as Google connections and egress keys, to a per-agent store, where they are connected again.
 
 Everyone who may use the agent then reads what that account can see, so connect a dedicated account, not a person's.

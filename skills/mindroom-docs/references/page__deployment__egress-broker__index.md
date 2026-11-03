@@ -276,8 +276,8 @@ The matched rule's auth type then formats the token like any other secret, so a 
 
 - The account follows the provider's own credential policy.
   GitHub and Atlassian are requester-scoped: the broker uses the requester named in the worker's verified token, so each user's requests use that user's own account.
-  An Atlassian connection registered with `requester_scoped=False` follows the worker scope like the Google providers ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
   In shared sandboxes the broker does not use them by default; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
+  An Atlassian connection registered with `requester_scoped=False` follows the worker scope like the Google providers instead ([Share One Account](https://docs.mindroom.chat/tools/atlassian/#share-one-account)).
 - The Google providers follow the agent's worker scope like API keys do: a `shared` agent has one connection that credential managers maintain, and a `user` agent has one per requester.
 - A call without a requester has no requester-scoped account (GitHub or Atlassian) to use.
 
@@ -298,10 +298,10 @@ Every other sandbox is shared:
 A proxy token minted for one user's call stays readable in a shared sandbox for its lifetime (for example in the environment of a process that call left running), so a later command from another user could use it to act with the first user's GitHub or Atlassian account until the token expires; keep `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` short where that matters.
 
 So in a shared sandbox the broker does not use requester-scoped accounts at all.
-It injects no GitHub or Atlassian account and adds no placeholder variables for it, a matched request without an API key gets 403 `credential_not_configured` with no connect link, and the egress pages, the connect routes, and the [`egress_credentials` tool](#agent-tool) offer no connection for it.
+It injects no requester-scoped GitHub or Atlassian account and adds no placeholder variables for it, a matched request without an API key gets 403 `credential_not_configured` with no connect link, and the egress pages, the connect routes, and the [`egress_credentials` tool](#agent-tool) offer no connection for it.
 
 Give those agents an API key instead, or run the agents whose users need their own account with worker scope `user` or `user_agent` on the Docker or Kubernetes worker backend, and make them `private` if other requesters can use them (see [Shared workspaces on non-private agents](#shared-workspaces-on-non-private-agents)).
-The Google providers are not affected: their connection on a shared agent is the agent's own, maintained by its credential managers.
+The Google providers and Atlassian connections with `requester_scoped=False` are not affected: their connection on a shared agent is the agent's own, maintained by its credential managers.
 
 An operator who accepts the risk can set `oauth_on_shared_workers: true` on the service.
 The broker then injects the calling requester's own account in shared sandboxes as well, and anyone who can run commands in such a sandbox can act with any other user's connected account until that user's proxy token expires (`MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS`, default 7 days).
