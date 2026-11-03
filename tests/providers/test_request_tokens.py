@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -23,6 +22,7 @@ from mindroom.native_compaction import checkpoint_items
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, plain_request_parts, route_request_tokens
+from tests.fakes.token_counter import quarter_tokens
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import provider_for
 from tests.providers.gemini_ollama_support import FAMILIES as GEMINI_OLLAMA_FAMILIES
@@ -84,7 +84,7 @@ def _recording_counter(texts: list[str]) -> TokenCounter:
 
     def estimate(text: str) -> int:
         texts.append(text)
-        return len(text) // 4
+        return quarter_tokens(text)
 
     return TokenCounter(estimate=estimate)
 
@@ -263,18 +263,6 @@ def test_claude_counts_earlier_thinking_where_it_replays_it(family: str, replays
 
     thought = route.request_tokens(ModelRequest(messages=(Message(role="user", content=_THINKING),)))
     assert added >= thought * 0.9 if replays else added == 0
-
-
-def test_gemini_counts_a_replayed_thought_signature_as_its_reported_reasoning(tmp_path: Path) -> None:
-    """A thought signature costs about the reasoning its reply reported, on the run's own replies and history alike."""
-    route = _route("gemini", tmp_path)
-    provenance = model_provenance(route.identity.id, route.identity.provider)
-    metrics = MessageMetrics(tokens=TokenCounts(output_tokens=320, reasoning_tokens=300))
-    plain = Message(role="assistant", content="Pack a light rain jacket.", provider_data=provenance, metrics=metrics)
-    signed = replace(plain, provider_data={**provenance, "thought_signature": "c2lnbmF0dXJl"})
-
-    assert _difference(route, signed, plain) == 300
-    assert _difference(route, replace(signed, from_history=True), replace(plain, from_history=True)) == 300
 
 
 def test_gemini_counts_a_signed_function_call_as_its_call_and_reported_reasoning(tmp_path: Path) -> None:

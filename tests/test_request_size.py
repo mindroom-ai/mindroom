@@ -18,7 +18,6 @@ from mindroom.history.request_size import RequestSize, request_sizer
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
-    REWRITTEN_ATTEMPT_KEY,
     Message,
     model_provenance,
 )
@@ -144,18 +143,6 @@ def test_a_queued_notice_the_reply_moved_keeps_the_answer_anchoring(tmp_path: Pa
     later = _first(Message(role="user", content="Hi"), answer, notice)
 
     assert _sized(tmp_path, model, later).reported
-
-
-def test_an_answer_to_a_rewritten_attempt_never_anchors(tmp_path: Path) -> None:
-    model = ScriptedModel([])
-    first = _first(Message(role="user", content="Hi"))
-    answer = _answered(model, first, "Hello")
-    answer.provider_data = {
-        key: value for key, value in (answer.provider_data or {}).items() if key != REQUEST_IDENTITY_KEY
-    } | {REWRITTEN_ATTEMPT_KEY: True}
-    later = replace(first, messages=(*first.messages, answer, Message(role="user", content="More")))
-
-    assert not _sized(tmp_path, model, later).reported
 
 
 def test_a_rewritten_attachment_ends_anchoring(tmp_path: Path) -> None:

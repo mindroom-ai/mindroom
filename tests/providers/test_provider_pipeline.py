@@ -496,21 +496,7 @@ async def test_a_media_free_retry_that_is_rejected_too_ends_the_request() -> Non
 
 @pytest.mark.asyncio
 async def test_input_specific_rejection_retries_without_learning() -> None:
-    rejection = InvalidRequest("Image exceeds 5 MB maximum", provider="Scripted", status_code=400)
-    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
-    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
-    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
-
-    await _drain(provider, request)
-    await _drain(provider, request)
-
-    assert inner.requests[1].messages[0].images is None
-    assert inner.requests[2].messages[0].images == [_image()]
-
-
-@pytest.mark.asyncio
-async def test_an_answer_to_a_retry_without_the_rejected_media_is_marked_as_another_request() -> None:
-    """The retry's usage describes a request without the image, so its answer must not size the next request."""
+    """The retry's usage describes a request without the image, so its answer is marked as another request's."""
     rejection = InvalidRequest("Image exceeds 5 MB maximum", provider="Scripted", status_code=400)
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
@@ -519,6 +505,8 @@ async def test_an_answer_to_a_retry_without_the_rejected_media_is_marked_as_anot
     retried = (await _drain(provider, request))[-1]
     sent_as_asked = (await _drain(provider, request))[-1]
 
+    assert inner.requests[1].messages[0].images is None
+    assert inner.requests[2].messages[0].images == [_image()]
     assert isinstance(retried, TurnCompleted)
     assert isinstance(sent_as_asked, TurnCompleted)
     assert (retried.message.provider_data or {}).get(REWRITTEN_ATTEMPT_KEY) is True

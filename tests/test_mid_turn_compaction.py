@@ -520,7 +520,7 @@ async def test_request_sizing_runs_off_the_event_loop(
     sizing_threads: list[int] = []
     original = RequestSizer.size
 
-    def recording(self: RequestSizer, request: ModelRequest) -> Any:  # noqa: ANN401
+    def recording(self: RequestSizer, request: ModelRequest) -> RequestSize:
         sizing_threads.append(threading.get_ident())
         return original(self, request)
 

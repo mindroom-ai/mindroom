@@ -26,7 +26,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     RuntimePaths,
-    resolve_runtime_paths,
 )
 from mindroom.dispatch_source import (
     HOOK_DISPATCH_SOURCE_KIND,
@@ -73,7 +72,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.token_counter import quarter_tokens
-from tests.history_helpers import replay_settings
+from tests.history_helpers import _runtime_paths, replay_settings
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -87,17 +86,6 @@ if TYPE_CHECKING:
 
 def _config() -> Config:
     return Config.model_validate({})
-
-
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
 
 
 # The model a reply's requests go to in cases that prepare without an agent build; it counts a quarter token per character.

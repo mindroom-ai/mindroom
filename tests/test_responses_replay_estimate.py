@@ -47,7 +47,7 @@ from mindroom.token_counting.counts import count, opaque_tokens
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel
-from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint, replay_settings
+from tests.history_helpers import _completed_run, _make_config, _session, record_native_checkpoint
 from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
 
@@ -57,7 +57,6 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.responses import ResponsesAdapter
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
-_ALL_HISTORY = replay_settings()
 
 
 def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[Any]:

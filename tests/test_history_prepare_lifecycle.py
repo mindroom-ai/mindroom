@@ -2085,18 +2085,11 @@ async def _prepare_with_reported_usage(
     if summary == "before":
         compact_runs(storage, session, ["run-0"], "Earlier summary")
     newest = _reported_run("run-2", identity=model.identity, **latest)
-    # The earlier reply only records the request it sent, so it compacts nothing.
-    _answering, sized = await _prepare_reply(
-        storage,
-        session,
-        config,
-        runtime_paths,
-        history_settings=answered_history_settings or history_settings,
-        model=model,
-        frame=request_frame(system=recorded_system_prompt, turn=newest.messages[0]),
-        plan=replace(plan, automatic_compaction=False),
+    answered = request_frame(system=recorded_system_prompt, turn=newest.messages[0]).request(
+        summary=session.summary,
+        history=prompt_visible_history(session, answered_history_settings or history_settings),
     )
-    stamp_request_identity(newest.messages[-1], model, sized[0])
+    stamp_request_identity(newest.messages[-1], model, answered)
     for run in [*earlier[runs_seen:], newest]:
         storage.save_run(session, run, record_usage=False)
     if summary == "after":
