@@ -8896,7 +8896,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Allow reading Google Drive file contents.",
+          "description": "Allow reading Google Drive files as text.",
           "env": [],
           "label": "Read Files",
           "name": "read_file",
@@ -8908,8 +8908,8 @@
         },
         {
           "authored_override": true,
-          "default": false,
-          "description": "Allow downloading or exporting Google Drive files.",
+          "default": true,
+          "description": "Allow saving Google Drive files, including binary files, into the agent workspace.",
           "env": [],
           "label": "Download Files",
           "name": "download_file",
@@ -8935,7 +8935,7 @@
         {
           "authored_override": true,
           "default": 10485760,
-          "description": "Maximum non-Google-Workspace file size to read in bytes.",
+          "description": "Maximum non-Google-Workspace file size to read as text in bytes.",
           "env": [],
           "label": "Max Read Size",
           "name": "max_read_size",
