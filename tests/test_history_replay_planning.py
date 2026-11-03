@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -25,6 +26,7 @@ from mindroom.history.policy import (
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
     estimate_prompt_visible_history_tokens,
+    estimate_summary_text_tokens,
     plan_replay_that_fits,
 )
 from mindroom.history.request_size import request_sizer
@@ -72,6 +74,8 @@ from tests.history_helpers import (
     folded_run_ids,
     replay_settings,
 )
+from tests.providers.golden_support import golden_paths, load_golden
+from tests.providers.openai_family_support import openai_family_adapter
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -121,11 +125,44 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
         model=model,
     )
 
-    [request] = model.sized
+    [request] = [sized for sized in model.sized if sized.messages]
     replayed_ids = [image.id for message in request.messages for image in message.images or []]
     assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
     assert sum("omitted from replay" in str(message.content) for message in request.messages) == 2
     assert session == before
+
+
+@pytest.mark.parametrize("estimate", ["history", "summary"])
+def test_history_estimates_leave_out_the_instructions_a_route_sends_with_every_request(
+    tmp_path: Path,
+    estimate: str,
+) -> None:
+    """Codex sends its default instructions in every request, which the request without its history already counts."""
+    config = load_golden(golden_paths(("codex",))[0])["input"]["model_config"]
+    session = _session(
+        "codex",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[Message(role="user", content="Hi"), Message(role="assistant", content="Hello")],
+            ),
+        ],
+    )
+
+    def estimated(instructions: str) -> int:
+        root = tmp_path / str(len(instructions))
+        root.mkdir()
+        authored = {**config, "extra_kwargs": {**config["extra_kwargs"], "default_instructions": instructions}}
+        model = openai_family_adapter(authored, root, lambda _request: httpx.Response(500))
+        if estimate == "history":
+            return estimate_prompt_visible_history_tokens(
+                session=session,
+                history_settings=replay_settings(),
+                model=model,
+            )
+        return estimate_summary_text_tokens("The user greeted the agent.", model)
+
+    assert estimated("Be brief.") == estimated("Be brief. " * 1_000)
 
 
 def test_history_estimate_charges_conservative_visual_cost() -> None:

@@ -73,6 +73,8 @@ _TRANSPORT_KEYS = frozenset(
         "images",
     },
 )
+# The fields holding a tool call's arguments as an object.
+_ARGUMENT_KEYS = frozenset({"input", "args"})
 # The body fields a request's model context lives in, per wire.
 _CONTEXT_FIELDS = ("messages", "input", "contents", "system", "systemInstruction", "instructions", "tools")
 
@@ -87,19 +89,24 @@ def _recording_counter(texts: list[str]) -> TokenCounter:
     return TokenCounter(estimate=estimate)
 
 
-def _adapter(path: Path, root: Path) -> ModelProvider:
+def _adapter(path: Path, root: Path, **extra_kwargs: object) -> ModelProvider:
+    """Return the adapter of a golden's model config, with ``extra_kwargs`` authored over its own."""
     golden = load_golden(path)
     family = path.parent.name
     config = golden["input"]["model_config"]
+    config = {**config, "extra_kwargs": {**config.get("extra_kwargs", {}), **extra_kwargs}}
     if family in CLAUDE_FAMILIES:
         return provider_for(config, root, httpx2.AsyncClient())
     if family in GEMINI_OLLAMA_FAMILIES:
         return build_adapter(config, root, lambda _request: httpx.Response(500))
-    return golden_provider(golden, root).adapter
+    return golden_provider({**golden, "input": {**golden["input"], "model_config": config}}, root).adapter
 
 
 def _strings(value: object, key: str | None = None) -> list[str]:
-    """Return the string leaves of a sent body value that a model reads, leaving transport fields out."""
+    """Return the string leaves of a sent body value that a model reads, leaving transport fields out.
+
+    A tool call's arguments (Claude's ``input``, Gemini's ``args``) are the model's own, read whole whatever their names.
+    """
     if key in _TRANSPORT_KEYS:
         return []
     if isinstance(value, str):
@@ -108,9 +115,26 @@ def _strings(value: object, key: str | None = None) -> list[str]:
         if value.get("defer_loading"):
             # A deferred tool ships for the API to load on a search, and costs nothing until then.
             return []
-        return [text for name, nested in value.items() for text in _strings(nested, name)]
+        return [
+            text
+            for name, nested in value.items()
+            for text in (
+                _leaves(nested) if name in _ARGUMENT_KEYS and isinstance(nested, dict) else _strings(nested, name)
+            )
+        ]
     if isinstance(value, list):
         return [text for nested in value for text in _strings(nested, key)]
+    return []
+
+
+def _leaves(value: object) -> list[str]:
+    """Return every non-blank string leaf of ``value``."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, dict):
+        return [text for nested in value.values() for text in _leaves(nested)]
+    if isinstance(value, list):
+        return [text for nested in value for text in _leaves(nested)]
     return []
 
 
@@ -181,11 +205,11 @@ _REASONING = "The forecast says rain in the evening, so a light jacket and close
 _THINKING = "Weigh the evening forecast against the walking plan before suggesting what to pack. " * 12
 
 
-def _route(family: str, tmp_path: Path) -> ModelProvider:
-    """Return the adapter one of ``family``'s goldens configures, built under its own directory."""
-    root = tmp_path / family
+def _route(family: str, tmp_path: Path, name: str = "", **extra_kwargs: object) -> ModelProvider:
+    """Return the adapter one of ``family``'s goldens configures, with ``extra_kwargs``, under its own directory."""
+    root = tmp_path / f"{family}{name}"
     root.mkdir()
-    return _adapter(golden_paths((family,))[0], root)
+    return _adapter(golden_paths((family,))[0], root, **extra_kwargs)
 
 
 def _claude_answer(route: ModelProvider, *blocks: dict[str, Any], **fields: Any) -> Message:  # noqa: ANN401
@@ -416,6 +440,84 @@ def test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks(tmp_path: Pa
 
     # Counted within the joined request, the block can round a token or two apart from its own count.
     assert abs(added - count(route.token_counter, _REASONING)) <= 2
+
+
+@pytest.mark.parametrize("start", [0, 1], ids=["whole", "tail"])
+def test_claude_counts_a_tool_call_s_arguments_whatever_their_names(tmp_path: Path, start: int) -> None:
+    """A call's arguments are the model's own, so one named like a transport field, such as ``data``, counts as sent."""
+    route = _route("anthropic", tmp_path)
+
+    def request(data: str) -> ModelRequest:
+        arguments = json.dumps({"id": "form-7", "data": data})
+        call = {"id": "call_form", "type": "function", "function": {"name": "make_request", "arguments": arguments}}
+        return ModelRequest(
+            messages=(
+                Message(role="user", content="Post the form."),
+                Message(role="assistant", tool_calls=[call]),
+                Message(role="tool", tool_call_id="call_form", tool_name="make_request", content="Posted."),
+            ),
+        )
+
+    added = route.request_tokens(request(_REASONING), start=start) - route.request_tokens(request(""), start=start)
+
+    assert abs(added - count(route.token_counter, _REASONING)) <= 2
+
+
+_FUNCTION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_lookup",
+        "description": "Look a question up on the web.",
+        "parameters": {"type": "object"},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("family", "tool"),
+    [
+        ("anthropic", {"type": "web_search_20250305", "name": "web_search"}),
+        ("openai_chat", _FUNCTION_TOOL),
+        ("deepseek", _FUNCTION_TOOL),
+        ("openai_responses", {"type": "web_search"}),
+        ("ollama", _FUNCTION_TOOL),
+    ],
+)
+def test_a_tool_authored_in_request_params_counts_once_per_reported_request(
+    tmp_path: Path,
+    family: str,
+    tool: dict[str, Any],
+) -> None:
+    """A tool authored in ``request_params`` goes with every request, so an answer's reported size already holds it."""
+    plain = _route(family, tmp_path)
+    authored = _route(family, tmp_path, "-authored", request_params={"tools": [tool]})
+    answer = Message(
+        role="assistant",
+        content="Pack a light rain jacket.",
+        provider_data=model_provenance(plain.identity.id, plain.identity.provider),
+    )
+    request = _conversation(answer)
+
+    assert authored.request_tokens(request) > plain.request_tokens(request)
+    assert authored.request_tokens(request, start=2) == plain.request_tokens(request, start=2)
+
+
+@pytest.mark.parametrize(("family", "sends_declarations"), [("gemini", True), ("gemini_vertexai", False)])
+def test_gemini_counts_function_declarations_only_where_search_leaves_them_in(
+    tmp_path: Path,
+    family: str,
+    sends_declarations: bool,
+) -> None:
+    """Gemini 3 takes Google Search beside function tools; Vertex AI sends the search in their place."""
+    route = _route(family, tmp_path, search=True)
+
+    def request(description: str) -> ModelRequest:
+        lookup = ToolSpec(name="lookup", description=description, parameters={"type": "object"}, strict=None)
+        return ModelRequest(messages=(Message(role="user", content="Look it up."),), tools=(lookup,))
+
+    grew = route.request_tokens(request(_REASONING)) > route.request_tokens(request("Look something up."))
+
+    assert grew is sends_declarations
 
 
 def test_a_plain_route_sizes_an_answer_and_what_follows_it_alone() -> None:

@@ -497,7 +497,11 @@ class ClaudeProvider:
             loaded = claude_loaded_tool_names(request.messages)
             request = replace(request, deferred_tools=replace(request.deferred_tools, names=deferred - loaded))
         body = self._request_body(request)
-        claude_body_parts(sdk_request_body(body.kwargs, _SDK_OPTION_KEYS), body.messages, parts)
+        kwargs = sdk_request_body(body.kwargs, _SDK_OPTION_KEYS)
+        if start and not request.tools:
+            # Tools authored in ``request_params``, such as a server tool, went with the request before the answer.
+            kwargs = {key: value for key, value in kwargs.items() if key != "tools"}
+        claude_body_parts(kwargs, body.messages, parts)
         parts.flag(body.flags)
 
     def _request_body(self, request: ModelRequest) -> _RequestBody:

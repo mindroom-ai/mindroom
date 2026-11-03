@@ -176,13 +176,19 @@ async def format_contents(
     return contents, system_text(messages) or None
 
 
-def gemini_request_parts(request: ModelRequest, start: int, parts: RequestParts) -> None:
+def gemini_request_parts(
+    request: ModelRequest,
+    start: int,
+    parts: RequestParts,
+    *,
+    tools: Sequence[Mapping[str, Any]],
+) -> None:
     """Add what the contents and tools a request sends for ``request`` give the model, its messages from ``start`` on.
 
     The system instruction and text parts count as the model reads them, without the escaping JSON adds; function
     calls, function responses, and server-side tool parts count as serialized, the last as though the request asked
     for them. Gemini bills a replayed thought signature about as the reasoning its reply reported, so each reply that
-    replays one adds its reasoning tokens. From ``start`` 0 the function declarations count too.
+    replays one adds its reasoning tokens. From ``start`` 0 the ``tools`` the request sends count too.
     """
     messages = request.messages[start:]
     if not start:
@@ -199,7 +205,8 @@ def gemini_request_parts(request: ModelRequest, start: int, parts: RequestParts)
             else:
                 parts.value({key: value for key, value in part.items() if key != "thought_signature"})
     if not start:
-        parts.value(function_declarations(request.tools))
+        for tool in tools:
+            parts.value(tool)
 
 
 def _is_tool_result(message: Message) -> bool:

@@ -396,11 +396,18 @@ def _block_parts(block: Mapping[str, Any], parts: RequestParts, replayed: set[st
 
 
 def _readable(value: Any, parts: RequestParts) -> Any:  # noqa: ANN401 - any JSON value of a block
-    """Return ``value`` without its transport fields; ciphertext the model reads decrypted costs ``opaque_tokens``."""
+    """Return ``value`` without its transport fields; ciphertext the model reads decrypted costs ``opaque_tokens``.
+
+    A tool call's ``input`` holds the model's own arguments, which it reads as sent.
+    """
     if isinstance(value, dict):
         if isinstance(ciphertext := value.get("encrypted_content"), str):
             parts.cost(opaque_tokens(len(ciphertext)))
-        return {key: _readable(item, parts) for key, item in value.items() if key not in _TRANSPORT_BLOCK_FIELDS}
+        return {
+            key: item if key == "input" else _readable(item, parts)
+            for key, item in value.items()
+            if key not in _TRANSPORT_BLOCK_FIELDS
+        }
     if isinstance(value, list):
         return [_readable(item, parts) for item in value]
     return value

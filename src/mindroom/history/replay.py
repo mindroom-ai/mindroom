@@ -22,6 +22,8 @@ from mindroom.native_compaction import native_checkpoint_id
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
@@ -54,7 +56,16 @@ def estimate_prompt_visible_history_tokens(
     it.
     """
     history = prompt_visible_history(session, history_settings)
-    return model.request_tokens(ModelRequest(messages=request_layout(summary=session.summary, history=history)))
+    return _added_tokens(model, request_layout(summary=session.summary, history=history))
+
+
+def _added_tokens(model: ModelProvider, messages: Sequence[Message]) -> int:
+    """Return what ``messages`` add to a request ``model`` receives, without what its route sends beside any messages.
+
+    A route can send instructions of its own with every request, which the request without its history already counts.
+    """
+    with_messages = model.request_tokens(ModelRequest(messages=tuple(messages)))
+    return with_messages - model.request_tokens(ModelRequest(messages=()))
 
 
 def prompt_visible_history(session: ConversationSession, history_settings: ResolvedHistorySettings) -> list[Message]:
@@ -85,7 +96,7 @@ def estimate_summary_text_tokens(summary: str, model: ModelProvider, *, upper_bo
     """
     message = compaction_summary_message(summary, run_local=False)
     tokens = count(model.token_counter, str(message.content), upper_bound=upper_bound)
-    return max(tokens, model.request_tokens(ModelRequest(messages=(message,))))
+    return max(tokens, _added_tokens(model, (message,)))
 
 
 def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:

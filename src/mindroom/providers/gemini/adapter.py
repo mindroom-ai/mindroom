@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
+    from mindroom.token_counting.requests import RequestParts
 
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 # How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
@@ -91,11 +92,15 @@ class GeminiProvider:
 
     def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
         """Estimate what ``request`` gives the model, from the parts and declarations ``stream`` sends for it."""
-        return route_request_tokens(self.token_counter, request, start, gemini_request_parts)
+        return route_request_tokens(self.token_counter, request, start, self._parts)
 
     def context_key(self, request: ModelRequest) -> str:
-        """Identify the function declarations ``stream`` sends for ``request``."""
-        return route_context_key(self.identity, self.token_counter, request, gemini_request_parts)
+        """Identify the tools ``stream`` sends for ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, self._parts)
+
+    def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
+        tools = self._tool_settings(request, authored_tool_config=None).get("tools", ())
+        gemini_request_parts(request, start, parts, tools=tools)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.
@@ -224,7 +229,7 @@ class GeminiProvider:
         (https://docs.cloud.google.com/vertex-ai/generative-ai/docs/grounding/grounding-with-google-search), so there
         search replaces the function tools too.
         """
-        if not self.settings.search or not request.tools or self._sdk_client().vertexai:
+        if not self.settings.search or not request.tools or self._client_params()["vertexai"]:
             return False
         generation = _GEMINI_GENERATION.match(self.identity.id.rsplit("/", 1)[-1].casefold())
         return generation is not None and int(generation[1]) >= 3
