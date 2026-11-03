@@ -686,16 +686,19 @@ async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attach
 @pytest.mark.usefixtures("provider")
 async def test_without_a_context_window_the_prepared_size_holds_the_attachments(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, context_window=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
     archive = File(content=b"\x89\xff binary", filename="archive.bin")
 
     with _no_memory():
         sizes = [
             (
                 await prepare_agent_and_prompt_for_test(
-                    make_turn_context("test_agent"),
+                    make_turn_context("test_agent", session_id="session-1"),
                     prompt="Read this.",
                     runtime_paths=runtime_paths,
                     config=config,
+                    scope_context=_scope_context(config, runtime_paths),
                     media=MediaInputs(files=files),
                 )
             ).prepared_history.prepared_context_tokens
