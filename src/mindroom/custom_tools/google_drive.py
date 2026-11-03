@@ -75,6 +75,7 @@ _DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 _UNSAFE_PATH_CHARACTERS = re.compile(r"[\x00-\x1f\x7f/\\]")
 # File systems allow 255 bytes per name; this leaves room for an export extension.
 _MAX_NAME_BYTES = 200
+_MAX_EXTENSION_CHARACTERS = 16
 # A file of these types over max_read_size is refused as binary rather than as too large; content decides smaller files,
 # since Drive types some text by its extension, such as TypeScript as `video/mp2t` or playlists as audio.
 _BINARY_MIME_PREFIXES = ("audio/", "video/", "image/")
@@ -142,6 +143,9 @@ def _path_component(name: str) -> str:
     if len(component.encode()) <= _MAX_NAME_BYTES:
         return component
     suffix = Path(component).suffix
+    # A dot inside a long title, as in "Plan v1.2 final ...", starts no extension.
+    if len(suffix) > _MAX_EXTENSION_CHARACTERS:
+        suffix = ""
     stem_budget = _MAX_NAME_BYTES - len(suffix.encode())
     return component.removesuffix(suffix).encode()[:stem_budget].decode(errors="ignore") + suffix
 

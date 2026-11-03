@@ -1449,23 +1449,32 @@ def test_google_drive_download_of_the_same_file_again_replaces_its_copy(
     assert list(saved.parent.iterdir()) == [saved]
 
 
-@pytest.mark.parametrize("stem", ["Weekly sync " + "x" * 300, "会议记录" * 30])
+@pytest.mark.parametrize(
+    ("name", "mime_type", "extension"),
+    [
+        pytest.param("Weekly sync " + "x" * 300 + ".m4a", "audio/mp4", ".m4a", id="ascii"),
+        pytest.param("会议记录" * 30 + ".m4a", "audio/mp4", ".m4a", id="cjk"),
+        pytest.param("Plan v1.2 " + "x" * 300, "application/vnd.google-apps.document", ".docx", id="dot-in-title"),
+    ],
+)
 def test_google_drive_download_shortens_a_name_too_long_for_the_file_system(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stem: str,
+    name: str,
+    mime_type: str,
+    extension: str,
 ) -> None:
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
-    service.files_resource.file_metadata = {"name": f"{stem}.m4a", "mimeType": "audio/mp4"}
+    service.files_resource.file_metadata = {"name": name, "mimeType": mime_type}
 
     result = json.loads(tool.download_file("recording-file-id"))
 
     saved = Path(result["path"])
-    assert result["name"] == f"{stem}.m4a"
+    assert result["name"] == name
     assert saved.parent == tmp_path / "google-drive-downloads" / "recording-file-id"
-    assert saved.name.endswith(".m4a")
-    assert stem.startswith(saved.name.removesuffix(".m4a"))
-    assert len(saved.name.encode()) <= 200
+    assert saved.name.endswith(extension)
+    assert name.startswith(saved.name.removesuffix(extension))
+    assert len(saved.name.encode()) <= 200 + len(extension)
     assert saved.read_bytes() == b"hello"
 
 
