@@ -58,6 +58,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
+from mindroom.workers.runtime import idle_worker_cleanup_runs
 from tests.api.conftest import (
     PLATFORM_SSO_SECRET,
     login_with_api_key,
@@ -755,6 +756,28 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     )
 
     assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
+
+
+@pytest.mark.asyncio
+async def test_worker_cleanup_loop_owns_idle_cleanup_while_it_runs(tmp_path: Path) -> None:
+    """Only while the API server's cleanup loop runs does the runtime count as cleaning up idle workers."""
+    runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30"},
+    )
+    main.initialize_api_app(main.app, runtime)
+    stop_event = asyncio.Event()
+    assert not idle_worker_cleanup_runs(runtime)
+
+    loop = asyncio.create_task(
+        main._worker_cleanup_loop(stop_event, main.app, touch_live_workers=lambda _backend: None),
+    )
+    await asyncio.sleep(0)
+    assert idle_worker_cleanup_runs(runtime)
+    stop_event.set()
+    await loop
+
+    assert not idle_worker_cleanup_runs(runtime)
 
 
 def test_worker_cleanup_touches_live_script_workers_before_maintenance(

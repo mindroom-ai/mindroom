@@ -36,6 +36,8 @@ __all__ = [
     "build_worker_launch_config",
     "configured_primary_worker_manager_identity",
     "current_worker_launch_config",
+    "idle_worker_cleanup_owner",
+    "idle_worker_cleanup_runs",
     "lease_configured_primary_worker_manager",
     "lease_primary_worker_manager",
     "reset_primary_worker_manager",
@@ -52,6 +54,9 @@ _PRIMARY_WORKER_MANAGER_CONDITION = threading.Condition(_PRIMARY_WORKER_MANAGER_
 logger = logging.getLogger(__name__)
 _DEFAULT_PRIMARY_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
+_IDLE_WORKER_CLEANUP_LOCK = threading.Lock()
+# How many idle-worker cleanup loops run in this process; `mindroom run --no-api` runs none.
+_idle_worker_cleanup_owners = 0
 
 
 @dataclass(slots=True)
@@ -219,6 +224,26 @@ def worker_cleanup_interval_seconds(runtime_paths: RuntimePaths) -> float:
     except ValueError:
         return 0.0
     return max(0.0, interval)
+
+
+@contextmanager
+def idle_worker_cleanup_owner() -> Iterator[None]:
+    """Mark this process as running idle-worker cleanup while the block runs, as the API server's cleanup loop does."""
+    global _idle_worker_cleanup_owners
+    with _IDLE_WORKER_CLEANUP_LOCK:
+        _idle_worker_cleanup_owners += 1
+    try:
+        yield
+    finally:
+        with _IDLE_WORKER_CLEANUP_LOCK:
+            _idle_worker_cleanup_owners -= 1
+
+
+def idle_worker_cleanup_runs(runtime_paths: RuntimePaths) -> bool:
+    """Return whether idle workers are cleaned up in this process: a cleanup loop runs and has a positive interval."""
+    with _IDLE_WORKER_CLEANUP_LOCK:
+        owned = _idle_worker_cleanup_owners > 0
+    return owned and worker_cleanup_interval_seconds(runtime_paths) > 0
 
 
 def worker_visible_storage_root(runtime_paths: RuntimePaths) -> Path | None:

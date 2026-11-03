@@ -74,6 +74,7 @@ from mindroom.personal_agents import read_personal_agent_user_ids
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
 from mindroom.workers.runtime import (
+    idle_worker_cleanup_owner,
     lease_configured_primary_worker_manager,
     worker_cleanup_interval_seconds,
 )
@@ -241,6 +242,22 @@ async def _worker_cleanup_loop(
     idle_poll_interval_seconds: float = 1.0,
 ) -> None:
     """Periodically clean idle workers using the app's current runtime paths."""
+    with idle_worker_cleanup_owner():
+        await _clean_workers_until_stopped(
+            stop_event,
+            api_app,
+            touch_live_workers=touch_live_workers,
+            idle_poll_interval_seconds=idle_poll_interval_seconds,
+        )
+
+
+async def _clean_workers_until_stopped(
+    stop_event: asyncio.Event,
+    api_app: FastAPI,
+    *,
+    touch_live_workers: Callable[[WorkerBackend], None],
+    idle_poll_interval_seconds: float,
+) -> None:
     while not stop_event.is_set():
         runtime_paths = _app_runtime_paths(api_app)
         interval_seconds = worker_cleanup_interval_seconds(runtime_paths)

@@ -125,7 +125,7 @@ Common errors:
 With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell`, `python`, and `file`, in a worker of its own instead of the worker it shares with its agent's other subagents.
 Use it when an agent runs several subagents at once or a subagent does heavy work, so they do not compete for one worker's CPU and memory.
 Set `dedicated_subagent_workers: true` on the calling agent; MindRoom then offers `dedicated_worker` and, on Kubernetes, `resource_profile` in its `run_subagent`.
-The backend must also run idle-worker cleanup (`MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` above 0, which both Helm charts set), because every such subagent gets a new worker.
+The runtime must also run idle-worker cleanup, because every such subagent gets a new worker: the API server runs it when `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is above 0, which both Helm charts set, so `mindroom run --no-api` offers no dedicated workers.
 
 ```yaml
 agents:
@@ -146,11 +146,12 @@ Settings saved inside the normal worker and packages installed into its environm
 The subagent's first worker call waits for the new worker to start, and `continue_subagent` follow-ups use the same worker while it exists.
 The worker is removed once it has been idle for the worker idle timeout (`workers.kubernetes.idleTimeoutSeconds`, or `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` with Docker), which stops any process the subagent left running there; a later follow-up starts a new one.
 If the calling agent loses the setting or the backend stops supporting dedicated workers, the subagent's later turns use its normal worker.
+MindRoom Chat's Computer panel for [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) shows the agent's normal worker, never a subagent's dedicated one.
 
 Errors:
 
 - `Cannot delegate: <caller> may not run subagents in dedicated workers.` - the calling agent does not set `dedicated_subagent_workers: true`.
-- `Cannot delegate: dedicated workers need the docker or kubernetes worker backend with MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS above 0.` - use a dedicated worker backend and enable idle-worker cleanup.
+- `Cannot delegate: dedicated workers need the docker or kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use a dedicated worker backend, run the API server, and set the cleanup interval.
 - `Cannot delegate: resource_profile requires dedicated_worker=true.` - a profile sizes only a dedicated worker.
 - `Cannot delegate: resource_profile requires the kubernetes worker backend.` - Docker workers have no resource profiles.
 

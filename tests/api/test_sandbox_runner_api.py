@@ -91,6 +91,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     resolve_worker_target,
+    subagent_worker_key,
     visible_workspace_roots,
     worker_dir_name,
     worker_log_id,
@@ -4388,6 +4389,59 @@ def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_worksp
     assert rejected.json()["failure_kind"] == "tool"
     assert "visible workspace" in rejected.json()["error"]
     assert not (storage_root / "agents" / "ops").exists()
+
+
+def test_a_subagent_worker_acts_in_its_normal_workers_private_workspace(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A runner pinned to one subagent's worker reaches the private workspace its normal worker serves."""
+    _set_sandbox_token(monkeypatch)
+    shared_root = tmp_path / "shared"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml_io.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {"mind": {"display_name": "Mind", "private": {"per": "user_agent"}}},
+                "router": {"model": "default"},
+            },
+        ),
+        encoding="utf-8",
+    )
+    normal_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
+    worker_key = subagent_worker_key(normal_key, "a" * 32)
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    workspace = private_instance_scope_root_path(shared_root, normal_key) / "mind" / "mind_data"
+    workspace.mkdir(parents=True)
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    _refresh_runner_app_from_env()
+
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "protocol": WORKER_PROTOCOL_VERSION,
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello", "note.txt"],
+                "kwargs": {},
+                "worker_key": worker_key,
+                "worker_scope": "user_agent",
+                "private_agent_names": ["mind"],
+                "base_dir": str(workspace.relative_to(shared_root)),
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True, response.json()
+    assert (workspace / "note.txt").read_text(encoding="utf-8") == "hello"
 
 
 def test_sandbox_runner_rejects_unknown_worker_key_base_dir(

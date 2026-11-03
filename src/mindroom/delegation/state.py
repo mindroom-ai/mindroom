@@ -136,8 +136,8 @@ class DelegationChild:
     # None for a child that runs its configured agent's own prompt.
     persona: SubagentPersona | None
     # LEGACY_COMPAT: Delegation child snapshots stored before a subagent could ask for a dedicated worker.
-    # Legacy format: A child snapshot in a subagent session file or a run's `mindroom_delegation` metadata that lacks
-    # `dedicated_worker` and `worker_resource_profile`.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `dedicated_worker` and `worker_resource_profile`.
     # Last legacy release: v2026.11.104; the next release writes both fields.
     # Handling: The defaults read such a child as running on its normal worker with no resource profile, which is how
     # it ran. They stay on the model, because run metadata is rewritten only by a conversation layout step.

@@ -22,6 +22,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import current_execution_identity, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.workers.placements import DedicatedWorkerPlacement, placement_for_session
+from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.access_schema_support import with_responder_access
 from tests.agent_tool_helpers import toolkit_offers
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, native_delegation_config, respond
@@ -30,6 +31,7 @@ from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -38,6 +40,21 @@ if TYPE_CHECKING:
 _REQUESTER = "@alice:example.org"
 _KUBERNETES = {"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30"}
 _DOCKER = {"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30"}
+
+
+@pytest.fixture
+def no_idle_cleanup() -> None:
+    """Run the requesting test as a runtime that cleans up no idle workers, as ``mindroom run --no-api`` does."""
+
+
+@pytest.fixture(autouse=True)
+def _idle_worker_cleanup(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Run every other test as a runtime whose API server cleans up idle workers."""
+    if "no_idle_cleanup" in request.fixturenames:
+        yield
+        return
+    with idle_worker_cleanup_owner():
+        yield
 
 
 def _paths(tmp_path: Path, env: dict[str, str]) -> RuntimePaths:
@@ -137,6 +154,20 @@ def test_dedicated_options_are_offered_only_where_they_work(
     assert ("dedicated_worker" in (function.description or "")) == bool(offered)
 
 
+@pytest.mark.usefixtures("no_idle_cleanup")
+def test_a_runtime_without_idle_cleanup_offers_no_dedicated_workers(tmp_path: Path) -> None:
+    """Without a running cleanup loop dedicated workers would never be removed, so none are offered or placed."""
+    paths = _paths(tmp_path, _KUBERNETES)
+    config = _config(paths)
+    child = _child(config, paths, dedicated_worker=True)
+
+    assert "dedicated_worker" not in toolkit_offers(_tools(config, paths), "run_subagent").parameters["properties"]
+    assert child_placement(child, config, paths) is None
+    with idle_worker_cleanup_owner():
+        assert "dedicated_worker" in toolkit_offers(_tools(config, paths), "run_subagent").parameters["properties"]
+        assert child_placement(child, config, paths) == DedicatedWorkerPlacement(child.subagent_id)
+
+
 @pytest.mark.parametrize(
     ("env", "allowed", "args", "refusal"),
     [
@@ -150,8 +181,8 @@ def test_dedicated_options_are_offered_only_where_they_work(
             {},
             True,
             {"dedicated_worker": True},
-            "Cannot delegate: dedicated workers need the docker or kubernetes worker backend with "
-            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS above 0.",
+            "Cannot delegate: dedicated workers need the docker or kubernetes worker backend and idle-worker "
+            "cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.",
         ),
         (
             _KUBERNETES,

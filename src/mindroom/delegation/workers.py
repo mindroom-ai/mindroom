@@ -8,7 +8,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 from mindroom.workers.placements import DedicatedWorkerPlacement
-from mindroom.workers.runtime import worker_cleanup_interval_seconds
+from mindroom.workers.runtime import idle_worker_cleanup_runs
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -29,7 +29,7 @@ def _dedicated_workers_available(runtime_paths: RuntimePaths) -> bool:
     Each such worker serves one subagent, so they are only offered where idle cleanup removes them again.
     """
     kind = _backend_kind(runtime_paths)
-    return kind is not None and kind.dedicated and worker_cleanup_interval_seconds(runtime_paths) > 0
+    return kind is not None and kind.dedicated and idle_worker_cleanup_runs(runtime_paths)
 
 
 def resource_profiles_available(runtime_paths: RuntimePaths) -> bool:
@@ -49,8 +49,8 @@ def dedicated_worker_refusal(
         return f"Cannot delegate: {caller_name} may not run subagents in dedicated workers."
     if not _dedicated_workers_available(runtime_paths):
         return (
-            "Cannot delegate: dedicated workers need the docker or kubernetes worker backend with "
-            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS above 0."
+            "Cannot delegate: dedicated workers need the docker or kubernetes worker backend and idle-worker "
+            "cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0."
         )
     if resource_profile is None:
         return None

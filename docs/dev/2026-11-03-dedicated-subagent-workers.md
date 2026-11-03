@@ -15,7 +15,9 @@ Background-job subagents run concurrently, so they compete for that one worker's
 - **The pinned key keeps every scope**, including `shared`, `user`, and unscoped. Forcing `user_agent` as scripts do would change a `user`-scope child's mounts, need private-scope restrictions, and fail the runner's browser check that the key's scope equals the route's `worker_scope`.
 - **The choice persists on `DelegationChild` and reaches calls through a registry keyed by the child's session ID**, bound for each attempt in `child_run_context`, which the direct, native, and job adapters share for fresh and resumed attempts. The child's session ID is in every identity its calls carry, including identities the Matrix tool context rebuilds from its fields and minimal-mode CLI calls that arrive as separate API requests.
 - **The pinned worker serves its normal key from its own credential store**, where the primary mirrors shared credentials; otherwise it would open an empty store for the normal key below its own root.
-- **Idle cleanup deletes a subagent's worker** instead of scaling it to zero, since nothing reuses it after its subagent is done; dedicated workers are offered only where idle cleanup runs.
+- **Idle cleanup deletes a subagent's worker** instead of scaling it to zero, since nothing reuses it after its subagent is done.
+  Dedicated workers are offered only while this process runs a cleanup loop with a positive interval: the loop lives in the API server, so `mindroom run --no-api` with a positive interval would otherwise accumulate them.
+- **The worker protocol moves to 8 with an unchanged wire schema**, as 7 did, because runners must map pinned keys to their normal key; an older runner would resolve a private agent's workspace and credential store from the pinned key.
 - **`DelegationChild` defaults the two new fields** instead of a conversation layout step, because run metadata is rewritten only by layout steps, and the defaults are how older children ran.
 
 ## Rejected alternatives
@@ -33,3 +35,5 @@ Background-job subagents run concurrently, so they compete for that one worker's
 - Each dedicated worker costs a cold start, and Kubernetes nodes the autoscaler adds can take longer than `readyTimeoutSeconds`.
 - Nothing caps how many dedicated workers run at once beyond a namespace `ResourceQuota`.
 - A worker stays for the idle timeout after its last call, holding its resource requests.
+- Worker Computer opens the agent's normal worker; showing a child's worker would need an authorized choice of child, which a session lookup cannot give that endpoint.
+- As for every worker, a call that has ensured its worker but not yet registered as in flight, or a file request, which never registers, can lose the worker to an idle pass; it needs an idle timeout shorter than a cold start, and closing it means tracking use from before `ensure_worker`.
