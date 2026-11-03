@@ -51,7 +51,6 @@ async def request_compaction_before_next_reply(
         history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
-        static_prompt_tokens=None,
     )
     unavailable = describe_compaction_unavailability(execution_plan)
     if unavailable is not None:

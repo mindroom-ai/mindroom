@@ -26,9 +26,11 @@ from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
 from mindroom.providers.media_files import read_media_bytes
+from mindroom.token_counting.counts import count, opaque_tokens
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types import ToolUseBlock, Usage
@@ -307,7 +309,8 @@ def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
     # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
     # content.
     # Handling: each block is sent as stored, and any other item as a text block.
-    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks
+    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks,
+    # tests/providers/test_request_tokens.py::test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks
     if isinstance(result.content, list):
         payload = [
             block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
@@ -337,6 +340,102 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
         elif key in {"anyOf", "allOf", "oneOf"} and isinstance(value, list):
             result[key] = [_with_additional_properties_false(item) for item in value]
     return result
+
+
+# Block fields no model reads as sent, at any depth: ids, cache breakpoints, signatures, and ciphertext the provider
+# decrypts, such as a web search result's page (``_readable``).
+_TRANSPORT_BLOCK_FIELDS = frozenset(
+    {"id", "tool_use_id", "cache_control", "citations", "signature", "data", "encrypted_content", "encrypted_index"},
+)
+
+
+def claude_body_parts(
+    body: Mapping[str, Any],
+    messages: Sequence[Message],
+    parts: RequestParts,
+    *,
+    loaded: frozenset[str],
+    static: bool,
+) -> None:
+    """Add what a Claude request body built from ``messages`` gives its model to ``parts``.
+
+    System and message text count as text, and tool inputs, results, and definitions as JSON. With ``static`` the
+    system text and the offered tools count; a deferred tool counts once a tool search loaded it (``loaded``), as the
+    API loads it then. A replayed ``thinking`` or ``redacted_thinking`` block is ciphertext beside a summary, so each
+    answer whose thinking the body replays counts its reported output beyond its visible part, or its thinking text
+    when that is larger.
+    """
+    system = body.get("system") if static else None
+    if isinstance(system, str):
+        parts.text(system)
+    for block in system if isinstance(system, list) else ():
+        parts.text(block.get("text"))
+    replayed: set[str] = set()
+    for turn in body.get("messages") or ():
+        for block in turn["content"]:
+            _block_parts(block, parts, replayed)
+    for message in messages:
+        if message.role == "assistant":
+            _thinking_parts(message, parts, replayed)
+    for tool in body.get("tools") or ():
+        if tool.get("name") in loaded if tool.get("defer_loading") else static:
+            parts.value({key: value for key, value in tool.items() if key not in {"cache_control", "defer_loading"}})
+
+
+def _block_parts(block: Mapping[str, Any], parts: RequestParts, replayed: set[str]) -> None:
+    """Add one content block; the identity of a thinking block goes to ``replayed`` and its cost is the answer's."""
+    kind = block.get("type")
+    if kind in _THINKING_BLOCK_TYPES:
+        replayed.add(_thinking_identity(block))
+    elif kind == "text":
+        parts.text(block.get("text"))
+    elif kind in {"image", "document"}:
+        parts.cost(MEDIA_ALLOWANCE_TOKENS)
+    elif kind == "tool_result":
+        content = block.get("content")
+        if isinstance(content, str):
+            parts.text(content)
+        for nested in content if isinstance(content, list) else ():
+            _block_parts(nested, parts, replayed)
+    elif kind == "compaction":
+        parts.text(block.get("content"))
+    else:
+        parts.value(_readable(block, parts))
+
+
+def _readable(value: Any, parts: RequestParts) -> Any:  # noqa: ANN401 - any JSON value of a block
+    """Return ``value`` without its transport fields; ciphertext the model reads decrypted costs ``opaque_tokens``.
+
+    A tool call's ``input`` holds the model's own arguments, which it reads as sent.
+    """
+    if isinstance(value, dict):
+        if isinstance(ciphertext := value.get("encrypted_content"), str):
+            parts.cost(opaque_tokens(len(ciphertext)))
+        return {
+            key: item if key == "input" else _readable(item, parts)
+            for key, item in value.items()
+            if key not in _TRANSPORT_BLOCK_FIELDS
+        }
+    if isinstance(value, list):
+        return [_readable(item, parts) for item in value]
+    return value
+
+
+def _thinking_identity(block: Mapping[str, Any]) -> str:
+    return str(block.get("signature") or block.get("data") or block.get("thinking") or "")
+
+
+def _thinking_parts(message: Message, parts: RequestParts, replayed: set[str]) -> None:
+    blocks = replayed_blocks(message)
+    thinking = [block for block in blocks if block.get("type") in _THINKING_BLOCK_TYPES]
+    if not any(_thinking_identity(block) in replayed for block in thinking):
+        return
+    visible = RequestParts(parts.counter)
+    for block in blocks:
+        if block.get("type") not in _THINKING_BLOCK_TYPES:
+            _block_parts(block, visible, set())
+    text = "".join(str(block.get("thinking") or "") for block in thinking)
+    parts.cost(max(count(parts.counter, text), message.metrics.tokens.output_tokens - visible.counted()))
 
 
 # Claude answers a tool whose ``input_schema`` has one of these at its root with a 400 ("input_schema does not support
@@ -457,6 +556,7 @@ __all__ = [
     "FormattedConversation",
     "assistant_message_from_response",
     "checks_thinking_prefix",
+    "claude_body_parts",
     "format_claude_messages",
     "format_claude_tools",
     "parse_claude_usage",

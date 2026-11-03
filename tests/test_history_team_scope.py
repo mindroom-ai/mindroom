@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -26,7 +25,7 @@ from mindroom.history.session_context import (
 from mindroom.history.types import (
     PreparedHistoryState,
 )
-from mindroom.llm.messages import Message, stable_serialize, system_text
+from mindroom.llm.messages import Message
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
@@ -37,7 +36,6 @@ from mindroom.teams.members import (
 from mindroom.teams.runtime import leader_tool_specs
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.token_counting.counts import count
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
@@ -63,7 +61,7 @@ from tests.teams.squad import start_team
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from mindroom.llm.provider import ModelRequest, TokenCounter
+    from mindroom.llm.provider import ModelRequest
 
 _PAIR = TeamConfig(
     display_name="Pair",
@@ -124,16 +122,6 @@ def _build_pair(
     )
 
 
-def _leader_non_prompt_tokens(built: BuiltTeam) -> int:
-    """Return the estimate a leader request costs besides its prompt text and history: the leader's prompt, its tools."""
-    payloads = [
-        {key: value for key, value in asdict(tool).items() if value is not None}
-        for tool in leader_tool_specs(built.spec)
-    ]
-    counter = built.spec.leader.model.token_counter
-    return count(counter, system_text(built.spec.leader.system_messages)) + count(counter, stable_serialize(payloads))
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scheduled", [False, True])
 async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
@@ -141,7 +129,7 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     monkeypatch: pytest.MonkeyPatch,
     scheduled: bool,
 ) -> None:
-    """The scope is prepared once on the leader's model and the turn's window, sized by the leader's prompt and tools.
+    """The scope is prepared once on the leader's model and the turn's window, its requests framed by the leader's prompt and tools.
 
     A scheduled turn's history budget rules out native compaction.
     """
@@ -180,41 +168,36 @@ async def test_a_team_turn_prepares_its_scope_once_on_the_leader_model(
     assert prepare.await_count == 1
     kwargs = prepare.await_args.kwargs
     assert kwargs["scope_context"] is scope_context
-    assert kwargs["model"] is built.spec.leader.model
+    assert kwargs["sizer"].model is built.spec.leader.model
     assert (kwargs["compaction_lifecycle"], kwargs["pipeline_timing"]) == (lifecycle, timing)
     assert kwargs["allow_native_compaction"] is not scheduled
     resolved_inputs = kwargs["resolved_inputs"]
     assert resolved_inputs.history_settings is built.history_settings
-    assert (resolved_inputs.active_model_name, resolved_inputs.active_context_window) == ("default", 1_500)
-    non_prompt_tokens = _leader_non_prompt_tokens(built)
-    assert kwargs["non_prompt_tokens"] == non_prompt_tokens
-    sent_prompt = render_prepared_messages_text(prepared.turn.in_request_order())
-    sent_tokens = count(built.spec.leader.model.token_counter, sent_prompt)
-    assert resolved_inputs.execution_plan.static_prompt_tokens == sent_tokens + non_prompt_tokens
+    plan = resolved_inputs.execution_plan
+    assert (plan.compaction_model_name, plan.replay_window_tokens) == ("default", 1_500)
+    # The provisional first request holds the turn the run sends.
+    frame = kwargs["frame"]
+    sent_turn = render_prepared_messages_text(prepared.turn.in_request_order())
+    assert render_prepared_messages_text(frame.turn.in_request_order()) == sent_turn
 
 
 @pytest.mark.asyncio
-async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_every_tool_it_offers(
+async def test_the_team_turn_frames_its_requests_with_the_leader_prompt_and_every_tool_it_offers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The static estimate counts the leader's rendered prompt and the tools its requests offer, the delegation tool among them."""
+    """Preparation frames the leader's prompt and the tools its requests offer, the delegation tool among them."""
     config, runtime_paths = _pair_config(tmp_path, teams={"pair": _PAIR})
     leader = ScriptedModel([answer("ok")])
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name="pair", leader=leader)
     sized: dict[str, Any] = {}
-    real_estimator = execution_preparation.build_static_token_estimator
+    real_prepare = execution_preparation.prepare_scope_history
 
-    def capture_estimator(
-        counter: TokenCounter,
-        system_messages: tuple[Message, ...],
-        tools: Any,  # noqa: ANN401
-        deferred_tool_names: frozenset[str],
-    ) -> Any:  # noqa: ANN401
-        sized["system_messages"], sized["tools"] = system_messages, list(tools)
-        return real_estimator(counter, system_messages, tools, deferred_tool_names)
+    async def capture_prepare(**kwargs: Any) -> Any:  # noqa: ANN401
+        sized["frame"] = kwargs["frame"]
+        return await real_prepare(**kwargs)
 
-    monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", capture_prepare)
 
     scope_context = load_bound_scope_session(
         member_names=["zeta", "alpha"],
@@ -245,9 +228,10 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         async for _event in events:
             pass
 
-    assert sized["system_messages"] is built.spec.leader.system_messages
+    frame = sized["frame"]
+    assert frame.system_messages == tuple(built.spec.leader.system_messages)
+    assert frame.template.tools == leader.requests[0].tools
     offered = [tool.name for tool in leader.requests[0].tools]
-    assert [tool.name for tool in sized["tools"]] == offered
     assert "delegate_task_to_member" in offered
     assert set(offered) > {function.name for kit in built.spec.leader.toolkits for function in kit.functions}
 

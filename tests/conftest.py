@@ -123,7 +123,8 @@ from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, TurnEnding
-from mindroom.history.prompt_tokens import build_static_token_estimator
+from mindroom.history.request_messages import TurnMessages
+from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -145,6 +146,8 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config, olm_store_dir
@@ -221,8 +224,7 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import ApprovalDeliveryView, EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
-    from mindroom.history.request_messages import TurnMessages
-    from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.types import ConversationSession
@@ -719,6 +721,23 @@ async def handle_card_response_for_test(manager: ApprovalManager, **response: An
     return await manager.handle_card_response(**(unset | response))
 
 
+def request_frame(
+    prompt: str = "Current prompt",
+    *,
+    system: str | None = None,
+    turn: Message | None = None,
+) -> RequestFrame:
+    """Return the frame of a reply without settings or tools around the scope's history.
+
+    Its system prompt is ``system``, none when None, and its turn is ``turn``, a user message of ``prompt`` when None.
+    """
+    return RequestFrame(
+        ModelRequest(messages=()),
+        () if system is None else (Message(role="system", content=system),),
+        TurnMessages(prompt=turn or Message(role="user", content=prompt)),
+    )
+
+
 async def prepare_history_for_run_for_test(
     *,
     agent_name: str,
@@ -733,47 +752,33 @@ async def prepare_history_for_run_for_test(
     history_settings: ResolvedHistorySettings | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
-    static_prompt_tokens: int | None = None,
-    available_history_budget: int | None = None,
+    system_prompt: str | None = None,
     scope: HistoryScope | None = None,
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedHistoryState:
-    """Compose the production history-preparation seams for one test run of an agent without instructions or tools.
+    """Compose the production history-preparation seams for one test run of an agent without tools.
 
-    ``model`` is the provider the run's requests go to; without one, history is sized by estimate alone.
+    The run's first request holds ``system_prompt``, the scope's history, and ``full_prompt`` as its turn. ``model``
+    is the provider the run's requests go to; without one, history is sized by estimate alone.
     """
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
     model = model or estimate_only_model()
-    static_token_estimator = build_static_token_estimator(model.token_counter, (), (), frozenset())
-    if static_prompt_tokens is None:
-        static_prompt_tokens = static_token_estimator.estimate(full_prompt)
+    model_name = active_model_name or entity_model_name(config, agent_name)
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         runtime_paths=runtime_paths,
         history_settings=history_settings or config.resolve_scope(agent_name).history_settings,
-        active_model_name=active_model_name or entity_model_name(config, agent_name),
+        active_model_name=model_name,
         active_context_window=active_context_window,
-        static_prompt_tokens=static_prompt_tokens,
     )
     if execution_plan is not None:
         resolved_inputs = replace(resolved_inputs, execution_plan=execution_plan)
-    if available_history_budget is not None:
-        # prepare_scope_history reads its trigger/hard budgets from the execution
-        # plan, so express the test budget override through the plan itself.
-        resolved_inputs = replace(
-            resolved_inputs,
-            execution_plan=replace(
-                resolved_inputs.execution_plan,
-                replay_budget_tokens=available_history_budget,
-                hard_replay_budget_tokens=available_history_budget,
-            ),
-        )
+    frame = request_frame(full_prompt, system=system_prompt)
     scope_history_kwargs = {
-        "model": model,
+        "sizer": request_sizer(model, config, model_name),
+        "frame": frame,
         "resolved_inputs": resolved_inputs,
-        "non_prompt_tokens": static_token_estimator.non_prompt_tokens,
-        "static_fingerprint": static_token_estimator.fingerprint,
         "runtime_paths": runtime_paths,
         "config": config,
         "compaction_lifecycle": compaction_lifecycle,
@@ -807,8 +812,7 @@ async def prepare_history_for_run_for_test(
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     return finalize_history_preparation(
         prepared_scope_history=prepared_scope_history,
-        config=config,
-        static_prompt_tokens=static_prompt_tokens,
+        frame=frame,
         pipeline_timing=None,
     )
 

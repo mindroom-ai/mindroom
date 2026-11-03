@@ -423,6 +423,7 @@ def test_team_history_preparation_logs_the_history_prepare_label() -> None:
     labels = _timing_probe_labels(
         module_name="mindroom.execution_preparation",
         call_expression=(
+            "with patch('mindroom.execution_preparation.resolve_entity_preparation_inputs'): "
             "asyncio.run(target_module.prepare_bound_team_run_context(Mock(), scope_context=Mock(), "
             "leader_system_messages=(), leader_tools=(), model=Mock(), prompt='', thread_history=None, "
             "runtime_paths=Mock(), config=Mock(), timezone='UTC', "

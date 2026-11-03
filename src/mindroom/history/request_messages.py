@@ -12,8 +12,9 @@ from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
-from mindroom.history.run_visibility import is_queued_notice_message, replays_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
+from mindroom.llm.messages import is_queued_notice_message
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -170,7 +171,21 @@ def build_request(
     prompt.images = media.images or None
     prompt.files = media.files or None
     prompt.videos = media.videos or None
-    return _with_scope_summary([*deepcopy(history), *turn.in_request_order()], summary)
+    return request_layout(summary=summary, history=deepcopy(history), turn=turn)
+
+
+def request_layout(
+    *,
+    summary: ScopeSummary | None,
+    history: Sequence[Message],
+    turn: TurnMessages | None = None,
+) -> list[Message]:
+    """Return the messages after a request's system messages, sharing them: the scope summary, history, then the turn.
+
+    It is the layout a request is sized by, which leaves the messages unchanged; a request that is sent takes the
+    copies ``build_request`` makes.
+    """
+    return _with_scope_summary([*history, *(turn.in_request_order() if turn is not None else ())], summary)
 
 
 def build_resume_request(
@@ -228,5 +243,6 @@ __all__ = [
     "filter_tool_calls",
     "replayable_messages",
     "replayed_history",
+    "request_layout",
     "scope_history_messages",
 ]

@@ -14,6 +14,7 @@ import pytest
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import _finalize_prepared_history
 from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
+from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     _compact_before_reply,
@@ -31,7 +32,13 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.token_counting.counts import count
-from tests.conftest import install_model_providers, loop_runs_while_blocked, runtime_paths_for, seed_session
+from tests.conftest import (
+    install_model_providers,
+    loop_runs_while_blocked,
+    request_frame,
+    runtime_paths_for,
+    seed_session,
+)
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -49,18 +56,50 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.history.runtime import HistoryPreparationInputs
+    from mindroom.history.types import CompactionLifecycle
+    from mindroom.llm.provider import ModelRequest
 
 
 def _agent_inputs(config: Config) -> HistoryPreparationInputs:
-    """Resolve the configured test agent's history inputs for a 100-token static prompt."""
+    """Resolve the configured test agent's history inputs."""
     return resolve_entity_preparation_inputs(
         history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        static_prompt_tokens=100,
         active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
+    )
+
+
+# A request's frame around its history: a short system prompt and turn.
+_FRAME = request_frame(system="You are helpful.")
+
+
+def _holds_history(request: ModelRequest) -> bool:
+    """Report whether ``request`` holds the seeded run's message, not only the frame around it."""
+    return any(message.content == "Hello" for message in request.messages)
+
+
+async def _prepare(
+    model: ResponsesAdapter,
+    config: Config,
+    paths: RuntimePaths,
+    scope_context: ScopeSessionContext,
+    *,
+    compaction_lifecycle: CompactionLifecycle | None = None,
+) -> PreparedScopeHistory:
+    return await prepare_scope_history(
+        sizer=request_sizer(model, config, entity_model_name(config, "test_agent")),
+        frame=_FRAME,
+        resolved_inputs=_agent_inputs(config),
+        runtime_paths=paths,
+        config=config,
+        scope_context=scope_context,
+        compaction_lifecycle=compaction_lifecycle,
+        pipeline_timing=None,
+        allow_native_compaction=True,
     )
 
 
@@ -91,20 +130,13 @@ async def test_history_sizing_allows_loop_progress(
     seed_session(storage, session)
     original = deepcopy(session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    resolved = _agent_inputs(config)
 
     async def prepare() -> PreparedScopeHistory:
-        return await prepare_scope_history(
-            model=model,
-            resolved_inputs=resolved,
-            non_prompt_tokens=0,
-            static_fingerprint="static",
-            runtime_paths=paths,
-            config=config,
-            scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
-            compaction_lifecycle=None,
-            pipeline_timing=None,
-            allow_native_compaction=True,
+        return await _prepare(
+            model,
+            config,
+            paths,
+            ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
         )
 
     prepared = await prepare()
@@ -117,17 +149,13 @@ async def test_history_sizing_allows_loop_progress(
     else:
         monkeypatch.setattr(
             ResponsesAdapter,
-            "estimate_portable_replay_tokens",
-            _noting_loop_progress(ResponsesAdapter.estimate_portable_replay_tokens, loop_progress),
+            "request_tokens",
+            _noting_loop_progress(ResponsesAdapter.request_tokens, loop_progress),
         )
     if stage == "prepare":
         await prepare()
     elif stage == "finalize":
-        await _finalize_prepared_history(
-            prepared_scope_history=prepared,
-            config=config,
-            static_prompt_tokens=100,
-        )
+        await _finalize_prepared_history(prepared_scope_history=prepared, frame=_FRAME)
     else:
         monkeypatch.setattr(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -145,7 +173,7 @@ async def test_history_sizing_allows_loop_progress(
             threshold_tokens=1000,
             progress=None,
             complete=_reported,
-            counter=model.token_counter,
+            model=model,
         )
         assert outcome is not None
     assert loop_progress
@@ -189,7 +217,7 @@ async def test_history_storage_work_allows_loop_progress(
         threshold_tokens=1000,
         progress=None,
         complete=_reported,
-        counter=model.token_counter,
+        model=model,
     )
     assert outcome is not None
     assert loop_progress == [True]
@@ -208,37 +236,35 @@ async def test_forced_compaction_reuses_canonical_history_count(
     session.metadata = with_force_compaction(session.metadata)
     storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    resolved = _agent_inputs(config)
+    # The history's share of the request: its size beyond the same request without the seeded run.
+    history_tokens = model.request_tokens(
+        _FRAME.request(summary=None, history=session.runs[0].messages),
+    ) - model.request_tokens(_FRAME.request())
     counted_history: list[list[str]] = []
-    estimate = ResponsesAdapter.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
 
-    def record_estimate(self: ResponsesAdapter, messages: list[Message]) -> int:
-        if messages:
-            counted_history.append([str(message.content) for message in messages])
-        return estimate(self, messages)
+    def record_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
+        if _holds_history(request):
+            counted_history.append([str(message.content) for message in request.messages])
+        return request_tokens(self, request, start=start)
 
-    monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", record_estimate)
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", record_request_tokens)
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
         AsyncMock(return_value="Greeting received."),
     )
     lifecycle = RecordingCompactionLifecycle()
-    prepared = await prepare_scope_history(
+    prepared = await _prepare(
+        model,
+        config,
+        paths,
+        ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
         compaction_lifecycle=lifecycle,
-        model=model,
-        resolved_inputs=resolved,
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
-        pipeline_timing=None,
-        allow_native_compaction=True,
     )
-    assert counted_history == [["Hello"]]
+    assert counted_history == [["You are helpful.", "Hello", "Current prompt"]]
     assert prepared.compaction_reply_outcome == "success"
-    assert completed_outcome(lifecycle).before_tokens == 11
+    assert completed_outcome(lifecycle).before_tokens == history_tokens
     assert session.summary is not None
     assert session.summary.text == "Greeting received."
 
@@ -262,12 +288,18 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     release = threading.Event()
-    estimate = ResponsesAdapter.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
+    sized: list[ModelRequest] = []
 
-    def controlled_estimate(self: ResponsesAdapter, messages: list[Message]) -> int:
-        loop.call_soon_threadsafe(entered.set)
-        assert release.wait(timeout=5)
-        return estimate(self, messages)
+    def controlled_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
+        # A size of what messages add also sizes the request without them, which holds nothing to wait on.
+        if request.messages:
+            sized.append(request)
+        # The first size checks the new summary before it is stored; the sizing after the store is the one held.
+        if len(sized) > 1:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(timeout=5)
+        return request_tokens(self, request, start=start)
 
     async def generate(**_kwargs: object) -> str:
         if not after_persist:
@@ -278,7 +310,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     lifecycle = AsyncMock()
     lifecycle.start.return_value = "notice"
     hook = AsyncMock()
-    monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
     monkeypatch.setattr("mindroom.history.compaction._emit_compaction_hook", hook)
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
@@ -299,8 +331,9 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
                 state=HistoryScopeState(force_compact_before_next_run=True),
                 resolved_inputs=resolved,
                 history_budget=1000,
+                max_summary_tokens=None,
                 before_tokens=11,
-                counter=model.token_counter,
+                model=model,
                 config=config,
                 runtime_paths=paths,
             ),
@@ -349,17 +382,11 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
     storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    prepared = await prepare_scope_history(
-        model=model,
-        resolved_inputs=_agent_inputs(config),
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+    prepared = await _prepare(
+        model,
+        config,
+        paths,
+        ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
     )
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
@@ -367,19 +394,19 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
     ownership = asyncio.Lock()
     reuse_attempted = asyncio.Event()
     reused = asyncio.Event()
-    estimate = ResponsesAdapter.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
 
-    def controlled_estimate(self: ResponsesAdapter, messages: list[Message]) -> int:
+    def controlled_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
         loop.call_soon_threadsafe(entered.set)
         assert release.wait(timeout=5)
-        return estimate(self, messages)
+        return request_tokens(self, request, start=start)
 
     async def finalize() -> None:
         async with ownership:
+            # A system prompt over the replay limit sends planning on to trim the history.
             await _finalize_prepared_history(
                 prepared_scope_history=prepared,
-                config=config,
-                static_prompt_tokens=100_000,
+                frame=request_frame(system="word " * 100_000),
             )
 
     async def reuse() -> None:
@@ -388,7 +415,7 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
             session.runs.append(_completed_run("later"))
             reused.set()
 
-    monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
     task = asyncio.create_task(finalize())
     reuse_task: asyncio.Task[None] | None = None
     try:
@@ -470,28 +497,22 @@ async def test_cancelling_preparation_sizing_preserves_input(
     entered = asyncio.Event()
     finished = asyncio.Event()
     release = threading.Event()
-    estimate = ResponsesAdapter.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
 
-    def controlled_estimate(self: ResponsesAdapter, messages: list[Message]) -> int:
+    def controlled_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
         loop.call_soon_threadsafe(entered.set)
         try:
             assert release.wait(timeout=5)
-            return estimate(self, messages)
+            return request_tokens(self, request, start=start)
         finally:
             loop.call_soon_threadsafe(finished.set)
 
-    monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
-    operation = prepare_scope_history(
-        model=model,
-        resolved_inputs=_agent_inputs(config),
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
+    operation = _prepare(
+        model,
+        config,
+        paths,
+        ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
     )
     task = asyncio.create_task(operation)
     try:

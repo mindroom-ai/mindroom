@@ -60,6 +60,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
@@ -82,6 +83,7 @@ from tests.conftest import (
     seed_session,
     seed_session_row,
 )
+from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.summary_model import summary_model
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 
@@ -165,6 +167,16 @@ def checkpointed_answer(item: dict[str, object], basis: str) -> Message:
             },
         },
     )
+
+
+def stamp_request_identity(answer: Message, model: ModelProvider, request: ModelRequest) -> None:
+    """Record on ``answer`` the identity of ``request``, the request ``model`` answered, as the model loop does.
+
+    A request without an identity, such as one holding media at a URL, leaves ``answer`` unstamped.
+    """
+    identity = request_prefixes(model, request)[-1]
+    if identity is not None:
+        answer.provider_data = {**(answer.provider_data or {}), REQUEST_IDENTITY_KEY: identity}
 
 
 def record_native_checkpoint(
@@ -647,22 +659,6 @@ _TEST_MODEL = ModelIdentity(id="test-model", provider="test")
 
 
 @dataclass
-class ReplayEstimate:
-    """A route that sizes every explicit replay at ``tokens`` (None: no estimate), keeping the last replay it sized."""
-
-    tokens: int | None
-    uses_visual_tokens: bool = False
-    messages: list[Message] = field(default_factory=list)
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
-        self.messages = messages
-        return self.tokens
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return self.uses_visual_tokens
-
-
-@dataclass
 class ToolLoopRequest:
     """One request a ``ToolLoopModel`` received, with its roles and contents spelled out."""
 
@@ -672,7 +668,7 @@ class ToolLoopRequest:
     request: ModelRequest
 
 
-class ToolLoopModel:
+class ToolLoopModel(PlainRequestSizing):
     """Call ``probe`` for ``tool_rounds`` requests, then answer; record every request.
 
     Each finished turn is stamped with the model's identity, as every adapter stamps the turns it finishes.

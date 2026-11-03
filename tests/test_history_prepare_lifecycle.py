@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -14,16 +14,16 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
-from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
     estimate_summary_text_tokens,
     estimate_summary_tokens,
+    prompt_visible_history,
 )
+from mindroom.history.request_size import RequestFrame, RequestSize, RequestSizer, request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
@@ -51,26 +51,29 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
-    ResolvedReplayPlan,
     ScopeSummary,
 )
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, NativeCompactionReplay, TokenCounter
+from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, NativeCompactionReplay, TokenCounter
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import delete_runs, install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.conftest import (
+    delete_runs,
+    install_model_providers,
+    prepare_history_for_run_for_test,
+    request_frame,
+    seed_session,
+)
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
-    ReplayEstimate,
     _completed_run,
     _completed_team_run,
     _included_run_count,
@@ -80,6 +83,7 @@ from tests.history_helpers import (
     compact_runs,
     completed_outcome,
     folded_run_ids,
+    stamp_request_identity,
     summary_rows_of,
 )
 from tests.providers.openai_family_support import responses_adapter
@@ -87,9 +91,56 @@ from tests.providers.openai_family_support import responses_adapter
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
+
+
+def _turn_tokens(prompt: str = "Current prompt") -> int:
+    """Return what a request holding only the turn ``prompt`` counts, as ``estimate_only_model`` sizes it."""
+    return estimate_only_model().request_tokens(request_frame(prompt).request())
+
+
+def _plan_with_history_budget(config: Config, runtime_paths: RuntimePaths, budget: int) -> ResolvedHistoryExecutionPlan:
+    """Return the test agent's plan with room for ``budget`` tokens of history beside the ``Current prompt`` turn."""
+    plan = resolve_entity_preparation_inputs(
+        history_settings=config.resolve_scope("test_agent").history_settings,
+        config=config,
+        runtime_paths=runtime_paths,
+        active_model_name=entity_model_name(config, "test_agent"),
+        active_context_window=None,
+    ).execution_plan
+    return replace(plan, trigger_tokens=budget + _turn_tokens(), limit_tokens=budget + _turn_tokens())
+
+
+def _compaction_plan(
+    *,
+    trigger_history: int,
+    limit_history: int,
+    summary_input_budget: int,
+    prompt: str = "Current prompt",
+    **overrides: object,
+) -> ResolvedHistoryExecutionPlan:
+    """Return a plan that compacts automatically with ``summary-model`` past ``trigger_history`` tokens of history.
+
+    The budgets are whole-request totals; the request holds the ``prompt`` turn besides its summary and history, so
+    the trigger and limit add that turn to ``trigger_history`` and ``limit_history``. ``overrides`` sets other fields.
+    """
+    plan = ResolvedHistoryExecutionPlan(
+        automatic_compaction=True,
+        text_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=1,
+        reserve_tokens=0,
+        trigger_tokens=trigger_history + _turn_tokens(prompt),
+        limit_tokens=limit_history + _turn_tokens(prompt),
+        summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
+    )
+    return replace(plan, **overrides)
 
 
 def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> None:
@@ -579,30 +630,21 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        counter=fake_token_counter(),
+        model=estimate_only_model(),
     )
     assert (
         estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=history_settings,
-            counter=fake_token_counter(),
+            model=estimate_only_model(),
         )
         > replay_budget
     )
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=replay_budget,
-        hard_replay_budget_tokens=replay_budget,
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+    execution_plan = _compaction_plan(
+        trigger_history=replay_budget,
+        limit_history=replay_budget,
+        summary_input_budget=summary_input_budget,
     )
 
     summary_mock = AsyncMock(
@@ -693,20 +735,11 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
     )
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=1,
+    execution_plan = _compaction_plan(
+        trigger_history=1,
         # Holds each summary message but not the raw history.
-        hard_replay_budget_tokens=100,
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+        limit_history=100,
+        summary_input_budget=summary_input_budget,
     )
 
     summary_mock = AsyncMock(
@@ -780,7 +813,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     summary = ScopeSummary(text="critical work detail " * 500, updated_at=datetime.now(UTC))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary), fake_token_counter())
+    summary_tokens = estimate_summary_tokens(_session("session-1", runs=[], summary=summary), estimate_only_model())
     session = _session(
         "session-1",
         runs=[
@@ -794,26 +827,18 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     seed_session(storage, session)
     # A summary exactly at the trigger already leaves no room for anything compaction keeps.
     trigger_budget = summary_tokens
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
+    execution_plan = _compaction_plan(
+        trigger_history=trigger_budget,
+        limit_history=summary_tokens * 4,
+        summary_input_budget=50_000,
         explicit_compaction_model=False,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
         trigger_threshold_tokens=trigger_budget,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=trigger_budget,
-        hard_replay_budget_tokens=summary_tokens * 4,
-        summary_input_budget_tokens=50_000,
-        compaction_timeout_seconds=600.0,
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
             runtime_paths=runtime_paths,
-            static_prompt_tokens=0,
             active_model_name=entity_model_name(config, "test_agent"),
             active_context_window=None,
         ),
@@ -824,10 +849,9 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
         prepared = await prepare_scope_history(
             compaction_lifecycle=RecordingCompactionLifecycle(),
-            model=estimate_only_model(),
+            sizer=request_sizer(estimate_only_model(), config, "default"),
+            frame=request_frame(),
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=0,
-            static_fingerprint="static",
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
@@ -862,7 +886,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     """Above the trigger budget only an active native route may leave history uncompacted.
 
     A scheduled run with a history limit disallows native compaction, and a text-only route (OpenRouter, Gemini, a
-    local model) never had it; neither has anything that compacts between the trigger and hard budgets.
+    local model) never had it; neither has anything that compacts between the trigger and the limit.
     """
     config, runtime_paths = _make_config(
         tmp_path,
@@ -888,30 +912,22 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     history_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=_ALL_HISTORY_SETTINGS,
-        counter=fake_token_counter(),
+        model=estimate_only_model(),
     )
     trigger_budget = history_tokens // 2
-    hard_budget = history_tokens * 2
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
+    limit = history_tokens * 2
+    execution_plan = _compaction_plan(
+        trigger_history=trigger_budget,
+        limit_history=limit,
+        summary_input_budget=50_000,
         explicit_compaction_model=False,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
         trigger_threshold_tokens=trigger_budget,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=trigger_budget,
-        hard_replay_budget_tokens=hard_budget,
-        summary_input_budget_tokens=50_000,
-        compaction_timeout_seconds=600.0,
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
             runtime_paths=runtime_paths,
-            static_prompt_tokens=0,
             active_model_name=entity_model_name(config, "test_agent"),
             active_context_window=None,
         ),
@@ -923,10 +939,9 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            model=_native_model() if native_model else estimate_only_model(),
+            sizer=request_sizer(_native_model() if native_model else estimate_only_model(), config, "default"),
+            frame=request_frame(),
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=0,
-            static_fingerprint="static",
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
@@ -944,7 +959,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     assert persisted is not None
     if native_model and allow_native_compaction:
         assert prepared.compaction_decision.mode == "none"
-        assert prepared.compaction_decision.reason == "within_hard_budget"
+        assert prepared.compaction_decision.reason == "within_limit"
         assert prepared.compaction_reply_outcome == "none"
         summary_mock.assert_not_awaited()
         assert len(persisted.runs) == 3
@@ -962,7 +977,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
         estimate_prompt_visible_history_tokens(
             session=persisted,
             history_settings=_ALL_HISTORY_SETTINGS,
-            counter=fake_token_counter(),
+            model=estimate_only_model(),
         )
         <= trigger_budget
     )
@@ -972,9 +987,9 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
 @pytest.mark.parametrize(
     ("run_chars", "summary_words", "stored"),
     [
-        # History over the hard budget, and a summary that would not fit it either.
+        # History over the limit, and a summary that would not fit it either.
         (4_000, 2_000, False),
-        # History over the trigger only, and a summary above the trigger that still fits the hard budget.
+        # History over the trigger only, and a summary above the trigger that still fits the limit.
         (2_400, 1_200, True),
     ],
 )
@@ -1025,20 +1040,21 @@ async def test_compaction_stores_no_summary_the_reply_cannot_replay(
     )
 
     decision = prepared.compaction_decision
-    assert decision.hard_budget_tokens is not None
-    assert decision.trigger_budget_tokens is not None
-    summary_tokens = estimate_summary_text_tokens(summary, fake_token_counter())
+    assert decision.limit_tokens is not None
+    assert decision.trigger_tokens is not None
+    # The reply's request holds its prompt beside the summary.
+    summary_request_tokens = _turn_tokens() + estimate_summary_text_tokens(summary, estimate_only_model())
     persisted = storage.load_session("session-1")
     assert persisted is not None
     if stored:
         assert decision.reason == "over_trigger_native_disabled"
-        assert decision.trigger_budget_tokens < summary_tokens <= decision.hard_budget_tokens
+        assert decision.trigger_tokens < summary_request_tokens <= decision.limit_tokens
         assert prepared.compaction_reply_outcome == "success"
         assert persisted.summary is not None
         assert persisted.summary.text == summary
         return
-    assert decision.reason == "history_exceeds_hard_budget"
-    assert summary_tokens > decision.hard_budget_tokens
+    assert decision.reason == "request_exceeds_limit"
+    assert summary_request_tokens > decision.limit_tokens
     assert prepared.compaction_reply_outcome == "failed"
     [failure] = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
     assert failure.failure_reason.startswith("The summary exceeds the history budget")
@@ -1100,28 +1116,20 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        counter=fake_token_counter(),
+        model=estimate_only_model(),
     )
     before_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         history_settings=history_settings,
-        counter=fake_token_counter(),
+        model=estimate_only_model(),
     )
     assert before_tokens > replay_budget
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=replay_budget,
-        hard_replay_budget_tokens=replay_budget,
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+    execution_plan = _compaction_plan(
+        trigger_history=replay_budget,
+        limit_history=replay_budget,
+        summary_input_budget=summary_input_budget,
+        prompt="CURRENT-RUN prompt",
     )
 
     async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
@@ -1161,7 +1169,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     outcome = completed_outcome(lifecycle)
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
-    summary_only_tokens = estimate_summary_tokens(persisted, fake_token_counter())
+    summary_only_tokens = estimate_summary_tokens(persisted, estimate_only_model())
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
     assert folded_run_ids(storage) == [f"run-{index:02}" for index in range(1, 24)]
@@ -1190,7 +1198,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         estimate_prompt_visible_history_tokens(
             session=current_run_session,
             history_settings=history_settings,
-            counter=fake_token_counter(),
+            model=estimate_only_model(),
         )
         > summary_only_tokens
     )
@@ -1256,22 +1264,13 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
         history_settings=history_settings,
-        counter=fake_token_counter(),
+        model=estimate_only_model(),
     )
 
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=replay_budget,
-        hard_replay_budget_tokens=replay_budget,
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+    execution_plan = _compaction_plan(
+        trigger_history=replay_budget,
+        limit_history=replay_budget,
+        summary_input_budget=summary_input_budget,
     )
 
     async def summarize(**_kwargs: object) -> str:
@@ -1380,20 +1379,11 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         )
         == 1
     )
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=1,
+    execution_plan = _compaction_plan(
+        trigger_history=1,
         # Holds each summary message.
-        hard_replay_budget_tokens=100,
-        summary_input_budget_tokens=summary_input_budget,
-        compaction_timeout_seconds=600.0,
+        limit_history=100,
+        summary_input_budget=summary_input_budget,
         compaction_fallback_model_name="fallback-model",
         compaction_fallback_summary_input_budget_tokens=summary_input_budget,
     )
@@ -1459,20 +1449,11 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     session = _session("session-1", runs=[_completed_run("run-1")])
     session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
-    execution_plan = ResolvedHistoryExecutionPlan(
-        automatic_compaction=True,
-        text_compaction_available=True,
-        explicit_compaction_model=True,
-        compaction_model_name="summary-model",
-        replay_window_tokens=64_000,
-        trigger_threshold_tokens=1,
-        reserve_tokens=0,
-        static_prompt_tokens=0,
-        replay_budget_tokens=1,
+    execution_plan = _compaction_plan(
+        trigger_history=1,
         # Holds the summary message.
-        hard_replay_budget_tokens=100,
-        summary_input_budget_tokens=16_000,
-        compaction_timeout_seconds=600.0,
+        limit_history=100,
+        summary_input_budget=16_000,
         compaction_fallback_model_name="fallback-model",
         compaction_fallback_summary_input_budget_tokens=16_000,
     )
@@ -1587,7 +1568,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             execution_identity=None,
             storage=storage,
             session=session,
-            available_history_budget=100,
+            execution_plan=_plan_with_history_budget(config, runtime_paths, 100),
         )
         persisted_before_second = storage.load_session("session-1")
         assert persisted_before_second is not None
@@ -1600,7 +1581,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             execution_identity=None,
             storage=storage,
             session=persisted_before_second,
-            available_history_budget=100,
+            execution_plan=_plan_with_history_budget(config, runtime_paths, 100),
         )
 
     persisted = storage.load_session("session-1")
@@ -1671,10 +1652,10 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_replays_history_between_trigger_and_hard_budget_on_a_native_route(
+async def test_prepare_history_for_run_replays_history_between_trigger_and_limit_on_a_native_route(
     tmp_path: Path,
 ) -> None:
-    """Native compaction owns history above the trigger, so replay is fitted only to the hard budget."""
+    """Native compaction owns history above the trigger, so replay is fitted only to the limit."""
     config, runtime_paths = _make_config(
         tmp_path,
         context_window=20_000,
@@ -1708,8 +1689,8 @@ async def test_prepare_history_for_run_replays_history_between_trigger_and_hard_
         session=session,
     )
 
-    # The three 200-token runs exceed the 400-token trigger but fit the hard budget, about half the 20,000-token window.
-    assert prepared.compaction_decision.reason == "within_hard_budget"
+    # The three 200-token runs exceed the 400-token trigger but fit the limit, about half the 20,000-token window.
+    assert prepared.compaction_decision.reason == "within_limit"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.estimated_tokens == 600
     assert prepared.replay_plan.num_history_runs is None
@@ -1755,9 +1736,9 @@ async def test_prepare_history_for_run_context_window_guard_skips_system_prompts
         execution_identity=None,
         storage=storage,
         session=persisted,
-        # The 40-token window minus its clamped 20-token reserve leaves 10 tokens of history beside this prompt.
-        static_prompt_tokens=10,
-        available_history_budget=10,
+        # The 40-token window minus its clamped 20-token reserve leaves 10 tokens of history beside this 10-token
+        # system prompt and turn.
+        system_prompt="s" * 28,
     )
 
     assert prepared.replay_plan is not None
@@ -1927,39 +1908,66 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     assert prepared.replays_persisted_history is True
 
 
-# Three runs of 2,000 + 2,000 characters estimate to 3,000 history tokens at chars / 4, under the trigger.
+# The reply's system prompt: 400 tokens at a quarter token per character.
+_SYSTEM_PROMPT = "s" * 1_600
+_PROMPT = "Current prompt"
+_FAKE = ModelIdentity(id="fake-model", provider="fake")
+# Three runs of 2,000 + 2,000 characters estimate to 3,000 history tokens at chars / 4, so the reply's request
+# estimates to 3,403 tokens with its system prompt and turn, under the trigger. The totals hold 4,000 and 6,000 tokens
+# of history beside them.
 _REPORTED_USAGE_PLAN = ResolvedHistoryExecutionPlan(
     automatic_compaction=True,
     text_compaction_available=True,
     explicit_compaction_model=True,
     compaction_model_name="summary-model",
     replay_window_tokens=64_000,
-    trigger_threshold_tokens=5_000,
+    trigger_threshold_tokens=4_400,
     reserve_tokens=0,
-    static_prompt_tokens=1_000,
-    replay_budget_tokens=4_000,
-    hard_replay_budget_tokens=6_000,
+    trigger_tokens=4_400,
+    limit_tokens=6_400,
     summary_input_budget_tokens=50_000,
     compaction_timeout_seconds=600.0,
 )
+# What a reported request adds beside the answer it did not hold: the 2,000-character answer and the turn.
+_TAIL_TOKENS = quarter_tokens("a" * 2_000 + _PROMPT)
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordingSizer(RequestSizer):
+    """A sizer that keeps every request it sizes."""
+
+    sized: list[ModelRequest] = field(default_factory=list)
+
+    def size(self, request: ModelRequest) -> RequestSize:
+        self.sized.append(request)
+        return super().size(request)
+
+
+class _AnswerHeavyModel(ScriptedModel):
+    """A route that renders each assistant answer with 700 tokens besides its text."""
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        answers = sum(message.role == "assistant" for message in request.messages[start:])
+        return super().request_tokens(request, start=start) + 700 * answers
+
+
+def _fake_model(counter: TokenCounter | None = None) -> ScriptedModel:
+    """Return the reply's model, counting with ``counter``, a quarter token per character when it is None."""
+    return ScriptedModel([], identity=_FAKE, token_counter=counter or fake_token_counter())
 
 
 def _reported_run(
     run_id: str,
     *,
     input_tokens: int = 0,
-    model: str = "fake-model",
+    identity: ModelIdentity = _FAKE,
     images: list[Image] | None = None,
     reasoning_tokens: int | None = None,
-    plan_mode: Literal["configured", "limited"] = "configured",
-    native_checkpoint: bool = False,
-    request_basis: str | None = None,
 ) -> RunRecord:
-    """Return a completed run whose answer ``model`` stamped with the request size its provider reported.
+    """Return a completed run whose answer the model ``identity`` stamped with the request size its provider reported.
 
-    The run publishes the replay plan ``plan_mode`` its request was sent with and the ``request_basis`` it recorded;
-    with ``native_checkpoint`` the answer holds a native compaction checkpoint. With ``reasoning_tokens`` the answer
-    also stores one encrypted reasoning item, as a Responses route records it, and reports that much reasoning.
+    With ``reasoning_tokens`` the answer also stores one encrypted reasoning item, as a Responses route records it,
+    and reports that much reasoning.
     """
     answer = Message(
         role="assistant",
@@ -1979,21 +1987,10 @@ def _reported_run(
                 },
             ],
         }
-    if native_checkpoint:
-        checkpoint = {"route": "checkpoints", "items": [{"type": "compaction", "encrypted_content": "gAAAA"}]}
-        answer.provider_data = {**(answer.provider_data or {}), NATIVE_CHECKPOINT_KEY: checkpoint}
-    stamp_model(answer, ModelIdentity(id=model, provider="fake"))
+    stamp_model(answer, identity)
     run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
-    run.model = model
-    run.model_provider = "fake"
-    run.metadata = build_prepared_history_metadata_content(
-        PreparedHistoryState(
-            replay_plan=ResolvedReplayPlan(mode=plan_mode, estimated_tokens=600, add_history_to_context=True),
-            prepared_context_tokens=1_000,
-            request_basis=request_basis,
-            native_history=None,
-        ),
-    )
+    run.model = identity.id
+    run.model_provider = identity.provider
     return run
 
 
@@ -2004,29 +2001,27 @@ async def _prepare_reply(
     runtime_paths: RuntimePaths,
     *,
     history_settings: ResolvedHistorySettings,
-    static_fingerprint: str = "static",
-    counter: TokenCounter | None = None,
-    non_prompt_tokens: int = 400,
+    model: ModelProvider,
+    frame: RequestFrame | None = None,
+    plan: ResolvedHistoryExecutionPlan = _REPORTED_USAGE_PLAN,
     lifecycle: RecordingCompactionLifecycle | None = None,
-) -> PreparedScopeHistory:
-    """Prepare a reply of ``fake-model`` in ``session-1``, whose system prompt and tools ``static_fingerprint`` names.
+) -> tuple[PreparedScopeHistory, list[ModelRequest]]:
+    """Prepare a reply of ``model`` in ``session-1`` around ``frame``; return it and the requests it sized.
 
-    ``session`` is the scope's stored session, None before its first reply is saved.
-
-    They are ``non_prompt_tokens`` of the plan's 1,000 static prompt tokens, and the model counts with ``counter``, a
-    quarter token per character when it is None.
+    ``session`` is the scope's stored session, None before its first reply is saved; ``frame`` is
+    ``request_frame(system=_SYSTEM_PROMPT)`` when None.
     """
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
             history_settings=history_settings,
             config=config,
             runtime_paths=runtime_paths,
-            static_prompt_tokens=0,
             active_model_name=entity_model_name(config, "test_agent"),
             active_context_window=None,
         ),
-        execution_plan=_REPORTED_USAGE_PLAN,
+        execution_plan=plan,
     )
+    sizer = _RecordingSizer(model=model, configured_provider=None)
     with (
         patch(
             "mindroom.providers.registry.build_model_provider",
@@ -2037,16 +2032,11 @@ async def _prepare_reply(
             new=AsyncMock(return_value="short summary"),
         ),
     ):
-        return await prepare_scope_history(
+        prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            model=ScriptedModel(
-                [],
-                identity=ModelIdentity(id="fake-model", provider="fake"),
-                token_counter=counter or fake_token_counter(),
-            ),
+            sizer=sizer,
+            frame=frame or request_frame(system=_SYSTEM_PROMPT),
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=non_prompt_tokens,
-            static_fingerprint=static_fingerprint,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=ScopeSessionContext(
@@ -2059,6 +2049,7 @@ async def _prepare_reply(
             pipeline_timing=None,
             allow_native_compaction=True,
         )
+    return prepared, sizer.sized
 
 
 async def _prepare_with_reported_usage(
@@ -2066,63 +2057,63 @@ async def _prepare_with_reported_usage(
     latest: dict[str, object],
     *,
     history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
+    answered_history_settings: ResolvedHistorySettings | None = None,
     summary: Literal["before", "after"] | None = None,
-    recorded_prompt: str = "static",
+    recorded_system_prompt: str = _SYSTEM_PROMPT,
+    system_prompt: str = _SYSTEM_PROMPT,
     runs_seen: int = 2,
-    counter: TokenCounter | None = None,
-    non_prompt_tokens: int = 400,
+    model: ModelProvider | None = None,
+    plan: ResolvedHistoryExecutionPlan = _REPORTED_USAGE_PLAN,
 ) -> tuple[PreparedScopeHistory, int, RecordingCompactionLifecycle]:
-    """Prepare a reply after three runs; return it, the chars / 4 history estimate, and the compaction notices.
+    """Prepare a reply after three runs; return it, the estimate of its request, and the compaction notices.
 
-    ``latest`` configures the newest run, whose request was prepared after the first ``runs_seen`` runs under the
-    system prompt and tools ``recorded_prompt`` names, and recorded the basis its preparation gave. A summary folding the
-    first run is written ``before`` or ``after`` that request. This reply's system prompt and tools are named
-    ``static`` and are ``non_prompt_tokens``; its model counts with ``counter``.
+    ``latest`` configures the newest run, whose request ``model`` prepared after the first ``runs_seen`` runs under
+    ``recorded_system_prompt`` and ``answered_history_settings`` (``history_settings`` when None), and whose answer
+    records that request's identity, as the model loop stamps it. A summary folding the first run is written
+    ``before`` or ``after`` that request. This reply's system prompt is ``system_prompt`` and its model ``model``,
+    ``_fake_model()`` when None.
     """
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
         context_window=64_000,
     )
+    model = model or _fake_model()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    earlier = [_reported_run("run-0"), _reported_run("run-1")]
+    earlier = [_reported_run("run-0", identity=model.identity), _reported_run("run-1", identity=model.identity)]
     session = seed_session(storage, _session("session-1", runs=earlier[:runs_seen]))
     if summary == "before":
         compact_runs(storage, session, ["run-0"], "Earlier summary")
-    request = await _prepare_reply(
-        storage,
-        session,
-        config,
-        runtime_paths,
-        history_settings=history_settings,
-        static_fingerprint=recorded_prompt,
+    newest = _reported_run("run-2", identity=model.identity, **latest)
+    answered = request_frame(system=recorded_system_prompt, turn=newest.messages[0]).request(
+        summary=session.summary,
+        history=prompt_visible_history(session, answered_history_settings or history_settings),
     )
-    recorded = finalize_history_preparation(
-        prepared_scope_history=request,
-        config=config,
-        static_prompt_tokens=0,
-        pipeline_timing=None,
-    ).request_basis
-    for run in [*earlier[runs_seen:], _reported_run("run-2", request_basis=recorded, **latest)]:
+    stamp_request_identity(newest.messages[-1], model, answered)
+    for run in [*earlier[runs_seen:], newest]:
         storage.save_run(session, run, record_usage=False)
     if summary == "after":
         compact_runs(storage, session, ["run-0"], "Earlier summary")
     session = storage.load_session("session-1")
     assert session is not None
-    estimate = estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=history_settings,
-        counter=fake_token_counter(),
+    # Off the event loop, as preparation counts.
+    estimate = await asyncio.to_thread(
+        model.request_tokens,
+        request_frame(system=system_prompt).request(
+            summary=session.summary,
+            history=prompt_visible_history(session, history_settings),
+        ),
     )
     lifecycle = RecordingCompactionLifecycle()
-    prepared = await _prepare_reply(
+    prepared, _sized = await _prepare_reply(
         storage,
         session,
         config,
         runtime_paths,
         history_settings=history_settings,
-        counter=counter,
-        non_prompt_tokens=non_prompt_tokens,
+        model=model,
+        frame=request_frame(system=system_prompt),
+        plan=plan,
         lifecycle=lifecycle,
     )
     return prepared, estimate, lifecycle
@@ -2148,15 +2139,15 @@ async def test_the_latest_reported_request_size_decides_compaction_before_a_repl
     """Chars / 4 undercounts real tokenizers (Qwen by about 1.3x), so the provider's count of the last request wins."""
     prepared, estimate, lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 8_000}, **setup)
 
-    assert estimate < 4_000  # The trigger budget.
-    # That request held the system prompt, tools, and all history but its own 500-token answer.
-    expected = 8_000 + 500 - 400
-    assert prepared.compaction_decision.current_history_tokens == expected
+    assert estimate < _REPORTED_USAGE_PLAN.trigger_tokens
+    # That request held the system prompt and all history but its own answer, which this request adds with its turn.
+    assert prepared.compaction_decision.request_tokens == 8_000 + _TAIL_TOKENS
     assert prepared.compaction_decision.mode == "required"
-    assert prepared.compaction_decision.reason == "history_exceeds_hard_budget"
+    assert prepared.compaction_decision.reason == "request_exceeds_limit"
     assert prepared.compaction_reply_outcome == "success"
     outcome = completed_outcome(lifecycle)
-    assert outcome.before_tokens == expected
+    # Notices show the history's share of the request, beside the 403-token system prompt and turn.
+    assert outcome.before_tokens == 8_000 + _TAIL_TOKENS - prepared.static_tokens
     start = lifecycle.events[0]
     assert isinstance(start, CompactionLifecycleStart)
     # A compaction nobody requested reports itself as automatic from its first notice to its outcome.
@@ -2172,41 +2163,50 @@ async def test_the_second_reply_sizes_its_history_by_the_first_reply_reported_si
         context_window=64_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    first = await _prepare_reply(storage, None, config, runtime_paths, history_settings=_ALL_HISTORY_SETTINGS)
-    recorded = finalize_history_preparation(
-        prepared_scope_history=first,
-        config=config,
-        static_prompt_tokens=0,
-        pipeline_timing=None,
-    ).request_basis
-    seed_session(
+    model = _fake_model()
+    first, sized = await _prepare_reply(
         storage,
-        _session("session-1", runs=[_reported_run("run-0", input_tokens=8_000, request_basis=recorded)]),
+        None,
+        config,
+        runtime_paths,
+        history_settings=_ALL_HISTORY_SETTINGS,
+        model=model,
     )
+    # Without a session there is nothing to size before the first reply.
+    assert first.compaction_decision.reason == "missing_session"
+    assert sized == []
+    run = _reported_run("run-0", input_tokens=8_000)
+    # The first reply's request held its system prompt and its turn.
+    stamp_request_identity(
+        run.messages[-1],
+        model,
+        request_frame(system=_SYSTEM_PROMPT, turn=run.messages[0]).request(),
+    )
+    seed_session(storage, _session("session-1", runs=[run]))
 
-    prepared = await _prepare_reply(
+    prepared, _sized = await _prepare_reply(
         storage,
         storage.load_session("session-1"),
         config,
         runtime_paths,
         history_settings=_ALL_HISTORY_SETTINGS,
+        model=model,
     )
 
-    assert prepared.compaction_decision.current_history_tokens == 8_000 + 500 - 400
+    assert prepared.compaction_decision.request_tokens == 8_000 + _TAIL_TOKENS
 
 
 @pytest.mark.asyncio
 async def test_the_reported_request_size_counts_its_answer_as_the_answering_route_sizes_it(tmp_path: Path) -> None:
     """The answer the reported request did not hold is sized as the model that answered replays it."""
-    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 8_000},
-        counter=fake_token_counter(replay=ReplayEstimate(1_200)),
+        model=_AnswerHeavyModel([], identity=_FAKE),
     )
 
-    # The route sizes the 500-token answer at 1,200 tokens; the whole history it sizes no higher than chars / 4.
-    assert estimate < 4_000
-    assert prepared.compaction_decision.current_history_tokens == 8_000 + 1_200 - 400
+    # The route renders the 500-token answer with 700 tokens more.
+    assert prepared.compaction_decision.request_tokens == 8_000 + _TAIL_TOKENS + 700
 
 
 @pytest.mark.asyncio
@@ -2223,7 +2223,7 @@ async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> 
         tmp_path,
         {"input_tokens": 8_000},
         summary="before",
-        counter=TokenCounter(estimate=estimate),
+        model=_fake_model(TokenCounter(estimate=estimate)),
     )
 
     assert counted_on
@@ -2232,20 +2232,20 @@ async def test_history_preparation_counts_off_the_event_loop(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_the_reported_request_size_decides_over_an_estimate_that_overcounts(tmp_path: Path) -> None:
-    """One ratio per route cannot fit every conversation's content, so the provider's count of the history wins.
+    """One ratio per route cannot fit every conversation's content, so the provider's count of the request wins.
 
     An estimate that counts a conversation a third too high would otherwise compact it early.
     """
-    one_per_character = TokenCounter(estimate=len)
-    prepared, _estimate, lifecycle = await _prepare_with_reported_usage(
+    prepared, estimate, lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 1_000},
-        counter=one_per_character,
+        model=_fake_model(TokenCounter(estimate=len)),
     )
 
-    # The reported request plus the 2,000-character answer it did not hold, minus the system prompt and tools; the
-    # estimate counts the three runs' 12,000 characters.
-    assert prepared.compaction_decision.current_history_tokens == 1_000 + 2_000 - 400
+    # The reported request plus the 2,000-character answer it did not hold and the turn; the estimate counts the three
+    # runs' 12,000 characters besides the system prompt.
+    assert prepared.compaction_decision.request_tokens == 1_000 + 2_000 + len(_PROMPT)
+    assert estimate > _REPORTED_USAGE_PLAN.limit_tokens
     assert prepared.compaction_decision.reason == "under_trigger"
     assert lifecycle.events == []
 
@@ -2254,30 +2254,23 @@ def _finalize_with_history_budget(
     tmp_path: Path,
     prepared: PreparedScopeHistory,
     history_budget: int,
-    policy: HistoryPolicy | None = None,
 ) -> PreparedHistoryState:
-    """Finalize ``prepared`` under the agent's own settings, with a static prompt that leaves ``history_budget``.
-
-    ``policy`` replaces the settings' replay policy when given.
-    """
+    """Finalize ``prepared`` under the agent's own settings, with a limit that leaves ``history_budget`` for history."""
     config, _paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True), context_window=64_000)
     # The agent's own settings, which bound replay by the context window.
     history_settings = config.resolve_scope("test_agent").history_settings
-    if policy is not None:
-        history_settings = replace(history_settings, policy=policy)
-    resolved_inputs = replace(prepared.resolved_inputs, history_settings=history_settings, active_context_window=64_000)
-    unloaded = resolve_history_execution_plan(
-        config=config,
-        history_settings=history_settings,
-        active_model_name=resolved_inputs.active_model_name,
-        active_context_window=64_000,
-        static_prompt_tokens=0,
+    execution_plan = replace(
+        prepared.resolved_inputs.execution_plan,
+        limit_tokens=prepared.static_tokens + history_budget,
     )
-    assert unloaded.hard_replay_budget_tokens is not None
+    resolved_inputs = replace(
+        prepared.resolved_inputs,
+        history_settings=history_settings,
+        execution_plan=execution_plan,
+    )
     return finalize_history_preparation(
         prepared_scope_history=replace(prepared, resolved_inputs=resolved_inputs),
-        config=config,
-        static_prompt_tokens=unloaded.hard_replay_budget_tokens - history_budget,
+        frame=request_frame(system=_SYSTEM_PROMPT),
         pipeline_timing=None,
     )
 
@@ -2285,17 +2278,29 @@ def _finalize_with_history_budget(
 @pytest.mark.asyncio
 async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_path: Path) -> None:
     """A history the reported size kept below the trigger replays whole, not trimmed by an estimate that overcounts."""
-    one_per_character = TokenCounter(estimate=len)
-    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+    prepared, estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 1_000},
-        counter=one_per_character,
+        model=_fake_model(TokenCounter(estimate=len)),
     )
-    reported = 1_000 + 2_000 - 400
-    assert prepared.compaction_decision.current_history_tokens == reported
+    reported = 1_000 + 2_000 + len(_PROMPT) - prepared.static_tokens
+    assert prepared.request_size == RequestSize(reported + prepared.static_tokens, reported=True)
 
-    # A budget between the reported size and the 12,000-character estimate.
-    state = _finalize_with_history_budget(tmp_path, prepared, (reported + 12_000) // 2)
+    # A budget between the reported history and the estimated one.
+    state = _finalize_with_history_budget(tmp_path, prepared, (reported + estimate - prepared.static_tokens) // 2)
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode != "limited"
+    assert state.replay_plan.estimated_tokens == reported
+
+
+@pytest.mark.asyncio
+async def test_a_history_exactly_at_the_final_budget_replays_whole(tmp_path: Path) -> None:
+    """A request exactly at the limit still fits it, so its history is not trimmed."""
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})
+    reported = 3_500 + _TAIL_TOKENS - prepared.static_tokens
+
+    state = _finalize_with_history_budget(tmp_path, prepared, reported)
 
     assert state.replay_plan is not None
     assert state.replay_plan.mode != "limited"
@@ -2309,9 +2314,9 @@ async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(
     The final prompt can leave less room than the check had, and nothing compacts when automatic compaction is off.
     """
     prepared, estimate, _lifecycle = await _prepare_with_reported_usage(tmp_path, {"input_tokens": 3_500})
-    reported = 3_500 + 500 - 400
-    assert prepared.compaction_decision.current_history_tokens == reported
-    assert estimate < 3_200 < reported
+    reported = 3_500 + _TAIL_TOKENS - prepared.static_tokens
+    assert prepared.request_size == RequestSize(reported + prepared.static_tokens, reported=True)
+    assert estimate - prepared.static_tokens < 3_200 < reported
 
     state = _finalize_with_history_budget(tmp_path, prepared, 3_200)
 
@@ -2322,14 +2327,60 @@ async def test_the_replay_plan_trims_by_the_reported_size_over_the_final_budget(
 
 @pytest.mark.asyncio
 async def test_history_never_sizes_below_zero(tmp_path: Path) -> None:
-    """A short conversation's reported request can be smaller than the padded estimate of its system prompt and tools."""
+    """A short conversation's reported request can be smaller than the estimate of its system prompt and tools."""
+    system_prompt = "s" * 20_000
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 200},
-        non_prompt_tokens=5_000,
+        recorded_system_prompt=system_prompt,
+        system_prompt=system_prompt,
+    )
+    assert prepared.compaction_decision.request_tokens == 200 + _TAIL_TOKENS < prepared.static_tokens
+
+    state = finalize_history_preparation(
+        prepared_scope_history=prepared,
+        frame=request_frame(system=system_prompt),
+        pipeline_timing=None,
     )
 
-    assert prepared.compaction_decision.current_history_tokens == 0
+    assert state.replay_plan is not None
+    assert state.replay_plan.estimated_tokens == 0
+    assert state.prepared_context_tokens == prepared.static_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("over", "replays"), [(-1, True), (1, False)], ids=["within", "over"])
+async def test_a_reported_request_within_the_limit_replays_whole_beside_a_larger_static_estimate(
+    tmp_path: Path,
+    over: int,
+    replays: bool,
+) -> None:
+    """The limit bounds the whole request, so a reported size within it keeps the history the static estimate exceeds.
+
+    Over the limit, trimming has no room left beside that estimate.
+    """
+    system_prompt = "s" * 20_000
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 200},
+        recorded_system_prompt=system_prompt,
+        system_prompt=system_prompt,
+    )
+    request_tokens = prepared.compaction_decision.request_tokens
+    assert request_tokens < prepared.static_tokens
+    plan = replace(prepared.resolved_inputs.execution_plan, limit_tokens=request_tokens - over)
+
+    state = finalize_history_preparation(
+        prepared_scope_history=replace(
+            prepared,
+            resolved_inputs=replace(prepared.resolved_inputs, execution_plan=plan),
+        ),
+        frame=request_frame(system=system_prompt),
+        pipeline_timing=None,
+    )
+
+    assert state.replay_plan is not None
+    assert state.replay_plan.mode == ("configured" if replays else "disabled")
 
 
 @pytest.mark.asyncio
@@ -2355,19 +2406,22 @@ async def test_trimming_never_widens_the_budget_by_an_estimate_that_overcounts(t
 
     Widening the budget by it could keep newer runs that overcount less, past the real budget.
     """
-    # Each run's 4,000 characters estimate at 2,000 tokens; the answer the request did not hold at 1,000.
+    # Each run's 4,000 characters estimate at 2,000 tokens; the reported history at 2,200.
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 2_000},
-        counter=TokenCounter(estimate=lambda text: len(text) // 2),
+        model=_fake_model(TokenCounter(estimate=lambda text: len(text) // 2)),
     )
-    assert prepared.compaction_decision.current_history_tokens == 2_000 + 1_000 - 400
+    reported = 2_000 + (2_000 + len(_PROMPT)) // 2 - prepared.static_tokens
+    assert reported == 2_200
 
-    state = _finalize_with_history_budget(tmp_path, prepared, 2_500)
+    # The estimate counts 6,000 history tokens, so widening by its ratio would allow two runs.
+    state = _finalize_with_history_budget(tmp_path, prepared, 2_000)
 
     assert state.replay_plan is not None
     assert state.replay_plan.mode == "limited"
-    assert state.replay_plan.estimated_tokens <= 2_500
+    assert state.replay_plan.num_history_runs == 1
+    assert state.replay_plan.estimated_tokens <= 2_000
 
 
 @pytest.mark.asyncio
@@ -2380,11 +2434,15 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
         prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
             root,
             {"input_tokens": 8_000, "reasoning_tokens": reasoning_tokens},
-            counter=responses_adapter(root, store=False).token_counter,
+            model=responses_adapter(root, store=False),
         )
-        sized[reasoning_tokens] = prepared.compaction_decision.current_history_tokens
+        request_tokens = prepared.compaction_decision.request_tokens
+        assert request_tokens is not None
+        # The reported request anchors it: the estimate of the whole request is far below the reported 8,000.
+        assert request_tokens > 8_000 + reasoning_tokens
+        sized[reasoning_tokens] = request_tokens
 
-    # Both answers size above their 500-token chars / 4 floor, so the difference is the extra reasoning alone.
+    # Both requests extend their answer's request, so the difference is the extra reasoning alone.
     assert sized[3_000] - sized[1_000] == 2_000
 
 
@@ -2393,14 +2451,15 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
     ("latest", "setup"),
     [
         pytest.param({}, {}, id="no-reported-usage"),
-        # A request whose replay plan cut the history reported the size of the part it sent.
-        pytest.param({"input_tokens": 8_000, "plan_mode": "limited"}, {}, id="partial-replay"),
-        # A native checkpoint replays differently on each route, and its response was billed for the transcript it replaced.
-        pytest.param({"input_tokens": 8_000, "native_checkpoint": True}, {}, id="native-checkpoint"),
-        # Another model, such as a fallback, counts with another tokenizer.
-        pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),
-        # A system prompt or tools changed since that request hold another number of tokens.
-        pytest.param({"input_tokens": 8_000}, {"recorded_prompt": "edited"}, id="system-prompt-changed"),
+        # A request whose replay plan cut the history held less than this one replays before that answer.
+        pytest.param(
+            {"input_tokens": 8_000},
+            {"answered_history_settings": replace(_ALL_HISTORY_SETTINGS, policy=HistoryPolicy(mode="runs", limit=1))},
+            id="partial-replay",
+        ),
+        # A system prompt changed since that request.
+        pytest.param({"input_tokens": 8_000}, {"recorded_system_prompt": "edited"}, id="system-prompt-changed"),
+        # A media item at a URL can change between requests unseen, and replay drops it.
         pytest.param(
             {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},
             {},
@@ -2425,6 +2484,7 @@ async def test_history_keeps_its_estimate_without_a_usable_reported_size(
 ) -> None:
     prepared, estimate, lifecycle = await _prepare_with_reported_usage(tmp_path, latest, **setup)
 
-    assert prepared.compaction_decision.current_history_tokens == estimate
+    assert prepared.request_size == RequestSize(estimate, reported=False)
+    assert prepared.compaction_decision.request_tokens == estimate
     assert prepared.compaction_decision.reason == "under_trigger"
     assert lifecycle.events == []

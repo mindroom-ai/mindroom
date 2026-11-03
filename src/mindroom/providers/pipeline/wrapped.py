@@ -12,17 +12,23 @@ final one replaced.
 
 Once failed attempts reported usage, one rule marks the usage of each later attempt as summing attempts: its reports
 get ``sums_attempts`` and its finished turn ``provider_data[AGGREGATE_USAGE_KEY]``, so a request that completes
-and one cut off before it finished both store the sum as describing no single request.
+and one cut off before it finished both store the sum as describing no single request. A finished turn whose attempt
+was reissued as another request, such as one without the media a provider rejected, gets
+``provider_data[REWRITTEN_ATTEMPT_KEY]``: its usage describes that other request, not the one the caller sent.
+
+A stage that rewrites every request it streams the same way, with no state of its own, names that rewrite as its
+``projection``, so the wrapper sizes and identifies the request its inner provider is sent.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError, incomplete_stream_error
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, stable_serialize
 from mindroom.llm.provider import (
     ReasoningDelta,
     ReportedUsage,
@@ -49,17 +55,30 @@ if TYPE_CHECKING:
     )
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["Retry", "WrappedProvider", "attempts"]
+__all__ = ["RequestProjection", "Retry", "WrappedProvider", "attempts"]
 
 type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]]
 
 
 @dataclass(frozen=True, slots=True)
+class RequestProjection:
+    """How a stage rewrites every request before its inner provider is sent it, which its ``stream`` applies too.
+
+    ``rewrite`` keeps the request's messages one for one. ``inputs`` returns what the rewrite reads besides the request,
+    such as the media kinds a route learned its model rejects, so a request's identity changes when they do.
+    """
+
+    rewrite: Callable[[ModelProvider, ModelRequest], ModelRequest]
+    inputs: Callable[[ModelProvider], object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class WrappedProvider:
-    """A provider whose ``stream`` runs ``stage`` around ``inner``."""
+    """A provider whose ``stream`` runs ``stage`` around ``inner``, which is sent ``projection``'s rewrite."""
 
     inner: ModelProvider
     stage: _Stage
+    projection: RequestProjection | None = None
 
     @property
     def identity(self) -> ModelIdentity:
@@ -86,9 +105,24 @@ class WrappedProvider:
         """The wrapped provider's recorded settings."""
         return self.inner.model_params
 
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Size the request the wrapped provider is sent."""
+        return self.inner.request_tokens(self._projected(request), start=start)
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the request the wrapped provider is sent, with what the projection reads besides it."""
+        key = self.inner.context_key(self._projected(request))
+        if self.projection is None or self.projection.inputs is None:
+            return key
+        inputs = stable_serialize(self.projection.inputs(self.inner))
+        return hashlib.sha256(f"{key}\0{inputs}".encode("utf-8", "surrogatepass")).hexdigest()
+
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Run the stage around the wrapped provider's stream."""
         return self.stage(self.inner, request)
+
+    def _projected(self, request: ModelRequest) -> ModelRequest:
+        return request if self.projection is None else self.projection.rewrite(self.inner, request)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +149,7 @@ async def attempts(
     route, and fails with the retryable ``incomplete_stream_error``.
     """
     carried: MessageMetrics | None = None
+    sent = request
     while True:
         committed = False
         finished = False
@@ -130,6 +165,10 @@ async def attempts(
                     usage.observe(event)
                     committed = committed or _commits_attempt(event)
                     finished = finished or isinstance(event, TurnCompleted)
+                    if isinstance(event, TurnCompleted) and request is not sent:
+                        # The attempt was another request than the caller's, so its usage sizes none of the caller's.
+                        message = event.message
+                        message.provider_data = {**(message.provider_data or {}), REWRITTEN_ATTEMPT_KEY: True}
                     yield _with_carried_usage(event, carried)
             if finished:
                 return

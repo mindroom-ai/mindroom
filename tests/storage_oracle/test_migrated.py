@@ -20,10 +20,9 @@ import pytest
 
 from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS, DELEGATION_STATE_KEY
-from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.summary_message import is_scope_summary
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, is_queued_notice_message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql, run_from_row

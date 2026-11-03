@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
+from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -31,9 +32,8 @@ from mindroom.constants import (
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.conversation_text import thread_context_note
-from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
-from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
+from mindroom.history.request_size import RequestFrame, request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
@@ -43,6 +43,7 @@ from mindroom.history.runtime import (
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.prompt_message_tags import render_msg_tag
@@ -54,15 +55,18 @@ from mindroom.streaming import (
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
+from mindroom.tool_jobs.execution import offered_definitions
 from mindroom.tool_system.events import has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config
+    from mindroom.history.request_size import RequestSizer
+    from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedHistorySettings
     from mindroom.llm.provider import ModelProvider, ToolSpec
@@ -298,12 +302,15 @@ def _messages_with_capped_context(
     *,
     config: Config,
     static_token_budget: int,
-    estimate_static_tokens_fn: Callable[[str], int],
+    turn_tokens: Callable[[TurnMessages], int],
 ) -> TurnMessages:
-    """Return the turn ``with_context`` builds around the newest context-message suffix that fits the static budget."""
+    """Return the turn ``with_context`` builds around the newest context-message suffix that fits the static budget.
+
+    ``turn_tokens`` sizes a request holding a turn and no history.
+    """
 
     def fits(turn: TurnMessages) -> bool:
-        return estimate_static_tokens_fn(render_prepared_messages_text(turn.in_request_order())) <= static_token_budget
+        return turn_tokens(turn) <= static_token_budget
 
     def newest_from(start: int) -> TurnMessages:
         # Tell the agent older messages were dropped; the marker counts against the same budget.
@@ -362,7 +369,7 @@ def _messages_with_current_prompt(
 
 
 def render_prepared_messages_text(messages: Sequence[Message]) -> str:
-    """Render canonical request messages to text for logs and rough token estimates."""
+    """Render canonical request messages to text for logs and prompt previews."""
     return "\n\n".join(str(message.content) for message in messages if message.content)
 
 
@@ -442,7 +449,7 @@ def _build_thread_history_messages(
     max_message_length: int | None,
     missing_sender_label: str | None,
     static_token_budget: int | None,
-    estimate_static_tokens_fn: Callable[[str], int],
+    turn_tokens: Callable[[TurnMessages], int],
     attachment_context: _ThreadAttachmentContext | None,
 ) -> TurnMessages:
     """Return the canonical turn for fallback full-thread replay."""
@@ -478,28 +485,9 @@ def _build_thread_history_messages(
             context_messages,
             config=config,
             static_token_budget=static_token_budget,
-            estimate_static_tokens_fn=estimate_static_tokens_fn,
+            turn_tokens=turn_tokens,
         )
     return with_context(context_messages)
-
-
-def _fallback_static_token_budget(
-    *,
-    context_window: int | None,
-    replay_window_tokens: int | None,
-    reserve_tokens: int,
-) -> int | None:
-    """Return the total static-token budget available to Matrix-thread fallback prompts.
-
-    Fallback thread replay stands in for persisted replay, so it uses the same replay window.
-    """
-    window = resolve_replay_window(
-        active_context_window=context_window,
-        configured_replay_window=replay_window_tokens,
-    )
-    if window is None or window <= 0:
-        return None
-    return context_budget_after_reserve(window, reserve_tokens)
 
 
 def _thread_history_before_current_event(
@@ -669,8 +657,7 @@ def _prepared_history_with_scheduled_limit(
 async def _finalize_prepared_history(
     *,
     prepared_scope_history: PreparedScopeHistory,
-    config: Config,
-    static_prompt_tokens: int,
+    frame: RequestFrame,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
     # Planning reads the caller's live session in a worker; drain it before cancellation lets the caller change it.
@@ -678,11 +665,15 @@ async def _finalize_prepared_history(
         asyncio.to_thread(
             finalize_history_preparation,
             prepared_scope_history=prepared_scope_history,
-            config=config,
-            static_prompt_tokens=static_prompt_tokens,
+            frame=frame,
             pipeline_timing=pipeline_timing,
         ),
     )
+
+
+def _turn_tokens(model: ModelProvider, frame: Callable[[TurnMessages], RequestFrame], turn: TurnMessages) -> int:
+    """Return the size of a request that holds ``turn`` and no history."""
+    return model.request_tokens(frame(turn).request())
 
 
 async def _prepare_execution_context_common(
@@ -699,18 +690,23 @@ async def _prepare_execution_context_common(
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
+    runtime_paths: RuntimePaths,
     timezone: str,
-    prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
-    estimate_static_tokens_fn: Callable[[str], int],
+    resolved_inputs: HistoryPreparationInputs,
+    compaction_lifecycle: CompactionLifecycle | None,
+    frame: Callable[[TurnMessages], RequestFrame],
+    sizer: RequestSizer,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
-    fallback_static_token_budget: int | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling.
 
-    ``timezone`` is the zone the current message's time is written in.
+    ``timezone`` is the zone the current message's time is written in. ``frame`` holds what the run's requests hold
+    around the scope's history for a turn, and ``sizer`` sizes them. A fallback thread replay stands in for persisted
+    replay, so ``resolved_inputs``' request limit bounds it too.
     """
+    turn_tokens = partial(_turn_tokens, sizer.model, frame)
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
@@ -757,8 +753,16 @@ async def _prepare_execution_context_common(
         )
 
     provisional_messages, _ = turn_messages(seen_event_ids)
-    prepared_scope_history = await prepare_scope_history_fn(
-        render_prepared_messages_text(provisional_messages.in_request_order()),
+    prepared_scope_history = await prepare_scope_history(
+        sizer=sizer,
+        frame=frame(provisional_messages),
+        resolved_inputs=resolved_inputs,
+        runtime_paths=runtime_paths,
+        config=config,
+        scope_context=scope_context,
+        compaction_lifecycle=compaction_lifecycle,
+        pipeline_timing=pipeline_timing,
+        allow_native_compaction=ctx.scheduled_history_budget is None,
     )
     final_messages, unseen_event_ids = turn_messages(
         await run_blocking_until_complete(_scope_seen_event_ids, scope_context)
@@ -766,14 +770,9 @@ async def _prepare_execution_context_common(
         else set(),
     )
 
-    final_static_tokens = await asyncio.to_thread(
-        estimate_static_tokens_fn,
-        render_prepared_messages_text(final_messages.in_request_order()),
-    )
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
-        config=config,
-        static_prompt_tokens=final_static_tokens,
+        frame=frame(final_messages),
         pipeline_timing=pipeline_timing,
     )
     if scheduled_history_budget is not None:
@@ -808,15 +807,12 @@ async def _prepare_execution_context_common(
             max_messages=render_limits.max_messages,
             max_message_length=render_limits.max_message_length,
             missing_sender_label=render_limits.missing_sender_label,
-            static_token_budget=fallback_static_token_budget,
-            estimate_static_tokens_fn=estimate_static_tokens_fn,
+            static_token_budget=resolved_inputs.execution_plan.limit_tokens,
+            turn_tokens=turn_tokens,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
         )
-        fallback_context_tokens = await asyncio.to_thread(
-            estimate_static_tokens_fn,
-            render_prepared_messages_text(final_messages.in_request_order()),
-        )
+        fallback_context_tokens = await asyncio.to_thread(turn_tokens, final_messages)
         if prepared_history.replay_plan is not None:
             fallback_context_tokens += prepared_history.replay_plan.estimated_tokens
         prepared_history = replace(prepared_history, prepared_context_tokens=fallback_context_tokens)
@@ -861,40 +857,10 @@ async def prepare_agent_execution_context(
     if not include_openai_compat_guidance:
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
-    # Encoding a long prompt would stall the replies sharing the event loop.
-    static_token_estimator = await asyncio.to_thread(
-        build_static_token_estimator,
-        build.spec.model.token_counter,
-        system_messages,
-        PreparedTools(functions=build.spec.functions).specs(),
-        build.request_template.deferred_tools.names,
-    )
-    compaction_config = build.history_settings.compaction_config
-
-    async def _prepare_agent_scope_history(
-        prepared_prompt: str,
-    ) -> PreparedScopeHistory:
-        resolved_inputs = resolve_entity_preparation_inputs(
-            config=config,
-            runtime_paths=runtime_paths,
-            history_settings=build.history_settings,
-            active_model_name=resolved_runtime_model.model_name,
-            active_context_window=resolved_runtime_model.context_window,
-            static_prompt_tokens=await asyncio.to_thread(static_token_estimator.estimate, prepared_prompt),
-        )
-        return await prepare_scope_history(
-            model=build.spec.model,
-            resolved_inputs=resolved_inputs,
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
-            static_fingerprint=static_token_estimator.fingerprint,
-            runtime_paths=runtime_paths,
-            config=config,
-            scope_context=scope_context,
-            compaction_lifecycle=compaction_lifecycle,
-            pipeline_timing=pipeline_timing,
-            allow_native_compaction=ctx.scheduled_history_budget is None,
-        )
-
+    offered = PreparedTools(functions=build.spec.functions).specs()
+    tools = offered_definitions(build.tool_jobs, offered) if build.tool_jobs is not None else offered
+    frame = partial(RequestFrame, replace(build.request_template, tools=tools), tuple(system_messages))
+    sizer = request_sizer(build.spec.model, config, resolved_runtime_model.model_name)
     return await _prepare_execution_context_common(
         ctx,
         scope_context=scope_context,
@@ -908,14 +874,18 @@ async def prepare_agent_execution_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        runtime_paths=runtime_paths,
         timezone=entity_timezone(config, agent_name),
-        prepare_scope_history_fn=_prepare_agent_scope_history,
-        estimate_static_tokens_fn=static_token_estimator.estimate,
-        fallback_static_token_budget=_fallback_static_token_budget(
-            context_window=resolved_runtime_model.context_window,
-            replay_window_tokens=compaction_config.replay_window_tokens,
-            reserve_tokens=compaction_config.reserve_tokens,
+        resolved_inputs=resolve_entity_preparation_inputs(
+            config=config,
+            runtime_paths=runtime_paths,
+            history_settings=build.history_settings,
+            active_model_name=resolved_runtime_model.model_name,
+            active_context_window=resolved_runtime_model.context_window,
         ),
+        compaction_lifecycle=compaction_lifecycle,
+        frame=frame,
+        sizer=sizer,
         attachment_context=_ThreadAttachmentContext(
             storage_path=runtime_paths.storage_root,
             room_id=ctx.room_id,
@@ -956,39 +926,8 @@ async def prepare_bound_team_run_context(
     the run adds is among them. ``history_settings`` are the built team's, whose replay policy and compaction config
     the scope follows.
     """
-    static_token_estimator = await asyncio.to_thread(
-        build_static_token_estimator,
-        model.token_counter,
-        leader_system_messages,
-        leader_tools,
-        frozenset(),
-    )
-    team_compaction_config = history_settings.compaction_config
-
-    async def _prepare_team_scope_history(
-        prepared_prompt: str,
-    ) -> PreparedScopeHistory:
-        resolved_inputs = resolve_entity_preparation_inputs(
-            config=config,
-            runtime_paths=runtime_paths,
-            history_settings=history_settings,
-            active_model_name=active_model_name,
-            active_context_window=active_context_window,
-            static_prompt_tokens=await asyncio.to_thread(static_token_estimator.estimate, prepared_prompt),
-        )
-        return await prepare_scope_history(
-            model=model,
-            resolved_inputs=resolved_inputs,
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
-            static_fingerprint=static_token_estimator.fingerprint,
-            runtime_paths=runtime_paths,
-            config=config,
-            scope_context=scope_context,
-            compaction_lifecycle=compaction_lifecycle,
-            pipeline_timing=pipeline_timing,
-            allow_native_compaction=ctx.scheduled_history_budget is None,
-        )
-
+    frame = partial(RequestFrame, ModelRequest(messages=(), tools=tuple(leader_tools)), tuple(leader_system_messages))
+    sizer = request_sizer(model, config, active_model_name)
     return await _prepare_execution_context_common(
         ctx,
         scope_context=scope_context,
@@ -1002,18 +941,22 @@ async def prepare_bound_team_run_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        runtime_paths=runtime_paths,
         timezone=timezone,
-        prepare_scope_history_fn=_prepare_team_scope_history,
-        estimate_static_tokens_fn=static_token_estimator.estimate,
+        resolved_inputs=resolve_entity_preparation_inputs(
+            config=config,
+            runtime_paths=runtime_paths,
+            history_settings=history_settings,
+            active_model_name=active_model_name,
+            active_context_window=active_context_window,
+        ),
+        compaction_lifecycle=compaction_lifecycle,
+        frame=frame,
+        sizer=sizer,
         thread_history_render_limits=thread_history_render_limits,
         attachment_context=_ThreadAttachmentContext(
             storage_path=runtime_paths.storage_root,
             room_id=ctx.room_id,
-        ),
-        fallback_static_token_budget=_fallback_static_token_budget(
-            context_window=active_context_window,
-            replay_window_tokens=team_compaction_config.replay_window_tokens,
-            reserve_tokens=team_compaction_config.reserve_tokens,
         ),
         pipeline_timing=pipeline_timing,
     )

@@ -64,11 +64,9 @@ class TokenCounter:
     """How a route estimates the tokens of text its model receives; ``mindroom.token_counting`` reads it for every count.
 
     ``estimate`` counts locally, never over the network, and returns None while its encoder is still loading.
-    ``replay`` is how the route sizes explicitly replayed history, or None to size it canonically.
     """
 
     estimate: Callable[[str], int | None]
-    replay: PortableReplayEstimator | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -350,18 +348,6 @@ class NativeHistoryRoute(Protocol):
         ...
 
 
-class PortableReplayEstimator(Protocol):
-    """A route that sizes explicitly replayed history the way its requests send it."""
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        """Return whether the estimate prices images by their visual cost instead of their transport bytes."""
-        ...
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
-        """Return the route's estimate of ``messages`` as one explicit replay, or None to size them canonically."""
-        ...
-
-
 class ModelProvider(Protocol):
     """A model behind one provider route."""
 
@@ -392,6 +378,23 @@ class ModelProvider(Protocol):
     @property
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings, which the request log records."""
+        ...
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate what ``request`` gives the route's model, rendered as the route sends it, never over the network.
+
+        From ``start`` 0 that is the whole model context: system prompt, the tool definitions it bills, what the
+        settings add, and every message; from another ``start``, which is an assistant answer, only what
+        ``request.messages[start:]`` add to the request that answer answered.
+        """
+        ...
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify what ``request`` gives the route's model besides its messages, as the route renders it.
+
+        Two requests with one key and the same messages give the model the same context, so a size the provider
+        reported for one describes the other.
+        """
         ...
 
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -428,7 +431,6 @@ __all__ = [
     "ModelTurn",
     "NativeCompactionReplay",
     "NativeHistoryRoute",
-    "PortableReplayEstimator",
     "ReasoningDelta",
     "ReportedUsage",
     "RequestOverrides",

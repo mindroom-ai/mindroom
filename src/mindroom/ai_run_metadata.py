@@ -113,26 +113,19 @@ def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[st
     """Return the prepared-context and compaction diagnostics a reply's run metadata publishes."""
     payload: dict[str, Any] = {}
     if prepared_history.prepared_context_tokens is not None:
-        prepared_context: dict[str, int | str] = {"tokens": prepared_history.prepared_context_tokens}
-        replay_plan = prepared_history.replay_plan
-        # A request whose plan cut the history, however it was cut, holds a part of it the basis does not describe.
-        if prepared_history.request_basis is not None and replay_plan is not None and replay_plan.mode == "configured":
-            prepared_context["request_basis"] = prepared_history.request_basis
-        payload["prepared_context"] = prepared_context
+        payload["prepared_context"] = {"tokens": prepared_history.prepared_context_tokens}
     decision = prepared_history.compaction_decision
     compaction: dict[str, Any] = {
         "decision": decision.mode,
         "outcome": prepared_history.compaction_reply_outcome,
         "reason": decision.reason,
     }
-    if decision.current_history_tokens is not None:
-        compaction["current_history_tokens"] = decision.current_history_tokens
-    if decision.trigger_budget_tokens is not None:
-        compaction["trigger_budget_tokens"] = decision.trigger_budget_tokens
-    if decision.hard_budget_tokens is not None:
-        compaction["hard_budget_tokens"] = decision.hard_budget_tokens
-    if decision.fitted_replay_tokens is not None:
-        compaction["fitted_replay_tokens"] = decision.fitted_replay_tokens
+    sizes = (
+        ("request_tokens", decision.request_tokens),
+        ("trigger_tokens", decision.trigger_tokens),
+        ("limit_tokens", decision.limit_tokens),
+    )
+    compaction.update({name: value for name, value in sizes if value is not None})
     if prepared_history.replay_plan is not None:
         compaction["replay_plan"] = {
             "mode": prepared_history.replay_plan.mode,

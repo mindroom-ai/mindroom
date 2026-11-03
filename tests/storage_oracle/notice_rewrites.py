@@ -12,8 +12,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, is_model_history_visible_run
-from mindroom.llm.messages import Message
+from mindroom.history.run_visibility import is_model_history_visible_run
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
 from tests.storage_oracle.backend import NOTICE_TURN_KEY
 
 if TYPE_CHECKING:

@@ -832,7 +832,7 @@ visibility = [
     "mindroom.ai_run_metadata",
     "mindroom.api.openai_compat",
     "mindroom.skill_learning.reviewer",
-    "mindroom.history.runtime",
+    "mindroom.history.request_size",
     "mindroom.providers.pipeline",
 ]
 
@@ -1178,7 +1178,6 @@ visibility = [
 [[modules]]
 path = "mindroom.ai_runtime"
 depends_on = [
-    "mindroom.history.run_visibility",
     "mindroom.llm",
 ]
 visibility = [
@@ -1194,13 +1193,10 @@ path = "mindroom.history.run_visibility"
 depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.session_storage.schema",
-    "mindroom.ai_runtime",
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
-    "mindroom.history.interrupted_replay",
-    "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
 
@@ -2592,9 +2588,8 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.history.conversation_text",
-    "mindroom.history.policy",
-    "mindroom.history.prompt_tokens",
     "mindroom.history.request_messages",
+    "mindroom.history.request_size",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -2603,6 +2598,7 @@ depends_on = [
     "mindroom.prompt_message_tags",
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_system.events",
     "mindroom.config.resolution",
 ]
@@ -2633,6 +2629,7 @@ depends_on = [
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.history.run_visibility",
+    "mindroom.llm",
 ]
 
 # The stored tool-call shapes earlier releases wrote, which the conversion to storage v2 stores in the current shape.
@@ -2674,8 +2671,15 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.history.prompt_tokens"
-depends_on = ["mindroom.llm"]
+path = "mindroom.history.request_size"
+depends_on = [
+    "mindroom.history.native",
+    "mindroom.history.request_messages",
+    "mindroom.llm",
+    "mindroom.model_usage",
+    "mindroom.native_compaction",
+]
+visibility = ["mindroom.execution_preparation", "mindroom.history.mid_turn_compaction"]
 
 [[modules]]
 path = "mindroom.history.summary_call"
@@ -2702,6 +2706,7 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.approval.resume",
+    "mindroom.history.request_size",
     "mindroom.history.runtime",
     "mindroom.teams",
 ]
@@ -2717,8 +2722,7 @@ visibility = [
     "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
-    "mindroom.history.runtime",
-    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.request_size",
     "mindroom.history.compaction",
     "mindroom.providers.openai",
 ]
@@ -2785,7 +2789,7 @@ depends_on = [
     "mindroom.providers.cache_ladder",
     "mindroom.providers.claude_wire_blocks",
 ]
-visibility = ["mindroom.history.mid_turn_compaction", "mindroom.providers.anthropic.messages"]
+visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.native_compaction"
@@ -2855,7 +2859,6 @@ depends_on = []
 path = "mindroom.history.interrupted_replay"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.run_visibility",
     "mindroom.history.storage",
     "mindroom.history.summary_message",
     "mindroom.prompt_message_tags",
@@ -2888,8 +2891,6 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
-    "mindroom.native_compaction",
-    "mindroom.constants",
     "mindroom.session_storage.lanes",
     "mindroom.history.compaction",
     "mindroom.history.native",
@@ -2898,8 +2899,6 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.types",
-    "mindroom.llm",
-    "mindroom.model_usage",
     "mindroom.failure_text",
     "mindroom.turn_model",
 ]
@@ -5980,7 +5979,6 @@ depends_on = []
 path = "mindroom.providers.openai"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.message_content",
     "mindroom.llm",
     "mindroom.native_compaction",
     "mindroom.providers.assistant_turn",
@@ -7682,17 +7680,14 @@ depends_on = [
 ]
 visibility = [
     "mindroom.history.legacy_stored_tool_calls",
-    "mindroom.history.replay",
     "mindroom.history.request_messages",
     "mindroom.history.summary_input",
-    "mindroom.providers.openai",
     "mindroom.participation_hook",
 ]
 
 [[modules]]
 path = "mindroom.history.replay"
 depends_on = [
-    "mindroom.history.message_content",
     "mindroom.llm",
     "mindroom.history.summary_message",
     "mindroom.history.types",
@@ -8457,6 +8452,8 @@ visibility = [
     # Agent assembly admits the calls of agents and team leaders as jobs, and the loop hooks offer their wait budget.
     "mindroom.agents",
     "mindroom.loop_hooks",
+    # Preparation sizes a reply's first request with the definitions the loop offers.
+    "mindroom.execution_preparation",
     # The CLI catalogs and a voice call's realtime tools run an agent's calls as its loop does.
     "mindroom.agent_cli.response_owner",
     "mindroom.matrix_rtc.call_tools",
@@ -9347,15 +9344,12 @@ depends_on = [
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.history.policy",
-    "mindroom.history.prompt_tokens",
     "mindroom.history.replay",
-    "mindroom.history.run_visibility",
+    "mindroom.history.request_size",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.summary_message",
     "mindroom.llm",
-    "mindroom.native_compaction",
-    "mindroom.providers.anthropic.prompt_cache",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.summary_rows",

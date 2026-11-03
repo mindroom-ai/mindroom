@@ -18,6 +18,7 @@ from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.identity import model_identity
 from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.requests import plain_request_parts, route_context_key, route_request_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -102,7 +103,7 @@ class SyntheticProvider:
     identity: ModelIdentity
     capabilities: Capabilities
     settings: SyntheticSettings
-    # The synthetic model keeps no history of its own, and its replayed history is sized canonically.
+    # The synthetic model keeps no history of its own.
     native_history_route: ClassVar[None] = None
 
     @property
@@ -114,6 +115,14 @@ class SyntheticProvider:
     def token_counter(self) -> TokenCounter:
         """The synthetic model estimates, as any route without a local tokenizer does."""
         return counter_for_model(self.identity)
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate ``request`` as a route that sends messages by role renders it; this model reads none of it."""
+        return route_request_tokens(self.token_counter, request, start, plain_request_parts)
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the tool definitions of ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, plain_request_parts)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.

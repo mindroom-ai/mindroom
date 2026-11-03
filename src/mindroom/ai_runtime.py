@@ -8,8 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, is_queued_notice_message
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, is_queued_notice_message
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:

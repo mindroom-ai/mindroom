@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, TokenCounter
+    from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -328,20 +328,20 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    counter: TokenCounter,
+    model: ModelProvider,
 ) -> CompactionOutcome | None:
     """Compact the scope owning ``session`` by appending summary rows that fold its oldest runs, chunk by chunk.
 
-    ``max_summary_tokens`` is the most history the reply can replay; no chunk whose summary exceeds it is stored.
-    ``progress`` receives the progress after each stored chunk that leaves runs to replay, and ``complete`` the
-    outcome after the last stored chunk.
+    The caller decided the reply needs it. ``max_summary_tokens`` is the most history the reply can replay; no chunk
+    whose summary exceeds it, as ``model``'s route sizes it, is stored. ``available_history_budget`` and
+    ``before_tokens`` are the history's budget and size the notices show; ``before_tokens`` is also the size the
+    ``compaction:before`` hook receives. ``progress`` receives the progress after each stored chunk that leaves runs
+    to replay, and ``complete`` the outcome after the last stored chunk.
     """
     scope = owner_scope(session)
     history_settings = summarizer.history_settings
     visible_runs = scope_visible_runs(session)
-    over_budget = available_history_budget is not None and before_tokens > available_history_budget
-    runs = visible_runs if state.force_compact_before_next_run or over_budget else []
-    if not runs:
+    if not visible_runs:
         await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
 
@@ -368,7 +368,7 @@ async def compact_scope_history(
             estimate_prompt_visible_history_tokens,
             session=working_session,
             history_settings=history_settings,
-            counter=counter,
+            model=model,
         )
         await progress(
             CompactionLifecycleProgress(
@@ -392,9 +392,9 @@ async def compact_scope_history(
             persisted_session=session,
             working_session=working_session,
             summarizer=summarizer,
-            runs=runs,
+            runs=visible_runs,
             max_summary_tokens=max_summary_tokens,
-            counter=counter,
+            model=model,
             before_persist=before_persist,
             after_persist=after_persist,
         )
@@ -420,7 +420,7 @@ async def compact_scope_history(
             estimate_prompt_visible_history_tokens,
             session=session,
             history_settings=history_settings,
-            counter=counter,
+            model=model,
         )
         outcome = CompactionOutcome(
             mode=mode,
@@ -458,13 +458,13 @@ async def _rewrite_working_session_for_compaction(
     summarizer: Summarizer,
     runs: Sequence[AnyRunRecord],
     max_summary_tokens: int | None,
-    counter: TokenCounter,
+    model: ModelProvider,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
 ) -> _CompactionRewriteResult | None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
-    Stops when the conversation changes or a chunk's summary, as ``counter`` sizes it, exceeds ``max_summary_tokens``;
+    Stops when the conversation changes or a chunk's summary, as ``model``'s route sizes it, exceeds ``max_summary_tokens``;
     with nothing stored yet, either stop fails the compaction.
     """
     scope = owner_scope(persisted_session)
@@ -496,7 +496,7 @@ async def _rewrite_working_session_for_compaction(
             )
             break
         # Sized as replay planning sizes a saved summary, never below it while the vocabulary loads, off the event loop.
-        summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, chunk.summary, counter, upper_bound=True)
+        summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, chunk.summary, model, upper_bound=True)
         if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
             _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
             break
@@ -602,7 +602,7 @@ async def compact_running_turn(
     threshold_tokens: int | None,
     available_history_budget: int | None,
     max_summary_tokens: int,
-    counter: TokenCounter,
+    model: ModelProvider,
     on_commit: Callable[[str], None],
     rewritten_request_tokens: Callable[[], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
@@ -614,20 +614,14 @@ async def compact_running_turn(
     is cancelled meanwhile, so the turn's in-memory state always matches the log and a stored fold never reads as
     failed. ``before_tokens`` sizes the request that triggered the fold, and ``rewritten_request_tokens`` sizes it
     after ``on_commit`` rewrote it, so the report compares one request before and after. Raises, writing nothing,
-    when the summary, sized by the reply's ``counter``, exceeds ``max_summary_tokens`` or the conversation
+    when the summary, sized by the reply's ``model``, exceeds ``max_summary_tokens`` or the conversation
     changed since ``basis`` was read.
     """
     scope = owner_scope(session)
     runs = [*basis.runs, *snapshots]
     summary, summarizer = await summarize_runs(summarizer, basis.summary, runs)
     # Sized as the rewritten request is, so a stored summary keeps it within the limit; sizing stays off the loop.
-    summary_tokens = await asyncio.to_thread(
-        estimate_summary_text_tokens,
-        summary,
-        counter,
-        as_request=True,
-        upper_bound=True,
-    )
+    summary_tokens = await asyncio.to_thread(estimate_summary_text_tokens, summary, model, upper_bound=True)
     if (error := _summary_budget_error(summary_tokens, max_summary_tokens)) is not None:
         raise error
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's

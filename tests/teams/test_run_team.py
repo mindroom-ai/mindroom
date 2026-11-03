@@ -420,7 +420,8 @@ async def test_a_collaborate_run_stores_labeled_member_results_in_member_order()
             metadata=metadata,
         ),
     )
-    members = store.members
+    # The members run concurrently, so they store in the order they finish.
+    members = sorted(store.members, key=lambda member: list(answers).index(member.agent_id))
     assert [settled(member) for member in members] == [
         settled(
             RunRecord(
@@ -453,7 +454,8 @@ async def test_a_collaborate_run_stores_labeled_member_results_in_member_order()
         for member_id in ("writer", "checker")
     }
     assert streamed == {"writer": "Five is prime.", "checker": "Five is odd."}
-    assert store.statuses == [("writer", "COMPLETED"), ("checker", "COMPLETED"), ("panel", "COMPLETED")]
+    assert sorted(store.statuses[:2]) == [("checker", "COMPLETED"), ("writer", "COMPLETED")]
+    assert store.statuses[2:] == [("panel", "COMPLETED")]
     # The turn's usage is the leader's plus each member's, counted once, within the leader's duration.
     total = team_usage(record)
     assert total is not None
@@ -521,7 +523,8 @@ async def test_a_collaborate_member_that_pauses_adds_its_labeled_notice_in_its_p
     assert record.status is RunStatus.paused
     assert record.tools is not None
     assert record.tools[0].result == ("Agent Writer: Six times seven is 42.\n\n" + CHECKER_PAUSED_PIECE)
-    writer_record, checker_record = store.members
+    # The members run concurrently, so they store in the order they finish.
+    writer_record, checker_record = sorted(store.members, key=lambda member: member.agent_id != "writer")
     assert (writer_record.status, checker_record.status) == (RunStatus.completed, RunStatus.paused)
     assert record.member_responses == [checker_record]  # Only the paused member rides along.
     [requirement] = record.requirements

@@ -30,6 +30,7 @@ from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings, ollama_client_options
 from mindroom.providers.tool_policy import disables_tools
 from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.requests import route_context_key, route_request_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, TokenCounter, ToolSpec
+    from mindroom.token_counting.requests import RequestParts
 
 
 @dataclass(slots=True)
@@ -73,7 +75,7 @@ class OllamaProvider:
     capabilities: Capabilities
     settings: OllamaSettings
     _client: AsyncClient | None = field(default=None, init=False, repr=False)
-    # Ollama keeps no history of its own, and its replayed history is sized canonically.
+    # Ollama keeps no history of its own.
     native_history_route: ClassVar[None] = None
 
     @property
@@ -85,6 +87,14 @@ class OllamaProvider:
     def token_counter(self) -> TokenCounter:
         """Ollama serves models whose tokenizer does not run locally, so the route estimates."""
         return counter_for_model(self.identity)
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate what ``request`` gives the model, from the messages and tools ``stream`` sends for it."""
+        return route_request_tokens(self.token_counter, request, start, self._parts)
+
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the tool definitions ``stream`` sends for ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, self._parts)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed chat request and yield its events."""
@@ -126,6 +136,19 @@ class OllamaProvider:
             stop_reason=_stop_reason(reply),
         ):
             yield event
+
+    def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
+        """Add what the messages and tools ``stream`` sends for ``request`` give the model, its messages from ``start`` on.
+
+        Each message renders alone; message and tool-result text count as text, and tool calls and definitions as JSON.
+        """
+        messages = request.messages[start:] if start else with_joined_system(request.messages)
+        for message in messages:
+            formatted = _message_dict(message)
+            parts.text(formatted.get("content"))
+            parts.value(formatted.get("tool_calls"))
+        if not start:
+            parts.value(self._chat_kwargs(request).get("tools"))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         """Return the chat parameters of one request; authored ``request_params`` override the settings and tools.
@@ -214,9 +237,18 @@ def _typed_property(schema: Any) -> Any:  # noqa: ANN401 - any JSON schema node
 async def _format_message(message: Message, provider: str) -> dict[str, Any]:
     """Return one chat message; images are read off the event loop, and the pipeline downloaded those at a URL.
 
-    A tool result names the tool that answered, as the API documents. An image that cannot be read raises
-    ``InvalidRequest``, so the media fallback replaces it with its note.
+    An image that cannot be read raises ``InvalidRequest``, so the media fallback replaces it with its note.
     """
+    formatted = _message_dict(message)
+    if message.role == "user":
+        images = [data for image in message.images or () if (data := await _image_bytes(image, provider))]
+        if images:
+            formatted["images"] = images
+    return formatted
+
+
+def _message_dict(message: Message) -> dict[str, Any]:
+    """Return one chat message without its images; a tool result names the tool that answered, as the API documents."""
     if message.role == "tool":
         result = tool_result_view(message)
         return {"role": "tool", "content": result.content, "tool_name": result.name}
@@ -230,10 +262,6 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
             }
             for call in message.tool_calls
         ]
-    if message.role == "user":
-        images = [data for image in message.images or () if (data := await _image_bytes(image, provider))]
-        if images:
-            formatted["images"] = images
     return formatted
 
 

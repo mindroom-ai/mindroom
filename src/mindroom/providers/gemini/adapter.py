@@ -34,9 +34,9 @@ from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.gemini.wire import (
     GeminiReply,
     MediaRoute,
-    estimate_replay_tokens,
     format_contents,
     function_declarations,
+    gemini_request_parts,
     malformed_tool_call_error,
     read_chunk,
     rejected_media,
@@ -48,6 +48,7 @@ from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.identity import model_identity
 from mindroom.providers.tool_policy import disables_tools
 from mindroom.token_counting.families import counter_for_model
+from mindroom.token_counting.requests import route_context_key, route_request_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping
@@ -57,8 +58,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
+    from mindroom.token_counting.requests import RequestParts
 
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 # How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
@@ -87,15 +88,24 @@ class GeminiProvider:
     @property
     def token_counter(self) -> TokenCounter:
         """Gemini's tokenizer does not run locally, so the route estimates; a tuned model's id need not name Gemini."""
-        return counter_for_model(self.identity, family="gemini", replay=self)
+        return counter_for_model(self.identity, family="gemini")
 
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        """Replayed media is sized by the history estimate's allowances."""
-        return False
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        """Estimate what ``request`` gives the model, from the parts and declarations ``stream`` sends for it."""
+        return route_request_tokens(self.token_counter, request, start, self._parts)
 
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
-        """Count the contents an explicitly replayed request sends for ``messages``, for history budgets."""
-        return estimate_replay_tokens(messages, counter=self.token_counter)
+    def context_key(self, request: ModelRequest) -> str:
+        """Identify the tools ``stream`` sends for ``request``."""
+        return route_context_key(self.identity, self.token_counter, request, self._parts)
+
+    def _parts(self, request: ModelRequest, start: int, parts: RequestParts) -> None:
+        gemini_request_parts(
+            request.messages[start:],
+            parts,
+            tools=self._generation_config(request, None).get("tools", ()),
+            server_tool_parts=self._sends_server_tool_parts(request),
+            static=not start,
+        )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.
@@ -120,7 +130,7 @@ class GeminiProvider:
                 request.messages,
                 MediaRoute(provider, upload),
                 # A decision request asks for no server-side tool parts (``without_tool_selection``).
-                server_tool_parts=self._sends_search_beside_tools(request) and not disables_tools(request.tool_choice),
+                server_tool_parts=self._sends_server_tool_parts(request),
             )
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
@@ -165,7 +175,14 @@ class GeminiProvider:
         request: ModelRequest,
         system_instruction: str | list[Any] | None,
     ) -> dict[str, Any] | GenerateContentConfig:
-        """Return the generation config of one request."""
+        """Return the generation config of one request; a decision request keeps its function schemas uncallable."""
+        config = self._generation_config(request, system_instruction)
+        if disables_tools(request.tool_choice):
+            return self._decision_config(config)
+        return config
+
+    def _generation_config(self, request: ModelRequest, system_instruction: str | list[Any] | None) -> dict[str, Any]:
+        """Return the authored and generated generation config of one request, its tools as it sends them."""
         settings = self.settings
         overrides = request.overrides
         dedicated = {
@@ -210,9 +227,11 @@ class GeminiProvider:
         # The request pipeline retries a failed request, so one attempt also overrides SDK retries that the generation
         # config's ``http_options`` authors.
         config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
-        if disables_tools(request.tool_choice):
-            return self._decision_config(config)
         return config
+
+    def _sends_server_tool_parts(self, request: ModelRequest) -> bool:
+        """Return whether ``request`` replays stored server-side tool parts; a decision request asks for none."""
+        return self._sends_search_beside_tools(request) and not disables_tools(request.tool_choice)
 
     def _sends_search_beside_tools(self, request: ModelRequest) -> bool:
         """Return whether ``request`` sends Google Search beside its function tools, as Gemini 3 and later take it.
@@ -224,7 +243,7 @@ class GeminiProvider:
         (https://docs.cloud.google.com/vertex-ai/generative-ai/docs/grounding/grounding-with-google-search), so there
         search replaces the function tools too.
         """
-        if not self.settings.search or not request.tools or self._sdk_client().vertexai:
+        if not self.settings.search or not request.tools or self._client_params()["vertexai"]:
             return False
         generation = _GEMINI_GENERATION.match(self.identity.id.rsplit("/", 1)[-1].casefold())
         return generation is not None and int(generation[1]) >= 3

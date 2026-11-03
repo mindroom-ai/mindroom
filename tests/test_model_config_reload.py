@@ -152,7 +152,6 @@ def _history_plan(config: Config, runtime_paths: RuntimePaths, entity_name: str)
         history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
-        static_prompt_tokens=0,
     )
 
 
@@ -172,7 +171,6 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         history_settings=old_agent.history_settings,
         config=old,
         runtime_paths=runtime.runtime_paths,
-        static_prompt_tokens=0,
         active_model_name=entity_model_name(old, "general"),
         active_context_window=None,
     ).execution_plan
@@ -202,7 +200,6 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         history_settings=agent.history_settings,
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
-        static_prompt_tokens=0,
         active_model_name=entity_model_name(runtime.config, "general"),
         active_context_window=None,
     ).execution_plan

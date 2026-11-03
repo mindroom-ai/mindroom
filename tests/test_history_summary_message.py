@@ -18,7 +18,6 @@ from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.execution_preparation import _prepared_history_with_scheduled_limit
 from mindroom.history.replay import (
     estimate_prompt_visible_history_tokens,
-    estimate_request_messages_tokens,
     plan_replay_that_fits,
 )
 from mindroom.history.request_messages import (
@@ -41,7 +40,6 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
-from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import _completed_team_run, _team_session, replay_settings, seed_summary
 from tests.session_storage.layout_4 import upgrade_from_layout_4
 from tests.team_turn_helpers import (
@@ -99,7 +97,7 @@ def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
     summary_tokens = estimate_prompt_visible_history_tokens(
         session=_owned_session(_SUMMARY, runs=False),
         history_settings=_ALL_HISTORY,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
     plan = plan_replay_that_fits(
@@ -107,7 +105,7 @@ def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
         history_settings=_ALL_HISTORY,
         available_history_budget=summary_tokens,
         current_history_tokens=summary_tokens + 1_000,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
     history = scope_history_messages(
         session.runs,
@@ -129,12 +127,12 @@ def test_replay_estimate_counts_the_rendered_summary_once() -> None:
     without = estimate_prompt_visible_history_tokens(
         session=_owned_session(None),
         history_settings=_ALL_HISTORY,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
     with_summary = estimate_prompt_visible_history_tokens(
         session=_owned_session(_SUMMARY),
         history_settings=_ALL_HISTORY,
-        counter=fake_token_counter(),
+        model=ScriptedModel([]),
     )
 
     rendered = str(compaction_summary_message(_SUMMARY, run_local=False).content)
@@ -153,20 +151,6 @@ def test_a_stored_run_local_summary_does_not_suppress_the_scope_summary_on_resum
     summaries = _owned_summaries(resumed)
     assert [summary.from_history for summary in summaries] == [True, False]
     assert _SUMMARY in str(summaries[0].content)
-
-
-def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() -> None:
-    session = _owned_session(None)
-    messages = [message for run in session.runs for message in run.messages]
-
-    assert estimate_request_messages_tokens(
-        messages,
-        counter=fake_token_counter(),
-    ) == estimate_prompt_visible_history_tokens(
-        session=session,
-        history_settings=_ALL_HISTORY,
-        counter=fake_token_counter(),
-    )
 
 
 def test_scheduled_history_limits_keep_or_drop_the_summary() -> None:

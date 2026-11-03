@@ -11,17 +11,13 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
-from functools import partial
-from typing import TYPE_CHECKING
+from functools import lru_cache, partial
 
 import tiktoken
 import tiktoken.model
 
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.logging_config import get_logger
-
-if TYPE_CHECKING:
-    from mindroom.llm.provider import PortableReplayEstimator
 
 __all__ = ["counter_for_model", "finish_loading", "load_o200k", "openai_model_counter", "start_loading_o200k"]
 
@@ -39,6 +35,9 @@ _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-", "codex-")
 # tiktoken's cost grows with the square of a run without whitespace, so text is encoded in pieces of at most this many
 # characters, each cut after a newline or before a word where one is near; a hard cut can add a token.
 _PIECE_CHARS = 8_192
+# How many pieces counts remember: every request a reply sizes repeats its system prompt and tools, and each reply
+# repeats the conversation before it, so the pieces they start with recur.
+_REMEMBERED_PIECES = 512
 # A failed load starts again only after this pause: a download has no timeout, and counts would otherwise retry it.
 _RETRY_SECONDS = 300.0
 
@@ -133,6 +132,11 @@ def _piece_end(text: str, start: int, end: int) -> int:
     return space if space > start else end
 
 
+@lru_cache(maxsize=_REMEMBERED_PIECES)
+def _piece_length(encoder: tiktoken.Encoding, piece: str) -> int:
+    return len(encoder.encode(piece, disallowed_special=()))
+
+
 def _encoded_length(encoder: tiktoken.Encoding, text: str) -> int:
     total = 0
     start = 0
@@ -140,7 +144,7 @@ def _encoded_length(encoder: tiktoken.Encoding, text: str) -> int:
         end = start + _PIECE_CHARS
         if end < len(text):
             end = _piece_end(text, start, end)
-        total += len(encoder.encode(text[start:end], disallowed_special=()))
+        total += _piece_length(encoder, text[start:end])
         start = end
     return total
 
@@ -185,7 +189,6 @@ def counter_for_model(
     *,
     local_encoder: bool = False,
     family: str | None = None,
-    replay: PortableReplayEstimator | None = None,
 ) -> TokenCounter:
     """Return the counter of the model ``identity`` names.
 
@@ -195,8 +198,8 @@ def counter_for_model(
     """
     name = identity.id.lower().rsplit("/", 1)[-1]
     if local_encoder and (encoding := _own_encoding(name)) is not None:
-        return TokenCounter(estimate=partial(_encoding_tokens, encoding), replay=replay)
-    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(family or name)), replay=replay)
+        return TokenCounter(estimate=partial(_encoding_tokens, encoding))
+    return TokenCounter(estimate=partial(_scaled_o200k_tokens, _margin(family or name)))
 
 
 def openai_model_counter(model_id: str) -> TokenCounter:

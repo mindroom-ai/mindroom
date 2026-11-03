@@ -206,17 +206,26 @@ def job_definitions_hook(actor: JobActor) -> BeforeRequestHook:
     """Return the pre-request hook that offers the wait budget of the actor's managed calls while they can be jobs."""
 
     async def project(state: LoopState) -> SendRequest:
-        scope = _job_scope()
-        if scope is not None:
-            managed = [
-                name
-                for name, tool in actor.tools.items()
-                if wait_mode(tool, depth=actor.depth, context=scope.context) == "managed"
-            ]
-            state.tools = project_definitions(state.tools, managed)
+        state.tools = offered_definitions(actor, state.tools)
         return SendRequest()
 
     return project
+
+
+def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tuple[ToolSpec, ...]:
+    """Return ``definitions`` as a request of ``actor`` made now offers them: managed calls with their wait budget.
+
+    Each request projects them, and preparation sizes the reply's first request with them.
+    """
+    scope = _job_scope()
+    if scope is None:
+        return tuple(definitions)
+    managed = [
+        name
+        for name, tool in actor.tools.items()
+        if wait_mode(tool, depth=actor.depth, context=scope.context) == "managed"
+    ]
+    return project_definitions(definitions, managed)
 
 
 def with_job_admission(actor: JobActor | None, inner: Sequence[ToolMiddleware]) -> tuple[ToolMiddleware, ...]:
@@ -560,6 +569,7 @@ __all__ = [
     "approval_can_run_as_job",
     "assembled_job_tools",
     "job_definitions_hook",
+    "offered_definitions",
     "project_definitions",
     "wait_mode",
     "with_job_admission",

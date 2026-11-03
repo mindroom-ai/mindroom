@@ -25,11 +25,11 @@ from mindroom.history.interrupted_replay import build_interrupted_replay_snapsho
 from mindroom.history.mid_turn_compaction import _carry_request_usage
 from mindroom.history.replay import current_summary_text
 from mindroom.history.request_messages import scope_history_messages
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, replays_in_scope
+from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.storage import new_scope_session, read_scope_state
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts

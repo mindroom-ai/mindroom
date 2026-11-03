@@ -23,9 +23,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
-from mindroom.execution_preparation import _PreparedExecutionContext
+from mindroom.execution_preparation import _PreparedExecutionContext, render_prepared_messages_text
 from mindroom.history.conversation_text import utterances
-from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import ScopeSessionContext, load_scope_session
 from mindroom.history.storage import (
@@ -52,7 +51,7 @@ from tests.conftest import (
     seed_session,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.fakes.token_counter import fake_token_counter, quarter_tokens
+from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     _completed_run,
@@ -228,15 +227,15 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
 
     assert prepare.await_args is not None
     build = prepared.build
-    estimator = build_static_token_estimator(
-        build.spec.model.token_counter,
-        prepared.spec.system_messages,
-        PreparedTools(functions=build.spec.functions).specs(),
-        build.request_template.deferred_tools.names,
-    )
-    assert prepare.await_args.kwargs["resolved_inputs"].execution_plan.static_prompt_tokens == estimator.estimate(
-        "Current prompt",
-    )
+    kwargs = prepare.await_args.kwargs
+    assert kwargs["sizer"].model is build.spec.model
+    # The provisional first request holds the agent's system prompt, its tools, and the prompt; persisted replay stands
+    # in for the thread history.
+    frame = kwargs["frame"]
+    assert frame.system_messages == tuple(prepared.spec.system_messages)
+    assert "Verbose role" in system_text(frame.system_messages)
+    assert frame.template.tools == tuple(PreparedTools(functions=build.spec.functions).specs())
+    assert render_prepared_messages_text(frame.turn.in_request_order()) == "Current prompt"
 
 
 @pytest.mark.asyncio
@@ -268,8 +267,8 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
 
     assert provider.model_names == ["large"]
     assert prepare.await_args is not None
-    assert prepare.await_args.kwargs["resolved_inputs"].active_model_name == "large"
-    assert prepare.await_args.kwargs["resolved_inputs"].active_context_window == 48_000
+    plan = prepare.await_args.kwargs["resolved_inputs"].execution_plan
+    assert (plan.compaction_model_name, plan.replay_window_tokens) == ("large", 48_000)
 
 
 @pytest.mark.asyncio
@@ -308,8 +307,13 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
     assert provider.model_names == ["call_fast"]
     assert prepare.await_args is not None
     resolved_inputs = prepare.await_args.kwargs["resolved_inputs"]
-    assert resolved_inputs.active_model_name == "call_fast"
-    assert resolved_inputs.active_context_window == 16_000
+    assert (
+        resolved_inputs.execution_plan.compaction_model_name,
+        resolved_inputs.execution_plan.replay_window_tokens,
+    ) == (
+        "call_fast",
+        16_000,
+    )
 
 
 @pytest.mark.asyncio
@@ -350,18 +354,9 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     assert prepared_run.prompt_text == "\n\n".join(expected)
 
 
-class _TextOnlyEstimator:
-    """A static estimate of the prompt text alone, so the thread fallback must fit the window by itself."""
-
-    counter = fake_token_counter()
-    non_prompt_tokens = 0
-    fingerprint = "static"
-
-    def __init__(self, *_args: object) -> None:
-        pass
-
-    def estimate(self, full_prompt: str) -> int:
-        return quarter_tokens(full_prompt)
+def _turn_text_tokens(_model: object, _frame: object, turn: TurnMessages) -> int:
+    """Size a turn by its text alone, so the thread fallback must fit the window by itself."""
+    return quarter_tokens(render_prepared_messages_text(turn.in_request_order()))
 
 
 @pytest.mark.asyncio
@@ -379,7 +374,7 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
 
     with (
         _no_memory(),
-        patch("mindroom.execution_preparation.build_static_token_estimator", _TextOnlyEstimator),
+        patch("mindroom.execution_preparation._turn_tokens", _turn_text_tokens),
         _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
         prepared_run = await prepare_agent_and_prompt_for_test(

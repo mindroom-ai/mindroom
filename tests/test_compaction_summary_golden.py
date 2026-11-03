@@ -22,7 +22,7 @@ from mindroom.session_storage.types import ConversationSession
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import SCENARIOS, Recorder, call_dict, load_golden, normalize
 from tests.conftest import seed_session
-from tests.fakes.token_counter import fake_token_counter
+from tests.fakes.scripted_model import ScriptedModel
 from tests.history_helpers import _reported
 
 if TYPE_CHECKING:
@@ -76,7 +76,6 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
         config=turn.config,
         runtime_paths=turn.runtime_paths,
         history_settings=turn.config.resolve_scope(turn.agent_name).history_settings,
-        static_prompt_tokens=0,
         active_model_name=entity_model_name(turn.config, turn.agent_name),
         active_context_window=None,
     )
@@ -91,8 +90,9 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
             state=read_scope_state(session),
             resolved_inputs=inputs,
             history_budget=None,
+            max_summary_tokens=None,
             before_tokens=0,
-            counter=fake_token_counter(),
+            model=ScriptedModel([]),
             config=turn.config,
             runtime_paths=turn.runtime_paths,
         )

@@ -28,9 +28,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _OUTPUT_LIMIT = 32768
-# Anthropic streams tool input one complete key and value at a time, so a call cut off before its last
-# argument ends with the arguments finished before the cut, which parse into a runnable call.
-_CUT_OFF_INPUT_JSON = '{"file_name": "big.py", "contents": "print(1)\\n"'
+# A script whose stored call input alone outgrows the compacting agent's replay window, about 7,500 tokens.
+_LARGE_SCRIPT = "".join(f"print({number})\n" for number in range(700))
 
 
 def _message(content: list[dict[str, Any]], *, stop_reason: str, output_tokens: int = 10) -> dict[str, Any]:
@@ -46,8 +45,8 @@ def _message(content: list[dict[str, Any]], *, stop_reason: str, output_tokens: 
     }
 
 
-def _cut_off_write() -> dict[str, Any]:
-    """The model spent its whole output budget inside one large file write."""
+def _cut_off_write(contents: str = "print(1)\n") -> dict[str, Any]:
+    """The model spent its whole output budget inside one large file write of ``contents``."""
     return _message(
         [
             {"type": "text", "text": "Writing the script now."},
@@ -55,7 +54,7 @@ def _cut_off_write() -> dict[str, Any]:
                 "type": "tool_use",
                 "id": "toolu_cut",
                 "name": "save_file",
-                "input": {"file_name": "big.py", "contents": "print(1)\n"},
+                "input": {"file_name": "big.py", "contents": contents},
             },
         ],
         stop_reason="max_tokens",
@@ -99,10 +98,10 @@ def _stream(message: dict[str, Any]) -> str:
         else:
             events += _event("content_block_start", index=index, content_block={**block, "input": {}})
             cut_off = message["stop_reason"] == "max_tokens" and index == len(message["content"]) - 1
-            delta = {
-                "type": "input_json_delta",
-                "partial_json": _CUT_OFF_INPUT_JSON if cut_off else json.dumps(block["input"]),
-            }
+            input_json = json.dumps(block["input"])
+            # Anthropic streams tool input one complete key and value at a time, so a call cut off before its last
+            # argument ends with the arguments finished before the cut, which parse into a runnable call.
+            delta = {"type": "input_json_delta", "partial_json": input_json[:-1] if cut_off else input_json}
         events += _event("content_block_delta", index=index, delta=delta)
         events += _event("content_block_stop", index=index)
     events += _event(
@@ -149,14 +148,16 @@ def config(tmp_path: Path) -> Config:
 
 @pytest.fixture
 def compacting_config(tmp_path: Path) -> Config:
-    """The same agent with a context window that one cut-off response's output overfills, so its retry is compacted.
+    """The same agent with a replay window that one large cut-off call overfills, so the retry that resends it is compacted.
 
-    Naming the summary model keeps compaction in MindRoom instead of Claude's native compaction.
+    The replay window caps the request at 10,000 - 4,096 tokens, while the summary input uses the model's whole
+    window, so one summary covers the call. Naming the summary model keeps compaction in MindRoom instead of
+    Claude's native compaction.
     """
     return _coder_config(
         tmp_path,
         context_window=30_000,
-        compaction=CompactionConfig(model="claude", reserve_tokens=4096),
+        compaction=CompactionConfig(model="claude", reserve_tokens=4096, replay_window_tokens=10_000),
     )
 
 
@@ -277,7 +278,7 @@ async def test_compaction_between_cut_offs_does_not_renew_the_retries(
     """Compaction folds the earlier cut-off responses into its summary, and the third one still ends the run."""
     bodies = _fake_claude(
         monkeypatch,
-        [_cut_off_write(), _cut_off_write(), _cut_off_write(), _answer("Wrote big.py in two parts.")],
+        [*repeat(_cut_off_write(_LARGE_SCRIPT), 3), _answer("Wrote big.py in two parts.")],
     )
 
     response = await _reply(compacting_config, "Write the full simulation script to big.py.")

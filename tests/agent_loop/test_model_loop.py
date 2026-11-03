@@ -27,9 +27,10 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_li
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
+from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
@@ -123,10 +124,36 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     assistant = messages[-1]
     assert (assistant.role, assistant.content) == ("assistant", "Hello, Alice.")
     assert assistant.metrics == usage(12, 3, time_to_first_token=0.25)
-    assert assistant.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
     [request] = model.requests
+    # The answer records the model that answered it and the identity of the request it answered.
+    assert assistant.provider_data == {
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+        REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1],
+    }
     assert request.messages == tuple(messages[:2])
     assert request.tools == ()
+
+
+async def test_an_answer_to_another_request_than_the_loop_sent_records_no_request_identity() -> None:
+    """A pipeline stage that answered with another request in its place leaves the answer's usage unmatched."""
+    rewritten = TurnCompleted(
+        message=Message(
+            role="assistant",
+            content="done",
+            metrics=usage(9, 1),
+            provider_data={REWRITTEN_ATTEMPT_KEY: True},
+        ),
+        stop_reason="end",
+    )
+    model = ScriptedModel([[TextDelta("done"), rewritten]])
+    messages = _prompt()
+
+    await _run(spec(model), messages)
+
+    assert messages[-1].provider_data == {
+        REWRITTEN_ATTEMPT_KEY: True,
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
 
 
 async def test_request_settings_come_from_the_template_and_tools_from_the_spec() -> None:
@@ -762,10 +789,13 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
         # The loop never took the turn, so only its usage is kept, on a message of its own.
         assert (messages[-1].content, messages[-1].tool_calls, record.content) == (None, None, None)
     assert messages[-1].metrics == usage(50, 2)
-    # Kept or cut off, the usage reads as one request only when it was one.
+    # Kept or cut off, the usage reads as one request only when it was one; only a kept answer records its request.
+    [request] = model.requests
+    identity = {REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1]} if ending == "completes" else {}
     assert messages[-1].provider_data == {
         **(marker or {}),
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+        **identity,
     }
     assert record.metrics is not None
     assert (
@@ -866,4 +896,4 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
     assert record.metrics.details == {
         "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI")],
     }
-    assert messages[-1].provider_data == {"mindroom_model": {"id": "m", "provider": "OpenAI"}}
+    assert messages[-1].provider_data["mindroom_model"] == {"id": "m", "provider": "OpenAI"}

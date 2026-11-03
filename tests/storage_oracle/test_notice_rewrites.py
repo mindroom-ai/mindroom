@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from tests.storage_oracle.backend import NOTICE_TURN_KEY
 from tests.storage_oracle.notice_rewrites import finalize, recover

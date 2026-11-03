@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import random
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -13,13 +12,13 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.history.native import configure_native_history, restore_native_history, with_native_history
-from mindroom.history.replay import compaction_marker, request_basis
+from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import scope_history_messages
+from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     _ScopeCompactionLifecycleResult,
     finalize_history_preparation,
@@ -29,19 +28,17 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import with_force_compaction
 from mindroom.history.summary_message import compaction_summary_message
-from mindroom.history.types import HistoryScope, PreparedHistoryState, ResolvedReplayPlan, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_summary, replay_basis
+from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
-from mindroom.token_counting.counts import count
-from mindroom.token_counting.families import openai_model_counter
-from tests.conftest import install_model_providers, runtime_paths_for, seed_session
+from tests.conftest import install_model_providers, request_frame, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _completed_run,
@@ -51,6 +48,7 @@ from tests.history_helpers import (
     _team_session,
     compact_runs,
     record_native_checkpoint,
+    stamp_request_identity,
 )
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
 from tests.providers.bare_adapter import bare_adapter
@@ -62,7 +60,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
-    from mindroom.history.types import NativeHistory
+    from mindroom.history.types import NativeHistory, PreparedHistoryState
     from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
     from mindroom.llm.runs import RunRecord
     from mindroom.providers.openai.responses import ResponsesAdapter
@@ -77,16 +75,45 @@ def _no_provider_environment() -> Iterator[None]:
         yield
 
 
+# The reply's first request around the scope's history: no system prompt or tools, and one prompt.
+_FRAME = request_frame("Continue")
+
+
 def _inputs(config: Config, entity: str = "test_agent") -> HistoryPreparationInputs:
-    """Resolve the configured ``entity``'s history inputs for a 100-token static prompt."""
+    """Resolve the configured ``entity``'s history inputs."""
     return resolve_entity_preparation_inputs(
         history_settings=config.resolve_scope(entity).history_settings,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        static_prompt_tokens=100,
         active_model_name=entity_model_name(config, entity),
         active_context_window=None,
     )
+
+
+async def _prepare(
+    model: ModelProvider,
+    config: Config,
+    scope_context: ScopeSessionContext,
+    *,
+    resolved: HistoryPreparationInputs | None = None,
+    allow_native_compaction: bool = True,
+) -> PreparedScopeHistory:
+    """Prepare the scope's history for a reply of ``_FRAME`` to ``model``, configured as ``default``."""
+    return await prepare_scope_history(
+        sizer=request_sizer(model, config, "default"),
+        frame=_FRAME,
+        resolved_inputs=resolved or _inputs(config),
+        runtime_paths=runtime_paths_for(config),
+        config=config,
+        scope_context=scope_context,
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=allow_native_compaction,
+    )
+
+
+def _finalize(prepared: PreparedScopeHistory) -> PreparedHistoryState:
+    return finalize_history_preparation(prepared_scope_history=prepared, frame=_FRAME, pipeline_timing=None)
 
 
 def _sent(adapter: ResponsesAdapter, messages: Sequence[Message], native: NativeHistory | None) -> dict[str, Any]:
@@ -102,7 +129,7 @@ def _continues(sent: dict[str, Any]) -> str | None:
 @pytest.mark.asyncio
 async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_history(tmp_path: Path) -> None:
     """Budget fitting must use safe explicit tool input without rewriting durable legacy records."""
-    config, paths = _make_config(
+    config, _paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=1000, replay_window_tokens=1000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=5000)},
@@ -142,26 +169,13 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     assert session is not None
     original = [run.to_dict() for run in session.runs]
     model = responses_adapter(tmp_path, store=True)
-    resolved = _inputs(config)
 
-    prepared = await prepare_scope_history(
-        model=model,
-        resolved_inputs=resolved,
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+    prepared = await _prepare(
+        model,
+        config,
+        ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
     )
-    final = finalize_history_preparation(
-        prepared_scope_history=prepared,
-        config=config,
-        static_prompt_tokens=100,
-        pipeline_timing=None,
-    )
+    final = _finalize(prepared)
 
     assert final.replay_plan is not None
     assert final.replay_plan.mode == "limited"
@@ -173,7 +187,8 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
         num_history_messages=None,
         max_tool_calls_from_history=None,
     )
-    assert model.estimate_portable_replay_tokens(messages) <= final.replay_plan.estimated_tokens <= 1000
+    replayed = with_native_history(ModelRequest(messages=tuple(messages)), final.native_history)
+    assert model.request_tokens(replayed) <= final.replay_plan.estimated_tokens <= 1000
     messages.append(Message(role="user", content="Continue"))
     sent = _sent(model, messages, final.native_history)
     assert _continues(sent) is None
@@ -195,7 +210,7 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     assert [run.to_dict() for run in session.runs] == original
 
 
-def test_portable_replay_follows_each_plans_replay_budget(tmp_path: Path) -> None:
+def test_portable_replay_follows_each_plans_request_limit(tmp_path: Path) -> None:
     """An unbounded plan continues the stored response; a bounded one replays its history explicitly."""
     config, _ = _make_config(tmp_path)
     model = responses_adapter(tmp_path, store=True)
@@ -208,22 +223,61 @@ def test_portable_replay_follows_each_plans_replay_budget(tmp_path: Path) -> Non
         ),
         Message(role="user", content="Continue"),
     ]
-    for budget in (1000, None, 2000):
+    for limit in (1000, None, 2000):
         native = configure_native_history(
             model,
-            plan=replace(resolved.execution_plan, hard_replay_budget_tokens=budget),
+            plan=replace(resolved.execution_plan, limit_tokens=limit),
             history_settings=resolved.history_settings,
             session=None,
             allowed=False,
             runs=(),
+            static_tokens=0,
         )
         sent = _sent(model, messages, native)
-        if budget is None:
+        if limit is None:
             assert _continues(sent) == "resp_previous"
             assert sent["input"] == [{"role": "user", "content": "Continue"}]
         else:
             assert _continues(sent) is None
             assert sent["input"][0] == {"role": "assistant", "content": "Previous answer"}
+
+
+@pytest.mark.parametrize(
+    ("static_tokens", "limit_tokens", "native"),
+    [(999, 5_000, True), (1_000, 5_000, False), (999, 1_000, False)],
+)
+def test_native_compaction_needs_a_trigger_between_the_request_without_history_and_the_limit(
+    tmp_path: Path,
+    static_tokens: int,
+    limit_tokens: int,
+    *,
+    native: bool,
+) -> None:
+    """A trigger the request reaches without history leaves nothing to compact; one at the limit would never fire."""
+    config, _ = _make_config(tmp_path)
+    model = responses_adapter(tmp_path, store=False)
+    resolved = _inputs(config)
+    plan = replace(
+        resolved.execution_plan,
+        automatic_compaction=True,
+        explicit_compaction_model=False,
+        trigger_threshold_tokens=1_000,
+        limit_tokens=limit_tokens,
+    )
+
+    configured = configure_native_history(
+        model,
+        plan=plan,
+        history_settings=resolved.history_settings,
+        session=None,
+        allowed=True,
+        runs=(),
+        static_tokens=static_tokens,
+    )
+
+    assert configured is not None
+    threshold = configured.native_compaction.threshold if configured.native_compaction is not None else None
+    assert threshold == (1_000 if native else None)
 
 
 @pytest.mark.parametrize("change", ["none", "model", "endpoint", "summary", "disabled", "missing", "invalid_threshold"])
@@ -272,24 +326,23 @@ def test_restore_native_policy_requires_latest_compatible_response(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Sizing by canonical history or the checkpoint's billed size would compact before the API sees the checkpoint."""
-    config, paths = _make_config(
+    config, _paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
     model = responses_adapter(tmp_path, store=False)
+    native = model.native_compaction_settings(threshold=120000, history_generation="", allow_authored=False)
+    transcript = Message(role="user", content="large old transcript " * 50000)
     answer = Message(
         role="assistant",
         content="Ready",
-        # Billed for the transcript the checkpoint replaced, over the 183,516-token hard budget.
+        # Billed for the transcript the checkpoint replaced, over the request limit.
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=190000)),
     )
-    record_native_checkpoint(
-        answer,
-        _CHECKPOINT,
-        model.native_compaction_settings(threshold=120000, history_generation="", allow_authored=False),
-    )
-    run = _completed_run("old", messages=[Message(role="user", content="large old transcript " * 50000), answer])
+    stamp_request_identity(answer, model, ModelRequest(messages=(transcript,), native_compaction=native))
+    record_native_checkpoint(answer, _CHECKPOINT, native)
+    run = _completed_run("old", messages=[transcript, answer])
     run.model = model.identity.id
     run.model_provider = model.identity.provider
     session = _session("session", runs=[run])
@@ -297,24 +350,12 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     seed_session(db, session)
     text_compact = AsyncMock(side_effect=AssertionError("Canonical history must remain intact"))
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
-    prepared = await prepare_scope_history(
-        model=model,
-        resolved_inputs=_inputs(config),
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+    prepared = await _prepare(
+        model,
+        config,
+        ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
     )
-    final = finalize_history_preparation(
-        prepared_scope_history=prepared,
-        config=config,
-        static_prompt_tokens=100,
-        pipeline_timing=None,
-    )
+    final = _finalize(prepared)
     assert final.replay_plan is not None
     assert final.replay_plan.add_history_to_context
     assert final.replay_plan.num_history_runs is None
@@ -330,10 +371,12 @@ async def _prepare_after_native_answer(
     *,
     checkpoint: bool,
     allow_native_compaction: bool,
-    answered_by_another_model: bool = False,
 ) -> PreparedScopeHistory:
-    """Prepare a reply after a native-route answer that reported a 30,000-token request over a long transcript."""
-    config, paths = _make_config(
+    """Prepare a reply after a native-route answer that reported a 30,000-token request over a long transcript.
+
+    The answer records the request it answered: the transcript under the route's native settings.
+    """
+    config, _paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
@@ -341,35 +384,21 @@ async def _prepare_after_native_answer(
     model = responses_adapter(tmp_path, store=False)
     settings = model.native_compaction_settings(threshold=120000, history_generation="", allow_authored=False)
     assert settings is not None
+    transcript = Message(role="user", content="old transcript " * 20000)
     answer = Message(role="assistant", content="Ready", metrics=MessageMetrics(tokens=TokenCounts(input_tokens=30000)))
+    stamp_request_identity(answer, model, ModelRequest(messages=(transcript,), native_compaction=settings))
     record_native_checkpoint(answer, _CHECKPOINT if checkpoint else [], settings)
-    answered_by = replace(model.identity, id="another-model") if answered_by_another_model else model.identity
-    stamp_model(answer, answered_by)
-    run = _completed_run("old", messages=[Message(role="user", content="old transcript " * 20000), answer])
-    run.model = answered_by.id
-    run.model_provider = answered_by.provider
-    run.metadata = build_prepared_history_metadata_content(
-        PreparedHistoryState(
-            replay_plan=ResolvedReplayPlan(mode="configured", estimated_tokens=0, add_history_to_context=True),
-            prepared_context_tokens=1_000,
-            # The request held no earlier history, under the system prompt and tools this reply carries.
-            request_basis=request_basis(static_fingerprint="static", summary=None, history=[]),
-            native_history=None,
-        ),
-    )
+    stamp_model(answer, model.identity)
+    run = _completed_run("old", messages=[transcript, answer])
+    run.model = model.identity.id
+    run.model_provider = model.identity.provider
     session = _session("session", runs=[run])
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, session)
-    return await prepare_scope_history(
-        model=model,
-        resolved_inputs=_inputs(config),
-        non_prompt_tokens=100,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
+    return await _prepare(
+        model,
+        config,
+        ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
         allow_native_compaction=allow_native_compaction,
     )
 
@@ -385,8 +414,9 @@ async def test_a_native_answer_without_a_checkpoint_sizes_the_next_reply_by_its_
     prepared = await _prepare_after_native_answer(tmp_path, checkpoint=False, allow_native_compaction=True)
 
     assert prepared.native_history is not None
-    # The reported 30,000 tokens plus the answer, minus the 100-token system prompt and tools.
-    assert 29_900 < prepared.compaction_decision.current_history_tokens < 30_100
+    # The reported 30,000 tokens plus the answer and the prompt.
+    assert prepared.compaction_decision.request_tokens is not None
+    assert 30_000 < prepared.compaction_decision.request_tokens < 30_100
 
 
 @pytest.mark.asyncio
@@ -394,16 +424,18 @@ async def test_a_native_answer_that_created_a_checkpoint_never_sizes_the_next_re
     """Its request is billed for the transcript the checkpoint replaced, which the next request no longer replays."""
     prepared = await _prepare_after_native_answer(tmp_path, checkpoint=True, allow_native_compaction=True)
 
-    assert prepared.compaction_decision.current_history_tokens < 1_000
+    assert prepared.compaction_decision.request_tokens is not None
+    assert prepared.compaction_decision.request_tokens < 1_000
 
 
 @pytest.mark.asyncio
-async def test_a_native_answer_without_a_checkpoint_sizes_a_turn_without_native_compaction(tmp_path: Path) -> None:
-    """Before any checkpoint, a native request sends the whole history, as a turn without native compaction does."""
+async def test_a_native_answer_never_sizes_a_turn_without_native_compaction(tmp_path: Path) -> None:
+    """A turn without native compaction renders its requests on another route, so the transcript is estimated."""
     prepared = await _prepare_after_native_answer(tmp_path, checkpoint=False, allow_native_compaction=False)
 
     assert prepared.native_history is None or prepared.native_history.native_compaction is None
-    assert 29_900 < prepared.compaction_decision.current_history_tokens < 30_100
+    assert prepared.compaction_decision.request_tokens is not None
+    assert prepared.compaction_decision.request_tokens > 35_000
 
 
 @pytest.mark.asyncio
@@ -415,7 +447,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     auto_compact: bool,
 ) -> None:
     """Dense text and hidden stored context must not bypass portable replay fitting."""
-    config, paths = _make_config(
+    config, _paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(enabled=auto_compact, reserve_tokens=1000, replay_window_tokens=6000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=30000)},
@@ -426,42 +458,31 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         AsyncMock(return_value="Keep the recent instruction"),
     )
     model = responses_adapter(tmp_path, base_url="https://proxy.example/v1", store=True)
-    latest = [
-        Message(role="user", content="Keep the recent instruction"),
-        Message(
-            role="assistant",
-            content="Ready",
-            provider_data={"response_id": "resp_large_context"},
-            metrics=MessageMetrics(tokens=TokenCounts(input_tokens=9000, output_tokens=10)),
-        ),
-    ]
+    old = Message(role="user", content="0123456789" * 1800)
+    answer = Message(
+        role="assistant",
+        content="Ready",
+        provider_data={"response_id": "resp_large_context"},
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=9000, output_tokens=10)),
+    )
+    latest = [Message(role="user", content="Keep the recent instruction"), answer]
+    # The stored response's context outgrew what the replayed history shows, which its reported size keeps in view.
+    stamp_request_identity(answer, model, ModelRequest(messages=(old, latest[0])))
+    stored_provider_data = dict(answer.provider_data or {})
     session = _session(
         "session",
-        runs=[
-            _completed_run("old", messages=[Message(role="user", content="0123456789" * 1800)]),
-            _completed_run("recent", messages=latest),
-        ],
+        runs=[_completed_run("old", messages=[old]), _completed_run("recent", messages=latest)],
     )
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, session)
-    prepared = await prepare_scope_history(
-        model=model,
-        resolved_inputs=_inputs(config),
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+    prepared = await _prepare(
+        model,
+        config,
+        ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
     )
-    final = finalize_history_preparation(
-        prepared_scope_history=prepared,
-        config=config,
-        static_prompt_tokens=100,
-        pipeline_timing=None,
-    )
+    final = _finalize(prepared)
+    assert prepared.compaction_decision.request_tokens is not None
+    assert prepared.compaction_decision.request_tokens > 9000
     assert final.replay_plan is not None
     if auto_compact:
         assert prepared.compaction_reply_outcome == "success"
@@ -478,7 +499,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     sent = _sent(model, [*latest, Message(role="user", content="Continue")], final.native_history)
     assert _continues(sent) is None
     assert sent["input"][0] == {"role": "user", "content": "Keep the recent instruction"}
-    assert latest[-1].provider_data == {"response_id": "resp_large_context"}
+    assert latest[-1].provider_data == stored_provider_data
 
 
 @pytest.mark.asyncio
@@ -498,7 +519,7 @@ async def test_native_activation_respects_history_policy(
     compaction = CompactionConfig(threshold_tokens=120000, enabled=case != "disabled")
     if case == "custom_summary":
         compaction.model = "summary"
-    config, paths = _make_config(
+    config, _paths = _make_config(
         tmp_path,
         # Under `defaults.compaction: null` the built-in config is enabled, but nobody authored it to compact.
         defaults_compaction=None if case == "built_in" else compaction,
@@ -533,17 +554,11 @@ async def test_native_activation_respects_history_policy(
     text_compact = AsyncMock(return_value=_ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
 
-    prepared = await prepare_scope_history(
-        model=model,
-        resolved_inputs=_inputs(config),
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
+    prepared = await _prepare(
+        model,
+        config,
+        ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
         allow_native_compaction=case != "scheduled",
-        compaction_lifecycle=None,
-        pipeline_timing=None,
     )
 
     native = prepared.native_history
@@ -554,7 +569,7 @@ async def test_native_activation_respects_history_policy(
 @pytest.mark.asyncio
 async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> None:
     """A retained native checkpoint cannot hide a newer portable summary rewrite."""
-    config, paths = _make_config(
+    config, _paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
@@ -565,17 +580,10 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
     session = _session("session", summary=ScopeSummary(text="New portable summary.", updated_at=datetime.now(UTC)))
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, session)
-    prepared = await prepare_scope_history(
-        model=model,
-        resolved_inputs=_inputs(config),
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+    prepared = await _prepare(
+        model,
+        config,
+        ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
     )
     assert prepared.native_history is not None
     assert prepared.native_history.native_compaction is not None
@@ -603,6 +611,7 @@ def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
             session=None,
             allowed=True,
             runs=runs,
+            static_tokens=0,
         )
         assert native is not None
         assert native.native_compaction is not None
@@ -642,7 +651,7 @@ def test_native_requests_record_the_history_they_replay(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) -> None:
     """A summary left in the session row cannot name the route checkpoints are recorded under."""
-    config, paths = _make_config(
+    config, _paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
@@ -660,17 +669,11 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     session = db.load_session("session")
     assert session is not None
     resolved = _inputs(config)
-    prepared = await prepare_scope_history(
-        model=model,
-        resolved_inputs=resolved,
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+    prepared = await _prepare(
+        model,
+        config,
+        ScopeSessionContext(_SCOPE, db, session, "session", storage_factory=lambda: db),
+        resolved=resolved,
     )
 
     assert session.summary is not None
@@ -682,6 +685,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         session=session,
         allowed=True,
         runs=(),
+        static_tokens=0,
     )
     assert expected is not None
     assert expected.native_compaction is not None
@@ -701,7 +705,7 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     """A team's native policy belongs to its leader model and the team's settings, not to its member's."""
-    config, paths = _make_config(
+    config, _paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(threshold_tokens=30000),
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
@@ -718,23 +722,17 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     session = _team_session("session", team_id="team", runs=[_completed_team_run("run", team_id="team")])
     seed_session(db, session)
 
-    prepared = await prepare_scope_history(
-        model=leader,
-        resolved_inputs=_inputs(config, "team"),
-        non_prompt_tokens=0,
-        static_fingerprint="static",
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(
+    prepared = await _prepare(
+        leader,
+        config,
+        ScopeSessionContext(
             HistoryScope(kind="team", scope_id="team"),
             db,
             session,
             "session",
             storage_factory=lambda: db,
         ),
-        compaction_lifecycle=None,
-        pipeline_timing=None,
-        allow_native_compaction=True,
+        resolved=_inputs(config, "team"),
     )
 
     assert prepared.native_history is not None
@@ -858,6 +856,7 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
         session=session,
         allowed=True,
         runs=(),
+        static_tokens=0,
     )
 
     def route_for(history_generation: str) -> str:
@@ -912,7 +911,7 @@ def test_compaction_marker_names_the_newest_summary_and_native_checkpoint(tmp_pa
 
 
 def test_history_reads_the_routes_native_settings_through_the_request_pipeline(tmp_path: Path) -> None:
-    """The provider the registry builds hands history planning its route's native history and replay estimator."""
+    """The provider the registry builds hands history planning its route's native history and request sizing."""
     config, paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
@@ -937,6 +936,7 @@ def test_history_reads_the_routes_native_settings_through_the_request_pipeline(t
             session=None,
             allowed=True,
             runs=(),
+            static_tokens=0,
         )
 
     provider = build_model_provider(config, paths, "default")
@@ -946,16 +946,32 @@ def test_history_reads_the_routes_native_settings_through_the_request_pipeline(t
     assert native is not None
     assert native.native_compaction is not None
     assert native == configured(adapter)
-    assert provider.token_counter.replay is adapter
-    chat = build_model_provider(config, paths, "chat")
-    assert (configured(chat), chat.token_counter.replay) == (None, None)
+    request = with_native_history(
+        ModelRequest(messages=(Message(role="user", content="Go"), Message(role="assistant", content="Done"))),
+        native,
+    )
+    assert provider.request_tokens(request) == adapter.request_tokens(request)
+    assert provider.request_tokens(request, start=1) == adapter.request_tokens(request, start=1)
+    assert configured(build_model_provider(config, paths, "chat")) is None
 
 
-def test_the_checkpoint_guard_sizes_ciphertext_by_its_length_not_its_tokens() -> None:
+def test_a_replayed_checkpoint_sizes_its_ciphertext_by_its_length_not_its_tokens(tmp_path: Path) -> None:
     """No tokenizer reads ciphertext: the provider counts the summary it decrypts to, so base64 is never tokenized."""
     ciphertext = base64.b64encode(random.Random(0).randbytes(30_000)).decode()  # noqa: S311 - reproducible, no secret
-    counter = openai_model_counter("gpt-4o")
-    items = [{"type": "compaction", "id": "cmp_1", "encrypted_content": ciphertext}]
+    model = responses_adapter(tmp_path, store=False)
+    native = model.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
 
-    readable = count(counter, json.dumps([{"type": "compaction", "id": "cmp_1"}]))
-    assert checkpoint_estimated_tokens(items, counter) == readable + (len(ciphertext) + 3) // 4
+    def request(encrypted: str) -> ModelRequest:
+        answer = Message(role="assistant", content="Ready")
+        record_native_checkpoint(
+            answer,
+            [{"type": "compaction", "id": "cmp_1", "encrypted_content": encrypted}],
+            native,
+        )
+        messages = (Message(role="user", content="Go"), answer, Message(role="user", content="Continue"))
+        return ModelRequest(messages=messages, native_compaction=native)
+
+    # A quarter token per character of the ciphertext, beside one character's.
+    assert model.request_tokens(request(ciphertext)) - model.request_tokens(request("x")) == (
+        (len(ciphertext) + 3) // 4 - 1
+    )

@@ -127,13 +127,14 @@ def _prepared_history(record: AnyRunRecord) -> PreparedHistoryState:
             estimated_tokens=plan["estimated_tokens"],
             add_history_to_context=True,
         ),
+        # The captured runs recorded their history's size and the history budgets; the decision publishes them as the
+        # sizes it compared, which is all the golden pins.
         compaction_decision=CompactionDecision(
             mode=compaction["decision"],
             reason=compaction["reason"],
-            current_history_tokens=compaction.get("current_history_tokens"),
-            trigger_budget_tokens=compaction.get("trigger_budget_tokens"),
-            hard_budget_tokens=compaction.get("hard_budget_tokens"),
-            fitted_replay_tokens=compaction.get("fitted_replay_tokens"),
+            request_tokens=compaction.get("current_history_tokens"),
+            trigger_tokens=compaction.get("trigger_budget_tokens"),
+            limit_tokens=compaction.get("hard_budget_tokens"),
         ),
         compaction_reply_outcome=compaction["outcome"],
         prepared_context_tokens=content["prepared_context"]["tokens"],

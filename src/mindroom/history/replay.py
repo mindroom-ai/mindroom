@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.history.message_content import (
-    HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
-    image_content_for_token_estimation,
-    render_message_content,
-)
-from mindroom.history.request_messages import scope_history_messages
+from mindroom.history.request_messages import request_layout, scope_history_messages
 from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import (
@@ -22,21 +16,16 @@ from mindroom.history.types import (
     owner_scope,
     replayed_summary_text,
 )
-from mindroom.llm.messages import stable_serialize
+from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
-from mindroom.native_compaction import (
-    checkpoint_estimated_tokens,
-    checkpoint_items,
-    native_checkpoint_id,
-    native_replay_messages,
-)
+from mindroom.native_compaction import native_checkpoint_id
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import TokenCounter
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
 
@@ -59,18 +48,24 @@ def estimate_prompt_visible_history_tokens(
     *,
     session: ConversationSession,
     history_settings: ResolvedHistorySettings,
-    counter: TokenCounter,
-    native_route: str | None = None,
+    model: ModelProvider,
 ) -> int:
     """Estimate the durable summary plus visible persisted history of the scope owning ``session`` for one run.
 
-    The history is the selection a request under ``history_settings`` sends, so the estimate counts exactly what the
-    model will read. Stale Anthropic replay fields are left in place because the canonical count never reads them.
+    The history is the selection a request under ``history_settings`` sends, estimated as ``model``'s route renders
+    it.
     """
-    history_messages = prompt_visible_history(session, history_settings)
-    tokens, has_checkpoint = _route_tokens(history_messages, counter=counter, native_route=native_route)
-    # A checkpoint covers the summary message before it, which native projection drops.
-    return tokens if has_checkpoint else estimate_summary_tokens(session, counter) + tokens
+    history = prompt_visible_history(session, history_settings)
+    return _added_tokens(model, request_layout(summary=session.summary, history=history))
+
+
+def _added_tokens(model: ModelProvider, messages: Sequence[Message]) -> int:
+    """Return what ``messages`` add to a request ``model`` receives, without what its route sends beside any messages.
+
+    A route can send instructions of its own with every request, which the request without its history already counts.
+    """
+    with_messages = model.request_tokens(ModelRequest(messages=tuple(messages)))
+    return with_messages - model.request_tokens(ModelRequest(messages=()))
 
 
 def prompt_visible_history(session: ConversationSession, history_settings: ResolvedHistorySettings) -> list[Message]:
@@ -85,130 +80,23 @@ def prompt_visible_history(session: ConversationSession, history_settings: Resol
     )
 
 
-def request_basis(*, static_fingerprint: str, summary: str | None, history: Sequence[Message]) -> str:
-    """Identify what a request holds before its turn: its system prompt and tools, the summary, and the history.
-
-    ``static_fingerprint`` identifies the system prompt and tools. Two requests with one basis hold the same content up
-    to their turns, so the size a model reported for one sizes the other's history on that model. Any change, such as
-    an edited system prompt, a new summary, or a replay limit that dropped a run, changes the basis.
-    """
-    digest = hashlib.sha256()
-    for part in (static_fingerprint, summary or "", *(stable_serialize(message.to_dict()) for message in history)):
-        digest.update(part.encode("utf-8", "surrogatepass"))
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def _route_tokens(
-    messages: list[Message],
-    *,
-    counter: TokenCounter,
-    native_route: str | None,
-) -> tuple[int, bool]:
-    """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
-    checkpoint_tokens = 0
-    if native_route is not None:
-        projected = native_replay_messages(messages, native_route)
-        messages = []
-        for message in projected:
-            if items := checkpoint_items(message, native_route):
-                checkpoint_tokens += checkpoint_estimated_tokens(items, counter)
-            else:
-                messages.append(message)
-    tokens = _estimate_messages_tokens(messages, counter=counter, native_route=native_route)
-    return checkpoint_tokens + tokens, checkpoint_tokens > 0
-
-
-def estimate_request_messages_tokens(
-    messages: Sequence[Message],
-    *,
-    counter: TokenCounter,
-    native_route: str | None = None,
-) -> int:
-    """Estimate one provider request's messages the way replay planning estimates history."""
-    return _route_tokens(list(messages), counter=counter, native_route=native_route)[0]
-
-
-def _estimate_messages_tokens(
-    history_messages: list[Message],
-    *,
-    counter: TokenCounter,
-    native_route: str | None,
-) -> int:
-    replay_estimator = counter.replay
-    uses_visual_tokens = replay_estimator is not None and replay_estimator.portable_replay_uses_visual_tokens()
-    attachment_tokens = _attachment_fallback_tokens(history_messages)
-    history_messages = [_without_attachments(message) for message in history_messages]
-    estimation_messages = (
-        history_messages
-        if uses_visual_tokens
-        else [_without_image_transport(message, strip_content_blocks=False) for message in history_messages]
-    )
-    provider_estimate = (
-        replay_estimator.estimate_portable_replay_tokens(estimation_messages)
-        if replay_estimator is not None and (estimation_messages or native_route is None)
-        else None
-    )
-    provider_accounts_for_images = uses_visual_tokens and provider_estimate is not None
-    canonical_text = "".join(
-        _estimated_message_text(_without_image_transport(message, strip_content_blocks=provider_accounts_for_images))
-        for message in history_messages
-    )
-    canonical_tokens = count(counter, canonical_text)
-    image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
-    return max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens + attachment_tokens
-
-
-def _without_attachments(message: Message) -> Message:
-    """Drop attached files, audio, and video for estimation; formatting them would count encoded bytes as text."""
-    updates = {
-        field: None
-        for field, value in (("files", message.files), ("audio", message.audio), ("videos", message.videos))
-        if value
-    }
-    return replace(message, **updates) if updates else message
-
-
-def _attachment_fallback_tokens(messages: list[Message]) -> int:
-    """Charge each attached file, audio, or video a bounded allowance instead of its encoded size."""
-    count = sum(len(message.files or []) + len(message.audio or []) + len(message.videos or []) for message in messages)
-    return count * HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS
-
-
-def _without_image_transport(message: Message, *, strip_content_blocks: bool) -> Message:
-    """Project image fields for estimation without changing saved messages."""
-    updates: dict[str, object] = {}
-    if strip_content_blocks and isinstance(message.content, list):
-        updates["content"] = [image_content_for_token_estimation(block) for block in message.content]
-    if message.images:
-        updates["images"] = None
-    return replace(message, **updates) if updates else message
-
-
-def estimate_summary_tokens(session: ConversationSession, counter: TokenCounter) -> int:
-    """Estimate the tokens the scope's summary message adds to a request."""
+def estimate_summary_tokens(session: ConversationSession, model: ModelProvider) -> int:
+    """Estimate the tokens the scope's summary message adds to a request ``model`` receives."""
     summary = current_summary_text(session)
     if summary is None:
         return 0
-    return estimate_summary_text_tokens(summary, counter)
+    return estimate_summary_text_tokens(summary, model)
 
 
-def estimate_summary_text_tokens(
-    summary: str,
-    counter: TokenCounter,
-    *,
-    as_request: bool = False,
-    upper_bound: bool = False,
-) -> int:
-    """Estimate the tokens the summary message holding ``summary`` adds to a request ``counter`` sizes.
+def estimate_summary_text_tokens(summary: str, model: ModelProvider, *, upper_bound: bool = False) -> int:
+    """Estimate the tokens the summary message holding ``summary`` adds to a request ``model`` receives.
 
-    Replay planning counts its text. ``as_request`` sizes it as a rewritten request's messages are sized, by the
-    route's request estimate, never below that count. ``upper_bound`` keeps the count from undercounting while the
-    vocabulary loads, as a check before storing a summary, which every later reply replays, needs.
+    The route's size of that message, never below its text's count. ``upper_bound`` keeps the count from undercounting
+    while the vocabulary loads, as a check before storing a summary, which every later reply replays, needs.
     """
     message = compaction_summary_message(summary, run_local=False)
-    tokens = count(counter, str(message.content), upper_bound=upper_bound)
-    return max(tokens, estimate_request_messages_tokens([message], counter=counter)) if as_request else tokens
+    tokens = count(model.token_counter, str(message.content), upper_bound=upper_bound)
+    return max(tokens, _added_tokens(model, (message,)))
 
 
 def scope_visible_runs(session: ConversationSession) -> list[AnyRunRecord]:
@@ -239,24 +127,13 @@ def compaction_marker(session: ConversationSession) -> tuple[str | None, str | N
     return current_summary_text(session), checkpoint
 
 
-def _estimated_message_text(message: Message) -> str:
-    """Return a message's text and tool calls; estimation charges its media separately, by bounded allowances."""
-    tool_calls = stable_serialize(message.tool_calls) if message.tool_calls else ""
-    return render_message_content(message) + tool_calls
-
-
-def _image_fallback_tokens(messages: list[Message]) -> int:
-    """Charge bounded visual input without serializing image transport as text."""
-    return sum(len(message.images or []) for message in messages) * HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS
-
-
 def plan_replay_that_fits(
     *,
     session: ConversationSession,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
-    counter: TokenCounter,
+    model: ModelProvider,
 ) -> ResolvedReplayPlan:
     """Return the safest plan for replaying the persisted history of the scope owning ``session`` within the budget.
 
@@ -268,7 +145,7 @@ def plan_replay_that_fits(
             history_settings=history_settings,
             estimated_tokens=current_history_tokens,
         )
-    summary_tokens = estimate_summary_tokens(session, counter)
+    summary_tokens = estimate_summary_tokens(session, model)
     if summary_tokens > available_history_budget:
         raise HistorySummaryBudgetError(summary_tokens=summary_tokens, available_tokens=available_history_budget)
 
@@ -279,7 +156,7 @@ def plan_replay_that_fits(
         available_history_budget=available_history_budget,
         limit_mode=limit_mode,
         max_limit=max_limit,
-        counter=counter,
+        model=model,
     )
     if fitting_limit > 0:
         policy = HistoryPolicy(mode=limit_mode, limit=fitting_limit)
@@ -319,7 +196,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-    counter: TokenCounter,
+    model: ModelProvider,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -333,7 +210,7 @@ def _find_fitting_history_limit_for_budget(
         candidate_tokens = estimate_prompt_visible_history_tokens(
             session=session,
             history_settings=replace(history_settings, policy=HistoryPolicy(mode=limit_mode, limit=mid)),
-            counter=counter,
+            model=model,
         )
         if candidate_tokens <= available_history_budget:
             best = mid
