@@ -384,6 +384,38 @@ def test_a_cut_off_reply_replays_rebuilt_after_the_searches_it_ran() -> None:
     ]
 
 
+@pytest.mark.parametrize("status", ["completed", "incomplete"])
+def test_a_call_into_a_searched_namespace_replays_with_its_namespace(status: str) -> None:
+    """A call to a tool a hosted search loaded under a namespace names that namespace again whenever it replays.
+
+    The provider resolves the call's name only within its namespace and rejects the call without it. A completed
+    response replays as recorded and a cut-off one is rebuilt; both go through the stored message.
+    """
+    search_output = {
+        **_SEARCH_OUTPUT,
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "crm",
+                "description": "Customer records.",
+                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+            },
+        ],
+    }
+    output = [_REASONING, _SEARCH_CALL, search_output, {**_CALL, "namespace": "crm"}]
+    parts = _streamed(_response(output, status=status), store=False)
+    reply = Message(role="assistant", tool_calls=parts.tool_calls, provider_data=parts.provider_data)
+
+    replay = _input(
+        [
+            Message.from_dict(json.loads(json.dumps(reply.to_dict()))),
+            Message(role="tool", tool_call_id="fc_lookup", content="Found"),
+        ],
+    )
+
+    assert [item.get("namespace") for item in replay if item.get("type") == "function_call"] == ["crm"]
+
+
 @pytest.mark.parametrize("reasoning", [None, _REASONING, {"type": "reasoning", "id": "rs_last", "summary": []}])
 @pytest.mark.parametrize("retained", ["none", "second", "both"])
 @pytest.mark.parametrize("portable", [False, True])
