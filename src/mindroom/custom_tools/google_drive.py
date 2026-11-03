@@ -22,6 +22,7 @@ from mindroom.atomic_file import atomic_write_file_at
 from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
+from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.client import ScopedOAuthClientMixin
@@ -362,7 +363,7 @@ class GoogleDriveTools(
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
-        resolved_mime_type = mime_type or mimetypes.guess_type(authorized.name)[0] or "application/octet-stream"
+        resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
         body: dict[str, object] = {"name": name or authorized.name}
         if folder_id:
             body["parents"] = [folder_id]
@@ -406,7 +407,7 @@ class GoogleDriveTools(
                         ),
                     },
                 )
-            resolved_mime_type = mime_type or mimetypes.guess_type(authorized.name)[0] or "application/octet-stream"
+            resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
             service = cast("Any", self.service)
             with _open_upload_media(authorized, resolved_mime_type) as media_body:
                 updated_file = (

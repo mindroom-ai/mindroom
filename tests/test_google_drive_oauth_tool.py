@@ -884,6 +884,33 @@ def test_google_drive_update_replaces_binary_file_content(
     }
 
 
+@pytest.mark.parametrize(
+    ("name", "mime_type"),
+    [
+        ("report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("rows.csv.gz", "application/octet-stream"),
+    ],
+)
+def test_google_drive_upload_and_update_type_a_file_by_its_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mime_type: str,
+) -> None:
+    """A Word file is typed as Word on every host, and a compressed file by no type its inner name names."""
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    (workspace_root / name).write_bytes(b"PK\x03\x04")
+    service.files_resource.file_metadata = {"id": "file-id", "name": name, "mimeType": mime_type}
+
+    tool.upload_file(name)
+    tool.update_file("file-id", name)
+
+    assert service.files_resource.create_kwargs is not None
+    assert service.files_resource.update_kwargs is not None
+    assert service.files_resource.create_kwargs["media_body"].mimetype == mime_type
+    assert service.files_resource.update_kwargs["media_body"].mimetype == mime_type
+
+
 def test_google_drive_update_rejects_google_workspace_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
