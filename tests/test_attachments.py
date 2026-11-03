@@ -55,6 +55,23 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
+def _file_event(event_id: str, filename: str, info: dict[str, object] | None) -> nio.RoomMessageFile:
+    content: dict[str, object] = {"msgtype": "m.file", "body": filename, "url": f"mxc://localhost/{filename}"}
+    if info is not None:
+        content["info"] = info
+    event = nio.Event.parse_event(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1780736400000,
+            "type": "m.room.message",
+            "content": content,
+        },
+    )
+    assert isinstance(event, nio.RoomMessageFile)
+    return event
+
+
 def test_attachment_id_for_event_is_stable() -> None:
     """Event IDs should map to deterministic attachment IDs."""
     event_id = "$file_event"
@@ -284,16 +301,7 @@ async def test_register_matrix_media_attachment_stops_reading_an_oversized_downl
     response = FakeMediaResponse(b"x" * (5 * limit))
     client = make_matrix_client_mock()
     client.send = AsyncMock(return_value=response)
-    event = nio.Event.parse_event(
-        {
-            "event_id": "$huge",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1780736400000,
-            "type": "m.room.message",
-            "content": {"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
-        },
-    )
-    assert isinstance(event, nio.RoomMessageFile)
+    event = _file_event("$huge", "huge.bin", None)
 
     record = await register_matrix_media_attachment(
         client,
@@ -485,27 +493,16 @@ async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) 
     """Each event keeps its own record, but events naming one upload share its single copy."""
     client = make_matrix_client_mock()
     client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"%PDF-1.7 shared"))
-    records = []
-    for index in range(3):
-        event = nio.Event.parse_event(
-            {
-                "event_id": f"$copy{index}",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1780736400000,
-                "type": "m.room.message",
-                "content": {"msgtype": "m.file", "body": "report.pdf", "url": "mxc://localhost/shared"},
-            },
+    records = [
+        await register_matrix_media_attachment(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            event=_file_event(f"$copy{index}", "report.pdf", None),
         )
-        assert isinstance(event, nio.RoomMessageFile)
-        records.append(
-            await register_matrix_media_attachment(
-                client,
-                tmp_path,
-                room_id="!room:localhost",
-                thread_id=None,
-                event=event,
-            ),
-        )
+        for index in range(3)
+    ]
     assert await attachments_module.wait_for_attachment_cleanup_tasks()
 
     stored = [record for record in records if record is not None]
@@ -901,23 +898,6 @@ async def test_a_text_attachment_whose_mime_type_has_parameters_reaches_claude_a
         {"type": "text", "media_type": "text/plain", "data": "Plain notes."},
     ]
     assert [(item.mime_type, item.local_path.suffix) for item in resolved] == [("text/plain", ".txt")]
-
-
-def _file_event(event_id: str, filename: str, info: dict[str, object] | None) -> nio.RoomMessageFile:
-    content: dict[str, object] = {"msgtype": "m.file", "body": filename, "url": f"mxc://localhost/{filename}"}
-    if info is not None:
-        content["info"] = info
-    event = nio.Event.parse_event(
-        {
-            "event_id": event_id,
-            "sender": "@user:localhost",
-            "origin_server_ts": 1780736400000,
-            "type": "m.room.message",
-            "content": content,
-        },
-    )
-    assert isinstance(event, nio.RoomMessageFile)
-    return event
 
 
 @pytest.mark.asyncio

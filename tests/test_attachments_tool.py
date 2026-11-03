@@ -324,45 +324,33 @@ async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, fi
 @pytest.mark.parametrize(
     ("filename", "mime_type", "data"),
     [
+        ("document.pdf", "application/pdf", b"%PDF-1.4 document bytes"),
         ("config.yaml", "application/x-yaml", b"replicas: 3\n"),
         ("rows.tsv", "text/tab-separated-values", b"a\tb\n"),
         ("server.log", "text/x-log", b"12:00 ERROR crashed\n"),
         ("feed.xml", "application/xml", b"<feed/>"),
     ],
 )
-async def test_get_attachment_view_returns_every_text_type(
+async def test_get_attachment_view_reopens_a_document_under_its_source_name(
     tmp_path: Path,
     filename: str,
     mime_type: str,
     data: bytes,
 ) -> None:
-    """An earlier message's text file of any text type reopens as a file the model reads."""
+    """An earlier message's PDF or text file of any text type reopens as a file the model reads.
+
+    Registration keeps the source name because the retained copy has an opaque name.
+    """
     local_path = tmp_path / filename
     local_path.write_bytes(data)
     attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type=mime_type)
     assert attachment is not None
+    assert attachment.local_path.name != filename
     with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
         result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
 
     assert isinstance(result, ToolValue)
     assert [(file.content, file.mime_type, file.filename) for file in result.files] == [(data, mime_type, filename)]
-
-
-@pytest.mark.asyncio
-async def test_get_attachment_view_uses_source_filename_when_none_is_given(tmp_path: Path) -> None:
-    """Registration keeps the source name because the retained copy has an opaque name."""
-    local_path = tmp_path / "document.pdf"
-    local_path.write_bytes(b"%PDF-1.4 document bytes")
-    attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type="application/pdf")
-    assert attachment is not None
-    assert attachment.filename == "document.pdf"
-    assert attachment.local_path.name != "document.pdf"
-    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
-        result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
-
-    assert isinstance(result, ToolValue)
-    assert result.files
-    assert result.files[0].filename == "document.pdf"
 
 
 @pytest.mark.asyncio

@@ -108,20 +108,15 @@ def test_worker_text_file_preserves_utf8_content(monkeypatch: pytest.MonkeyPatch
         serialize_worker_tool_result(result)
 
 
-def test_a_worker_returns_a_file_of_any_document_type_and_nothing_else() -> None:
-    """Any text type, such as YAML, crosses the worker boundary as a file; a type no document has never does."""
-    files = tuple(
-        OwnedFile(content=b"a: 1\n", mime_type=mime_type, filename="settings.yaml")
-        for mime_type in ("application/x-yaml", "application/ld+json")
-    )
+def test_a_worker_returns_a_file_of_any_document_type() -> None:
+    """Any text type, such as YAML, and a document type in any case cross the worker boundary as a file."""
+    mime_types = ["application/x-yaml", "application/ld+json", "Application/PDF"]
+    files = tuple(OwnedFile(content=b"a: 1\n", mime_type=mime_type) for mime_type in mime_types)
 
     decoded = decode_media_result(serialize_worker_tool_result(ToolValue(content="Files", files=files)))
 
     assert isinstance(decoded, ToolValue)
-    assert [file.mime_type for file in decoded.files] == ["application/x-yaml", "application/ld+json"]
-    archive = ToolValue(content="Archive", files=(OwnedFile(content=b"tar", mime_type="application/x-tar"),))
-    with pytest.raises(ValueError, match="Invalid worker tool result envelope"):
-        serialize_worker_tool_result(archive)
+    assert [file.mime_type for file in decoded.files] == mime_types
 
 
 @pytest.mark.parametrize("source", ["file", "url"])

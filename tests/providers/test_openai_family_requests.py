@@ -1443,6 +1443,7 @@ def test_rebuilding_a_request_leaves_a_message_s_content_list_unchanged() -> Non
         ("script.sh", None, "text/x-sh"),
         ("report.pdf", None, "application/pdf"),
         ("report.docx", None, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("REPORT.DOCX", None, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         ("report.pptx", None, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         ("report.xlsx", None, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         ("notes.txt", "application/pdf", "application/pdf"),

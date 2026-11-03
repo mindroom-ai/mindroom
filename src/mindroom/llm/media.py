@@ -229,7 +229,6 @@ _APPLICATION_TEXT_MIME_TYPES = frozenset(
         "application/x-latex",
     },
 )
-# The types of the binary documents a tool may return a file as for the model to read.
 _BINARY_DOCUMENT_MIME_TYPES = frozenset(
     {
         "application/pdf",

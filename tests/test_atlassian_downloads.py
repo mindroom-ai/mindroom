@@ -744,8 +744,8 @@ async def test_a_compressed_download_served_as_octet_stream_is_never_viewed_as_t
         ),
     )
 
+    result = await _download(tool, context)
     with tool_runtime_context(context):
-        result = json.loads(await tool.confluence_download_attachment(page_id="123", attachment_id="att456"))
         viewed = await AttachmentTools().get_attachment(str(result["attachment_id"]), view=True)
 
     assert result["attachment"]["mime_type"] == "application/octet-stream"
