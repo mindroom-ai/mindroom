@@ -146,6 +146,10 @@ async def test_every_text_type_reaches_claude_as_a_plain_text_document(tmp_path:
     ]
     encoded = [
         ("text/csv", "1;Müller GmbH;3 €\n".encode("cp1252"), "1;Müller GmbH;3 €\n"),
+        # Windows-1252 text whose bytes form one valid multibyte UTF-8 character by chance (é, a non-breaking space,
+        # and », or ß and “).
+        ("text/plain", "« qualité\u00a0» … société".encode("cp1252"), "« qualité\u00a0» … société"),
+        ("text/plain", "„Gruß“ Jürgen Müller".encode("cp1252"), "„Gruß“ Jürgen Müller"),
         ("text/x-log", "12:00 ERROR crashed\n".encode("utf-16"), "12:00 ERROR crashed\n"),
         ("text/x-log", codecs.BOM_UTF16_BE + "12:00 ERROR\n".encode("utf-16-be"), "12:00 ERROR\n"),
         ("text/plain", "\ufeffMüller".encode(), "Müller"),

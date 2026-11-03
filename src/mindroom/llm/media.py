@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import codecs
 import mimetypes
-import re
 from dataclasses import dataclass, field, fields, replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -268,15 +267,12 @@ def is_document_mime_type(mime_type: str | None) -> bool:
     return is_text_mime_type(mime_type) or canonical_mime_type(mime_type) in _BINARY_DOCUMENT_MIME_TYPES
 
 
-# A character only a valid multibyte UTF-8 sequence decodes to; Windows-1252 text almost never forms one.
-_UTF8_MULTIBYTE_CHARACTER = re.compile("[^\x00-\x7f\ufffd]")
-
-
 def file_text(data: bytes) -> str:
     """Return the text a text file's bytes hold: UTF-16 or UTF-8 by their byte-order mark, else UTF-8, else Windows-1252.
 
-    Bytes that are not all UTF-8 still read as UTF-8 when they hold a multibyte UTF-8 character, as a log cut
-    mid-character does. Bytes that do not decode become replacement characters.
+    Bytes that are not all UTF-8 still read as UTF-8 when they hold at least as many multibyte UTF-8 characters as
+    bytes that do not decode, as a log cut mid-character does; Windows-1252 text forms such a character only by
+    chance. Bytes that do not decode become replacement characters.
     """
     if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         return data.decode("utf-16", errors="replace")
@@ -286,7 +282,9 @@ def file_text(data: bytes) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         text = data.decode("utf-8", errors="replace")
-    return text if _UTF8_MULTIBYTE_CHARACTER.search(text) else data.decode("cp1252", errors="replace")
+    replaced = text.count("\ufffd")
+    multibyte = len(text) - replaced - len(text.encode("ascii", errors="ignore"))
+    return text if multibyte >= replaced else data.decode("cp1252", errors="replace")
 
 
 # The longest attachment name or type that model-facing text prints.

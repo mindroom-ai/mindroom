@@ -986,6 +986,24 @@ async def test_a_file_without_a_declared_type_is_typed_by_its_name_or_text(
     ]
 
 
+@pytest.mark.asyncio
+async def test_a_declared_type_stands_over_the_file_name(tmp_path: Path) -> None:
+    """A client's declared type decides a received file's type, even where its name names another."""
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(return_value=FakeMediaResponse(b"a,b\n"))
+
+    record = await register_matrix_media_attachment(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        event=_file_event("$rows", "rows.pdf", {"mimetype": "text/csv"}),
+    )
+
+    assert record is not None
+    assert record.mime_type == "text/csv"
+
+
 def test_register_local_attachment_uses_unique_temp_metadata_paths(tmp_path: Path) -> None:
     """Repeated writes for the same attachment ID should not reuse temp metadata paths."""
     file_path = tmp_path / "payload.txt"
