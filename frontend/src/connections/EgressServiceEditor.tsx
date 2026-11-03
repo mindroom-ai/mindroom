@@ -85,6 +85,14 @@ import type {
   EgressScope,
 } from "./types";
 
+/**
+ * A ref that scrolls what it is on into view once, when it appears: the
+ * editor and its notice open above the rows whose ⋯ menu opened them. As one
+ * function for every render, React calls it on mount only.
+ */
+const scrollIntoViewOnMount = (node: HTMLElement | null) =>
+  node?.scrollIntoView({ block: "nearest" });
+
 /** A problem with no field to show it, or with a field the basic form does not have. */
 function needsMoreOptions(problem: ServiceProblem): boolean {
   return problem.field !== "form" && !isBasicField(problem.field);
@@ -602,7 +610,9 @@ export function EgressServiceEditor({
       className="space-y-5 bg-muted/20 px-5 py-4"
       onSubmit={(event) => void submit(event)}
     >
-      <h3 className="font-semibold">{title}</h3>
+      <h3 ref={scrollIntoViewOnMount} className="scroll-m-4 font-semibold">
+        {title}
+      </h3>
       {note && <p className="text-xs text-muted-foreground">{note}</p>}
 
       {!limiting && (
@@ -917,7 +927,7 @@ export function DiscardEditsNotice({
   onKeep: () => void;
 }) {
   return (
-    <Alert className="m-4 w-auto p-2">
+    <Alert ref={scrollIntoViewOnMount} className="m-4 w-auto scroll-m-4 p-2">
       <AlertDescription className="flex flex-wrap items-center gap-2">
         You have unsaved changes in the open editor.
         <Button size="sm" variant="destructive" onClick={onDiscard}>
