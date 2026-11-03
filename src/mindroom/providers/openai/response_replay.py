@@ -54,6 +54,7 @@ def _function_call_items(message: Message) -> list[dict[str, Any]]:
             "name": call["function"]["name"],
             "arguments": call["function"]["arguments"],
             "status": "completed",
+            **({"namespace": call["namespace"]} if call.get("namespace") else {}),
         }
         for call in message.tool_calls or ()
     ]
