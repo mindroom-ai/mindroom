@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 CAROL = "@carol:localhost"
 ORIGIN_ROOM = "!room:example.org"
 ORIGIN_THREAD = "$thread"
+_ORIGIN = MessageTarget.resolve(room_id=ORIGIN_ROOM, thread_id=ORIGIN_THREAD, reply_to_event_id="$request")
 BOB_ROOM = "!bobroom:localhost"
 CAROL_ROOM = "!carolroom:localhost"
 CONTACT_ROOM = "!contact:localhost"
@@ -133,10 +134,11 @@ def _context(
     agent_name: str,
     requester_id: str,
     runtime: _Runtime | None = None,
+    origin: MessageTarget = _ORIGIN,
 ) -> ToolRuntimeContext:
     return make_test_tool_runtime_context(
         agent_name=agent_name,
-        target=MessageTarget.resolve(room_id=ORIGIN_ROOM, thread_id=ORIGIN_THREAD, reply_to_event_id="$request"),
+        target=origin,
         requester_id=requester_id,
         client=MagicMock(),
         config=config,
@@ -163,11 +165,12 @@ async def _request(
     agent_name: str = "mind_alice",
     requester_id: str = OWNER,
     target: str = "mind_bob",
+    origin: MessageTarget = _ORIGIN,
     **options: Any,  # noqa: ANN401
 ) -> ContactRecord:
     fields: dict[str, Any] = {"reason": "Plan the dinner", "rules": None, "tools": None, "party": "agent"}
     record, _asked = await flow.request_contact(
-        _context(config, paths, agent_name, requester_id, runtime),
+        _context(config, paths, agent_name, requester_id, runtime, origin),
         agent_name,
         target=target,
         **(fields | options),
@@ -348,7 +351,10 @@ async def test_a_person_without_a_personal_agent_here_is_refused_before_anything
 
 @pytest.mark.asyncio
 async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_path: Path) -> None:
-    """A pending or active pair is returned from either side; a notice that never landed is posted again."""
+    """A pending or active pair is returned from either side; a notice that never landed is posted again.
+
+    The requester's retry also moves the answer to the thread it asked again from.
+    """
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     with _delivered(None), pytest.raises(ValueError, match=r"could not be posted"):
@@ -356,8 +362,9 @@ async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_pa
     (missing,) = _stored(paths)
     assert missing.notice_event_id is None
 
+    retry_origin = MessageTarget.resolve(room_id="!retry:example.org", thread_id="$retry", reply_to_event_id="$again")
     with _delivered("$late") as send:
-        again = await _request(config, paths, runtime, reason="Another reason")
+        again = await _request(config, paths, runtime, reason="Another reason", origin=retry_origin)
         reverse = await _request(
             config,
             paths,
@@ -366,9 +373,12 @@ async def test_repeat_request_returns_existing_and_reposts_missing_notice(tmp_pa
             requester_id=CO_OWNER,
             target="mind_alice",
         )
-    # The notice nobody saw goes out with the reason the requester just approved, and the other side changes nothing.
+    # The notice nobody saw goes out with the reason the requester just approved, the answer goes to the thread that
+    # asked again, and the other side changes nothing.
     assert (again.id, again.notice_event_id, again.reason) == (missing.id, "$late", "Another reason")
+    assert (again.origin_room_id, again.origin_thread_id) == ("!retry:example.org", "$retry")
     assert [record.reason for record in _stored(paths)] == ["Another reason"]
+    assert _stored(paths) == [again]
     assert "Another reason" in str(send.await_args)
     assert reverse.id == missing.id
     send.assert_awaited_once()
