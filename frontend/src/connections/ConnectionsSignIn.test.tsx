@@ -234,6 +234,28 @@ describe("ConnectionsSignIn with an opener", () => {
     expect(await sentUser()).toBe("@bob:example.org");
   });
 
+  it("keeps a late sign-in when the session probe answers after it", async () => {
+    vi.useFakeTimers();
+    let releaseProbe = () => {};
+    vi.mocked(fetch).mockImplementation(async (_input, init) => {
+      if (init?.method === "POST")
+        return json({ matrix_user_id: "@bob:example.org" });
+      await new Promise<void>((resolve) => {
+        releaseProbe = resolve;
+      });
+      return signedOut();
+    });
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    answerFromOpener("bob");
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByText("Portal content")).toBeInTheDocument();
+    releaseProbe();
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByText("Portal content")).toBeInTheDocument();
+    expect(openChatSignIn).not.toHaveBeenCalled();
+  });
+
   it("sends a signed-out visitor to MindRoom Chat when the opener does not answer", async () => {
     vi.useFakeTimers();
     installBackend({ get: signedOut() });

@@ -199,7 +199,8 @@ function markSentToChat(): boolean {
  *
  * When MindRoom Chat opened the portal and its tab is still open, it ignores any existing session and only renders after
  * Chat's OpenID handshake succeeds; when the opener does not answer within five seconds, the page goes to the MindRoom
- * Chat page the server names, which signs the browser in and comes back, and a later answer from Chat still signs in.
+ * Chat page the server names, which signs the browser in and comes back; without one it shows its message, and a
+ * later answer from Chat still signs in.
  * Otherwise the page shows the session the server reports, and a signed-out visitor goes to that Chat page too.
  * Still signed out right after that page, the visitor gets a link to it instead.
  * A `?next=` connect or reset link is opened instead once sign-in settles, whether or not it succeeded.
@@ -211,7 +212,11 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
-    void signIn(signal, setGate)
+    let signedInLate = false;
+    void signIn(signal, (late) => {
+      signedInLate ||= late.state === "ready";
+      setGate(late);
+    })
       .catch(() => blocked(RELOAD))
       .then((next) => {
         if (signal.aborted) return;
@@ -219,6 +224,8 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
         // A failed sign-in opens it too, as a plain click would have: the link checks its own sign-in.
         const link = agentLinkToOpen(window.location.search);
         if (link) openAgentLink(link);
+        // Chat's late answer already signed in; the session probe that raced it must not replace the portal.
+        else if (signedInLate) return;
         else if (next.state !== "chat") setGate(next);
         // Without the mark, a visitor who comes back still signed out would be sent again and again.
         else if (markSentToChat()) openChatSignIn(next.url);
