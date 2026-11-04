@@ -143,7 +143,7 @@ run_subagent(task="Build the parser branch and run its tests.", dedicated_worker
 
 `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings); omitting it gives the worker the normal worker resources.
 The worker sees the same workspace, shared directories, and knowledge as the subagent's normal worker, with the same file access, leased tool settings, and shared credentials.
-Settings saved inside the normal worker and packages installed into its environment are not there, so a subagent that needs extra packages installs them again or uses a virtual environment in the workspace.
+Credentials and settings saved in the normal worker's own credential store and packages installed into its environment are not there, so a subagent that needs extra packages installs them again or uses a virtual environment in the workspace.
 The subagent's first worker call waits for the new worker to start, and `continue_subagent` follow-ups use the same worker while it exists.
 The worker is removed once it has been idle for the worker idle timeout, also while the subagent waits for an approval (`MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` or `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`, 30 minutes by default), which stops any process the subagent left running there; a later follow-up starts a new one.
 If the calling agent loses the setting or the backend stops supporting dedicated workers, the subagent's next attempt, including a call it resumes after an approval, uses its normal worker.

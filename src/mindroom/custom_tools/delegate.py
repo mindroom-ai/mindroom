@@ -190,7 +190,8 @@ class DelegateTools(Toolkit):
             "subagents, so parallel or heavy children do not compete for one worker. It sees the same workspace; its "
             "first worker call waits for the new worker to start, and packages installed into the normal worker's "
             "environment are not there. "
-            f"{profiles}Follow-ups keep the child's worker.\n"
+            f"{profiles}Follow-ups keep the child's worker while it exists; once it has been idle for the worker idle "
+            "timeout, a follow-up starts a new one with the same workspace and nothing installed outside it.\n"
         )
 
     def _authoring_guidance(self) -> str:
