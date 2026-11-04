@@ -728,10 +728,42 @@ async def test_a_shared_room_is_never_treated_as_a_personal_room(
     assert not owner._guest_removal_retries
 
 
+_RECORD_RULE = (
+    "because this room existed before it became a personal room, "
+    "and only the agents its personal-room record lists can stay here."
+)
+_KEEP_ROUTER = "To keep RouterAgent here, ask an operator to list it in this room's personal-room record."
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("removed", "notice"),
+    [
+        pytest.param(
+            ("@mindroom_writer:localhost",),
+            f"I removed Writer {_RECORD_RULE} Inviting it here again will remove it again. "
+            "To talk to Writer, create a new room and invite it.",
+            id="one-agent",
+        ),
+        pytest.param(
+            ("@mindroom_router:localhost",),
+            f"I removed RouterAgent {_RECORD_RULE} Inviting it here again will remove it again. {_KEEP_ROUTER}",
+            id="router",
+        ),
+        pytest.param(
+            ("@mindroom_blank:localhost", "@mindroom_router:localhost", "@mindroom_writer:localhost"),
+            f"I removed @mindroom_blank:localhost, RouterAgent, and Writer {_RECORD_RULE} "
+            "Inviting them here again will remove them again. "
+            f"To talk to @mindroom_blank:localhost and Writer, create a new room and invite them. {_KEEP_ROUTER}",
+            id="several-with-router-and-blank-name",
+        ),
+    ],
+)
 async def test_an_unattested_agent_is_removed_from_an_imported_room(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    removed: tuple[str, ...],
+    notice: str,
 ) -> None:
     """Agents are welcome only in rooms MindRoom created; an imported room removes them instead of failing.
 
@@ -754,7 +786,6 @@ async def test_an_unattested_agent_is_removed_from_an_imported_room(
             update={"display_name": display_name},
         )
     persist_entity_accounts(owner.runtime.config, owner.runtime_paths)
-    removed = ("@mindroom_blank:localhost", "@mindroom_router:localhost", "@mindroom_writer:localhost")
     for user_id in ("@mindroom_general:localhost", *removed):
         server.set_member(room_id, user_id, "join")
 
@@ -763,16 +794,11 @@ async def test_an_unattested_agent_is_removed_from_an_imported_room(
     assert server.kicks == [(room_id, user_id) for user_id in removed]
     for user_id in removed:
         assert server.removal_reason(room_id, user_id) == (
-            "This room existed before it became a personal room, so other agents can't join"
+            "This room existed before it became a personal room, "
+            "so only the agents its personal-room record lists can stay"
         )
     notices = [message["content"]["body"] for message in server.messages.values() if message["room_id"] == room_id]
-    assert notices == [
-        "I removed @mindroom_blank:localhost, RouterAgent, and Writer because this room existed before it became "
-        "a personal room, and only the agents its personal-room record lists can stay here. "
-        "Inviting them here again will remove them again. "
-        "To talk to @mindroom_blank:localhost and Writer, create a new room and invite them. "
-        "To keep RouterAgent here, ask an operator to list it in this room's personal-room record.",
-    ]
+    assert notices == [notice]
 
 
 @pytest.mark.asyncio

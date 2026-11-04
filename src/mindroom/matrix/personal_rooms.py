@@ -66,7 +66,9 @@ _GUEST_REMOVAL_NOTICE = (
     "This room is private to {owner}, so I removed {guests}. To work with other people, use a shared room."
 )
 # Only imported rooms remove agents: a room MindRoom created hides history from before an invite.
-_AGENT_REMOVAL_REASON = "This room existed before it became a personal room, so other agents can't join"
+_AGENT_REMOVAL_REASON = (
+    "This room existed before it became a personal room, so only the agents its personal-room record lists can stay"
+)
 _AGENT_REMOVAL_NOTICE = (
     "I removed {agents} because this room existed before it became a personal room, "
     "and only the agents its personal-room record lists can stay here. "
@@ -81,6 +83,11 @@ _ROUTER_REMOVAL_ADVICE = " To keep {router} here, ask an operator to list it in 
 # owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
+
+
+def _pronoun(names: list[str]) -> str:
+    """Return the pronoun for one named agent or several."""
+    return "it" if len(names) == 1 else "them"
 
 
 async def is_onboarding_room_member(source_client: nio.AsyncClient, user_id: str, source_room_id: str) -> bool:
@@ -501,15 +508,16 @@ class PersonalRoomService:
         """Remove members the room does not permit, then tell the room why once."""
         assert record.room_id is not None
         client = self._client()
-        # Validation removes only people from a room MindRoom created and only agents from an adopted one.
-        reason = _GUEST_REMOVAL_REASON if record.adoption is None else _AGENT_REMOVAL_REASON
-        # Word the notice before any kick: once the guests are gone, no later
-        # validation finds them, so a failure after the kicks would lose it.
-        notice = (
-            _GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(guests)))
-            if record.adoption is None
-            else self._agent_removal_notice(guests)
-        )
+        # Validation removes only people from a room MindRoom created and only
+        # agents from an adopted one. Word the notice before any kick: once the
+        # guests are gone, no later validation finds them, so a failure after
+        # the kicks would lose it.
+        if record.adoption is None:
+            reason = _GUEST_REMOVAL_REASON
+            notice = _GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(guests)))
+        else:
+            reason = _AGENT_REMOVAL_REASON
+            notice = self._agent_removal_notice(guests)
         for user_id in sorted(guests):
             response = await client.room_kick(record.room_id, user_id, reason=reason)
             if not isinstance(response, nio.RoomKickResponse):
@@ -536,24 +544,20 @@ class PersonalRoomService:
     def _agent_removal_notice(self, agent_ids: set[str]) -> str:
         """Explain why agents left an adopted room and what the owner can do instead."""
         config = self.runtime.config
-        entity_names = prepared_entity_names_by_user_id(config, self.runtime_paths)
-        router_removed = any(entity_names.get(user_id) == ROUTER_AGENT_NAME for user_id in agent_ids)
+        prepared = prepared_entity_names_by_user_id(config, self.runtime_paths)
+        entity_names = {user_id: prepared.get(user_id) for user_id in agent_ids}
+        router_removed = ROUTER_AGENT_NAME in entity_names.values()
+        # A blank display name or an unprepared account shows the Matrix ID.
         agents = sorted(
-            (config.entity_display_name(entity_names[user_id]) if user_id in entity_names else "") or user_id
-            for user_id in agent_ids
-            if entity_names.get(user_id) != ROUTER_AGENT_NAME
+            (name and config.entity_display_name(name)) or user_id
+            for user_id, name in entity_names.items()
+            if name != ROUTER_AGENT_NAME
         )
         router = config.entity_display_name(ROUTER_AGENT_NAME)
         removed = sorted([*agents, router]) if router_removed else agents
-        notice = _AGENT_REMOVAL_NOTICE.format(
-            agents=join_names(removed, "and"),
-            pronoun="it" if len(removed) == 1 else "them",
-        )
+        notice = _AGENT_REMOVAL_NOTICE.format(agents=join_names(removed, "and"), pronoun=_pronoun(removed))
         if agents:
-            notice += _AGENT_REMOVAL_ADVICE.format(
-                agents=join_names(agents, "and"),
-                pronoun="it" if len(agents) == 1 else "them",
-            )
+            notice += _AGENT_REMOVAL_ADVICE.format(agents=join_names(agents, "and"), pronoun=_pronoun(agents))
         if router_removed:
             notice += _ROUTER_REMOVAL_ADVICE.format(router=router)
         return notice
