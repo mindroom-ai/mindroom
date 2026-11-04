@@ -18,7 +18,7 @@ import nio
 import pytest
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import SKIP_MENTIONS_KEY, tracking_dir
 from mindroom.contacts import flow
 from mindroom.contacts.store import contact_room_ids
 from mindroom.hooks.sender import build_hook_message_sender
@@ -559,6 +559,19 @@ async def test_a_slow_invitation_withdrawal_leaves_a_removed_agent_its_whole_lea
 
     room = world.server.rooms[room_id]
     assert (room.members, room.invited) == ({_account(world.paths, "mind_alice")}, set())
+
+
+async def test_an_unreadable_contacts_store_still_lets_a_removed_agent_leave_its_rooms(tmp_path: Path) -> None:
+    """A removed agent that can neither end its contacts nor read them for invitations still leaves its contact room."""
+    world = _world(tmp_path)
+    room_id = await _accepted_and_relayed(world)
+    room = world.server.rooms[room_id]
+    invited = set(room.invited)
+    (tracking_dir(world.paths) / "contacts.json").write_text("{", encoding="utf-8")
+
+    await _lifecycle(world, "mind_bob").leave_all_rooms(timeout_seconds=5)
+
+    assert (room.members, room.invited) == ({_account(world.paths, "mind_alice")}, invited)
 
 
 def _lifecycle(world: _World, name: str) -> BotRoomLifecycle:

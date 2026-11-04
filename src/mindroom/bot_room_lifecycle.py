@@ -456,11 +456,18 @@ class BotRoomLifecycle:
             self._logger().exception("Error leaving rooms during cleanup")
 
     async def _end_contacts(self, config: Config) -> None:
-        """Mark a personal agent's active contacts removed before it leaves their rooms, ending them for both sides."""
+        """Mark a personal agent's active contacts removed before it leaves their rooms, ending them for both sides.
+
+        A contacts store that cannot be read or written is only logged, so it never keeps the agent in those rooms.
+        """
         name = self.deps.agent_name
         if config.personal_agent_instance(name) is None:
             return
-        removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
+        try:
+            removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
+        except (OSError, ValueError):
+            self._logger().exception("contacts_end_failed_as_agent_leaves")
+            return
         if removed:
             self._logger().info("contacts_removed_as_agent_leaves", contact_ids=removed)
 
