@@ -44,6 +44,7 @@ export function ToolReach({
   const notes = [
     REACH_NOTES[choice.reach],
     choice.provider && "Acts with your connected account.",
+    choice.shared_account && "Acts with a shared service account.",
   ].filter((note): note is string => Boolean(note));
   return (
     <>

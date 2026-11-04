@@ -91,8 +91,9 @@ function YourTerms({
   if (!agent || contact.effective_tools === null)
     return (
       <p className="text-sm text-muted-foreground">
-        Contacts are off for {contact.you.display_name}, so its rules and tools
-        cannot be shown or changed.
+        {contact.status === "pending" && contact.side === "target"
+          ? `Contacts are off for ${contact.you.display_name}, so this request cannot be accepted until they are on again; you can still decline it.`
+          : `Contacts are off for ${contact.you.display_name}, so its rules and tools cannot be shown or changed.`}
       </p>
     );
   const choices = new Map(

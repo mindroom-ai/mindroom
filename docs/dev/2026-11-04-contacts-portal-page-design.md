@@ -54,14 +54,14 @@ After a decision made on the page, that agent posts it in the request's thread, 
 
 Accepting, declining, and removing make agents create, post to, join, or leave rooms, so they take a slot of the runtime's response admission gate, as dashboard room departures do, and are refused while a config reload swaps the agents out.
 Updating rules and tools only writes the store, so it needs no slot.
-The runtime lends the API a lookup of running agent bots for this, rather than the orchestrator itself, because the API needs nothing else from it.
+The runtime lends the API a lookup of its agent bots for this, rather than the orchestrator itself, because the API needs nothing else from it.
 
 ### Tool warnings come from tool metadata
 
 Each tool a contact may use is shown with what its reach means for the other side, derived from metadata every tool already declares and the agent's `file_access`.
 A tool that runs code reaches everything the agent's worker or process can, and so does an `unconfined` tool, or an `agent` tool on an agent with `file_access: unrestricted`, since nothing limits it to the agent's files; only an `agent` tool on a confined agent reaches just the agent's files.
 The server works this out, because it depends on the agent's `file_access`, which the page does not have, and a warning that understates a tool's reach misleads the owner at the moment they grant it.
-An OAuth `auth_provider` acts with the owner's connected account, unless a shared service account serves the provider.
+An OAuth `auth_provider` acts with the owner's connected account, or with a shared service account when one serves the provider, which the warning names, since the other side can then drive that account.
 The warnings say what the other side can ask for, matching the security warning in the contacts docs, at the moment the owner chooses the tool.
 
 A tool that uses an account the owner has not connected is flagged, because contact turns run as the owner and would fail to use it; a provider a shared service account serves is never flagged, because the owner has no account of their own to connect there.

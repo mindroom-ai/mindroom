@@ -350,8 +350,10 @@ export interface EgressLogRecord {
 export interface ContactToolChoice {
   name: string;
   display_name: string;
-  /** The OAuth provider whose connected account the tool acts with, `null` for a shared service account. */
+  /** The OAuth provider whose connected account the tool acts with. */
   provider: string | null;
+  /** A shared service account serves the tool's provider instead, and the other side can drive it. */
+  shared_account: boolean;
   /**
    * `code`: runs code; `unconfined`: not confined to the agent's files;
    * `files`: confined to them; `none`: reaches neither.

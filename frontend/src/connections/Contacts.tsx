@@ -193,7 +193,10 @@ export function Contacts() {
                         : undefined
                     }
                     busy={busy !== null}
-                    working={busy?.id === contact.id ? busy.action : null}
+                    // A refused change says so above while the contacts reload.
+                    working={
+                      busy?.id === contact.id && !error ? busy.action : null
+                    }
                     onAction={(action, terms) =>
                       void act(contact, action, terms)
                     }

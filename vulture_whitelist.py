@@ -48,6 +48,7 @@ can_use  # JSON response field consumed by connections portal (src/mindroom/api/
 redeem_url  # JSON response field consumed by MindRoom Chat's iOS app (src/mindroom/api/connections_native.py)
 continue_url  # JSON response field consumed by MindRoom Chat's iOS app (src/mindroom/api/connections_native.py)
 configured_rules  # JSON response field consumed by the connections portal (src/mindroom/api/connections_contacts.py)
+shared_account  # JSON response field consumed by the connections portal (src/mindroom/api/connections_contacts.py)
 tool_choices  # JSON response field consumed by the connections portal (src/mindroom/api/connections_contacts.py)
 key_configured  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
 key_updated_at  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)

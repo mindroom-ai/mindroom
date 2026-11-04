@@ -22,25 +22,36 @@ const agent: ContactAgent = {
       name: "calculator",
       display_name: "Calculator",
       provider: null,
+      shared_account: false,
       reach: "none",
     },
     {
       name: "shell",
       display_name: "Shell Commands",
       provider: null,
+      shared_account: false,
       reach: "code",
     },
     {
       name: "duckdb",
       display_name: "DuckDB",
       provider: null,
+      shared_account: false,
       reach: "unconfined",
     },
     {
       name: "google_drive",
       display_name: "Google Drive",
       provider: "google_drive",
+      shared_account: false,
       reach: "files",
+    },
+    {
+      name: "google_calendar",
+      display_name: "Google Calendar",
+      provider: null,
+      shared_account: true,
+      reach: "none",
     },
   ],
 };
@@ -220,6 +231,20 @@ describe("contacts page", () => {
     expect(shell).toHaveAccessibleDescription(
       "Runs code: the other side can ask it to reach anything your agent's worker or process can.",
     );
+    const drive = within(dialog).getByRole("checkbox", {
+      name: "Google Drive",
+    });
+    for (const note of [
+      "Reaches your agent's files: the other side can ask for what it can read and change what it can write, such as MEMORY.md.",
+      "Acts with your connected account.",
+      "Not connected, so contact turns cannot use it. Connect it on the Agents page.",
+    ])
+      expect(drive).toHaveAccessibleDescription(expect.stringContaining(note));
+    expect(
+      within(dialog).getByRole("checkbox", { name: "Google Calendar" }),
+    ).toHaveAccessibleDescription("Acts with a shared service account.");
+    // Leaving the page from the dialog would lose the choices made in it.
+    expect(within(dialog).queryByRole("link")).toBeNull();
     fireEvent.click(shell);
     fireEvent.click(within(dialog).getByRole("button", { name: "Accept" }));
     expect(
@@ -302,6 +327,7 @@ describe("contacts page", () => {
       "mind_alice is not running, so try again",
     );
   });
+
   it("saves only the tools when a tool is taken away", async () => {
     const active = contact({
       status: "active",
@@ -389,7 +415,7 @@ describe("contacts page", () => {
     const card = await screen.findByRole("article", { name: "Alice's Mind" });
     expect(
       within(card).getByText(
-        "Contacts are off for Bob's Mind, so its rules and tools cannot be shown or changed.",
+        "Contacts are off for Bob's Mind, so this request cannot be accepted until they are on again; you can still decline it.",
       ),
     ).toBeVisible();
     expect(within(card).queryByRole("button", { name: "Accept…" })).toBeNull();
@@ -433,21 +459,25 @@ describe("contacts page", () => {
   });
 
   it("reloads the contacts after a refused change", async () => {
-    let contacts = page([contact({})]);
-    installApi(
-      () => contacts,
-      (path, init) => {
-        if (
-          path !== "/api/connections/contacts/c1/accept" ||
-          init?.method !== "POST"
-        )
-          return undefined;
-        contacts = page([]);
+    let refused = false;
+    let finishReload: (response: Response) => void = () => undefined;
+    installApi(page([contact({})]), (path, init) => {
+      if (path === "/api/connections/contacts/c1/accept") {
+        refused = true;
         return Promise.resolve(
           json({ detail: "Only a pending contact can be accepted" }, 409),
         );
-      },
-    );
+      }
+      if (
+        path === "/api/connections/contacts" &&
+        refused &&
+        init?.method === "GET"
+      )
+        return new Promise<Response>((resolve) => {
+          finishReload = resolve;
+        });
+      return undefined;
+    });
     render(<Contacts />);
     fireEvent.click(await screen.findByRole("button", { name: "Accept…" }));
     fireEvent.click(
@@ -458,6 +488,10 @@ describe("contacts page", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Only a pending contact can be accepted");
     await waitFor(() => expect(alert).toHaveFocus());
+    // The reload is still running: the card stays locked but no longer says it is accepting.
+    expect(screen.queryByText("Accepting…")).toBeNull();
+    expect(screen.getByRole("button", { name: "Decline…" })).toBeDisabled();
+    finishReload(json(page([])));
     expect(
       await screen.findByText(
         "No contacts yet. Ask your agent in your personal room to get in touch with someone.",
@@ -494,6 +528,8 @@ describe("contacts page", () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(await screen.findByText("x")).toBeVisible();
+    // Let the effects of the new page run before counting.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(requests("/api/connections/agents/mind_bob/state")).toHaveLength(1);
   });
 
@@ -505,6 +541,9 @@ describe("contacts page", () => {
     );
     render(<Contacts />);
     const card = await screen.findByRole("article", { name: "Alice's Mind" });
+    expect(
+      [...card.querySelectorAll("time")].map((time) => time.dateTime),
+    ).toEqual(["2026-11-03T09:00:00.000Z", "2026-11-04T10:00:00.000Z"]);
     expect(card).toHaveTextContent(/Declined \d/);
     expect(card).not.toHaveTextContent(/Active since/);
   });

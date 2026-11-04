@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.contacts import ContactsConfig
     from mindroom.config.main import Config
+    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactParty, ContactRecord
     from mindroom.tool_system.declarations import ToolMetadata
@@ -60,12 +61,14 @@ class ContactToolChoice(BaseModel):
 
     `reach` is `code` for a tool that runs code, `unconfined` for one that `file_access` does not confine to the
     agent's files, `files` for one it confines there, and `none` otherwise. `provider` is the OAuth provider whose
-    connected account the tool acts with, or None, as when a shared service account serves it.
+    connected account the tool acts with, if any, and `shared_account` says a shared service account serves the
+    tool's provider instead, which the other side can then drive.
     """
 
     name: str
     display_name: str
     provider: str | None
+    shared_account: bool
     reach: _ToolReach
 
 
@@ -144,7 +147,7 @@ async def _viewer(request: Request, response: Response) -> _Viewer:
 _ViewerContext = Annotated[_Viewer, Depends(_viewer)]
 
 
-def _reach(metadata: ToolMetadata, agent_file_access: str) -> _ToolReach:
+def _reach(metadata: ToolMetadata, agent_file_access: FileAccess) -> _ToolReach:
     """Return what the other side can ask a tool to reach; `unrestricted` file access confines no tool to the files."""
     if metadata.executes_code:
         return "code"
@@ -163,17 +166,19 @@ def _agent_view(config: Config, runtime_paths: RuntimePaths, agent_name: str, co
         if name == "matrix_message":
             continue
         if (metadata := plugins.tools.get(name)) is None:
-            choices.append(ContactToolChoice(name=name, display_name=name, provider=None, reach="none"))
+            choices.append(
+                ContactToolChoice(name=name, display_name=name, provider=None, shared_account=False, reach="none"),
+            )
             continue
         provider = metadata.auth_provider
         oauth_provider = None if provider is None else plugins.oauth_providers.get(provider)
-        if oauth_provider is not None and oauth_provider_service_account_configured(oauth_provider, runtime_paths):
-            provider = None
+        shared = oauth_provider is not None and oauth_provider_service_account_configured(oauth_provider, runtime_paths)
         choices.append(
             ContactToolChoice(
                 name=name,
                 display_name=metadata.display_name,
-                provider=provider,
+                provider=None if shared else provider,
+                shared_account=shared,
                 reach=_reach(metadata, file_access),
             ),
         )

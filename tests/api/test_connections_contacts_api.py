@@ -217,6 +217,7 @@ def test_listing_says_what_each_tool_a_contact_may_use_reaches(portal: dict[str,
         "name": "calculator",
         "display_name": "Calculator",
         "provider": None,
+        "shared_account": False,
         "reach": "none",
     }
 
@@ -234,13 +235,14 @@ def test_a_tool_served_by_a_shared_service_account_names_no_account_of_the_owner
     portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Google tool that a configured service account serves does not act with the owner's account."""
+    """A Google tool that a configured service account serves acts with that shared account, not the owner's."""
     monkeypatch.setattr(
         "mindroom.api.connections_contacts.oauth_provider_service_account_configured",
         lambda provider, _paths: provider.id == "google_drive",
     )
     choices = {choice["name"]: choice for choice in _get(portal, "alice")["agents"][0]["tool_choices"]}
-    assert choices["google_drive"]["provider"] is None
+    assert (choices["google_drive"]["provider"], choices["google_drive"]["shared_account"]) == (None, True)
+    assert choices["calculator"]["shared_account"] is False
 
 
 def test_a_side_whose_agent_has_no_contacts_shows_no_terms(portal: dict[str, Any]) -> None:
@@ -423,8 +425,8 @@ def test_me_says_contacts_are_on_for_an_owner_of_an_agent_with_contacts(portal: 
         assert response.json()["contacts_enabled"] is enabled
 
 
-def test_the_runtime_lends_the_api_its_running_agent_bots(tmp_path: Path) -> None:
-    """The portal reaches the bots the runtime runs now, including one started after the API was served."""
+def test_the_runtime_lends_the_api_its_agent_bots(tmp_path: Path) -> None:
+    """The portal reaches the bots the runtime holds now, including one added after the API was served."""
     runtime = ready_runtime(Config(), _runtime_paths(tmp_path, {}))
     lent = runtime.embedded_runtime()
     bot = MagicMock()
