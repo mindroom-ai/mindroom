@@ -158,10 +158,10 @@ class _Homeserver:
 
     async def _send(self, sender: str, *, room_id: str, content: dict[str, Any], **_send: object) -> object:
         room = self.rooms[room_id]
+        if sender not in room.members:
+            return nio.RoomSendError("not sent", "M_FORBIDDEN", room_id=room_id)
         if room_id in self.refused_sends:
             self.refused_sends.discard(room_id)
-            return nio.RoomSendError("not sent", "M_FORBIDDEN", room_id=room_id)
-        if sender not in room.members:
             return nio.RoomSendError("not sent", "M_FORBIDDEN", room_id=room_id)
         room.timeline.append(_Event(sender, content))
         return nio.RoomSendResponse(f"$event{next(self._ids)}", room_id)
