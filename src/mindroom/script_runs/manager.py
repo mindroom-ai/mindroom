@@ -769,6 +769,9 @@ class ScriptRunManager:
         if ready.cancel_requested_at is not None:
             return await self._complete_cancel_before_spawn(ready)
         socket_path = await asyncio.to_thread(ensure_shell_supervisor)
+        environment = {**os.environ, **context.runtime_paths.process_env}
+        # The script runs on MindRoom's interpreter, so its `mindroom-agent` comes first on PATH.
+        environment["PATH"] = os.pathsep.join(filter(None, (str(Path(sys.executable).parent), environment.get("PATH"))))
         try:
             refusal = await launch_supervised_script(
                 socket_path,
@@ -777,7 +780,7 @@ class ScriptRunManager:
                 source_digest=run.source_digest,
                 gateway_url=self.gateway_url,
                 python_executable=sys.executable,
-                environment={**os.environ, **context.runtime_paths.process_env},
+                environment=environment,
                 snapshot=snapshot,
                 workspace=workspace,
                 max_runtime_seconds=run.max_runtime_seconds,

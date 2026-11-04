@@ -26,7 +26,7 @@ def test_dotted_name_selects_toolkit_and_function() -> None:
     describe = parse_arguments(["tools", "describe", "matrix_message.matrix_message"])
     assert (describe.toolkit, describe.function) == ("matrix_message", "matrix_message")
     call = parse_arguments(["tools", "call", "todo.add_todo", "--json", "{}"])
-    assert (call.toolkit, call.function, call.timeout) == ("todo", "add_todo", 30)
+    assert (call.toolkit, call.function, call.timeout) == ("todo", "add_todo", None)
 
 
 @pytest.mark.parametrize(
@@ -189,27 +189,53 @@ def test_a_background_script_calls_tools_with_its_own_capability(capsys, monkeyp
     ]
 
 
-def test_a_failed_background_script_call_prints_its_error(capsys, monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("state", "kind", "exit_code"),
+    [("failed", "tool_failure", 1), ("indeterminate", "indeterminate", 4)],
+)
+def test_an_unfinished_background_script_call_prints_its_error(
+    state,
+    kind,
+    exit_code,
+    capsys,
+    monkeypatch,
+    tmp_path,
+) -> None:
 
     _in_background_script(monkeypatch, tmp_path)
-    _script_gateway(monkeypatch, "failed", error={"kind": "tool_failure", "message": "boom", "retryable": False})
+    _script_gateway(monkeypatch, state, error={"kind": kind, "message": "boom", "retryable": False})
 
-    assert main(["tools", "call", "slack", "slack_search", "{}"]) == 1
+    assert main(["tools", "call", "slack", "slack_search", "{}"]) == exit_code
     assert json.loads(capsys.readouterr().out) == {
         "call_id": "call-1",
         "toolkit": "slack",
         "function": "slack_search",
-        "status": "failed",
-        "outcome": {"error": "boom", "kind": "tool_failure"},
+        "status": state,
+        "outcome": {"error": "boom", "kind": kind},
     }
 
 
 @pytest.mark.parametrize(
     "argv",
-    [["tools", "list"], ["calls", "get", "12345678-1234-4234-8234-123456789abc"], ["context", "list"]],
+    [
+        ["tools", "list"],
+        ["calls", "get", "12345678-1234-4234-8234-123456789abc"],
+        ["context", "list"],
+        ["tools", "call", "a.b", "--call-id", "12345678-1234-4234-8234-123456789abc"],
+        ["tools", "call", "a.b", "--timeout", "0"],
+    ],
 )
 def test_a_background_script_is_offered_only_tool_calls(argv, capsys, monkeypatch, tmp_path) -> None:
 
     _in_background_script(monkeypatch, tmp_path)
     assert main(argv) == 2
     assert "background script" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_a_background_script_prints_a_result_at_the_gateway_limit(capsys, monkeypatch, tmp_path) -> None:
+
+    _in_background_script(monkeypatch, tmp_path)
+    _script_gateway(monkeypatch, "completed", result="x" * 65_500)
+
+    assert main(["tools", "call", "file.read_file", "{}"]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "x" * 65_500

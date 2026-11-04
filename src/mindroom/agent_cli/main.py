@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = ["main", "parse_arguments", "read_call_arguments"]
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -18,6 +19,7 @@ from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_
 from mindroom.script_runs.launch_contract import RUN_ID_ENV
 from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
 
+_CALL_TIMEOUT_SECONDS = 30
 # Parsed options the CLI handles itself instead of sending in the operation payload.
 _LOCAL_ARGUMENTS = frozenset(
     {"group", "action", "json", "json_argument", "json_file", "json_stdin", "call_id", "timeout"},
@@ -49,7 +51,8 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
             command.add_argument(
                 "--timeout",
                 type=int,
-                default=30,
+                # Unset rather than 30, so a background script, whose calls always wait, can refuse an explicit one.
+                default=None,
                 help="Seconds to wait for the result before returning the pending receipt (default: 30; 0 returns at once)",
             )
             inputs = command.add_mutually_exclusive_group()
@@ -84,7 +87,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.group == "tools" and args.action in {"describe", "call"}:
         _select_tool(parser, args)
-    if (args.group, args.action) in {("calls", "wait"), ("tools", "call")} and args.timeout < 0:
+    if (args.group, args.action) in {("calls", "wait"), ("tools", "call")} and (args.timeout or 0) < 0:
         parser.error("--timeout must be nonnegative")
     return args
 
@@ -130,6 +133,8 @@ def _exit_code(result: dict[str, object]) -> int:
         return 3
     if status in {"failed", "cancelled"}:
         return 1
+    if status == "indeterminate":
+        return 4
     return 0
 
 
@@ -146,15 +151,17 @@ def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeo
 
 def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
     """Call one tool with a background script's own capability; a response's CLI grant does not reach scripts."""
-    if (args.group, args.action) != ("tools", "call") or args.call_id is not None:
-        msg = "Inside a background script, mindroom-agent offers only `tools call`, without --call-id"
+    if (args.group, args.action) != ("tools", "call") or args.call_id is not None or args.timeout is not None:
+        msg = "Inside a background script, mindroom-agent offers only `tools call`, which waits for the result, without --call-id or --timeout"
         raise ValueError(msg)
     receipt: dict[str, object] = {"toolkit": args.toolkit, "function": args.function}
     try:
         outcome = MindRoomTools().call(args.toolkit, args.function, **read_call_arguments(args))
     except MindRoomToolCallError as exc:
         error = {"error": str(exc), "kind": exc.kind}
-        return receipt | {"call_id": exc.call_id, "status": "failed", "outcome": error}
+        # An indeterminate call may have had its side effect, so it must not read as a failure to retry.
+        status = "indeterminate" if exc.kind == "indeterminate" else "failed"
+        return receipt | {"call_id": exc.call_id, "status": status, "outcome": error}
     except RuntimeError as exc:
         raise AgentCliUnavailableError(str(exc)) from exc
     return receipt | {"status": "completed", "outcome": outcome}
@@ -173,7 +180,10 @@ def main(argv: list[str] | None = None) -> int:
         # Only a background script's launcher sets its run ID.
         if os.environ.get(RUN_ID_ENV):
             result = _script_tool_call(args)
-        elif args.group == "calls":
+            # The gateway bounded the outcome already; its receipt may still pass the CLI's 64 KiB wire limit.
+            print(json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+            return _exit_code(result)
+        if args.group == "calls":
             call_id = str(args.call_id)
             client = AgentCliClient()
             result = client.receipt(call_id)
@@ -192,7 +202,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "call" and call_id is not None:
                 # The call is admitted; if polling fails, print its submission receipt so `calls wait` can resume.
                 with suppress(AgentCliUnavailableError):
-                    result = _wait(client, call_id, result, args.timeout)
+                    timeout = _CALL_TIMEOUT_SECONDS if args.timeout is None else args.timeout
+                    result = _wait(client, call_id, result, timeout)
         print(canonical_json(result))
         return _exit_code(result)
     except (AgentCliUnavailableError, ValueError, OSError) as exc:

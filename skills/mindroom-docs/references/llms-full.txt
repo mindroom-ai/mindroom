@@ -8894,7 +8894,7 @@ result = tools.call("website", "read_url", url="https://example.org/status.txt")
 print(result, flush=True)
 ```
 
-`MindRoomTools.call(toolkit_name, function_name, **arguments)` blocks until the call finishes and returns a JSON-compatible value.
+`MindRoomTools.call(toolkit_name, function_name, /, **arguments)` takes the toolkit and function positionally, blocks until the call finishes and returns a JSON-compatible value.
 A tool that produces media such as an image returns an object with its text under `content` and an `attachments` list that gives each medium's `kind`, `mime_type`, and `url` when it has one, without the media's bytes.
 Arguments must have an unambiguous strict-JSON representation.
 A result larger than about 64 KiB fails the call with kind `result_too_large`.
@@ -8912,8 +8912,10 @@ A script, or a program it starts, can also call tools with the [agent CLI](https
 mindroom-agent tools call website read_url '{"url": "https://example.org/status.txt"}'
 ```
 
-Inside a background script, `mindroom-agent` offers only `tools call`, waits until the call finishes, and does not accept `--call-id`.
-It prints the toolkit, function, status (`completed` or `failed`), and outcome, with exit code `0` or `1`; a failed call also prints its `call_id`, and its outcome gives the error and its `kind`.
+Inside a background script, `mindroom-agent` offers only `tools call`, which waits until the call finishes and does not accept `--call-id` or `--timeout`.
+It prints the toolkit, function, status, and outcome: `completed` exits `0`, `failed` exits `1`, and `indeterminate` exits `4`, so a script must not repeat that call automatically.
+A failed or indeterminate call also prints its `call_id`, and its outcome gives the error and its `kind`.
+A refused command exits `2`, and a missing script capability exits `4` without a receipt.
 
 ## Complete Watcher Example
 
