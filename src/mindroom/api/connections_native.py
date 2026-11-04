@@ -13,6 +13,7 @@ import html
 import re
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -70,6 +71,8 @@ _TAP_AGAIN_PAGE = """<!doctype html>
 
 # The sign-in sheet closes on the first navigation to the app's callback scheme. This page, not a redirect, performs it:
 # iOS may drop a cookie set on a response that redirects straight to that scheme, and the flow needs the pending cookie.
+# The callback names this deployment's origin, and the app confirms only a nonce from the backend it started with:
+# otherwise another backend could send the sheet here with its own start state and have the app relay the nonce to it.
 _REDEEMED_PAGE = """<!doctype html>
 <html lang="en">
   <head>
@@ -181,7 +184,7 @@ async def redeem_native_start(request: Request, start: str | None = None) -> Res
         return _tap_again_page()
     pending = _issue(paths, _PENDING, user=started["user"], next=started["next"])
     nonce = _issue(paths, _NONCE, user=started["user"], pending=_digest(pending))
-    page = _redeemed_page(f"mindroom://connections/confirm?nonce={nonce}")
+    page = _redeemed_page(f"mindroom://connections/confirm?{urlencode({'nonce': nonce, 'origin': origin})}")
     connections_session.set_portal_cookie(page, _pending_cookie(origin), pending, max_age=_STATE_SECONDS)
     return page
 

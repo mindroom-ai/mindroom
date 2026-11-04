@@ -18,7 +18,7 @@ On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CO
 Chat opens the backend set as its Computers backend: each user's Computers URL in Settings, General, or the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`.
 When neither is set, as in hosted MindRoom Chat, Chat on a homeserver that binds tokens opens the backend that the MindRoom agents in the user's rooms publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, with one button per backend when it finds several.
 On other homeservers, users enter their backend's URL under Computers before the card works.
-The Android app does not offer Connections yet; the iOS app signs in as described under [From The iOS App](#from-the-ios-app).
+The native apps do not show the Connections card in Settings; the iOS app opens agents' connect and reset links signed in, as described under [From The iOS App](#from-the-ios-app), and the Android app opens them like a link opened outside Chat.
 
 Sign-in works as follows:
 
@@ -35,12 +35,13 @@ If two Connections tabs, on the Agents or Agent Keys page, are signed in as diff
 
 ## From The iOS App
 
-MindRoom Chat's iOS app signs the system browser in to the portal, and opens an agent's connect or reset link, through two system sign-in sheets one after the other.
+MindRoom Chat's iOS app opens an agent's connect or reset link signed in as the Chat user, through two system sign-in sheets one after the other.
 Each sheet shows the system's "wants to use ... to Sign In" prompt.
-The first closes by itself, and the second ends on the portal or the provider's pages; after the provider's success page the user closes it.
+The first closes by itself, and the second opens the link and continues to the provider's pages; after the provider's success page the user closes it.
 It needs a homeserver that binds tokens (`io.mindroom.openid_audience`, see [Token Binding](#token-binding)), and `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` needs no entry for the app, because no browser origin vouches for its calls.
 The same variable still turns the app's sign-in off: `[]`, or a list made invalid by a bad entry, refuses the app and every Chat.
 The app confirms the browser's session with its own token, so a link forwarded to someone else cannot sign them in as the sender.
+It confirms only a nonce issued by the backend it started with, so another backend, such as one an agent published in a shared room, cannot obtain a nonce from this one through the app.
 The steps are described in [Connections portal sign-in](architecture/security-posture.md#connections-portal-sign-in).
 
 ## Settings

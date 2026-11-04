@@ -10,6 +10,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
+from urllib.parse import parse_qsl, quote
 
 import pytest
 from fastapi import HTTPException
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 
 NATIVE = "/api/connections/session/native"
 PENDING_COOKIE = f"{CONNECTIONS_SESSION_COOKIE}_native"
-CONFIRM_PREFIX = "mindroom://connections/confirm?nonce="
+CONFIRM_URL = "mindroom://connections/confirm"
 CONNECT_LINK = "/api/oauth/google_drive/authorize?connect_token=x&execution_scope=user_agent"
 TAP_AGAIN = "Tap the link in the MindRoom app again."
 IOS_APP_ORIGIN = "capacitor://localhost"
@@ -79,11 +80,21 @@ def callback_url_of(redeemed: Response) -> str:
     return url
 
 
-def nonce_of(redeemed: Response) -> str:
-    """Return the nonce the redeem step hands to the app through its custom-scheme callback."""
+def callback_query_of(redeemed: Response) -> dict[str, str]:
+    """Return the callback's query, which holds exactly one `nonce` and one `origin`."""
     url = callback_url_of(redeemed)
-    assert url.startswith(CONFIRM_PREFIX), url
-    return url.removeprefix(CONFIRM_PREFIX)
+    target, _, query = url.partition("?")
+    assert target == CONFIRM_URL, url
+    params = parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+    assert sorted(name for name, _ in params) == ["nonce", "origin"], url
+    return dict(params)
+
+
+def nonce_of(redeemed: Response, origin: str = PORTAL_ORIGIN) -> str:
+    """Return the nonce the redeem step hands to the app, after checking the callback names the deployment `origin`."""
+    query = callback_query_of(redeemed)
+    assert query["origin"] == origin, query
+    return query["nonce"]
 
 
 def confirm(browser: TestClient, nonce: str, name: str = "alice") -> Response:
@@ -133,7 +144,7 @@ def test_native_flow_signs_browser_in_and_opens_next(signin: dict[str, Any]) -> 
     assert "no-store" in started.headers["cache-control"]
 
     redeemed = redeem(browser, started)
-    assert callback_url_of(redeemed).startswith(CONFIRM_PREFIX)
+    nonce = nonce_of(redeemed)
     assert "no-store" in redeemed.headers["cache-control"]
     assert redeemed.headers["referrer-policy"] == "no-referrer"
     pending = redeemed.headers["set-cookie"]
@@ -141,7 +152,7 @@ def test_native_flow_signs_browser_in_and_opens_next(signin: dict[str, Any]) -> 
         assert attribute in pending
     assert _session_of(browser) is None
 
-    confirmed = confirm(browser, nonce_of(redeemed))
+    confirmed = confirm(browser, nonce)
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["continue_url"].startswith(f"{PORTAL_ORIGIN}{NATIVE}/continue?confirmed=")
     assert "no-store" in confirmed.headers["cache-control"]
@@ -162,7 +173,7 @@ def test_native_flow_signs_browser_in_and_opens_next(signin: dict[str, Any]) -> 
 
 
 def test_native_flow_opens_the_portal_by_default(signin: dict[str, Any]) -> None:
-    """Without `next`, the Settings card's sign-in lands on the portal."""
+    """Without `next`, the sign-in lands on the portal."""
     signin["binds"].return_value = True
     continued = run_native_flow(signin["client"])
     assert continued.status_code == 303, continued.text
@@ -340,12 +351,12 @@ def test_native_flow_on_plain_http_local_backend(signin: dict[str, Any]) -> None
     assert started.status_code == 200, started.text
     assert started.json()["redeem_url"].startswith(f"{local}{NATIVE}/redeem?start=")
     redeemed = redeem(browser, started)
-    assert callback_url_of(redeemed).startswith(CONFIRM_PREFIX)
+    nonce = nonce_of(redeemed, local)
     pending = redeemed.headers["set-cookie"]
     assert pending.startswith("mindroom_connections_session_native=")
     assert "Secure" not in pending
 
-    confirmed = confirm(browser, nonce_of(redeemed))
+    confirmed = confirm(browser, nonce)
     assert confirmed.json()["continue_url"].startswith(f"{local}{NATIVE}/continue?confirmed=")
     continued = continue_in(browser, confirmed)
     assert continued.status_code == 303, continued.text
@@ -437,7 +448,10 @@ def test_browser_steps_without_their_query_ask_to_tap_the_link_again(signin: dic
 
 
 def test_redeem_page_escapes_the_callback_url(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    """The callback URL is HTML-escaped wherever the page repeats it, so a nonce can never break out of its attribute."""
+    """The callback URL is URL-encoded inside and HTML-escaped wherever the page repeats it.
+
+    So a nonce can never break out of its query parameter or its attribute.
+    """
     signin["binds"].return_value = True
     real_issue = connections_native.issue_opaque_oauth_state
     hostile = 'x"><b>&amp;'
@@ -448,9 +462,35 @@ def test_redeem_page_escapes_the_callback_url(signin: dict[str, Any], monkeypatc
 
     monkeypatch.setattr(connections_native, "issue_opaque_oauth_state", issue)
     redeemed = redeem(signin["client"], native_start(signin["client"]))
-    assert callback_url_of(redeemed) == f"{CONFIRM_PREFIX}{hostile}"
+    assert nonce_of(redeemed) == hostile
     assert hostile not in redeemed.text
     assert "<b>" not in redeemed.text
+    # The separator between the nonce and the origin is the one character the page itself must escape.
+    assert "&amp;origin=" in redeemed.text
+    assert "&origin=" not in redeemed.text
+
+
+@pytest.mark.parametrize(
+    ("public_url", "origin"),
+    [
+        pytest.param(PORTAL_ORIGIN, PORTAL_ORIGIN, id="https"),
+        pytest.param("https://Portal.Example.org:443/mindroom/", PORTAL_ORIGIN, id="https-url-with-path"),
+        pytest.param("http://localhost:8765", "http://localhost:8765", id="plain-http-local"),
+    ],
+)
+def test_redeem_callback_names_this_deployment(signin: dict[str, Any], public_url: str, origin: str) -> None:
+    """The callback names the origin of the deployment that issued the nonce, as a browser computes it.
+
+    The app confirms a nonce only at the backend it started with, and only when the callback names that backend.
+    So a backend that sends the first sheet on to another deployment's redeem URL, with a start state of its own,
+    never receives the nonce that deployment's page hands the app.
+    """
+    _serve(signin, MINDROOM_PUBLIC_URL=public_url)
+    signin["binds"].return_value = True
+    browser = TestClient(main.app, base_url=origin)
+    redeemed = redeem(browser, native_start(browser))
+    nonce = nonce_of(redeemed, origin)
+    assert callback_url_of(redeemed) == f"{CONFIRM_URL}?nonce={nonce}&origin={quote(origin, safe='')}"
 
 
 @pytest.mark.parametrize(
