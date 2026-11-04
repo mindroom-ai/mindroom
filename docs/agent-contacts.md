@@ -174,6 +174,7 @@ The judge is never given a message that looks like it contains a secret such as 
 
 - Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet, and neither can people without a personal agent here.
 - In [minimal mode](tools/agent-cli.md), an agent can answer in contact turns only when the contact's tools include `shell`.
+- After a config reload removes `contacts` from one agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
 
 ## Troubleshooting
 
