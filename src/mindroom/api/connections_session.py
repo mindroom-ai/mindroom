@@ -12,7 +12,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import is_administrator, require_connections_user
+from mindroom.api.auth import CONNECTIONS_SIGN_IN_REQUIRED, is_administrator, require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     require_connections_public_origin,
@@ -32,7 +32,12 @@ from mindroom.matrix_openid import (
     homeserver_binds_openid_audience,
     verify_matrix_openid,
 )
-from mindroom.origins import connections_client_origin_allowed, connections_origins_configured, deployment_origin
+from mindroom.origins import (
+    connections_client_origin_allowed,
+    connections_origins_configured,
+    connections_sign_in_page,
+    deployment_origin,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -195,17 +200,22 @@ async def hand_off(request: Request, openid_token: Annotated[str, Form()]) -> Re
     return redirect
 
 
-@router.get("")
-async def current_session(request: Request, response: Response) -> _SignedIn:
-    """Tell the portal page which Matrix user is signed in, or 401 so it signs in."""
+@router.get("", response_model=_SignedIn)
+async def current_session(request: Request, response: Response) -> _SignedIn | JSONResponse:
+    """Tell the portal page which Matrix user is signed in, or 401 so it signs in.
+
+    The 401 names the MindRoom Chat page that signs the browser in (`sign_in_url`) when the operator lists one.
+    """
     try:
         auth_user = await require_connections_user(request)
     except HTTPException as error:
         # The sign-in probe answer depends on the browser's cookies, so no cache may keep it.
-        raise HTTPException(
-            error.status_code,
-            error.detail,
-            headers={**(error.headers or {}), **CONNECTIONS_HEADERS},
-        ) from error
+        headers = {**(error.headers or {}), **CONNECTIONS_HEADERS}
+        paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
+        # Only a browser without a session goes to Chat; a page showing another account just reloads.
+        sign_in_url = connections_sign_in_page(paths) if error.detail == CONNECTIONS_SIGN_IN_REQUIRED else None
+        if sign_in_url is None:
+            raise HTTPException(error.status_code, error.detail, headers=headers) from error
+        return JSONResponse({"detail": error.detail, "sign_in_url": sign_in_url}, status_code=401, headers=headers)
     response.headers.update(CONNECTIONS_HEADERS)
     return _SignedIn(matrix_user_id=auth_user.matrix_user_id)

@@ -1,12 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { agentLinkToOpen, openAgentLink } from "./navigation";
+import { agentLinkToOpen, openAgentLink, openChatSignIn } from "./navigation";
 import { setSignedInUser } from "./request";
 
 const SESSION_PATH = "/api/connections/session";
 const READY_MESSAGE = "mindroom:connections-ready";
 const OPENID_MESSAGE = "mindroom:connections-openid";
-const ANSWER_TIMEOUT_MS = 30000;
+// MindRoom Chat answers with one token request to its homeserver; an opener that is not Chat never answers.
+const ANSWER_TIMEOUT_MS = 5000;
+const SENT_TO_CHAT = "mindroom-connections-sent-to-chat";
 const OPEN_FROM_CHAT =
   "Open Connections from MindRoom Chat (Settings, General) to sign in.";
 const NOT_AVAILABLE = "Connections are not available for this account.";
@@ -16,6 +18,7 @@ const RELOAD = "Could not sign in. Reload this page to try again.";
 type Gate =
   | { state: "checking" }
   | { state: "ready" }
+  | { state: "chat"; url: string }
   | { state: "blocked"; message: string };
 
 const blocked = (message: string): Gate => ({ state: "blocked", message });
@@ -36,6 +39,44 @@ async function signedIn(response: Response): Promise<Gate> {
   if (typeof user !== "string" || !user) return blocked(RELOAD);
   setSignedInUser(user);
   return { state: "ready" };
+}
+
+/** The web page the server names for signing in, or `null`. */
+function chatSignInUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "https:" || protocol === "http:" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether this tab was just sent to Chat to sign in, forgetting it; without storage there is no loop guard, so yes. */
+function backFromChat(): boolean {
+  try {
+    const sent = window.sessionStorage.getItem(SENT_TO_CHAT) !== null;
+    window.sessionStorage.removeItem(SENT_TO_CHAT);
+    return sent;
+  } catch {
+    return true;
+  }
+}
+
+/** Show the session the server reports, or send a signed-out visitor to the MindRoom Chat page that signs them in. */
+async function sessionGate(signal: AbortSignal): Promise<Gate> {
+  const response = await fetch(SESSION_PATH, {
+    signal,
+    credentials: "same-origin",
+  });
+  // Read after the probe, so a run that is cancelled first (React runs effects twice in development) keeps it.
+  const back = backFromChat();
+  if (response.status === 403) return blocked(NOT_AVAILABLE);
+  if (response.status !== 401)
+    return response.ok ? signedIn(response) : blocked(RELOAD);
+  const url = chatSignInUrl((await readBody(response)).sign_in_url);
+  // Still signed out right after Chat's page: sending the visitor there again would loop.
+  return url && !back ? { state: "chat", url } : blocked(OPEN_FROM_CHAT);
 }
 
 /** Ask the window that opened the portal for a Matrix OpenID token; `null` means no answer in time or aborted. */
@@ -66,18 +107,11 @@ function askOpener(opener: Window, signal: AbortSignal) {
 
 async function signIn(signal: AbortSignal): Promise<Gate> {
   const opener: Window | null = window.opener;
-  if (!opener || opener.closed) {
-    // Trusted-upstream deployments, direct visits, and reloads after Chat's tab closed have no handshake to run.
-    const response = await fetch(SESSION_PATH, {
-      signal,
-      credentials: "same-origin",
-    });
-    if (response.status === 401) return blocked(OPEN_FROM_CHAT);
-    if (response.status === 403) return blocked(NOT_AVAILABLE);
-    return response.ok ? signedIn(response) : blocked(RELOAD);
-  }
+  // Trusted-upstream deployments, direct visits, and reloads after Chat's tab closed have no handshake to run.
+  if (!opener || opener.closed) return sessionGate(signal);
   const answer = await askOpener(opener, signal);
-  if (!answer) return blocked(OPEN_FROM_CHAT);
+  // An opener that is not MindRoom Chat, such as a page that linked here, never answers.
+  if (!answer) return signal.aborted ? blocked(RELOAD) : sessionGate(signal);
   const response = await fetch(SESSION_PATH, {
     method: "POST",
     signal,
@@ -99,7 +133,9 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
  * Render a Connections page for the Matrix user signed in to MindRoom Chat.
  *
  * When MindRoom Chat opened the portal and its tab is still open, it ignores any existing session and only renders after
- * Chat's OpenID handshake succeeds. Otherwise the page shows the session the server reports.
+ * Chat's OpenID handshake succeeds. Otherwise, or when the opener does not answer within five seconds, the page shows
+ * the session the server reports. A signed-out visitor goes to the MindRoom Chat page the server names, which signs
+ * the browser in and comes back; still signed out right after that, the page explains instead.
  * A `?next=` connect or reset link is opened instead once sign-in settles, whether or not it succeeded.
  *
  * @param children - Page content shown only after sign-in succeeds.
@@ -117,7 +153,10 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
         // A failed sign-in opens it too, as a plain click would have: the link checks its own sign-in.
         const link = agentLinkToOpen(window.location.search);
         if (link) openAgentLink(link);
-        else setGate(next);
+        else if (next.state === "chat") {
+          window.sessionStorage.setItem(SENT_TO_CHAT, "1");
+          openChatSignIn(next.url);
+        } else setGate(next);
       });
     return () => controller.abort();
   }, []);
@@ -126,14 +165,14 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
   return (
     <main className="min-h-screen bg-muted/20 px-4 py-8 sm:px-6 sm:py-12">
       <div className="mx-auto max-w-6xl">
-        {gate.state === "checking" ? (
-          <p role="status" className="text-sm text-muted-foreground">
-            Signing in…
-          </p>
-        ) : (
+        {gate.state === "blocked" ? (
           <Alert>
             <AlertDescription>{gate.message}</AlertDescription>
           </Alert>
+        ) : (
+          <p role="status" className="text-sm text-muted-foreground">
+            Signing in…
+          </p>
         )}
       </div>
     </main>

@@ -410,7 +410,7 @@ def test_session_reads_catalog_as_matrix_user(signin: dict[str, Any]) -> None:
     assert client.get("/api/connections").status_code == 401
     anonymous = client.get("/api/connections/session")
     assert anonymous.status_code == 401
-    assert anonymous.json() == {"detail": "Connections sign-in required"}
+    assert anonymous.json() == {"detail": "Connections sign-in required", "sign_in_url": f"{CHAT_ORIGIN}/connections"}
     assert "no-store" in anonymous.headers["cache-control"]
     assert anonymous.headers["referrer-policy"] == "no-referrer"
 
@@ -423,6 +423,37 @@ def test_session_reads_catalog_as_matrix_user(signin: dict[str, Any]) -> None:
     assert session.json() == {"matrix_user_id": "@alice:example.org"}
     assert "no-store" in session.headers["cache-control"]
     assert session.headers["referrer-policy"] == "no-referrer"
+
+
+def test_signed_out_probe_names_the_first_listed_web_chat(signin: dict[str, Any]) -> None:
+    """The portal sends signed-out visitors to /connections on the first web MindRoom Chat the operator lists."""
+    _serve(
+        signin,
+        MINDROOM_CONNECTIONS_ALLOWED_ORIGINS=f'["capacitor://localhost", "{CHAT_ORIGIN}", "https://other-chat.example.org"]',
+    )
+    anonymous = signin["client"].get("/api/connections/session")
+    assert anonymous.status_code == 401
+    assert anonymous.json()["sign_in_url"] == f"{CHAT_ORIGIN}/connections"
+    assert "no-store" in anonymous.headers["cache-control"]
+
+
+@pytest.mark.parametrize("origins", [None, "[]", '["capacitor://localhost"]', "not json"])
+def test_signed_out_probe_names_no_chat_without_a_listed_web_chat(signin: dict[str, Any], origins: str | None) -> None:
+    """Without a listed web Chat, the portal cannot know which Chat signs people in, so it names none."""
+    env = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": origins} if origins is not None else {}
+    paths = replace(
+        signin["paths"],
+        process_env={
+            **{k: v for k, v in signin["paths"].process_env.items() if k != "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS"},
+            **env,
+        },
+    )
+    main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, signin["payload"])
+    anonymous = signin["client"].get("/api/connections/session")
+    assert anonymous.status_code == 401
+    assert anonymous.json() == {"detail": "Connections sign-in required"}
 
 
 def test_portal_needs_no_connections_agent(signin: dict[str, Any]) -> None:

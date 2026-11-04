@@ -885,6 +885,9 @@ def _is_browser_page_request(request: Request) -> bool:
     )
 
 
+CONNECTIONS_SIGN_IN_REQUIRED = "Connections sign-in required"
+
+
 async def require_connections_user(request: Request) -> SignedMatrixUser:
     """Authenticate a Connections user through a portal session or a signed upstream Matrix identity."""
     auth_user = _connections_session_auth_user(request)
@@ -893,7 +896,7 @@ async def require_connections_user(request: Request) -> SignedMatrixUser:
     else:
         if not _request_auth_state(request).settings.trusted_upstream.enabled:
             # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
-            raise HTTPException(status_code=401, detail="Connections sign-in required")
+            raise HTTPException(status_code=401, detail=CONNECTIONS_SIGN_IN_REQUIRED)
         auth_user = await _require_signed_matrix_user(request, label="Connections")
     page_user = request.headers.get(_CONNECTIONS_USER_HEADER)
     if page_user is not None and page_user != auth_user.matrix_user_id:

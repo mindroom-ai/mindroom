@@ -30,7 +30,8 @@ An agent's connect and reset links, which it posts when a tool needs an account,
 The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
 Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
 
-When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](deployment/trusted-upstream-auth.md) identity, or asks the user to open Connections from Chat.
+When the portal is opened directly rather than from Chat, reloaded after the Chat tab that opened it closed, or opened by a page that does not answer within five seconds, it uses the existing session or a [trusted upstream](deployment/trusted-upstream-auth.md) identity.
+Without either, it sends the browser to `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, where MindRoom Chat signs the user in and opens the portal again; without such an origin, or when the browser comes back from that page still signed out, it asks the user to open Connections from Chat.
 If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 
 ## From The iOS App
@@ -85,7 +86,7 @@ Without that mapping, when trusted upstream auth is enabled with `MINDROOM_TRUST
 The session lasts one hour.
 A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication, and every API route stays protected; API requests without a valid sign-in return `401`.
-`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
+`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in, with `sign_in_url` naming that Chat page when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists a web origin.
 
 Apart from the dashboard rule below, a session authenticates only these paths:
 

@@ -44,6 +44,13 @@ export function agentLinkToOpen(search: string): string | null {
   return `${url.pathname}${url.search}`;
 }
 
+/** Leave the portal for MindRoom Chat's Connections page, which signs the browser in and comes back. */
+export function openChatSignIn(url: string) {
+  window.opener = null;
+  // Replacing the portal keeps Back from returning to a page that would only send the visitor on again.
+  window.location.replace(url);
+}
+
 /** Leave the portal for an agent link, replacing the portal in history. */
 export function openAgentLink(path: string) {
   // The link and the provider pages it leads to must not reach MindRoom Chat's tab.
