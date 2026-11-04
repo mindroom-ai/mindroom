@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main, parse_arguments, read_call_arguments
+from mindroom.script_runs.launch_contract import digest_arguments
 
 
 def test_call_accepts_json_object() -> None:
@@ -129,3 +130,86 @@ def test_unknown_transport_preserves_exact_call_id(capsys, monkeypatch) -> None:
     call_id = "12345678-1234-4234-8234-123456789abc"
     assert main(["tools", "call", "a", "b", "--call-id", call_id]) == 4
     assert json.loads(capsys.readouterr().out)["call_id"] == call_id
+
+
+def _in_background_script(monkeypatch, tmp_path) -> None:
+    token_path = tmp_path / "capability"
+    token_path.write_text("script-token", encoding="utf-8")
+    monkeypatch.delenv("MINDROOM_AGENT_CLI_URL", raising=False)
+    monkeypatch.delenv("MINDROOM_AGENT_CLI_TOKEN", raising=False)
+    monkeypatch.setenv("MINDROOM_SCRIPT_GATEWAY_URL", "http://primary:8765/api/script-gateway")
+    monkeypatch.setenv("MINDROOM_SCRIPT_RUN_ID", "run-1")
+    monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
+    monkeypatch.setattr("mindroom.script_sdk.uuid.uuid4", lambda: type("ID", (), {"hex": "call-1"})())
+
+
+def _script_gateway(monkeypatch, state: str, *, result=None, error=None) -> list[dict[str, object]]:
+    """Answer every submission with one receipt in *state*, and return the submissions."""
+    submitted: list[dict[str, object]] = []
+
+    def urlopen(request, *, timeout) -> BytesIO:
+        del timeout
+        assert request.headers["Authorization"] == "Bearer script-token"
+        payload = json.loads(request.data)
+        submitted.append(payload)
+        receipt = {
+            "run_id": "run-1",
+            "call_id": "call-1",
+            "toolkit_name": payload["toolkit_name"],
+            "function_name": payload["function_name"],
+            "arguments_digest": digest_arguments(payload["arguments"]),
+            "state": state,
+            "created_at": "2026-11-04T00:00:00Z",
+            "updated_at": "2026-11-04T00:00:01Z",
+            "result": result,
+            "error": error,
+        }
+        return BytesIO(json.dumps(receipt).encode())
+
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    return submitted
+
+
+def test_a_background_script_calls_tools_with_its_own_capability(capsys, monkeypatch, tmp_path) -> None:
+
+    _in_background_script(monkeypatch, tmp_path)
+    submitted = _script_gateway(monkeypatch, "completed", result={"messages": 3})
+    # Arguments may share a name with the SDK's own parameters.
+    arguments = {"query": "launch", "function_name": "kept"}
+
+    assert main(["tools", "call", "slack.slack_search", json.dumps(arguments)]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "toolkit": "slack",
+        "function": "slack_search",
+        "status": "completed",
+        "outcome": {"messages": 3},
+    }
+    assert [(call["toolkit_name"], call["function_name"], call["arguments"]) for call in submitted] == [
+        ("slack", "slack_search", arguments),
+    ]
+
+
+def test_a_failed_background_script_call_prints_its_error(capsys, monkeypatch, tmp_path) -> None:
+
+    _in_background_script(monkeypatch, tmp_path)
+    _script_gateway(monkeypatch, "failed", error={"kind": "tool_failure", "message": "boom", "retryable": False})
+
+    assert main(["tools", "call", "slack", "slack_search", "{}"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "call_id": "call-1",
+        "toolkit": "slack",
+        "function": "slack_search",
+        "status": "failed",
+        "outcome": {"error": "boom", "kind": "tool_failure"},
+    }
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["tools", "list"], ["calls", "get", "12345678-1234-4234-8234-123456789abc"], ["context", "list"]],
+)
+def test_a_background_script_is_offered_only_tool_calls(argv, capsys, monkeypatch, tmp_path) -> None:
+
+    _in_background_script(monkeypatch, tmp_path)
+    assert main(argv) == 2
+    assert "background script" in json.loads(capsys.readouterr().out)["error"]

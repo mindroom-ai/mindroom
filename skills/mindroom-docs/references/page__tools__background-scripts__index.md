@@ -86,6 +86,7 @@ list_scripts(include_finished: bool = True)
 
 - `start_script` requires exactly one of `source` (inline Python) or `path` (relative to the agent workspace), limited to 128 KiB.
   A `path` file is copied at launch, so later edits do not change the running program.
+  The script runs with no command-line arguments, so `sys.argv` holds only its own path.
   `name` is an optional label shown in status and list results.
 - `resource_profile` selects a Kubernetes CPU and memory profile; omitting it uses the configured default.
   `get_script_resource_profiles` shows the default and each profile's exact requests and limits, and start, status, and list results report the selected profile.
@@ -120,6 +121,15 @@ Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `
 A denied approval raises a non-retryable error with kind `approval_denied`.
 A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
+
+A script, or a program it starts, can also call tools with the [agent CLI](https://docs.mindroom.chat/tools/agent-cli/) through the same access:
+
+```bash
+mindroom-agent tools call website read_url '{"url": "https://example.org/status.txt"}'
+```
+
+Inside a background script, `mindroom-agent` offers only `tools call`, waits until the call finishes, and does not accept `--call-id`.
+It prints the toolkit, function, status (`completed` or `failed`), and outcome, with exit code `0` or `1`; a failed call also prints its `call_id`, and its outcome gives the error and its `kind`.
 
 ## Complete Watcher Example
 

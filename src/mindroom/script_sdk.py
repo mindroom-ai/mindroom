@@ -95,7 +95,7 @@ class MindRoomTools:
         self._http_timeout_seconds = http_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
 
-    def call(self, toolkit_name: str, function_name: str, **arguments: object) -> object:
+    def call(self, toolkit_name: str, function_name: str, /, **arguments: object) -> object:
         """Execute one logical governed call and poll only its stable call ID."""
         call_id = uuid.uuid4().hex
         wire_arguments = _json_wire_arguments(arguments, call_id=call_id)

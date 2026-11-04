@@ -5,6 +5,7 @@ from __future__ import annotations
 __all__ = ["main", "parse_arguments", "read_call_arguments"]
 
 import argparse
+import os
 import sys
 import time
 from contextlib import suppress
@@ -14,6 +15,8 @@ from uuid import UUID, uuid4
 
 from mindroom.agent_cli.client import AgentCliClient, AgentCliUnavailableError
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
+from mindroom.script_runs.launch_contract import RUN_ID_ENV
+from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
 
 # Parsed options the CLI handles itself instead of sending in the operation payload.
 _LOCAL_ARGUMENTS = frozenset(
@@ -141,6 +144,22 @@ def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeo
     return result
 
 
+def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
+    """Call one tool with a background script's own capability; a response's CLI grant does not reach scripts."""
+    if (args.group, args.action) != ("tools", "call") or args.call_id is not None:
+        msg = "Inside a background script, mindroom-agent offers only `tools call`, without --call-id"
+        raise ValueError(msg)
+    receipt: dict[str, object] = {"toolkit": args.toolkit, "function": args.function}
+    try:
+        outcome = MindRoomTools().call(args.toolkit, args.function, **read_call_arguments(args))
+    except MindRoomToolCallError as exc:
+        error = {"error": str(exc), "kind": exc.kind}
+        return receipt | {"call_id": exc.call_id, "status": "failed", "outcome": error}
+    except RuntimeError as exc:
+        raise AgentCliUnavailableError(str(exc)) from exc
+    return receipt | {"status": "completed", "outcome": outcome}
+
+
 def main(argv: list[str] | None = None) -> int:
     """Print one bounded JSON envelope and return the documented exit code."""
     call_id: str | None = None
@@ -151,7 +170,10 @@ def main(argv: list[str] | None = None) -> int:
             if exc.code:
                 print(canonical_json({"error": "Invalid CLI arguments"}))
             return int(exc.code or 0)
-        if args.group == "calls":
+        # Only a background script's launcher sets its run ID.
+        if os.environ.get(RUN_ID_ENV):
+            result = _script_tool_call(args)
+        elif args.group == "calls":
             call_id = str(args.call_id)
             client = AgentCliClient()
             result = client.receipt(call_id)

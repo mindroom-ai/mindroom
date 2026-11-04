@@ -331,6 +331,7 @@ path = "mindroom.agent_cli.main"
 depends_on = [
     "mindroom.agent_cli.client",
     "mindroom.agent_cli.json_io",
+    "mindroom.script_runs.launch_contract",
 ]
 
 [[modules]]
