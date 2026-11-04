@@ -16347,7 +16347,10 @@ An agent's connect and reset links, which it posts when a tool needs an account,
 The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
 Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
 
-When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity, or asks the user to open Connections from Chat.
+When the window that opened the portal does not answer within five seconds, such as a page that only linked to it, the portal does not trust the browser's existing session, which may belong to another account than Chat's: it goes to Chat's sign-in page described below, and without one shows its message, which a later answer from Chat still replaces with the signed-in portal.
+When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity.
+Without a session or upstream identity, it sends the browser to `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, so list the Chat origin people use first: Chat keeps its login per origin.
+When that Chat has this backend as its only backend, it signs the user in there and opens the portal again; a browser that comes back still signed out gets a link to that page instead, and without such an origin the portal asks the user to open Connections from Chat.
 If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 
 ## From The iOS App
@@ -16402,7 +16405,7 @@ Without that mapping, when trusted upstream auth is enabled with `MINDROOM_TRUST
 The session lasts one hour.
 A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication, and every API route stays protected; API requests without a valid sign-in return `401`.
-`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
+`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in; the signed-in answer and the `Connections sign-in required` 401 carry `sign_in_url`, naming that Chat page, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists a web origin.
 
 Apart from the dashboard rule below, a session authenticates only these paths:
 
@@ -16870,7 +16873,8 @@ The model sees the effective file access and the unconfined tools in its tool ex
 ## Connections portal sign-in
 
 This section holds the mechanics behind [opening Connections from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat).
-The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to 30 seconds.
+The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to five seconds; without an answer it signs in through Chat's page below rather than trusting the browser's existing session, which may belong to another account, and while it shows its message instead, an answer that arrives later still signs in.
+That page, also where a signed-out direct visit goes, is the `sign_in_url` that `GET /api/connections/session` names, `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which comes only from configuration; the portal never sends the same tab there twice in a row, and links to it the second time instead.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.

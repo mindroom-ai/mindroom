@@ -139,6 +139,19 @@ def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, s
     return client_origin == _HOSTED_CHAT_ORIGIN or (is_local_origin(server_origin) and is_local_origin(client_origin))
 
 
+def connections_sign_in_page(paths: RuntimePaths) -> str | None:
+    """Return MindRoom Chat's Connections page on the first web origin the operator lists, or `None` without one.
+
+    That page signs the browser in to the portal, so the portal sends signed-out visitors there.
+    """
+    web_origins = [
+        origin
+        for origin in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV)
+        if origin != "capacitor://localhost"
+    ]
+    return f"{web_origins[0]}/connections" if web_origins else None
+
+
 def connections_sign_in_enabled(paths: RuntimePaths) -> bool:
     """Return whether some MindRoom Chat may sign users in: the list is unset, or lists at least one valid origin."""
     return not connections_origins_configured(paths) or bool(

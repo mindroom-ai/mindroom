@@ -2,12 +2,13 @@ import { StrictMode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionsSignIn } from "./ConnectionsSignIn";
-import { openAgentLink } from "./navigation";
+import { openAgentLink, openChatSignIn } from "./navigation";
 import { requestConnection, setSignedInUser } from "./request";
 
 vi.mock("./navigation", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./navigation")>()),
   openAgentLink: vi.fn(),
+  openChatSignIn: vi.fn(),
 }));
 
 const SESSION = "/api/connections/session";
@@ -16,10 +17,15 @@ const OPEN_FROM_CHAT =
 const NOT_AVAILABLE = "Connections are not available for this account.";
 const REJECTED = "MindRoom did not accept the sign-in from MindRoom Chat.";
 const RELOAD = "Could not sign in. Reload this page to try again.";
+const SIGN_IN_TO_CHAT = "Sign in to MindRoom Chat to use Connections.";
 const chatOrigin = "https://chat.example.org";
+const CHAT_SIGN_IN = `${chatOrigin}/connections`;
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status });
 const tokenFor = (name: string) => ({ access_token: name, expires_in: 3600 });
+// What the session probe answers a browser that is signed out, on a deployment that lists its MindRoom Chat.
+const signedOut = (sign_in_url: unknown = CHAT_SIGN_IN) =>
+  json({ detail: "Connections sign-in required", sign_in_url }, 401);
 
 let opener: { postMessage: ReturnType<typeof vi.fn>; closed?: boolean } | null;
 
@@ -105,9 +111,11 @@ const messageListeners = (spy: { mock: { calls: unknown[][] } }) =>
 beforeEach(() => {
   setOpener({ postMessage: vi.fn() });
   vi.mocked(openAgentLink).mockClear();
+  vi.mocked(openChatSignIn).mockClear();
 });
 afterEach(() => {
   cleanup();
+  window.sessionStorage.clear();
   window.history.replaceState({}, "", "/");
   setSignedInUser(null);
   vi.useRealTimers();
@@ -179,19 +187,101 @@ describe("ConnectionsSignIn with an opener", () => {
     expect(await sentUser()).toBe("@bob:example.org");
   });
 
-  it("shows the open-from-Chat copy and no content when Chat never answers", async () => {
+  it("goes through Chat's page, not an existing session, when the opener does not answer within five seconds", async () => {
+    // The session may belong to another account than the one Chat is signed in to.
+    vi.useFakeTimers();
+    installBackend({
+      get: json({
+        matrix_user_id: "@alice:example.org",
+        sign_in_url: CHAT_SIGN_IN,
+      }),
+    });
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(4_999));
+    expect(fetch).not.toHaveBeenCalled();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(openChatSignIn).toHaveBeenCalledWith(CHAT_SIGN_IN);
+    expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+  });
+
+  it("does not show an existing session when the opener does not answer and nothing names a Chat", async () => {
+    vi.useFakeTimers();
+    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByText(OPEN_FROM_CHAT)).toBeInTheDocument();
+    expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
+  });
+
+  it("signs in a late answer from Chat", async () => {
+    // A slow homeserver can make Chat answer after the five seconds.
     vi.useFakeTimers();
     installBackend();
     renderGate();
-    await act(() => vi.advanceTimersByTimeAsync(29_999));
-    expect(screen.queryByText(OPEN_FROM_CHAT)).not.toBeInTheDocument();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByText(OPEN_FROM_CHAT)).toBeInTheDocument();
+    answerFromOpener("bob");
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByText("Portal content")).toBeInTheDocument();
+    expect(sessionCalls("POST")).toHaveLength(1);
+    // Chat answers every ready message, but one late answer is enough.
+    answerFromOpener("carol");
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(sessionCalls("POST")).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+    expect(await sentUser()).toBe("@bob:example.org");
+  });
+
+  it.each([
+    ["names Chat's page", () => signedOut()],
+    ["names no Chat", () => json({}, 401)],
+  ])(
+    "keeps a late sign-in when a session probe that %s answers after it",
+    async (_case, probe) => {
+      vi.useFakeTimers();
+      let releaseProbe = () => {};
+      vi.mocked(fetch).mockImplementation(async (_input, init) => {
+        if (init?.method === "POST")
+          return json({ matrix_user_id: "@bob:example.org" });
+        await new Promise<void>((resolve) => {
+          releaseProbe = resolve;
+        });
+        return probe();
+      });
+      renderGate();
+      await act(() => vi.advanceTimersByTimeAsync(5_000));
+      answerFromOpener("bob");
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(screen.getByText("Portal content")).toBeInTheDocument();
+      releaseProbe();
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(screen.getByText("Portal content")).toBeInTheDocument();
+      expect(screen.queryByText(OPEN_FROM_CHAT)).not.toBeInTheDocument();
+      expect(openChatSignIn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("sends a signed-out visitor to MindRoom Chat when the opener does not answer", async () => {
+    vi.useFakeTimers();
+    installBackend({ get: signedOut() });
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(openChatSignIn).toHaveBeenCalledTimes(1);
+    expect(openChatSignIn).toHaveBeenCalledWith(CHAT_SIGN_IN);
     expect(screen.getByRole("status")).toBeInTheDocument();
-    await act(() => vi.advanceTimersByTimeAsync(1));
+  });
+
+  it("shows the open-from-Chat copy when the opener does not answer and nothing names a Chat", async () => {
+    vi.useFakeTimers();
+    installBackend();
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
     expect(screen.getByText(OPEN_FROM_CHAT)).toBeInTheDocument();
     expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
-    expect(fetch).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(openChatSignIn).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -287,7 +377,7 @@ describe("ConnectionsSignIn with an opener", () => {
     expect(messageListeners(remove)).toBe(2);
     expect(vi.getTimerCount()).toBe(0);
     answerFromOpener();
-    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -364,6 +454,77 @@ describe("ConnectionsSignIn without an opener", () => {
   });
 });
 
+describe("ConnectionsSignIn sending signed-out visitors to MindRoom Chat", () => {
+  beforeEach(() => setOpener(null));
+
+  const openedChat = (times: number) =>
+    vi.waitFor(() => expect(openChatSignIn).toHaveBeenCalledTimes(times));
+
+  it("opens Chat's Connections page, which signs the browser in", async () => {
+    installBackend({ get: signedOut() });
+    renderGate();
+    await openedChat(1);
+    expect(openChatSignIn).toHaveBeenCalledWith(CHAT_SIGN_IN);
+    expect(screen.getByRole("status")).toHaveTextContent("Signing in");
+  });
+
+  it("shows the copy instead of sending the visitor to Chat twice in a row", async () => {
+    installBackend({ get: signedOut() });
+    renderGate();
+    await openedChat(1);
+    // Back from Chat in the same tab, still signed out.
+    cleanup();
+    renderGate();
+    expect(await screen.findByText(SIGN_IN_TO_CHAT)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Open MindRoom Chat" }),
+    ).toHaveAttribute("href", CHAT_SIGN_IN);
+    expect(openChatSignIn).toHaveBeenCalledTimes(1);
+    // The next visit tries Chat again.
+    cleanup();
+    renderGate();
+    await openedChat(2);
+  });
+
+  it("tries Chat again after a sign-in succeeds", async () => {
+    installBackend({ get: signedOut() });
+    renderGate();
+    await openedChat(1);
+    cleanup();
+    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
+    renderGate();
+    expect(await screen.findByText("Portal content")).toBeInTheDocument();
+    cleanup();
+    installBackend({ get: signedOut() });
+    renderGate();
+    await openedChat(2);
+  });
+
+  it("offers the link instead of leaving when this tab cannot remember the trip", async () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+    installBackend({ get: signedOut() });
+    renderGate();
+    expect(await screen.findByText(SIGN_IN_TO_CHAT)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Open MindRoom Chat" }),
+    ).toHaveAttribute("href", CHAT_SIGN_IN);
+    expect(openChatSignIn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no address", null],
+    ["an address that is not a string", 7],
+    ["an address that is not a web page", "javascript:alert(1)"],
+  ])("shows the copy for %s", async (_case, url) => {
+    installBackend({ get: signedOut(url) });
+    renderGate();
+    expect(await screen.findByText(OPEN_FROM_CHAT)).toBeInTheDocument();
+    expect(openChatSignIn).not.toHaveBeenCalled();
+  });
+});
+
 describe("ConnectionsSignIn with an agent link to open", () => {
   const CONNECT_LINK =
     "/api/oauth/slack/authorize?connect_token=t&agent_name=mind_alice&execution_scope=user";
@@ -420,10 +581,12 @@ describe("ConnectionsSignIn with an agent link to open", () => {
   it("opens the link with the existing session when nothing opened the portal", async () => {
     setOpener(null);
     openWith(CONNECT_LINK);
-    installBackend({ get: json({}, 401) });
+    installBackend({ get: signedOut() });
     renderGate();
     await vi.waitFor(() =>
       expect(openAgentLink).toHaveBeenCalledWith(CONNECT_LINK),
     );
+    // The link checks its own sign-in, so the portal does not send it to Chat.
+    expect(openChatSignIn).not.toHaveBeenCalled();
   });
 });
