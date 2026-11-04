@@ -127,3 +127,9 @@ def test_record_helpers_name_the_side_of_an_agent_or_owner() -> None:
     assert record.owner_side(ALICE) == "requester"
     assert record.owner_side("@carol:localhost") == "target"
     assert record.owner_side(BOB) is None
+
+
+def test_a_record_written_before_dates_reads_them_unset() -> None:
+    """A contact stored before requests and decisions were dated reads with neither date."""
+    record = ContactRecord.model_validate_json(_record().model_dump_json(exclude={"requested_at", "decided_at"}))
+    assert (record.requested_at, record.decided_at) == (None, None)

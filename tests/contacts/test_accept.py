@@ -758,3 +758,17 @@ async def test_toolkit_accept_contact_names_the_room(tmp_path: Path) -> None:
         "- Never share keys.",
         "matrix_message",
     )
+
+
+@pytest.mark.asyncio
+async def test_accepting_dates_the_decision(tmp_path: Path) -> None:
+    """An accepted contact records when it was accepted."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    with _matrix():
+        accepted = await _accept(config, paths, runtime, record.id)
+    assert accepted.decided_at is not None
+    assert record.requested_at is not None
+    assert accepted.decided_at >= record.requested_at
+    assert _stored(paths) == [accepted]

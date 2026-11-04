@@ -109,6 +109,7 @@ added_entities  # config:reloaded context field plugin hooks read (src/mindroom/
 counterparty_id  # contact:before_send context field plugin hooks read (src/mindroom/hooks/context.py)
 counterparty_name  # contact:before_send context field plugin hooks read (src/mindroom/hooks/context.py)
 _.revise  # contact:before_send context method plugin hooks call (src/mindroom/hooks/context.py)
+decided_at  # TEMPORARY until the Connections contacts API reads it (src/mindroom/contacts/store.py)
 start_new_session  # unused variable (src/mindroom/knowledge/refresh_runner.py)
 _.row_factory  # sqlite row-name access (src/mindroom/event_journal/sqlite_backend.py, src/mindroom/script_runs/store.py, src/mindroom/oauth/credential_store.py, src/mindroom/mcp_gateway/store.py, src/mindroom/debug_report.py, src/mindroom/usage/stats_storage.py)
 _.text_factory  # sqlite text decoding with replacement characters (src/mindroom/session_storage/legacy_agno3_conversion.py)

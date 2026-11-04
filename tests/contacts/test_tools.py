@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -884,3 +885,35 @@ def test_a_personal_agent_with_contacts_is_built_with_the_contacts_tools_and_mat
         "remove_contact",
     }
     assert "matrix_message" in offered
+
+
+@pytest.mark.asyncio
+async def test_a_request_is_dated_when_stored_and_asking_again_keeps_the_date(tmp_path: Path) -> None:
+    """A new request records when it was asked, and a repeat of it keeps that date."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    before = datetime.now(UTC)
+    record = await _pending(config, paths, runtime)
+    assert record.requested_at is not None
+    assert record.requested_at >= before
+    assert record.decided_at is None
+    again = await _pending(config, paths, runtime)
+    assert again.requested_at == record.requested_at
+
+
+@pytest.mark.asyncio
+async def test_declining_dates_the_decision(tmp_path: Path) -> None:
+    """A declined contact records when it was declined."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    with _delivered():
+        declined = await flow.decline_contact(
+            _context(config, paths, "mind_bob", CO_OWNER, runtime),
+            "mind_bob",
+            record.id,
+        )
+    assert declined.decided_at is not None
+    assert record.requested_at is not None
+    assert declined.decided_at >= record.requested_at
+    assert _stored(paths) == [declined]

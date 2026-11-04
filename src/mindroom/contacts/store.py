@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003 - pydantic resolves the field type at runtime
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,7 +45,7 @@ class ContactSide(BaseModel):
 
 
 class ContactRecord(BaseModel):
-    """One contact and where its request came from, its notice, and its room."""
+    """One contact and where its request came from, its notice, its room, and when it was asked and answered."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -59,6 +60,13 @@ class ContactRecord(BaseModel):
     origin_thread_id: str | None
     notice_event_id: str | None = None
     room_id: str | None = None
+    # LEGACY_COMPAT: contact records without request and decision dates
+    # Legacy format: a record in tracking/contacts.json with no requested_at or decided_at field.
+    # Last legacy release: v2026.11.116 wrote records without them; the next release dates every new request and decision.
+    # Handling: both read as None, so the Connections page shows no date for such a contact; nothing is migrated.
+    # Coverage: tests/contacts/test_store.py::test_a_record_written_before_dates_reads_them_unset
+    requested_at: datetime | None = None
+    decided_at: datetime | None = None
 
     def party(self, side: SideName) -> ContactParty:
         """Return the party on one side."""

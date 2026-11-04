@@ -6,6 +6,7 @@ Every refusal is a ``ValueError`` whose text is meant for the agent that called.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -306,6 +307,7 @@ async def request_contact(
             target_side=ContactSide(),
             origin_room_id=context.room_id,
             origin_thread_id=context.resolved_thread_id,
+            requested_at=datetime.now(UTC),
         )
         book.contacts.append(record)
         return record.model_copy(deep=True)
@@ -552,6 +554,7 @@ async def accept_contact(
         if current.status != "pending" or current.room_id != room_id:
             raise ValueError(_NOT_PENDING["accept"])
         current.status = "active"
+        current.decided_at = datetime.now(UTC)
         _change_side(current.target_side, rules, checked)
         return current.model_copy(deep=True)
 
@@ -581,6 +584,7 @@ async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_
         if record.status != "pending":
             raise ValueError(_NOT_PENDING["decline"])
         record.status = "declined"
+        record.decided_at = datetime.now(UTC)
         return record.model_copy(deep=True)
 
     record = await run_blocking_until_complete(update_contacts, context.runtime_paths, decline)
