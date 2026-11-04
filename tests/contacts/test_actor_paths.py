@@ -22,9 +22,9 @@ from mindroom.hooks import (
     ReactionReceivedContext,
     hook,
 )
-from tests.bot_helpers import _hook_plugin, dispatch_reaction_durably
+from tests.bot_helpers import _hook_plugin, _room_file_event, dispatch_reaction_durably
 from tests.conftest import drain_coalescing, install_generate_response_mock
-from tests.contacts.test_admission import ADMIN, CAROL, CONTACT_ROOM, _agent, _contact, _setup
+from tests.contacts.test_admission import ADMIN, CAROL, CONTACT_ROOM, _agent, _contact, _event, _setup
 from tests.contacts.test_matrix_message_policy import (  # noqa: F401 - _reset_rate_limit is an autouse pytest fixture
     _call,
     _context,
@@ -44,20 +44,20 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 RUN, REFUSED, IGNORED = "run", "refused", "ignored"
-PATHS = ("message", "edit", "message hook post", "reaction hook post")
-# What each actor's event does in Bob's agent's contact room, by path. "run" passes the message precheck, reaches the
-# edit regenerator, runs the message hooks, or runs the reaction hooks; "refused" logs contact_room_sender_refused and
+PATHS = ("edit", "message hook post", "media", "reaction hook post")
+# What each actor's event does in Bob's agent's contact room, by path. "run" reaches the edit regenerator, runs the
+# message hooks on a text message or a file, or runs the reaction hooks; "refused" logs contact_room_sender_refused and
 # runs nothing; "ignored" runs nothing, as for the agent's own messages and another agent's edits in any room.
 # The agent's own reactions run its reaction hooks as in any room, and the room refuses their posts.
 # fmt: off
 ACTIVE = {
-    #                      message  edit     message hook reaction hook
-    "owner":              (RUN,     RUN,     RUN,         RUN),
-    "counterparty owner": (RUN,     RUN,     RUN,         RUN),
-    "counterparty agent": (RUN,     IGNORED, RUN,         RUN),
-    "administrator":      (REFUSED, REFUSED, REFUSED,     REFUSED),
-    "stranger":           (REFUSED, REFUSED, REFUSED,     REFUSED),
-    "agent itself":       (IGNORED, IGNORED, IGNORED,     RUN),
+    #                      edit     message hook media    reaction hook
+    "owner":              (RUN,     RUN,         RUN,     RUN),
+    "counterparty owner": (RUN,     RUN,         RUN,     RUN),
+    "counterparty agent": (IGNORED, RUN,         RUN,     RUN),
+    "administrator":      (REFUSED, REFUSED,     REFUSED, REFUSED),
+    "stranger":           (REFUSED, REFUSED,     REFUSED, REFUSED),
+    "agent itself":       (IGNORED, IGNORED,     IGNORED, RUN),
 }
 # fmt: on
 # A removed contact's room starts nothing for anyone else, its agent's owner included.
@@ -72,7 +72,7 @@ SENDERS = {
     "agent itself": "mind_bob",
 }
 CASES = [
-    pytest.param(status, actor, path, outcome, id=f"{status}-{actor}-{path}")
+    pytest.param(status, actor, path, outcome, id=f"{status}-{actor}-{path}".replace(" ", "_"))
     for status, table in (("active", ACTIVE), ("removed", REMOVED))
     for actor, outcomes in table.items()
     for path, outcome in zip(PATHS, outcomes, strict=True)
@@ -93,16 +93,6 @@ async def _message(config: Config, paths: RuntimePaths, actor: str) -> dict[str,
     return content
 
 
-def _text(sender: str, content: dict[str, Any], event_id: str = "$message") -> nio.RoomMessageText:
-    source = {"event_id": event_id, "sender": sender, "origin_server_ts": 1, "type": "m.room.message"}
-    return nio.RoomMessageText.from_dict(source | {"content": content, "room_id": CONTACT_ROOM})
-
-
-async def _precheck(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
-    validator = bot._ingress_validator
-    return await validator.precheck_event(room, event, validator.classify(event, room_id=CONTACT_ROOM))
-
-
 async def _react(bot: AgentBot, room: nio.MatrixRoom, sender: str) -> None:
     reaction = {"event_id": "$reaction", "sender": sender, "origin_server_ts": 1, "type": "m.reaction"}
     content = {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$message", "key": "👍"}}
@@ -116,11 +106,12 @@ async def _edit(bot: AgentBot, room: nio.MatrixRoom, sender: str) -> None:
         "m.new_content": {"msgtype": "m.text", "body": "Saturday?"},
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$message"},
     }
-    await bot._turn_ingress.handle_text_event(room, _text(sender, content, "$edit"))
+    await bot._turn_ingress.handle_text_event(room, _event(sender, **content))
 
 
-async def _dispatch(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-    await bot._turn_ingress.handle_text_event(room, event)
+async def _drained(bot: AgentBot, handled: Awaitable[object]) -> None:
+    """Await an event's ingress callback, then the turn it coalesced into."""
+    await handled
     await drain_coalescing(bot)
 
 
@@ -171,18 +162,20 @@ async def test_each_actor_on_each_path_is_run_refused_or_ignored_as_the_table_sa
     posted: list[str | None] = []
     _hooks(bot, ran, posted)
     room = _contact_room(paths)
-    steps: dict[str, Callable[[], Awaitable[object]]] = {
-        "message": lambda: _precheck(bot, room, _text(sender, content)),
+    ingress = bot._turn_ingress
+    upload = _room_file_event(sender=sender, event_id="$file", room_id=CONTACT_ROOM)
+    steps: dict[str, Callable[[], Awaitable[None]]] = {
         "edit": lambda: _edit(bot, room, sender),
-        "message hook post": lambda: _dispatch(bot, room, _text(sender, content)),
+        "message hook post": lambda: _drained(bot, ingress.handle_text_event(room, _event(sender, **content))),
+        "media": lambda: _drained(bot, ingress.handle_media_event(room, upload)),
         "reaction hook post": lambda: _react(bot, room, sender),
     }
 
     with capture_logs() as logs:
-        passed_precheck = await steps[path]()
+        await steps[path]()
     events = {log["event"] for log in logs}
     # An edit that reaches the edit regenerator logs edit_not_regenerated, as no turn of the edited message is recorded.
-    handled = passed_precheck is True or bool(ran) or "edit_not_regenerated" in events
+    handled = bool(ran) or "edit_not_regenerated" in events
     outcome = REFUSED if "contact_room_sender_refused" in events else RUN if handled else IGNORED
 
     assert outcome == expected
