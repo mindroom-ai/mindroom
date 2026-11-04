@@ -435,12 +435,14 @@ async def _withdraw_unjoined_owner_invites(client: nio.AsyncClient, record: Cont
     """Withdraw the invitations of the owners who never joined a removed contact's room, as its creating agent.
 
     Once its agents leave, such an invitation leads to a room nobody is left to let them into, while owners who joined
-    keep the room and its history. A member list that cannot be read withdraws nothing, so no joined owner is removed.
+    keep the room and its history. The member list is read again just before each owner's withdrawal, so an owner who
+    joins while the other's invitation is withdrawn stays; one who joins between that read and the withdrawal does not.
+    A member list that cannot be read withdraws nothing for that owner.
     """
-    joined = await get_room_members(client, room_id)
-    if joined is not None:
-        owners = (record.requester.owner, record.target.owner)
-        await _withdraw_owner_invites(client, record, room_id, [owner for owner in owners if owner not in joined])
+    for owner in (record.requester.owner, record.target.owner):
+        joined = await get_room_members(client, room_id)
+        if joined is not None and owner not in joined:
+            await _withdraw_owner_invites(client, record, room_id, [owner])
 
 
 async def withdraw_removed_contact_invites(

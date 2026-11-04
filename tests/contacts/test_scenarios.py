@@ -420,6 +420,28 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(
     _assert_world_invariants(world, stranded=frozenset(left[1]))
 
 
+async def test_an_owner_who_joins_while_another_invitation_is_withdrawn_keeps_the_room(tmp_path: Path) -> None:
+    """Bob joins while Alice's invitation to a removed contact's room is withdrawn, and his agent does not remove him."""
+    world = _world(tmp_path)
+    room_id = await _accepted_and_relayed(world)
+    client = world.runtime.clients["mind_bob"]
+    kick = client.room_kick.side_effect
+
+    async def bob_joins_during_alices_withdrawal(kicked_room_id: str, user_id: str, **kick_args: object) -> object:
+        if user_id == OWNER:
+            assert await world.server.membership(CO_OWNER, kicked_room_id, "join")
+        return await kick(kicked_room_id, user_id, **kick_args)
+
+    client.room_kick.side_effect = bob_joins_during_alices_withdrawal
+    alice = _context(world.config, world.paths, "mind_alice", OWNER, world.runtime)
+
+    await flow.remove_contact(alice, "mind_alice", _stored(world.paths)[0].id)
+
+    room = world.server.rooms[room_id]
+    assert (room.members, room.invited) == ({CO_OWNER}, set())
+    _assert_world_invariants(world)
+
+
 @pytest.mark.parametrize(
     ("losing", "invited_meanwhile"),
     [
