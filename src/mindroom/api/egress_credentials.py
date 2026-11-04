@@ -14,12 +14,13 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
+    EmptyMutation,
     build_connection_agent_target,
     masked_oauth_call,
     require_connections_same_origin,
@@ -646,10 +647,6 @@ def delete_user_service_route(
 # Accounts
 
 
-class _EmptyMutation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
 async def _account_provider(
     request: Request,
     requester_id: str,
@@ -713,7 +710,7 @@ async def connect_egress_account(
     agent_name: str,
     service: str,
     requester_id: _EgressUser,
-    _body: _EmptyMutation,
+    _body: EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start the OAuth flow of a service's provider for one agent's credential scope."""
     _agent, egress_service, provider = await _account_provider(
@@ -740,7 +737,7 @@ async def disconnect_egress_account(
     agent_name: str,
     service: str,
     requester_id: _EgressUser,
-    _body: _EmptyMutation,
+    _body: EmptyMutation,
 ) -> dict[str, str]:
     """Reset the OAuth connection of a service's provider for one agent's credential scope; its opt-in stays."""
     _agent, egress_service, provider = await _account_provider(

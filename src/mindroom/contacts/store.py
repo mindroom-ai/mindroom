@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-type _PartyKind = Literal["agent", "person"]
+type PartyKind = Literal["agent", "person"]
 type ContactStatus = Literal["pending", "active", "declined", "removed"]
 type SideName = Literal["requester", "target"]
 
@@ -30,7 +30,7 @@ class ContactParty(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: _PartyKind
+    kind: PartyKind
     id: str
     owner: str
 
@@ -165,6 +165,15 @@ def agent_contacts(
         (record, side)
         for record in read_contacts(runtime_paths).contacts
         if (side := record.agent_side(agent_name)) is not None
+    ]
+
+
+def owner_contacts(runtime_paths: RuntimePaths, owner: str) -> list[tuple[ContactRecord, SideName]]:
+    """Return the owner's contacts that are not removed, each with the owner's side, in the order they were asked."""
+    return [
+        (record, side)
+        for record in read_contacts(runtime_paths).contacts
+        if (side := record.owner_side(owner)) is not None and record.status != "removed"
     ]
 
 

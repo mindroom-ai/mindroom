@@ -12,16 +12,19 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_connections_user
-from mindroom.api.connection_agents import CONNECTIONS_HEADERS, require_connections_same_origin
+from mindroom.api.connection_agents import CONNECTIONS_HEADERS, EmptyMutation, require_connections_same_origin
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.contacts import flow
 from mindroom.contacts.parties import agent_party, owner_contact_agents, party_name
 from mindroom.contacts.store import (
     ContactStatus,
+    PartyKind,
+    SideName,
+    owner_contacts,
     read_contacts,
 )
 from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
-from mindroom.matrix.identity import try_parse_historical_matrix_user_id
+from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.plugins import config_plugins
@@ -32,9 +35,12 @@ if TYPE_CHECKING:
     from mindroom.config.contacts import ContactsConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import ContactParty, ContactRecord, SideName
+    from mindroom.contacts.store import ContactParty, ContactRecord
+    from mindroom.tool_system.declarations import ToolMetadata
 
 router = APIRouter(prefix="/api/connections/contacts", tags=["connections"])
+
+type _ToolReach = Literal["code", "unconfined", "files", "none"]
 
 _UNAVAILABLE = "Contacts are unavailable"
 _RESTARTING = "MindRoom is restarting its agents; try again in a moment."
@@ -49,35 +55,29 @@ class ContactTerms(BaseModel):
     tools: list[str] | None = None
 
 
-class _NoBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
 class ContactToolChoice(BaseModel):
     """One tool a contact of the agent may use, with what it lets the other side reach.
 
-    `provider` is the OAuth provider whose connected account the tool acts with, if any.
+    `reach` is `code` for a tool that runs code, `unconfined` for one that `file_access` does not confine to the
+    agent's files, `files` for one it confines there, and `none` otherwise. `provider` is the OAuth provider whose
+    connected account the tool acts with, or None, as when a shared service account serves it.
     """
 
     name: str
     display_name: str
-    icon: str | None
     provider: str | None
-    executes_code: bool
-    reaches_files: bool
+    reach: _ToolReach
 
 
 class ContactAgent(BaseModel):
     """One of the owner's personal agents with contacts, and what applies to every contact it has.
 
-    `configured_rules` and `default_tools` come from its configuration, and `judged` says whether a judge checks its
-    messages. `tool_choices` leaves out `matrix_message`, which every contact offers.
+    `configured_rules` come from its configuration, and `judged` says whether a judge checks its messages.
+    `tool_choices` leaves out `matrix_message`, which every contact offers.
     """
 
     agent_name: str
-    display_name: str
     configured_rules: list[str]
-    default_tools: list[str]
     judged: bool
     tool_choices: list[ContactToolChoice]
 
@@ -85,7 +85,7 @@ class ContactAgent(BaseModel):
 class ContactPartyView(BaseModel):
     """One end of a contact, named for people: an agent's display name, or a person's Matrix ID."""
 
-    kind: Literal["agent", "person"]
+    kind: PartyKind
     id: str
     owner: str
     display_name: str
@@ -94,20 +94,19 @@ class ContactPartyView(BaseModel):
 class ContactView(BaseModel):
     """One contact as its owner sees it: the owner's own side only, and never a removed contact.
 
-    `rules` and `tools` are what the owner set for their side, `tools` None meaning the agent's default tools, and
-    `effective_tools` is what a contact turn offers now. All three are None for a person's side and for an agent that
-    no longer has contacts. `room_id` names the room of an active contact only.
+    `rules` are what the owner set for their side, and `effective_tools` is what a contact turn offers now. Both are
+    None for a person's side and for an agent that no longer has contacts. `room_id` names the room of an active
+    contact only.
     """
 
     id: str
     status: ContactStatus
-    side: Literal["requester", "target"]
+    side: SideName
     you: ContactPartyView
     other: ContactPartyView
     reason: str
     room_id: str | None
     rules: str | None
-    tools: list[str] | None
     effective_tools: list[str] | None
     requested_at: datetime | None
     decided_at: datetime | None
@@ -122,7 +121,6 @@ class ContactsPage(BaseModel):
 
 @dataclass(frozen=True)
 class _Viewer:
-    user_id: str
     owner: str
     config: Config
     runtime_paths: RuntimePaths
@@ -134,42 +132,54 @@ async def _viewer(request: Request, response: Response) -> _Viewer:
     auth_user = await require_connections_user(request)
     if request.query_params:
         raise HTTPException(400, "Query parameters are not accepted", headers=CONNECTIONS_HEADERS)
-    if try_parse_historical_matrix_user_id(auth_user.matrix_user_id) is None:
-        raise HTTPException(403, "Contacts require a verified Matrix identity", headers=CONNECTIONS_HEADERS)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
     if config is None:
         raise HTTPException(503, _UNAVAILABLE, headers=CONNECTIONS_HEADERS)
     paths = snapshot.runtime_paths
     owner = resolve_human_requester_alias(auth_user.matrix_user_id, config, paths)
-    return _Viewer(auth_user.matrix_user_id, owner, config, paths)
+    return _Viewer(owner, config, paths)
 
 
 _ViewerContext = Annotated[_Viewer, Depends(_viewer)]
 
 
+def _reach(metadata: ToolMetadata, agent_file_access: str) -> _ToolReach:
+    """Return what the other side can ask a tool to reach; `unrestricted` file access confines no tool to the files."""
+    if metadata.executes_code:
+        return "code"
+    if metadata.file_access is ToolFileAccess.UNCONFINED or (
+        metadata.file_access is ToolFileAccess.AGENT and agent_file_access == "unrestricted"
+    ):
+        return "unconfined"
+    return "files" if metadata.file_access is ToolFileAccess.AGENT else "none"
+
+
 def _agent_view(config: Config, runtime_paths: RuntimePaths, agent_name: str, contacts: ContactsConfig) -> ContactAgent:
-    registry = config_plugins(config, runtime_paths).tools
+    plugins = config_plugins(config, runtime_paths)
+    file_access = config.resolve_agent(agent_name).file_access
     choices = []
     for name in contact_tool_choices(config, runtime_paths, agent_name):
         if name == "matrix_message":
             continue
-        metadata = registry.get(name)
+        if (metadata := plugins.tools.get(name)) is None:
+            choices.append(ContactToolChoice(name=name, display_name=name, provider=None, reach="none"))
+            continue
+        provider = metadata.auth_provider
+        oauth_provider = None if provider is None else plugins.oauth_providers.get(provider)
+        if oauth_provider is not None and oauth_provider_service_account_configured(oauth_provider, runtime_paths):
+            provider = None
         choices.append(
             ContactToolChoice(
                 name=name,
-                display_name=name if metadata is None else metadata.display_name,
-                icon=None if metadata is None else metadata.icon,
-                provider=None if metadata is None else metadata.auth_provider,
-                executes_code=metadata is not None and metadata.executes_code,
-                reaches_files=metadata is not None and metadata.file_access is not ToolFileAccess.NONE,
+                display_name=metadata.display_name,
+                provider=provider,
+                reach=_reach(metadata, file_access),
             ),
         )
     return ContactAgent(
         agent_name=agent_name,
-        display_name=config.agents[agent_name].display_name,
         configured_rules=list(contacts.rules),
-        default_tools=list(contacts.tools),
         judged=contacts.judgment is not None,
         tool_choices=choices,
     )
@@ -192,7 +202,6 @@ def _contact_view(config: Config, runtime_paths: RuntimePaths, record: ContactRe
         reason=record.reason,
         room_id=record.room_id if record.status == "active" else None,
         rules=own.rules if with_terms else None,
-        tools=own.tools if with_terms else None,
         effective_tools=list(contact_turn_tools(config, runtime_paths, you.id, record, side)) if with_terms else None,
         requested_at=record.requested_at,
         decided_at=record.decided_at,
@@ -203,7 +212,7 @@ def _page(viewer: _Viewer) -> ContactsPage:
     """Build the owner's page; an unreadable contacts file is unavailable rather than an error naming the file."""
     config, paths = viewer.config, viewer.runtime_paths
     try:
-        owned = flow.owner_contacts(paths, viewer.owner)
+        owned = owner_contacts(paths, viewer.owner)
     except ValueError as exc:
         raise HTTPException(503, _UNAVAILABLE, headers=CONNECTIONS_HEADERS) from exc
     return ContactsPage(
@@ -253,8 +262,13 @@ async def _change(
         await run_blocking_until_complete(read_contacts, viewer.runtime_paths)
     except ValueError as exc:
         raise HTTPException(503, _UNAVAILABLE, headers=CONNECTIONS_HEADERS) from exc
-    runtime = config_lifecycle.app_state(request.app).runtime
-    actor = flow.owner_actor(viewer.config, viewer.runtime_paths, viewer.user_id, runtime.agent_bot)
+    actor = flow.ContactActor(
+        owner=viewer.owner,
+        agent_name=None,
+        config=viewer.config,
+        runtime_paths=viewer.runtime_paths,
+        agent_bot=config_lifecycle.app_state(request.app).runtime.agent_bot,
+    )
     async with _agents_admitted(request, admit=moves_agents):
         try:
             await change(actor)
@@ -275,8 +289,8 @@ async def accept(contact_id: str, terms: ContactTerms, request: Request, viewer:
 
 
 @router.post("/{contact_id}/decline")
-async def decline(contact_id: str, _body: _NoBody, request: Request, viewer: _ViewerContext) -> ContactsPage:
-    """Decline a request to the owner; the agents post the decision in both requests' threads."""
+async def decline(contact_id: str, _body: EmptyMutation, request: Request, viewer: _ViewerContext) -> ContactsPage:
+    """Decline a request to the owner; its thread and the thread an asking agent asked from are told."""
     return await _change(request, viewer, lambda actor: flow.decline_contact(actor, contact_id), moves_agents=True)
 
 
@@ -292,6 +306,6 @@ async def update(contact_id: str, terms: ContactTerms, request: Request, viewer:
 
 
 @router.post("/{contact_id}/remove")
-async def remove(contact_id: str, _body: _NoBody, request: Request, viewer: _ViewerContext) -> ContactsPage:
+async def remove(contact_id: str, _body: EmptyMutation, request: Request, viewer: _ViewerContext) -> ContactsPage:
     """Remove a contact, withdraw a request the owner sent, or clear a request the owner declined."""
     return await _change(request, viewer, lambda actor: flow.remove_contact(actor, contact_id), moves_agents=True)

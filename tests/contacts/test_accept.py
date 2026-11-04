@@ -23,6 +23,7 @@ from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
+from mindroom.matrix.personal_room_store import personal_room_record_path
 from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -855,6 +856,22 @@ async def test_a_portal_decision_on_a_request_never_posted_answers_no_thread(tmp
 
     assert accepted.status == "active"
     assert _thread_posts(send, BOB_ROOM) == []
+
+
+@pytest.mark.asyncio
+async def test_a_decision_without_the_owners_personal_room_says_so(tmp_path: Path) -> None:
+    """With the owner's personal room gone, the request has nowhere to be answered, and nothing changes."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    personal_room_record_path(paths, "mind_bob", CO_OWNER).unlink()
+    for decide in (
+        lambda actor: flow.accept_contact(actor, record.id, rules=None, tools=None),
+        lambda actor: flow.decline_contact(actor, record.id),
+    ):
+        with pytest.raises(ValueError, match=rf"^{CO_OWNER} has no personal room to answer this request in$"):
+            await decide(_portal(config, paths, runtime))
+    assert [stored.status for stored in _stored(paths)] == ["pending"]
 
 
 @pytest.mark.asyncio

@@ -19,12 +19,11 @@ if TYPE_CHECKING:
 _CONFIRMED = frozenset({"request_contact", "accept_contact", "update_contact"})
 
 
-def _asked(actor: flow.ContactActor, record: ContactRecord, *, posted: bool) -> str:
+def _asked(owner: str, record: ContactRecord, *, posted: bool) -> str:
     """Say where a request stands for the owner who just made it; only a posted request notice asked anyone.
 
     A person who asked has no agent to tell in this thread, so they learn of an acceptance from the room invitation.
     """
-    owner = actor.owner
     if posted and record.requester.owner == owner:
         answer = (
             "you are told in this thread when they accept or decline"
@@ -101,10 +100,10 @@ class ContactsTools(Toolkit):
                 tools=tools,
                 party=party,
             )
+            actor = flow.tool_actor(context, self.agent_name)
         except ValueError as exc:
             return f"Error: {exc}"
-        actor = flow.tool_actor(context, self.agent_name)
-        return _asked(actor, record, posted=posted) + flow.own_side_terms(actor, record)
+        return _asked(actor.owner, record, posted=posted) + flow.own_side_terms(actor, record)
 
     async def accept_contact(
         self,

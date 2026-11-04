@@ -81,7 +81,6 @@ def _runtime() -> _Runtime:
         bot.conversation_reader.latest_thread_event_id = make_latest_thread_event_id_mock()
         bot.change_local_membership = AsyncMock(return_value=True)
         bot.current_joined_room_ids = AsyncMock(return_value=frozenset())
-    orchestrator.running_entity_client.side_effect = runtime.clients.get
     orchestrator.agent_bots = runtime.bots
     return runtime
 

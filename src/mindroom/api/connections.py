@@ -9,13 +9,14 @@ from typing import TYPE_CHECKING, Annotated
 import nio
 from aiohttp import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import dashboard_link, is_administrator, require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
+    EmptyMutation,
     masked_oauth_call,
     require_connections_same_origin,
     resolve_connection_agent,
@@ -150,10 +151,6 @@ class ConnectionsIdentity(BaseModel):
     egress_enabled: bool
     contacts_enabled: bool
     dashboard_url: str
-
-
-class _EmptyMutation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
 
 @dataclass(frozen=True)
@@ -511,7 +508,7 @@ async def connect(
     provider_id: str,
     request: Request,
     context: _ConnectionsContext,
-    _body: _EmptyMutation,
+    _body: EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start existing OAuth state handling with an authorized agent target."""
     require_connections_same_origin(request, context.user.runtime_paths)
@@ -577,7 +574,7 @@ async def connect_consent_group(
     group: str,
     request: Request,
     context: _ConnectionsContext,
-    _body: _EmptyMutation,
+    _body: EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start one sign-in that connects each service of a consent group this user may connect and has not connected.
 
@@ -603,7 +600,7 @@ async def disconnect(
     provider_id: str,
     request: Request,
     context: _ConnectionsContext,
-    _body: _EmptyMutation,
+    _body: EmptyMutation,
 ) -> dict[str, str]:
     """Reset the authorized agent's scoped provider credentials."""
     require_connections_same_origin(request, context.user.runtime_paths)
