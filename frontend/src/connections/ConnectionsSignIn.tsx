@@ -1,27 +1,41 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { agentLinkToOpen, openAgentLink, openChatSignIn } from "./navigation";
-import { setSignedInUser } from "./request";
+import {
+  agentLinkToOpen,
+  openAgentLink,
+  openChatSignIn,
+  reloadPortal,
+} from "./navigation";
+import { getSignedInUser, setSignedInUser } from "./request";
 
 const SESSION_PATH = "/api/connections/session";
 const READY_MESSAGE = "mindroom:connections-ready";
 const OPENID_MESSAGE = "mindroom:connections-openid";
-// MindRoom Chat answers with one token request to its homeserver; an opener that is not Chat never answers.
+// MindRoom Chat answers with a few requests to its homeserver; an opener that is not Chat never answers.
 const ANSWER_TIMEOUT_MS = 5000;
 const SENT_TO_CHAT = "mindroom-connections-sent-to-chat";
 const OPEN_FROM_CHAT =
   "Open Connections from MindRoom Chat (Settings, General) to sign in.";
+const SIGN_IN_TO_CHAT = "Sign in to MindRoom Chat to use Connections.";
 const NOT_AVAILABLE = "Connections are not available for this account.";
 const REJECTED = "MindRoom did not accept the sign-in from MindRoom Chat.";
 const RELOAD = "Could not sign in. Reload this page to try again.";
+
+type Answer = { token: object; origin: string };
 
 type Gate =
   | { state: "checking" }
   | { state: "ready" }
   | { state: "chat"; url: string }
-  | { state: "blocked"; message: string };
+  | { state: "blocked"; message: string; chatUrl?: string };
 
 const blocked = (message: string): Gate => ({ state: "blocked", message });
+// Shown instead of leaving for Chat's page again; a click cannot loop.
+const linkToChat = (url: string): Gate => ({
+  state: "blocked",
+  message: SIGN_IN_TO_CHAT,
+  chatUrl: url,
+});
 
 async function readBody(response: Response): Promise<Record<string, unknown>> {
   try {
@@ -75,19 +89,23 @@ async function sessionGate(signal: AbortSignal): Promise<Gate> {
   if (response.status !== 401)
     return response.ok ? signedIn(response) : blocked(RELOAD);
   const url = chatSignInUrl((await readBody(response)).sign_in_url);
+  if (!url) return blocked(OPEN_FROM_CHAT);
   // Still signed out right after Chat's page: sending the visitor there again would loop.
-  return url && !back ? { state: "chat", url } : blocked(OPEN_FROM_CHAT);
+  return back ? linkToChat(url) : { state: "chat", url };
 }
 
-/** Ask the window that opened the portal for a Matrix OpenID token; `null` means no answer in time or aborted. */
-function askOpener(opener: Window, signal: AbortSignal) {
-  type Answer = { token: object; origin: string };
+/**
+ * Ask the window that opened the portal for a Matrix OpenID token; `null` means no answer in time or aborted.
+ * The first answer that arrives after the timeout goes to `onLate` instead, until `signal` aborts.
+ */
+function askOpener(
+  opener: Window,
+  signal: AbortSignal,
+  onLate: (answer: Answer) => void,
+) {
   return new Promise<Answer | null>((resolve) => {
-    const finish = (answer: Answer | null) => {
-      clearTimeout(timer);
-      window.removeEventListener("message", onMessage);
-      resolve(answer);
-    };
+    let waiting = true;
+    const stop = () => window.removeEventListener("message", onMessage);
     const onMessage = (event: MessageEvent) => {
       const { type, openid_token: token } = (event.data ?? {}) as {
         type?: unknown;
@@ -95,24 +113,32 @@ function askOpener(opener: Window, signal: AbortSignal) {
       };
       if (event.source !== opener || type !== OPENID_MESSAGE) return;
       if (typeof token !== "object" || token === null) return;
-      finish({ token, origin: event.origin });
+      stop();
+      if (!waiting) return onLate({ token, origin: event.origin });
+      clearTimeout(timer);
+      resolve({ token, origin: event.origin });
     };
-    const timer = setTimeout(() => finish(null), ANSWER_TIMEOUT_MS);
-    signal.addEventListener("abort", () => finish(null), { once: true });
+    const timer = setTimeout(() => {
+      waiting = false;
+      resolve(null);
+    }, ANSWER_TIMEOUT_MS);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        stop();
+        resolve(null);
+      },
+      { once: true },
+    );
     window.addEventListener("message", onMessage);
     // The ready message carries no secret; the backend checks the reply's origin against its allowlist.
     opener.postMessage({ type: READY_MESSAGE }, "*");
   });
 }
 
-async function signIn(signal: AbortSignal): Promise<Gate> {
-  const opener: Window | null = window.opener;
-  // Trusted-upstream deployments, direct visits, and reloads after Chat's tab closed have no handshake to run.
-  if (!opener || opener.closed) return sessionGate(signal);
-  const answer = await askOpener(opener, signal);
-  // An opener that is not MindRoom Chat, such as a page that linked here, never answers.
-  if (!answer) return signal.aborted ? blocked(RELOAD) : sessionGate(signal);
-  const response = await fetch(SESSION_PATH, {
+function postAnswer(answer: Answer, signal: AbortSignal) {
+  return fetch(SESSION_PATH, {
     method: "POST",
     signal,
     credentials: "same-origin",
@@ -122,6 +148,27 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
       client_origin: answer.origin,
     }),
   });
+}
+
+/** Sign in Chat's late answer; when it is not the account the page shows, reload so the page shows Chat's account. */
+async function signInLateAnswer(answer: Answer, signal: AbortSignal) {
+  const response = await postAnswer(answer, signal);
+  if (!response.ok) return;
+  const { matrix_user_id: user } = await readBody(response);
+  if (typeof user === "string" && user && user !== getSignedInUser())
+    reloadPortal();
+}
+
+async function signIn(signal: AbortSignal): Promise<Gate> {
+  const opener: Window | null = window.opener;
+  // Trusted-upstream deployments, direct visits, and reloads after Chat's tab closed have no handshake to run.
+  if (!opener || opener.closed) return sessionGate(signal);
+  const answer = await askOpener(opener, signal, (late) => {
+    void signInLateAnswer(late, signal).catch(() => undefined);
+  });
+  // An opener that is not MindRoom Chat, such as a page that linked here, never answers; Chat may answer late.
+  if (!answer) return signal.aborted ? blocked(RELOAD) : sessionGate(signal);
+  const response = await postAnswer(answer, signal);
   if (response.ok) return signedIn(response);
   if (response.status !== 401 && response.status !== 403)
     return blocked(RELOAD);
@@ -129,13 +176,24 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
   return blocked(typeof detail === "string" && detail ? detail : REJECTED);
 }
 
+/** Remember that this tab leaves for Chat's sign-in page; `false` when the tab cannot remember it. */
+function markSentToChat(): boolean {
+  try {
+    window.sessionStorage.setItem(SENT_TO_CHAT, "1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Render a Connections page for the Matrix user signed in to MindRoom Chat.
  *
  * When MindRoom Chat opened the portal and its tab is still open, it ignores any existing session and only renders after
  * Chat's OpenID handshake succeeds. Otherwise, or when the opener does not answer within five seconds, the page shows
- * the session the server reports. A signed-out visitor goes to the MindRoom Chat page the server names, which signs
- * the browser in and comes back; still signed out right after that, the page explains instead.
+ * the session the server reports; a later answer from Chat still signs in, and reloads the page for Chat's account.
+ * A signed-out visitor goes to the MindRoom Chat page the server names, which signs the browser in and comes back;
+ * still signed out right after that, the page links to it instead.
  * A `?next=` connect or reset link is opened instead once sign-in settles, whether or not it succeeded.
  *
  * @param children - Page content shown only after sign-in succeeds.
@@ -153,10 +211,10 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
         // A failed sign-in opens it too, as a plain click would have: the link checks its own sign-in.
         const link = agentLinkToOpen(window.location.search);
         if (link) openAgentLink(link);
-        else if (next.state === "chat") {
-          window.sessionStorage.setItem(SENT_TO_CHAT, "1");
-          openChatSignIn(next.url);
-        } else setGate(next);
+        else if (next.state !== "chat") setGate(next);
+        // Without the mark, a visitor who comes back still signed out would be sent again and again.
+        else if (markSentToChat()) openChatSignIn(next.url);
+        else setGate(linkToChat(next.url));
       });
     return () => controller.abort();
   }, []);
@@ -167,7 +225,17 @@ export function ConnectionsSignIn({ children }: { children: ReactNode }) {
       <div className="mx-auto max-w-6xl">
         {gate.state === "blocked" ? (
           <Alert>
-            <AlertDescription>{gate.message}</AlertDescription>
+            <AlertDescription>
+              {gate.message}
+              {gate.chatUrl ? (
+                <>
+                  {" "}
+                  <a className="underline" href={gate.chatUrl}>
+                    Open MindRoom Chat
+                  </a>
+                </>
+              ) : null}
+            </AlertDescription>
           </Alert>
         ) : (
           <p role="status" className="text-sm text-muted-foreground">

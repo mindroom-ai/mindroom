@@ -74,6 +74,7 @@ _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _CONNECTIONS_SESSION_FLOW_SCOPE_KEY = "mindroom.connections_session_flow"
 # Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
 _CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
+CONNECTIONS_SIGN_IN_REQUIRED = "Connections sign-in required"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
 _JWT_MAX_BYTES = 16 * 1024
@@ -883,9 +884,6 @@ def _is_browser_page_request(request: Request) -> bool:
         and path != "/api"
         and not path.startswith("/api/")
     )
-
-
-CONNECTIONS_SIGN_IN_REQUIRED = "Connections sign-in required"
 
 
 async def require_connections_user(request: Request) -> SignedMatrixUser:

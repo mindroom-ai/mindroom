@@ -756,6 +756,17 @@ def test_upstream_identity_refuses_a_page_showing_another_account(
     assert matching.json() == {"matrix_user_id": "@bob:example.org"}
 
 
+def test_trusted_upstream_signed_out_probe_names_no_chat(
+    signin: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behind a trusted upstream, a request without its identity is the upstream's to sign in, not Chat's."""
+    client, _upstream = _serve_with_trusted_upstream(signin, monkeypatch, signin["payload"])
+    anonymous = client.get("/api/connections/session")
+    assert anonymous.status_code == 401
+    assert "sign_in_url" not in anonymous.json()
+
+
 def test_expired_session_is_rejected(signin: dict[str, Any]) -> None:
     """A session stops authenticating once its fixed lifetime ends."""
     client = signin["client"]

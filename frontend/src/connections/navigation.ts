@@ -51,6 +51,11 @@ export function openChatSignIn(url: string) {
   window.location.replace(url);
 }
 
+/** Load the portal again, which runs MindRoom Chat's sign-in handshake again. */
+export function reloadPortal() {
+  window.location.reload();
+}
+
 /** Leave the portal for an agent link, replacing the portal in history. */
 export function openAgentLink(path: string) {
   // The link and the provider pages it leads to must not reach MindRoom Chat's tab.

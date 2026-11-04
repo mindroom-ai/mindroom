@@ -2,13 +2,14 @@ import { StrictMode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionsSignIn } from "./ConnectionsSignIn";
-import { openAgentLink, openChatSignIn } from "./navigation";
+import { openAgentLink, openChatSignIn, reloadPortal } from "./navigation";
 import { requestConnection, setSignedInUser } from "./request";
 
 vi.mock("./navigation", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./navigation")>()),
   openAgentLink: vi.fn(),
   openChatSignIn: vi.fn(),
+  reloadPortal: vi.fn(),
 }));
 
 const SESSION = "/api/connections/session";
@@ -17,6 +18,7 @@ const OPEN_FROM_CHAT =
 const NOT_AVAILABLE = "Connections are not available for this account.";
 const REJECTED = "MindRoom did not accept the sign-in from MindRoom Chat.";
 const RELOAD = "Could not sign in. Reload this page to try again.";
+const SIGN_IN_TO_CHAT = "Sign in to MindRoom Chat to use Connections.";
 const chatOrigin = "https://chat.example.org";
 const CHAT_SIGN_IN = `${chatOrigin}/connections`;
 const json = (value: unknown, status = 200) =>
@@ -111,6 +113,7 @@ beforeEach(() => {
   setOpener({ postMessage: vi.fn() });
   vi.mocked(openAgentLink).mockClear();
   vi.mocked(openChatSignIn).mockClear();
+  vi.mocked(reloadPortal).mockClear();
 });
 afterEach(() => {
   cleanup();
@@ -197,13 +200,38 @@ describe("ConnectionsSignIn with an opener", () => {
     await act(() => vi.advanceTimersByTimeAsync(1));
     expect(screen.getByText("Portal content")).toBeInTheDocument();
     expect(sessionCalls("GET")).toHaveLength(1);
-    // A late answer is ignored.
-    answerFromOpener("bob");
-    await act(() => vi.advanceTimersByTimeAsync(0));
     expect(sessionCalls("POST")).toHaveLength(0);
     expect(vi.getTimerCount()).toBe(0);
     vi.useRealTimers();
     expect(await sentUser()).toBe("@alice:example.org");
+  });
+
+  it("signs in a late answer from Chat and reloads when it is another account", async () => {
+    // A slow homeserver can make Chat answer after the fallback showed an older session.
+    vi.useFakeTimers();
+    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByText("Portal content")).toBeInTheDocument();
+    answerFromOpener("bob");
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(sessionCalls("POST")).toHaveLength(1);
+    expect(reloadPortal).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the page when a late answer from Chat is the account it shows", async () => {
+    vi.useFakeTimers();
+    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    answerFromOpener("alice");
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(sessionCalls("POST")).toHaveLength(1);
+    expect(reloadPortal).not.toHaveBeenCalled();
+    // Chat answers every ready message, but one late answer is enough.
+    answerFromOpener("bob");
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(sessionCalls("POST")).toHaveLength(1);
   });
 
   it("sends a signed-out visitor to MindRoom Chat when the opener does not answer", async () => {
@@ -418,7 +446,10 @@ describe("ConnectionsSignIn sending signed-out visitors to MindRoom Chat", () =>
     // Back from Chat in the same tab, still signed out.
     cleanup();
     renderGate();
-    expect(await screen.findByText(OPEN_FROM_CHAT)).toBeInTheDocument();
+    expect(await screen.findByText(SIGN_IN_TO_CHAT)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Open MindRoom Chat" }),
+    ).toHaveAttribute("href", CHAT_SIGN_IN);
     expect(openChatSignIn).toHaveBeenCalledTimes(1);
     // The next visit tries Chat again.
     cleanup();
@@ -438,6 +469,19 @@ describe("ConnectionsSignIn sending signed-out visitors to MindRoom Chat", () =>
     installBackend({ get: signedOut() });
     renderGate();
     await openedChat(2);
+  });
+
+  it("offers the link instead of leaving when this tab cannot remember the trip", async () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+    installBackend({ get: signedOut() });
+    renderGate();
+    expect(await screen.findByText(SIGN_IN_TO_CHAT)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Open MindRoom Chat" }),
+    ).toHaveAttribute("href", CHAT_SIGN_IN);
+    expect(openChatSignIn).not.toHaveBeenCalled();
   });
 
   it.each([
