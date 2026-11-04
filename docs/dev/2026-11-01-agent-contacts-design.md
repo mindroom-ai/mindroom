@@ -76,7 +76,7 @@ An agent whose `contacts` is removed treats each of its active contacts as remov
 When it leaves those rooms it also marks those contacts removed in the store, and a pending request that needs it cannot be accepted while it lacks `contacts`.
 Deriving that status only when read was rejected, because restoring `contacts` would revive contacts whose rooms the agent had left: the other side would keep writing there, a new request would find the contact active, and nobody would answer.
 A personal agent that a reload removes ends its contacts the same way when it leaves every room, for the same reasons, and the config it reads then still names it a personal agent, because a reload removes entities before it publishes the config without them.
-Detecting it from the store instead was rejected, because every removed entity would then read the store, and a corrupt store would keep entities that can never have contacts, such as the router, teams, and authored agents, in their rooms.
+Detecting it from the store instead was rejected, because every removed entity, the router, teams, and authored agents included, would then read the store, which only personal agents read.
 
 ### Contact turns run as the agent's owner
 
@@ -217,6 +217,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - An acceptance cut short by a restart leaves the owners' invitations to its room pending, because only the acceptance in progress knows whom it invited.
 - When a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays joined in the now-removed contact room until its own restart, starting and sending nothing there.
 - A personal agent removed while MindRoom is stopped, or while its bot is not running because it failed to start, keeps its contacts active, because no bot of it runs to end them, so the other side writes into a room where its agent no longer answers until the agent comes back or the other owner removes the contact.
+- A personal agent whose removal waits on an unresolved approval recovery stays in its rooms so that recovery can still deliver there, and keeps its contacts active the same way.
 - A personal agent removed while the contacts store cannot be read or written still leaves its rooms but keeps its contacts active and its owners' invitations pending, because staying would keep a removed agent in every room it joined.
 - The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends none of them into its room, and only a plugin hook could.
 - An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.

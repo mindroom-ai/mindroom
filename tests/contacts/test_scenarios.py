@@ -18,7 +18,7 @@ import nio
 import pytest
 
 from mindroom.bot_room_lifecycle import BotRoomLifecycle
-from mindroom.constants import SKIP_MENTIONS_KEY, tracking_dir
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
 from mindroom.contacts.store import contact_room_ids
 from mindroom.hooks.sender import build_hook_message_sender
@@ -43,6 +43,7 @@ from tests.contacts.test_tools import (
     _setup,
     _stored,
 )
+from tests.contacts.test_turns import _corrupt_store
 from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal
 
 if TYPE_CHECKING:
@@ -567,7 +568,7 @@ async def test_an_unreadable_contacts_store_still_lets_a_removed_agent_leave_its
     room_id = await _accepted_and_relayed(world)
     room = world.server.rooms[room_id]
     invited = set(room.invited)
-    (tracking_dir(world.paths) / "contacts.json").write_text("{", encoding="utf-8")
+    _corrupt_store(world.paths)
 
     await _lifecycle(world, "mind_bob").leave_all_rooms(timeout_seconds=5)
 
