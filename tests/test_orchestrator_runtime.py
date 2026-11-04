@@ -392,6 +392,30 @@ async def test_entity_removal_recovers_original_final_before_bot_cleanup(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_removed_entity_leaves_its_rooms_while_the_config_naming_it_is_published(tmp_path: Path) -> None:
+    """A reload removes an entity before it publishes the config without it, so a removed personal agent can still end its contacts."""
+    current_config = _runtime_bound_config(Config(agents={"removed": AgentConfig(display_name="Removed")}), tmp_path)
+    new_config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config), config=current_config)
+    published_at_leave: list[Config] = []
+    bot = MagicMock(agent_name="removed")
+    bot.prepare_for_sync_shutdown = AsyncMock()
+    bot.leave_rooms = AsyncMock(side_effect=lambda: published_at_leave.append(orchestrator.config))
+    # A failing stop ends the reload before it publishes anything.
+    bot.stop = AsyncMock(side_effect=RuntimeError("stop boundary"))
+    orchestrator.fleet.add("removed", bot)
+    orchestrator._approval_recovery.reconcile_removed_entities = AsyncMock(return_value=set())
+
+    with pytest.raises(RuntimeError, match="stop boundary"):
+        await orchestrator._apply_config_update_plan(
+            current_config,
+            ConfigUpdatePlan(new_config=new_config, remove=frozenset({"removed"})),
+        )
+
+    assert published_at_leave == [current_config]
+
+
+@pytest.mark.asyncio
 async def test_a_runtime_refuses_a_journal_another_runtime_holds(tmp_path: Path) -> None:
     """Binding succeeds, but a journal another runtime claimed stops this one before any bot exists."""
     config_path = tmp_path / "config.yaml"
