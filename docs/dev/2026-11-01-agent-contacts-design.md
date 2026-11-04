@@ -75,8 +75,8 @@ A removed contact's room takes no more turns or messages from its agents, becaus
 An agent whose `contacts` is removed treats each of its active contacts as removed and leaves their rooms, because in a room it no longer reads as a contact room its owner's and the other side's messages would start normal turns with its full tools, and its sends there would skip the policy.
 When it leaves those rooms it also marks those contacts removed in the store, and a pending request that needs it cannot be accepted while it lacks `contacts`.
 Deriving that status only when read was rejected, because restoring `contacts` would revive contacts whose rooms the agent had left: the other side would keep writing there, a new request would find the contact active, and nobody would answer.
-A personal agent that a reload removes ends its contacts the same way as it leaves every room, for the same reasons, and the config it reads then still names it a personal agent, because a reload removes entities before it publishes the config without them.
-Detecting it from the store instead was rejected, because every removed entity would then read the store, and a corrupt store would keep entities without contacts in their rooms.
+A personal agent that a reload removes ends its contacts the same way when it leaves every room, for the same reasons, and the config it reads then still names it a personal agent, because a reload removes entities before it publishes the config without them.
+Detecting it from the store instead was rejected, because every removed entity would then read the store, and a corrupt store would keep entities that can never have contacts, such as the router, teams, and authored agents, in their rooms.
 
 ### Contact turns run as the agent's owner
 

@@ -425,16 +425,6 @@ class BotRoomLifecycle:
         """
         client = self._client()
         config = self._config()
-        deadline = 0.0
-
-        async def leave(room_id: str) -> bool:
-            try:
-                async with asyncio.timeout_at(deadline):
-                    return await self.deps.change_membership(room_id, "leave")
-            except TimeoutError:
-                self._logger().warning("matrix_removal_leave_timeout", room_id=room_id)
-                return False
-
         try:
             await self._end_contacts(config)
             joined_rooms = await get_joined_rooms(client)
@@ -448,6 +438,15 @@ class BotRoomLifecycle:
                 )
                 # The leave budget starts after the invitation withdrawals, so a slow one never keeps the agent joined.
                 deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+                async def leave(room_id: str) -> bool:
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            return await self.deps.change_membership(room_id, "leave")
+                    except TimeoutError:
+                        self._logger().warning("matrix_removal_leave_timeout", room_id=room_id)
+                        return False
+
                 await leave_non_dm_rooms(
                     client,
                     joined_rooms,
