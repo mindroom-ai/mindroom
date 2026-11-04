@@ -117,6 +117,8 @@ def _main(argv: list[str]) -> int:
         signal.signal(signal.SIGTERM, _handle_sigterm)
         # Launched with `-P`: the script may import workspace modules, after installed ones.
         sys.path.append(str(workspace_root))
+        # The script takes no arguments; keep the shim's own source and capability paths out of its argv.
+        sys.argv = [str(source_path)]
         runpy.run_path(str(source_path), run_name="__main__")
     finally:
         sys.stdout.flush()

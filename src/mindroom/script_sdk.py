@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -35,7 +36,12 @@ _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 
 
 class MindRoomToolCallError(RuntimeError):
-    """Stable framework or transport failure returned by the script gateway."""
+    """Stable framework or transport failure returned by the script gateway.
+
+    `state` is the terminal receipt's state, `failed` or `indeterminate`; `rejected` when the arguments or every
+    submission were refused, so the call never ran; or None when the call may have been accepted but no receipt
+    settled it.
+    """
 
     def __init__(
         self,
@@ -44,11 +50,13 @@ class MindRoomToolCallError(RuntimeError):
         kind: str,
         retryable: bool,
         call_id: str,
+        state: str | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.retryable = retryable
         self.call_id = call_id
+        self.state = state
 
     @classmethod
     def from_receipt(cls, receipt: _Receipt) -> MindRoomToolCallError:
@@ -62,6 +70,7 @@ class MindRoomToolCallError(RuntimeError):
             kind=str(kind or receipt.state),
             retryable=retryable is True,
             call_id=receipt.call_id,
+            state=receipt.state,
         )
 
 
@@ -95,12 +104,14 @@ class MindRoomTools:
         self._http_timeout_seconds = http_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
 
-    def call(self, toolkit_name: str, function_name: str, **arguments: object) -> object:
+    def call(self, toolkit_name: str, function_name: str, /, **arguments: object) -> object:
         """Execute one logical governed call and poll only its stable call ID."""
         call_id = uuid.uuid4().hex
         wire_arguments = _json_wire_arguments(arguments, call_id=call_id)
         arguments_digest = digest_arguments(wire_arguments)
         receipt: _Receipt | None = None
+        # Only a 4xx answer proves the gateway did not record a submission.
+        maybe_accepted = False
         while receipt is None:
             try:
                 receipt = self._submit(
@@ -111,7 +122,10 @@ class MindRoomTools:
                     arguments_digest=arguments_digest,
                 )
             except MindRoomToolCallError as exc:
+                maybe_accepted = maybe_accepted or exc.kind not in {"request_rejected", "rate_limited"}
                 if not exc.retryable:
+                    if not maybe_accepted:
+                        exc.state = "rejected"
                     raise
                 time.sleep(self._poll_interval_seconds)
 
@@ -197,7 +211,7 @@ class MindRoomTools:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             raise _http_error(exc, call_id=call_id) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise MindRoomToolCallError(
                 _TRANSPORT_ERROR,
                 kind="transport",
@@ -251,6 +265,8 @@ def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[
             kind="invalid_arguments",
             retryable=False,
             call_id=call_id,
+            # Raised before any submission, so the call never ran.
+            state="rejected",
         ) from None
     return cast("dict[str, object]", wire_arguments)
 
@@ -330,7 +346,7 @@ def _http_error(exc: urllib.error.HTTPError, *, call_id: str) -> MindRoomToolCal
     retryable = rate_limited or exc.code >= 500
     try:
         payload = json.loads(exc.read())
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, http.client.HTTPException):
         payload = {}
     detail = payload.get("detail") if isinstance(payload, dict) else None
     return MindRoomToolCallError(
