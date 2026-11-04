@@ -429,6 +429,7 @@ Matrix sync callback
 | `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool, skill, and knowledge subsets, `subagents/<name>.md` workspace profiles, and the caller tool, skill, and knowledge checks |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `delegation/targets.py` | Turning a `run_subagent` or `continue_subagent` call into the child it starts or continues, for both the direct tools and the native driver |
+| `delegation/workers.py` | Whether a caller may run a subagent in a dedicated worker, which options it is offered, and the placement each attempt of such a child binds |
 | `delegation/legacy_records.py` | Delegation records whose working state lived only in their workspace files, left as they were |
 | `delegation/legacy_snapshots.py` | Delegation child snapshots stored without a field a later release added, rewritten once in subagent session files at startup and in runs' metadata as conversation layout version 5 |
 | `credentials/manager.py` | Credential stores (CredentialsManager) and `credential_layers`, the one resolver of where a service's credentials are read and written for a target |
@@ -478,6 +479,7 @@ Matrix sync callback
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
+| `workers/placements.py` | The sessions whose worker-routed calls run in a dedicated subagent worker, bound for each attempt of such a child |
 | `workers/protocol.py` | The typed requests and responses the primary and its sandbox runners exchange, and the worker protocol version both check |
 | `workers/backend_kinds.py` | The worker backends `MINDROOM_WORKER_BACKEND` can select, the one table of its accepted values, and which backends are dedicated |
 | `workers/progress.py` | Warmup progress of the workers a dedicated Docker or Kubernetes backend starts, sent to every caller waiting on the same worker |
