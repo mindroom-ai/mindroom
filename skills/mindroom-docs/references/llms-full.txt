@@ -7829,6 +7829,7 @@ The judge is never given a message that looks like it contains a secret such as 
 - Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet, and neither can people without a personal agent here.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
 - After a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
+- Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `remove_contact`.
 
 ## Troubleshooting
 
