@@ -118,6 +118,7 @@ Calls within one run execute one at a time, in order.
 The SDK retries transient failures automatically without repeating the side effect.
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
+Its `state` is `failed` or `indeterminate` from the call's final receipt, `rejected` when the gateway refused every submission so the tool never ran, and `None` when the call may have been accepted but no final receipt settled it.
 A denied approval raises a non-retryable error with kind `approval_denied`.
 A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
@@ -130,7 +131,9 @@ mindroom-agent tools call website read_url '{"url": "https://example.org/status.
 
 Inside a background script, `mindroom-agent` offers only `tools call`, which waits until the call finishes and does not accept `--call-id` or `--timeout`.
 It prints the toolkit, function, status, and outcome: `completed` exits `0`, `failed` exits `1`, and `indeterminate` exits `4`, so a script must not repeat that call automatically.
-A call is `failed` only when MindRoom recorded it as failed; when the CLI cannot read the call's final receipt, for example because the gateway refused the lookup after accepting the call, it reports `indeterminate`.
+A call is `failed` when MindRoom recorded it as failed or refused it before recording it, as for a tool outside the run's grants.
+When the CLI cannot read the final receipt of a call MindRoom may have accepted, for example because the gateway refused the lookup, it reports `indeterminate`.
+Inside a script the CLI cannot look a call up again, so check the tool's effect before repeating an `indeterminate` call.
 A failed or indeterminate call also prints its `call_id`, and its outcome gives the error and its `kind`.
 A refused command exits `2`, and a missing script capability exits `4` without a receipt.
 

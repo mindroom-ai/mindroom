@@ -272,3 +272,18 @@ def test_a_background_script_without_its_capability_exits_4(capsys, monkeypatch,
 
     assert main(["tools", "call", "a.b", "{}"]) == 4
     assert json.loads(capsys.readouterr().out)["error"] == "The MindRoom script capability token is unavailable."
+
+
+def test_a_background_script_call_the_gateway_refused_failed(capsys, monkeypatch, tmp_path) -> None:
+
+    _in_background_script(monkeypatch, tmp_path)
+
+    def urlopen(request, *, timeout) -> BytesIO:
+        del timeout
+        # A tool outside the run's grants is refused before the gateway records the call.
+        raise HTTPError(request.full_url, 404, "Not Found", Message(), BytesIO(b'{"detail":"unavailable"}'))
+
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    assert main(["tools", "call", "memory.add_memory", "{}"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"

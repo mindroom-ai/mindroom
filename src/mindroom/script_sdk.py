@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -37,7 +38,8 @@ _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 class MindRoomToolCallError(RuntimeError):
     """Stable framework or transport failure returned by the script gateway.
 
-    `state` is the terminal receipt's state, `failed` or `indeterminate`, or None when no receipt settled the call.
+    `state` is the terminal receipt's state, `failed` or `indeterminate`; `rejected` when the gateway refused every
+    submission, so the call never ran; or None when the call may have been accepted but no receipt settled it.
     """
 
     def __init__(
@@ -107,6 +109,8 @@ class MindRoomTools:
         wire_arguments = _json_wire_arguments(arguments, call_id=call_id)
         arguments_digest = digest_arguments(wire_arguments)
         receipt: _Receipt | None = None
+        # Only a 4xx answer proves the gateway did not record a submission.
+        maybe_accepted = False
         while receipt is None:
             try:
                 receipt = self._submit(
@@ -117,7 +121,10 @@ class MindRoomTools:
                     arguments_digest=arguments_digest,
                 )
             except MindRoomToolCallError as exc:
+                maybe_accepted = maybe_accepted or exc.kind not in {"request_rejected", "rate_limited"}
                 if not exc.retryable:
+                    if not maybe_accepted:
+                        exc.state = "rejected"
                     raise
                 time.sleep(self._poll_interval_seconds)
 
@@ -203,7 +210,7 @@ class MindRoomTools:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             raise _http_error(exc, call_id=call_id) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise MindRoomToolCallError(
                 _TRANSPORT_ERROR,
                 kind="transport",
@@ -336,7 +343,7 @@ def _http_error(exc: urllib.error.HTTPError, *, call_id: str) -> MindRoomToolCal
     retryable = rate_limited or exc.code >= 500
     try:
         payload = json.loads(exc.read())
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, http.client.HTTPException):
         payload = {}
     detail = payload.get("detail") if isinstance(payload, dict) else None
     return MindRoomToolCallError(

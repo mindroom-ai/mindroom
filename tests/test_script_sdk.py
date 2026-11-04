@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -225,6 +226,10 @@ def _http_error(request: Request, status: int, reason: str, detail: bytes) -> ur
             lambda request: _http_error(request, 429, "Too Many Requests", b'{"detail":"rate limited"}'),
             id="rate-limited",
         ),
+        pytest.param(
+            lambda _request: http.client.IncompleteRead(b"{", 199),
+            id="accepted-response-truncated",
+        ),
     ],
 )
 def test_script_sdk_retries_same_submit_after_a_retryable_failure(
@@ -392,3 +397,35 @@ def test_script_sdk_refuses_an_oversized_capability_file(monkeypatch: pytest.Mon
 
     with pytest.raises(RuntimeError, match="capability token is invalid"):
         MindRoomTools()
+
+
+@pytest.mark.parametrize(
+    ("failures", "state"),
+    [
+        pytest.param([404], "rejected", id="refused-at-once"),
+        pytest.param([429, 404], "rejected", id="refused-after-rate-limit"),
+        pytest.param([503, 404], None, id="refused-after-an-attempt-that-may-have-been-accepted"),
+    ],
+)
+def test_script_sdk_marks_a_call_the_gateway_never_accepted_as_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failures: list[int],
+    state: str | None,
+) -> None:
+    """Only a submission refused on every attempt proves the call never ran."""
+    _configure(monkeypatch, tmp_path)
+    remaining = list(failures)
+
+    def urlopen(request: Request, *, timeout: float) -> io.BytesIO:
+        del timeout
+        status = remaining.pop(0)
+        raise _http_error(request, status, "Refused", b'{"detail":"refused"}')
+
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+
+    with pytest.raises(MindRoomToolCallError) as exc_info:
+        MindRoomTools(poll_interval_seconds=0.0001).call("website", "read_url", url="https://example.org/")
+
+    assert (exc_info.value.kind, exc_info.value.state) == ("request_rejected", state)
+    assert remaining == []
