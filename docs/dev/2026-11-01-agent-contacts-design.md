@@ -66,6 +66,7 @@ The target agent creates it, or the requesting agent when the target is a person
 The pending contact names its room before anyone is invited, because a room the store does not know yet would run an owner's early message as a normal turn, and a setup that crashes would leave it unrecognized.
 A retried acceptance keeps the room of the attempt it replaces as a removed contact's room, because an agent whose leave failed may still be in it and would otherwise run ordinary turns there.
 An acceptance that abandons its room withdraws the owners' invitations before its agents leave, because only a member with kick power can withdraw them, and a pending invitation would lead an owner to a dead room named like the real one.
+Whenever the creating agent leaves a removed contact's room, it first withdraws the invitations of owners who never joined, because once its agents are gone the room can have no joined member, and Synapse then refuses the join with `NoKnownServersError`; owners who joined keep the room and its history.
 Agent parties keep the room across restarts through cleanup exclusions read from the contacts store, which stays the single source of truth.
 The invited-rooms store was rejected for this, because it is not persisted for agents whose `accept_invites` is false.
 Contact rooms are also left out of the rooms an agent keeps for accepted invites, because an agent that accepts invites records the contact room's invite like any other, and would otherwise rejoin a removed contact's room at its next start.

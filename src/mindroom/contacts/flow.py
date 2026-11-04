@@ -1,5 +1,7 @@
 """The contact operations an agent's tools run: request, accept, decline, update, remove, and list.
 
+It also withdraws the stale invitations to a removed contact's room that an agent leaves at a reload or start.
+
 Each operation first checks that the requester owns the agent it runs for, then that they own a side of the contact.
 Every refusal is a ``ValueError`` whose text is meant for the agent that called.
 """
@@ -30,6 +32,7 @@ from mindroom.contacts.store import (
     ContactRecord,
     ContactSide,
     SideName,
+    agent_contacts,
     read_contacts,
     update_contacts,
 )
@@ -37,11 +40,13 @@ from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_room_admin import create_room, invite_to_room, kick_from_room
+from mindroom.matrix.client_room_admin import create_room, get_room_members, invite_to_room, kick_from_room
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     import nio
 
     from mindroom.bot import AgentBot
@@ -406,7 +411,7 @@ async def _withdraw_owner_invites(
     room_id: str,
     invited: list[str],
 ) -> None:
-    """Withdraw the owners' invitations to an abandoned contact room, so none leads them to a dead room.
+    """Withdraw the owners' invitations among ``invited`` to a contact room its agents leave, so none leads to a dead room.
 
     Only the creating agent, which is still in the room, can withdraw them; invited agents leave on their own.
     A withdrawal that fails or raises is only logged, so the agents still leave.
@@ -424,6 +429,41 @@ async def _withdraw_owner_invites(
                 user_id=user_id,
                 room_id=room_id,
             )
+
+
+async def _withdraw_unjoined_owner_invites(client: nio.AsyncClient, record: ContactRecord, room_id: str) -> None:
+    """Withdraw the invitations of the owners who never joined a removed contact's room, as its creating agent.
+
+    Once its agents leave, such an invitation leads to a room nobody is left to let them into, while owners who joined
+    keep the room and its history. A member list that cannot be read withdraws nothing, so no joined owner is removed.
+    """
+    joined = await get_room_members(client, room_id)
+    if joined is not None:
+        owners = (record.requester.owner, record.target.owner)
+        await _withdraw_owner_invites(client, record, room_id, [owner for owner in owners if owner not in joined])
+
+
+async def withdraw_removed_contact_invites(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    leaving: Collection[str],
+) -> None:
+    """Withdraw unjoined owners' invitations to the removed contacts' rooms this agent created and is about to leave.
+
+    An agent leaves such a room on a reload that takes its contacts away, and at its next start when the removal did
+    not make it leave, as when the other agent lost its contacts.
+    """
+    for record, _side in await run_blocking_until_complete(agent_contacts, config, runtime_paths, agent_name):
+        room_id = record.room_id
+        if (
+            room_id is not None
+            and room_id in leaving
+            and record.status == "removed"
+            and _room_creator(record) == agent_name
+        ):
+            await _withdraw_unjoined_owner_invites(client, record, room_id)
 
 
 async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord, room_id: str) -> None:
@@ -627,7 +667,8 @@ async def update_contact(
 async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_id: str) -> ContactRecord:
     """Remove a contact for either owner, except that only the owner who declined a contact may remove it.
 
-    The contact's agents leave its room and stop keeping it across restarts.
+    The contact's agents leave its room and stop keeping it across restarts, its creating agent first withdrawing the
+    invitations of owners who never joined; a creator that is not running does so when it leaves at its next start.
     """
     own = _own_party(context, agent_name)
 
@@ -645,6 +686,9 @@ async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_i
 
     record = await run_blocking_until_complete(update_contacts, context.runtime_paths, remove)
     if record.room_id is not None:
+        creator = _bot(context, _room_creator(record))
+        if creator is not None and creator.running and creator.client is not None:
+            await _withdraw_unjoined_owner_invites(creator.client, record, record.room_id)
         await _leave_contact_room(context, record, record.room_id)
     return record
 

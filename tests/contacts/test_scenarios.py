@@ -182,8 +182,6 @@ class _World:
     runtime: _Runtime
     # Where Alice last asked her agent for a contact.
     latest_ask: MessageTarget | None = None
-    # Each room an acceptance made a contact's active room, which its owners keep with their invitations once it ends.
-    activated: set[str] = field(default_factory=set)
 
 
 def _world(tmp_path: Path) -> _World:
@@ -214,10 +212,9 @@ async def _ask(world: _World, origin: MessageTarget = _ORIGIN) -> ContactRecord:
 
 
 async def _bob_accepts(world: _World, contact_id: str) -> str:
-    """Bob's agent accepts the request for him; return the room the acceptance made active, which the world notes."""
+    """Bob's agent accepts the request for him; return the room the acceptance made active."""
     accepted = await _accept(world.config, world.paths, world.runtime, contact_id)
     assert accepted.room_id is not None
-    world.activated.add(accepted.room_id)
     return accepted.room_id
 
 
@@ -257,9 +254,10 @@ def _answers(world: _World) -> list[tuple[str, _Event]]:
 
 def _assert_world_invariants(world: _World) -> None:
     """Check what every flow leaves behind: no stranded invitation or membership, answers in place, and quiet notices."""
+    active = {record.room_id for record in _stored(world.paths) if record.status == "active"}
     for room_id, room in world.server.rooms.items():
-        if room_id not in world.activated:
-            # A room that never became active leaves nobody invited to it.
+        if room_id not in active:
+            # Only an active contact's room keeps invitations: one never activated, or whose contact ended, has none.
             assert not room.invited, f"{sorted(room.invited)} stay invited to dead {room_id}"
     for name, home in HOME_ROOMS.items():
         kept = home | contact_room_ids(world.config, world.paths, name)
@@ -369,9 +367,10 @@ async def test_the_acceptance_that_loses_a_race_strands_no_owner(tmp_path: Path)
 
 
 async def _accepted_and_relayed(world: _World) -> str:
-    """Return the room of a contact Bob accepted, where Alice's agent already wrote to Bob's."""
+    """Return the room of a contact Bob accepted, which Alice joined and Bob did not, where her agent wrote to Bob's."""
     record = await _ask(world)
     room_id = await _bob_accepts(world, record.id)
+    assert await world.server.membership(OWNER, room_id, "join")
     # Bob's agent never admits Alice by access, yet her agent can name it as recipient there and so wake it.
     sent = await _matrix_message(world, "mind_alice", room_id, message="Free Friday?", recipient="mind_bob")
     assert sent["status"] == "ok", sent
@@ -381,7 +380,10 @@ async def _accepted_and_relayed(world: _World) -> str:
 
 
 async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(tmp_path: Path) -> None:
-    """After Alice removes the contact, its agents are gone from the room and her agent's matrix_message sends nothing there."""
+    """After Alice removes the contact, its agents are gone from the room and her agent's matrix_message sends nothing there.
+
+    Alice, who joined, keeps the room and its history, and Bob, who never joined, no longer holds an invitation to it.
+    """
     world = _world(tmp_path)
     room_id = await _accepted_and_relayed(world)
     alice = _context(world.config, world.paths, "mind_alice", OWNER, world.runtime)
@@ -391,35 +393,51 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(tmp_pat
 
     assert refused["message"].endswith("was removed, so nothing more can be sent into its room")
     room = world.server.rooms[room_id]
-    # The owners keep the room and its history.
-    assert (room.members, room.invited) == (set(), {OWNER, CO_OWNER})
+    assert (room.members, room.invited) == ({OWNER}, set())
     assert len(room.timeline) == 1
     _assert_world_invariants(world)
 
 
-async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(tmp_path: Path) -> None:
-    """The agent that loses contacts leaves its contact's room, and neither agent sends anything more there."""
+@pytest.mark.parametrize(
+    ("losing", "invited_meanwhile"),
+    [
+        # Bob's agent, which created the room, stays in it, so Bob's invitation stands until that agent leaves.
+        ("mind_alice", {CO_OWNER}),
+        # Bob's agent created the room, so it withdraws Bob's invitation before it leaves.
+        ("mind_bob", set()),
+    ],
+)
+async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(
+    tmp_path: Path,
+    losing: str,
+    invited_meanwhile: set[str],
+) -> None:
+    """The agent that loses contacts leaves its contact's room, and neither agent sends anything more there.
+
+    Once both agents have left, Alice, who joined, keeps the room, and Bob, who never joined, holds no invitation.
+    """
     world = _world(tmp_path)
     room_id = await _accepted_and_relayed(world)
     data = _data()
-    data["personal_agents"]["mind"]["users"] = {OWNER: {"contacts": None}}
+    data["personal_agents"]["mind"]["users"] = {OWNERS[losing]: {"contacts": None}}
     world.config = _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER), _personal(CAROL)])
 
     # The reload reconciles the rooms of only the agent whose contacts changed.
-    await _reconcile_rooms(world, "mind_alice")
+    await _reconcile_rooms(world, losing)
 
     for name in ("mind_alice", "mind_bob"):
         refused = await _matrix_message(world, name, room_id, message="Still there?")
         assert refused["message"].endswith("was removed, so nothing more can be sent into its room"), name
     assert [stored.status for stored in _stored(world.paths)] == ["removed"]
     room = world.server.rooms[room_id]
-    # Bob's agent stays in the removed contact's room, where it starts and sends nothing, until its own restart: an
+    [staying] = {"mind_alice", "mind_bob"} - {losing}
+    # The other agent stays in the removed contact's room, where it starts and sends nothing, until its own restart: an
     # accepted limitation in docs/dev/2026-11-01-agent-contacts-design.md.
-    assert (room.members, room.invited) == ({_account(world.paths, "mind_bob")}, {OWNER, CO_OWNER})
+    assert (room.members, room.invited) == ({_account(world.paths, staying), OWNER}, invited_meanwhile)
 
     # Its restart reconciles its rooms, and it leaves.
-    await _reconcile_rooms(world, "mind_bob")
-    assert (room.members, room.invited) == (set(), {OWNER, CO_OWNER})
+    await _reconcile_rooms(world, staying)
+    assert (room.members, room.invited) == ({OWNER}, set())
     assert len(room.timeline) == 1
     _assert_world_invariants(world)
 
