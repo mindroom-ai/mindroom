@@ -511,8 +511,8 @@ async def withdraw_removed_contact_invites(
 ) -> None:
     """Withdraw unjoined owners' invitations to the removed contacts' rooms this agent created and is about to leave.
 
-    An agent leaves such a room on a reload that takes its contacts away, and at its next start when the removal did
-    not make it leave, as when the other agent lost its contacts.
+    An agent leaves such a room on a reload that takes its contacts away or removes the agent, and at its next start
+    when the removal did not make it leave, as when the other agent lost its contacts.
     """
     for record, _side in await run_blocking_until_complete(agent_contacts, config, runtime_paths, agent_name):
         room_id = record.room_id

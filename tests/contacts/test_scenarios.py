@@ -43,6 +43,7 @@ from tests.contacts.test_tools import (
     _setup,
     _stored,
 )
+from tests.contacts.test_turns import _corrupt_store
 from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal
 
 if TYPE_CHECKING:
@@ -519,14 +520,106 @@ async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(
     _assert_world_invariants(world)
 
 
-async def _reconcile_rooms(world: _World, name: str) -> None:
-    """Leave the rooms nothing keeps an agent in, as a reload or restart does for each agent it reconciles."""
+@pytest.mark.parametrize(
+    ("removed", "invited_meanwhile"),
+    [
+        # Bob's agent created the room, so it withdraws Bob's invitation before it leaves.
+        ("mind_bob", set()),
+        # Bob's agent, which created the room, stays in it, so Bob's invitation stands until that agent leaves.
+        ("mind_alice", {CO_OWNER}),
+    ],
+)
+async def test_removing_an_agent_ends_its_contact_for_both_sides(
+    tmp_path: Path,
+    removed: str,
+    invited_meanwhile: set[str],
+) -> None:
+    """A reload that removes an agent of a contact ends the contact as that agent leaves its rooms.
+
+    The other agent sends nothing more there and leaves at its next reconcile, and adding the removed agent back would
+    find no active contact. Alice, who joined, keeps the room, and Bob, who never joined, holds no invitation to it.
+    """
+    world = _world(tmp_path)
+    room_id = await _accepted_and_relayed(world)
+    assert await world.server.membership(OWNER, room_id, "join")
+
+    # A reload removes an agent before it publishes the config without it, which here drops its roster entry.
+    await _lifecycle(world, removed).leave_all_rooms(timeout_seconds=5)
+    entries = [_personal(owner) for name, owner in OWNERS.items() if name != removed]
+    world.config = _load(tmp_path, _data(), entries=entries)
+
+    assert [stored.status for stored in _stored(world.paths)] == ["removed"]
+    [staying] = {"mind_alice", "mind_bob"} - {removed}
+    refused = await _matrix_message(world, staying, room_id, message="Still there?")
+    assert refused["message"].endswith("was removed, so nothing more can be sent into its room")
+    room = world.server.rooms[room_id]
+    assert (room.members, room.invited) == ({_account(world.paths, staying), OWNER}, invited_meanwhile)
+
+    # The other agent stays in the removed contact's room until its own restart reconciles its rooms, and it leaves.
+    await _reconcile_rooms(world, staying)
+    assert (room.members, room.invited) == ({OWNER}, set())
+    assert len(room.timeline) == 1
+    _assert_world_invariants(world)
+
+    # Bringing the removed agent back keeps no room for the contact it left.
+    restored = _load(tmp_path, _data(), entries=[_personal(owner) for owner in OWNERS.values()])
+    assert contact_room_ids(restored, world.paths, removed) == frozenset()
+
+
+async def test_a_slow_invitation_withdrawal_leaves_a_removed_agent_its_whole_leave_budget(tmp_path: Path) -> None:
+    """The creator's withdrawals outlast the leave budget, and it still leaves its contact room."""
+    world = _world(tmp_path)
+    room_id = await _accepted_and_relayed(world)
+    client = world.runtime.clients["mind_bob"]
+    kick = client.room_kick.side_effect
+
+    async def slow_kick(kicked_room_id: str, user_id: str, **kick_args: object) -> object:
+        await asyncio.sleep(0.3)
+        return await kick(kicked_room_id, user_id, **kick_args)
+
+    client.room_kick.side_effect = slow_kick
+    bot = world.runtime.bots["mind_bob"]
+    change = bot.change_local_membership.side_effect
+
+    async def yielding_change(changed_room_id: str, membership: str) -> bool:
+        # A real membership command waits on the server, which is where an exhausted budget would cut it off.
+        await asyncio.sleep(0)
+        return await change(changed_room_id, membership)
+
+    bot.change_local_membership.side_effect = yielding_change
+
+    await _lifecycle(world, "mind_bob").leave_all_rooms(timeout_seconds=0.2)
+
+    room = world.server.rooms[room_id]
+    assert (room.members, room.invited) == ({_account(world.paths, "mind_alice")}, set())
+
+
+async def test_an_unreadable_contacts_store_still_lets_a_removed_agent_leave_its_rooms(tmp_path: Path) -> None:
+    """A removed agent that can neither end its contacts nor read them for invitations still leaves its contact room."""
+    world = _world(tmp_path)
+    room_id = await _accepted_and_relayed(world)
+    room = world.server.rooms[room_id]
+    invited = set(room.invited)
+    _corrupt_store(world.paths)
+
+    await _lifecycle(world, "mind_bob").leave_all_rooms(timeout_seconds=5)
+
+    assert (room.members, room.invited) == ({_account(world.paths, "mind_alice")}, invited)
+
+
+def _lifecycle(world: _World, name: str) -> BotRoomLifecycle:
+    """Return the room lifecycle of an agent's bot on the world's server, configured for its home rooms."""
     deps = _room_lifecycle(world.config, world.paths, name).deps
-    await BotRoomLifecycle(
+    return BotRoomLifecycle(
         replace(
             deps,
             runtime=SimpleNamespace(client=world.runtime.clients[name], config=world.config),
             change_membership=world.runtime.bots[name].change_local_membership,
             get_configured_rooms=partial(sorted, HOME_ROOMS[name]),
         ),
-    ).leave_unconfigured_rooms()
+    )
+
+
+async def _reconcile_rooms(world: _World, name: str) -> None:
+    """Leave the rooms nothing keeps an agent in, as a reload or restart does for each agent it reconciles."""
+    await _lifecycle(world, name).leave_unconfigured_rooms()
