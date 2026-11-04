@@ -7308,6 +7308,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 - MindRoom's own router, agent, and team accounts, accounts listed in `bot_accounts`, and the internal `mindroom_user` account never get personal rooms.
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
+- When it onboards someone, MindRoom invites the router into the personal room it created, so [approval cards](https://docs.mindroom.chat/tool-approval/) work there without the agent inviting it first, unless [`router.accept_invites`](https://docs.mindroom.chat/configuration/router/) leaves out the agent; once the router has left, MindRoom does not invite it again.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.
@@ -18997,7 +18998,7 @@ A successful request returns `202` with `accepted: true`, the `event_id`, and th
 | `413` | `External trigger body exceeds configured limit` | Shrink the body or raise `max_body_bytes`. |
 | `422` | `External trigger kind is not allowed` | `kind` is not in the trigger's `allowed_kinds`; other `422` responses list invalid body fields. |
 | `429` | `External trigger replay limit reached` | Too many recent events for one trigger; wait for older entries to expire. |
-| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. A room without the router, such as a personal room, needs the agent to call [`invite_router`](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing) first. |
+| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. A room without the router needs the agent to call [`invite_router`](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing) first. |
 
 ## Watcher Behavior
 

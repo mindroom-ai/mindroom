@@ -68,7 +68,7 @@ class CallbackManagerTools(Toolkit):
         Give the returned instruction to the background agent.
         When it runs the script, its result wakes this agent in the current thread.
         The wake-up needs the router in this room.
-        In a room without it, such as a personal room, call `invite_router` first.
+        In a room without it, call `invite_router` first.
 
         Args:
             label: Short name for the background task shown in the wake-up message.

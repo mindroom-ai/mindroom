@@ -30,6 +30,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_persist_invited_rooms,
     update_pending_room_invites,
 )
+from mindroom.matrix.personal_room_store import personal_room_ids
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
@@ -341,6 +342,9 @@ class BotRoomLifecycle:
     async def _send_invite_welcome(self, room_id: str, sender: str) -> None:
         """Finish router welcome delivery or leave the invite retryable."""
         if self.deps.agent_name != ROUTER_AGENT_NAME:
+            return
+        # A personal room is a private conversation with its own agent, which greets the owner itself.
+        if any(room_id in personal_room_ids(self.deps.runtime_paths, name) for name in self._config().agents):
             return
         if await self.send_welcome_message_if_empty(room_id, sender):
             return
