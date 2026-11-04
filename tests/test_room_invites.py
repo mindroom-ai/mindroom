@@ -44,6 +44,7 @@ from mindroom.matrix.invited_rooms_store import (
     remember_invited_room,
     should_accept_invites,
 )
+from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_continuity import SyncContinuityStore
@@ -919,6 +920,48 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     await restarted_bot.join_configured_rooms()
 
     join_room.assert_awaited_once_with(restarted_bot.client, "!router-invited:localhost")
+
+
+@pytest.mark.asyncio
+async def test_router_joins_a_personal_room_without_its_welcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The router joins a personal room its agent invites it to, but leaves the greeting to that agent."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1", role="Test agent")},
+            router=RouterConfig(model="default", accept_invites=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    write_personal_room(
+        personal_room_record_path(paths, "agent1", "@alice:localhost"),
+        PersonalRoomRecord(
+            user_id="@alice:localhost",
+            alias="#personal_alice:localhost",
+            source_room_id="!lobby:localhost",
+            room_id="!personal:localhost",
+        ),
+    )
+    bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=paths)
+    install_runtime_journal_support(bot)
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
+    welcome_message = AsyncMock()
+    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
+    monkeypatch.setattr(bot.orchestrator.scheduled_tasks, "restore_room", AsyncMock(return_value=0))
+    room = MagicMock(room_id="!personal:localhost")
+    room.canonical_alias = None
+
+    await _handle_invite(bot, room, MagicMock(sender="@mindroom_agent1:localhost"))
+
+    join_room.assert_awaited_once_with(bot.client, "!personal:localhost")
+    welcome_message.assert_not_awaited()
+    assert bot._room_lifecycle.invited_room_ids() == {"!personal:localhost"}
 
 
 @pytest.mark.asyncio
