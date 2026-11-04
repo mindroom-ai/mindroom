@@ -79,6 +79,16 @@ async def invite_to_room(
     return False
 
 
+async def kick_from_room(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
+    """Remove a user from a room, which also withdraws a pending invitation."""
+    response = await client.room_kick(room_id, user_id)
+    if isinstance(response, nio.RoomKickResponse):
+        logger.info("matrix_room_kicked", room_id=room_id, user_id=user_id)
+        return True
+    logger.error("matrix_room_kick_failed", room_id=room_id, user_id=user_id, error=str(response))
+    return False
+
+
 async def admin_join_room_user(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
     """Join one user through the Synapse-compatible admin API without changing invites."""
     if not client.access_token:
@@ -864,6 +874,7 @@ __all__ = [
     "get_room_name",
     "invite_to_room",
     "join_room",
+    "kick_from_room",
     "leave_room",
     "resolve_room_reference",
     "room_admin_power_user",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
 import stat
 import sys
 import threading
@@ -69,7 +70,6 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    import os
     from collections.abc import Awaitable, Callable, Iterator
 
     from mindroom.script_runs.supervised import ScriptSnapshot
@@ -744,6 +744,26 @@ async def test_local_launch_keeps_workspace_code_out_of_the_shim(
     await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")
 
     assert [argv[:5] for argv in launched_argv] == [[sys.executable, "-P", "-s", "-m", "mindroom.script_runs.shim"]]
+
+
+@pytest.mark.asyncio
+async def test_local_launch_puts_mindroom_agent_first_on_the_script_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsafe-local script finds the `mindroom-agent` installed beside MindRoom's interpreter."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    launched_paths: list[str] = []
+
+    async def launch_local(*args: object, **kwargs: object) -> ShellRunResult:
+        launched_paths.append(cast("dict[str, str]", kwargs["env"])["PATH"])
+        return await _started(*args, **kwargs)
+
+    _fake_local_supervisor(monkeypatch, launch=launch_local)
+
+    await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")
+
+    assert [path.split(os.pathsep)[0] for path in launched_paths] == [str(Path(sys.executable).parent)]
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,8 @@ from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.contacts.parties import agent_party
+from mindroom.contacts.store import contact_room_ids, remove_active_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.invited_rooms_store import (
@@ -232,8 +234,16 @@ class BotRoomLifecycle:
         return pending_room_invites_path(self.deps.runtime_paths, self.deps.agent_name)
 
     def invited_room_ids(self) -> frozenset[str]:
-        """Return the rooms this entity keeps across restarts because it accepted their invites."""
-        return read_invited_rooms(self.deps.runtime_paths, self._config(), self.deps.agent_name)
+        """Return the rooms this entity keeps across restarts because it accepted their invites.
+
+        A personal agent's contact rooms never count, though it may have accepted their invites: it keeps a contact
+        room only while the contact is active and the agent has contacts.
+        """
+        config, paths = self._config(), self.deps.runtime_paths
+        invited = read_invited_rooms(paths, config, self.deps.agent_name)
+        if not invited:
+            return invited
+        return invited - contact_room_ids(config, paths, self.deps.agent_name, any_status=True)
 
     async def _invited_room_ids_after_joined_invites(self) -> frozenset[str]:
         """Return invited rooms once every pending invite this client already joined is persisted.
@@ -387,7 +397,15 @@ class BotRoomLifecycle:
                 self._logger().warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this bot is no longer configured for."""
+        """Leave any rooms this bot is no longer configured for.
+
+        A personal agent without contacts leaves its contact rooms, so it ends those contacts in the store first.
+        """
+        config, name = self._config(), self.deps.agent_name
+        if config.personal_agent_instance(name) is not None and agent_party(config, name) is None:
+            removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
+            if removed:
+                self._logger().info("contacts_removed_without_contacts", contact_ids=removed)
         client = self._client()
         await leave_non_dm_rooms(
             client,
@@ -433,6 +451,12 @@ class BotRoomLifecycle:
         configured_rooms = set(self.deps.get_configured_rooms())
         configured_rooms.update(await self.deps.get_cleanup_exclusions())
         configured_rooms.update(await self._invited_room_ids_after_joined_invites())
+        # An active contact keeps its room while the agent has contacts, whatever the agent's invite policy says.
+        config = self._config()
+        if agent_party(config, self.deps.agent_name) is not None:
+            configured_rooms.update(
+                await asyncio.to_thread(contact_room_ids, config, self.deps.runtime_paths, self.deps.agent_name),
+            )
         if self.deps.agent_name == ROUTER_AGENT_NAME:
             # The router maintains the root Space and the server emoji room outside the configured rooms.
             state = matrix_state_for_runtime(self.deps.runtime_paths)

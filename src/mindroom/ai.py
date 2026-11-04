@@ -807,7 +807,9 @@ async def _prepare_agent_and_prompt(
                 eager_deferred_tools=ctx.eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
                 agent_cli_in_shell=True,
+                inline_tools=ctx.inline_tools,
                 persona=ctx.persona,
+                tool_names=ctx.tool_names,
             )
         return runtime_model, build
 
@@ -1115,7 +1117,7 @@ def _with_background_tool_jobs(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> ResponseTurnContext:
-    """Run the turn's managed calls as background jobs while the instance runs them, except in a voice call."""
+    """Run the turn's managed calls as background jobs while the instance runs them, unless they run inline."""
     return replace(
         ctx,
         background_tool_jobs=not ctx.inline_tools and background_tool_jobs_enabled(config, runtime_paths),

@@ -60,6 +60,8 @@ class TurnOrigin:
     intent: TurnIntent
     source_kind: str
     trust: TurnTrust
+    # Whether the sender's message runs for a requester other than itself, so the sender stays its author.
+    acts_for_requester: bool = False
 
     @property
     def may_dispatch_without_mention(self) -> bool:
@@ -77,6 +79,11 @@ class TurnOrigin:
         if self.intent == TurnIntent.MANAGED_MESSAGE and self.requester_kind == SenderKind.USER:
             return self.transport_sender_id
         return None
+
+    @property
+    def speaker_id(self) -> str | None:
+        """Return the sender the model reads as the message's author when that is not the requester."""
+        return self.transport_sender_id if self.acts_for_requester else self.acting_sender_id
 
     @property
     def blocks_unmentioned_managed_sender(self) -> bool:
@@ -108,6 +115,7 @@ def classify_turn_origin(
     source_kind: str,
     original_sender: str | None,
     trusted_user_relay: bool,
+    acts_for_requester: bool = False,
 ) -> TurnOrigin:
     """Return the canonical origin policy for one inbound turn."""
     sender_kind = SenderKind.MANAGED_ENTITY if sender_entity_name is not None else SenderKind.USER
@@ -132,6 +140,7 @@ def classify_turn_origin(
         ),
         source_kind=source_kind,
         trust=trust,
+        acts_for_requester=acts_for_requester,
     )
 
 

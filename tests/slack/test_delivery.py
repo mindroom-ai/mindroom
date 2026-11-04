@@ -1060,6 +1060,7 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
         IngressValidatorDeps(
             runtime=runtime,
             runtime_paths=harness.paths,
+            agent_name=agent,
             matrix_id=matrix_id,
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
@@ -1078,7 +1079,7 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
         ),
     )
 
-    facts = validator.classify(event)
+    facts = validator.classify(event, room_id="!room:localhost")
     envelope = resolver.build_envelope(
         event=event,
         facts=facts,

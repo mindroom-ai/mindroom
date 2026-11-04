@@ -34,6 +34,7 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
         "agent_manager",
         "claude_agent",
         "compact_context",
+        "contacts",
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",

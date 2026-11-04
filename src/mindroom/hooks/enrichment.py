@@ -24,7 +24,7 @@ def _render_items(items: Sequence[EnrichmentItem]) -> list[str]:
                     f'<item key="{html.escape(item.key, quote=True)}" '
                     f'cache_policy="{html.escape(item.cache_policy, quote=True)}">'
                 ),
-                html.escape(item.text),
+                html.escape(item.text, quote=False),
                 "</item>",
             ),
         )

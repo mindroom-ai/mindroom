@@ -9,6 +9,8 @@ from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
+from mindroom.contacts.parties import personal_room_of
+from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
     explicit_thread_root,
@@ -31,6 +33,43 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+
+_CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
+_CONTACT_TURN_ERROR = (
+    "Error: in a contact conversation you can only write to this room, or send a message without recipient or "
+    "idempotency_key to your owner's personal room, in its timeline or a new thread"
+)
+
+
+def _contact_target_error(
+    context: ToolRuntimeContext,
+    room_id: str,
+    *,
+    action: str,
+    recipient: str | None,
+    thread_id: str | None,
+    idempotency_key: str | None,
+) -> str | None:
+    """Return why this turn may not act in ``room_id`` this way, or None when it may.
+
+    A keyed retry into a room that is or was a contact room would deliver a message prepared under outdated rules.
+    A turn in such a room is a contact turn, even after a removal mid-turn, and beyond its room it may only report to
+    its owner's personal room: a recipient, one of the owner's threads, or a key shared with the owner's keyed sends
+    would act with the owner's authority.
+    """
+    config = context.current_config
+    paths = context.runtime_paths
+    if idempotency_key is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
+        return _CONTACT_ROOM_KEY_ERROR
+    contact = contact_room(config, paths, context.room_id, context.agent_name)
+    if contact is None or room_id == context.room_id:
+        return None
+    record, side = contact
+    report = action == "send" and recipient is None and idempotency_key is None and thread_id in {None, "room"}
+    if report and personal_room_of(config, paths, record.party(side).owner) == (context.agent_name, room_id):
+        return None
+    return _CONTACT_TURN_ERROR
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
@@ -160,7 +199,17 @@ class MatrixMessageTools(Toolkit):
         resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        if not await room_access_allowed(context, resolved_room_id):
+        target_error = _contact_target_error(
+            context,
+            resolved_room_id,
+            action=action,
+            recipient=recipient,
+            thread_id=thread_id,
+            idempotency_key=idempotency_key,
+        )
+        if target_error is not None:
+            return self._payload("error", room_id=resolved_room_id, message=target_error)
+        if not await room_access_allowed(context, resolved_room_id, contact_room_ok=True):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(
             self._dispatch_action,

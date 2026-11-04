@@ -14,11 +14,14 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.contacts.store import update_contacts
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import seed_session
+from tests.conftest import seed_session, test_runtime_paths
+from tests.contacts.test_store import _record as _contact_record
+from tests.test_generated_agents import CO_OWNER, _load, _personal, _with_template
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,10 +53,10 @@ def _config(*, graph_edits: bool = False, **entry: object) -> Config:
     )
 
 
-def _context(config: Config, paths: RuntimePaths, tmp_path: Path) -> AutomationContext:
-    (entry,) = config.resolve_agent("mind").automations
+def _context(config: Config, paths: RuntimePaths, tmp_path: Path, *, agent: str = "mind") -> AutomationContext:
+    (entry,) = config.resolve_agent(agent).automations
     return AutomationContext(
-        agent_name="mind",
+        agent_name=agent,
         config=config,
         runtime_paths=paths,
         entry=entry,
@@ -79,6 +82,7 @@ def _seed(
     created_at: int,
     hook_source: str | None = None,
     updated_at: int | None = None,
+    agent: str = "mind",
 ) -> None:
     metadata: dict[str, object] = {"room_id": "!room:x", "thread_id": session_id.rsplit(":", 1)[-1]}
     if hook_source is not None:
@@ -86,15 +90,15 @@ def _seed(
     run = RunRecord(
         run_id=f"run-{session_id}",
         session_id=session_id,
-        agent_id="mind",
+        agent_id=agent,
         created_at=created_at,
         status=RunStatus.completed,
         metadata=metadata,
         messages=[Message(role="user", content="q"), Message(role="assistant", content="a")],
         tools=tools,
     )
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
-    seed_session(storage, ConversationSession(kind="agent", session_id=session_id, owner_id="mind", runs=[run]))
+    storage = create_session_storage(agent, config, paths, execution_identity=None)
+    seed_session(storage, ConversationSession(kind="agent", session_id=session_id, owner_id=agent, runs=[run]))
     # The conversation was last active when its turn was made, unless a later reply updated it.
     _set_updated_at(storage, session_id, updated_at or created_at)
 
@@ -223,6 +227,29 @@ def test_leads_skip_graph_lookups_and_exploration_threads(tmp_path: Path) -> Non
     )
 
     assert _leads(config, paths, tmp_path)[0] == []
+
+
+def test_tool_calls_in_a_contact_room_are_not_leads(tmp_path: Path) -> None:
+    """The other side of a contact drove the tool calls in its room, so they never steer exploration."""
+    data = _with_template()
+    data["personal_agents"]["mind"]["agent"] |= {
+        "knowledge_graph": True,
+        "contacts": {},
+        "automations": [{"name": "exploration", "room": "lobby"}],
+    }
+    data["knowledge_graph"] = {"model": "default"}
+    config = _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER)])
+    paths = test_runtime_paths(tmp_path)
+    contact = _contact_record(status="active", room_id="!contact:x")
+    update_contacts(paths, lambda book: book.contacts.append(contact))
+    contact_call = _tool("get_repository", repo="acme/secret")
+    _seed(config, paths, "!contact:x:$talk", [contact_call], created_at=100, agent="mind_bob")
+    _seed(config, paths, "!room:x:$t1", [_tool("get_repository", repo="acme/atlas")], created_at=200, agent="mind_bob")
+    context = _context(config, paths, tmp_path, agent="mind_bob")
+
+    leads, _, _ = _collect_leads(context, since=0, read_through={}, log_end=None, limit=10)
+
+    assert [lead.arguments for lead in leads] == ['{"repo": "acme/atlas"}']
 
 
 def test_lead_arguments_are_redacted(tmp_path: Path) -> None:

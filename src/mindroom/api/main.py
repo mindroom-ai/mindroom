@@ -30,6 +30,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
+from mindroom.api.connections_native import router as connections_native_router
 from mindroom.api.connections_session import router as connections_session_router
 
 # Import routers
@@ -89,6 +90,8 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
+_NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
+_IOS_APP_ORIGIN = "capacitor://localhost"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
@@ -138,16 +141,20 @@ class _RuntimeDashboardCorsMiddleware:
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
-        origins = (
-            allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
-            if path.startswith("/api/computers")
-            else gateway_cors_origins(paths, path)
-        )
-        settings = (
-            _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
-            if origins is not None
-            else _dashboard_cors_settings(paths)
-        )
+        if path.startswith(_NATIVE_SIGN_IN_PATH):
+            # Only MindRoom Chat's iOS app calls these routes from a page, and it sends no cookies.
+            settings = _DashboardCorsSettings((_IOS_APP_ORIGIN,), allow_credentials=False)
+        else:
+            origins = (
+                allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
+                if path.startswith("/api/computers")
+                else gateway_cors_origins(paths, path)
+            )
+            settings = (
+                _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
+                if origins is not None
+                else _dashboard_cors_settings(paths)
+            )
         middleware = self._middleware_by_settings.get(settings)
         if middleware is None:
             middleware = CORSMiddleware(
@@ -436,6 +443,7 @@ async def _commit_dashboard_save(
 # Include routers
 app.include_router(auth_router)
 app.include_router(connections_session_router)
+app.include_router(connections_native_router)
 app.include_router(connections_router)
 app.include_router(egress_credentials_router)
 install_gateway_routes(app)

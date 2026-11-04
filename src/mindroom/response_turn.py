@@ -342,7 +342,8 @@ class ResponseTurnContext:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
     background_tool_jobs: bool = False
-    # Set for a voice call's turn: no reply owns its calls' outcomes afterwards, so they finish inside it.
+    # Set for a voice call's turn, where no reply owns its calls' outcomes afterwards, and for a contact turn, whose
+    # jobs would be published to the other side: their calls finish inside the turn.
     inline_tools: bool = False
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
@@ -351,6 +352,8 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for authored subagents: their authored prompt and tool subset.
     persona: SubagentPersona | None = None
+    # Set only for contact turns: the agent's own tools the turn may offer, with no skills or knowledge.
+    tool_names: tuple[str, ...] | None = None
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
     # Which events this turn's history derives from are redacted, each with the source a legacy summary consumed

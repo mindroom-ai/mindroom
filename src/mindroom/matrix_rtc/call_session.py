@@ -45,7 +45,6 @@ _MEMBERSHIP_REFRESH_RETRY_MS = 60 * 1000
 #: the last delay, delivery waits for the next membership change instead of
 #: polling the homeserver forever for a device that may never come online.
 _KEY_DISTRIBUTION_RETRY_DELAYS_S = (1.0, 5.0, 30.0)
-_E2EE_READY_TIMEOUT_S = 15.0
 
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 
@@ -143,8 +142,6 @@ class CallSession:
     _key_distribution_retry_scheduled: bool = field(default=False, init=False)
     _key_distribution_wakeup_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
-    _devices_with_received_key: set[str] = field(default_factory=set, init=False)
-    _inbound_key_roster_generation: int = field(default=0, init=False)
     _undelivered_key_device_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     _reported_failure_codes: set[str] = field(default_factory=set, init=False)
 
@@ -165,8 +162,6 @@ class CallSession:
     async def start(self, members: list[CallMember]) -> None:
         """Join the call: connect media, publish membership, distribute keys."""
         self._members = members
-        self._inbound_key_roster_generation += 1
-        roster_generation = self._inbound_key_roster_generation
         self._sync_bridge_participants()
         try:
             grant = await self.deps.fetch_grant()
@@ -184,9 +179,6 @@ class CallSession:
             if self.e2ee_enabled:
                 await self._distribute_keys()
                 self._require_start_allowed()
-                self._spawn(
-                    self._report_missing_inbound_key_after_timeout(roster_generation),
-                )
             self._spawn(self._membership_refresh_loop())
             self._require_start_allowed()
             try:
@@ -211,10 +203,6 @@ class CallSession:
         """React to remote membership changes (key rotation/sharing)."""
         if self._stopped:
             return
-        self._inbound_key_roster_generation += 1
-        roster_generation = self._inbound_key_roster_generation
-        active_device_ids = {member.device_id for member in members}
-        self._devices_with_received_key.intersection_update(active_device_ids)
         self._members = members
         self._sync_bridge_participants()
         if not self.e2ee_enabled:
@@ -222,10 +210,6 @@ class CallSession:
         # A roster change is a fresh delivery opportunity: restart the backoff.
         self._key_retry_attempt = 0
         await self._distribute_keys()
-        if self._missing_inbound_key_device_ids():
-            self._spawn(
-                self._report_missing_inbound_key_after_timeout(roster_generation),
-            )
 
     def on_key_received(self, received: ReceivedFrameKey) -> bool:
         """Install a current participant's frame key and report roster admission."""
@@ -248,7 +232,6 @@ class CallSession:
         )
         if inbound is None:
             return True
-        self._devices_with_received_key.add(received.claimed_device_id)
         self.deps.bridge.set_frame_key(inbound.participant_identity, inbound.key, inbound.key_index)
         logger.info(
             "call_frame_key_installed",
@@ -386,28 +369,6 @@ class CallSession:
             except _MATRIX_NETWORK_ERRORS as error:
                 logger.warning("call_key_distribution_error", room_id=self.room_id, error=str(error))
                 self._schedule_key_distribution_retry()
-
-    async def _report_missing_inbound_key_after_timeout(self, roster_generation: int) -> None:
-        """Explain the otherwise-silent case where the agent cannot decrypt the caller."""
-        await asyncio.sleep(_E2EE_READY_TIMEOUT_S)
-        if self._stopped or roster_generation != self._inbound_key_roster_generation:
-            return
-        missing_device_ids = self._missing_inbound_key_device_ids()
-        if not missing_device_ids:
-            return
-        target_devices = ", ".join(sorted(missing_device_ids))
-        self._report_failure_once(
-            "inbound_encryption_key_missing",
-            "Encrypted call setup error: MindRoom has not received a usable media encryption key from your "
-            f"Matrix device ({target_devices}), so the agent cannot decrypt or hear your microphone audio. "
-            "Leave and rejoin the call after the client has fully synced. If it repeats, restart the Matrix "
-            "client and have the server operator inspect encrypted to-device events, the device's Olm session, "
-            "and its signed one-time-key supply.",
-        )
-
-    def _missing_inbound_key_device_ids(self) -> frozenset[str]:
-        """Return active remote devices whose media key is still unavailable."""
-        return frozenset(member.device_id for member in self._members) - self._devices_with_received_key
 
     def _report_failure_once(self, code: str, message: str) -> None:
         """Coalesce one actionable room notice per failure mode."""

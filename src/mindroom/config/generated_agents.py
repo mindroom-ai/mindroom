@@ -70,6 +70,7 @@ def _generated_agent_data(
             "accept_invites": owners,
             "rooms": [],
             "automations": None,
+            "contacts": None,
             "delegate_to": [],
             "dedicated_subagent_workers": False,
             "allow_self_config": False,

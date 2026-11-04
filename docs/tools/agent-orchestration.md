@@ -18,6 +18,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 
 Related tools documented elsewhere:
 
+- [`contacts`](../agent-contacts.md#tools) - Ask other people's personal agents, or people, for an approved contact, and manage the contacts an agent has.
 - [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
 - [`oauth_connections`](../oauth-framework.md#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](../openclaw.md#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
@@ -264,7 +265,7 @@ A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
 A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
-A shell call that runs outside any job, such as during a voice call, in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
+A shell call that runs outside any job, such as during a voice call, in a [contact turn](../agent-contacts.md#contact-turns), in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Tools that run long in a [worker](../deployment/sandbox-proxy.md) are not limited by the worker's request timeouts while they run as a job, except browser calls: a `browser` call stops after its own 120-second limit, and a `browser_mcp` call after the worker's request timeouts, 120 seconds by default.
 
@@ -403,7 +404,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, a text `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `contacts`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
     Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.

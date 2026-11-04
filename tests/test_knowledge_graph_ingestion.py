@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
+from mindroom.contacts.store import update_contacts
 from mindroom.history import session_runs
 from mindroom.knowledge_graph import ingestion
 from mindroom.knowledge_graph.episodes import RUN_DONE
@@ -33,8 +34,10 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import delete_runs, seed_session
+from tests.conftest import delete_runs, seed_session, test_runtime_paths
+from tests.contacts.test_store import _record as _contact_record
 from tests.history_helpers import unreadable_conversations
+from tests.test_generated_agents import CO_OWNER, _load, _personal, _with_template
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
@@ -302,6 +305,26 @@ async def test_max_sessions_per_cycle_is_respected(tmp_path: Path) -> None:
     assert len(set(store.sessions())) == 2
     await _pass(worker, config, now=T0 + 20)
     assert len(set(store.sessions())) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["active", "removed"])
+async def test_conversations_in_a_contact_room_are_not_ingested(tmp_path: Path, status: str) -> None:
+    """The other side of a contact drove the conversations in its room, even once the contact is removed."""
+    data = _with_template()
+    data["personal_agents"]["mind"]["agent"] |= {"knowledge_graph": True, "contacts": {}}
+    data["knowledge_graph"] = {"model": "default", "ingest": {"idle_seconds": 1}}
+    config = _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER)])
+    paths, store = test_runtime_paths(tmp_path), _FakeStore()
+    contact = _contact_record(status=status, room_id="!contact:x")
+    update_contacts(paths, lambda book: book.contacts.append(contact))
+    _seed(config, paths, "!contact:x:$talk", ["c1"], agent="mind_bob")
+    _seed(config, paths, "!contact:x", ["c2"], agent="mind_bob")
+    _seed(config, paths, "!room:x:$t1", ["r1"], agent="mind_bob")
+
+    await _pass(_worker(config, paths, store), config, now=T0 + 10)
+
+    assert store.sessions() == ["!room:x:$t1"]
 
 
 @pytest.mark.asyncio

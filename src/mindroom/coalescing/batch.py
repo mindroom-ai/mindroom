@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_store import TurnClaim
-    from mindroom.turns.facts import IngressFacts
+    from mindroom.turns.facts import IngressFacts, RunIdentity
     from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
 
 
@@ -135,10 +135,10 @@ class PreparedTurn:
     # The queued notices of follow-ups still waiting behind this batch when it flushed, which dispatch
     # releases with its own. Only a batch of an active response's follow-ups has any.
     queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...]
-    # Whether this turn's queue still holds a run other than the given requester's own messages for this
+    # Whether this turn's queue still holds a run other than the given run identity's own messages for this
     # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted
     # meanwhile counts.
-    queues_other_run: Callable[[str], bool]
+    queues_other_run: Callable[[RunIdentity], bool]
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -346,16 +346,6 @@ _SOURCE_KIND_PRIORITY: dict[str, int] = {
 }
 
 
-def pending_event_run_identity(pending_event: PendingEvent) -> tuple[str, str | None]:
-    """Return who one queued event runs as, plus its author when an entity wrote it for that requester.
-
-    A batch runs as one requester and takes its origin from its latest event, so a
-    reply an entity wrote for a human never shares a batch with that human's messages.
-    """
-    facts = pending_event.facts
-    return facts.run_requester_id, facts.physical_sender if facts.acts_for_requester else None
-
-
 def pending_event_addressing(pending_event: PendingEvent) -> bool | None:
     """Return whether one queued event is for another participant; ``None`` for an upload that leaves that to its caption.
 
@@ -377,7 +367,7 @@ def _batch_facts(ordered_pending_events: list[PendingEvent]) -> IngressFacts:
     runs as one requester and one hook, so a mix of either is a gate bug.
     """
     latest = ordered_pending_events[-1].facts
-    if len({pending_event_run_identity(pending_event) for pending_event in ordered_pending_events}) != 1:
+    if len({pending_event.facts.run_identity for pending_event in ordered_pending_events}) != 1:
         msg = "Coalesced batch carried multiple requesters"
         raise ValueError(msg)
     hook_sources = {event.facts.hook_source for event in ordered_pending_events if event.facts.hook_source is not None}
@@ -421,7 +411,7 @@ def build_prepared_turn(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
     *,
-    queues_other_run: Callable[[str], bool],
+    queues_other_run: Callable[[RunIdentity], bool],
     queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...] = (),
     timestamp_formatter: TimestampFormatter | None = None,
 ) -> PreparedTurn:

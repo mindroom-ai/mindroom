@@ -1626,7 +1626,7 @@ class Config(BaseModel):
             msg = f"Unknown defaults.cheap_model: {self.defaults.cheap_model!r}"
             raise ValueError(msg)
         for agent_name, agent in self.agents.items():
-            for settings in (agent.participation, agent.mid_turn, agent.cold_cache):
+            for settings in (agent.participation, agent.mid_turn, agent.cold_cache, agent.contacts):
                 if settings is None:
                     continue
                 judgment = settings.judgment
