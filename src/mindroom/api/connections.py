@@ -257,7 +257,8 @@ def _agent_connections(
     return AgentConnections(
         agent_name=agent_name,
         agent_display_name=agent.display_name,
-        is_shared=agent.private is None,
+        # An agent personal_agents generates belongs to one person, though it sets no `private`.
+        is_shared=agent.private is None and config.personal_agent_instance(agent_name) is None,
         can_use=agent_name in user.agent_names,
         managers=list(agent.credential_managers) if names_managers and shared_scope else [],
         mcp_available=agent_name in user.gateway_agent_names,

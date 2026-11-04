@@ -25,6 +25,7 @@ from mindroom.oauth import credential_lifecycle
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.providers import OAuthConsentGroup, OAuthProviderError
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.conftest import (
     publish_api_payload,
@@ -41,6 +42,7 @@ from tests.api.test_oauth_api import (
 )
 from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -721,6 +723,21 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
     assert all(agent["is_shared"] == (agent["agent_name"] not in private) for agent in agents)
     # These shared agents have no per-user scope or MCP opt-in, so only the private agents reach the gateway.
     assert all(agent["mcp_available"] == (agent["agent_name"] in private) for agent in agents)
+
+
+def test_catalog_lists_generated_personal_agent_as_personal(portal: dict[str, Any]) -> None:
+    """An agent personal_agents generates for one person is personal, though it sets no `private`."""
+    _append_personal_agent_roster_entry(portal["paths"], personal_agent_entry("@alice:example.org"))
+    portal["payload"]["personal_agents"] = {
+        "mind": {"agent": {"display_name": "{user_first_name}'s Mind", "role": "Assistant", "tools": ["google_drive"]}},
+    }
+    publish_api_payload(main.app, portal["payload"])
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    assert {agent["agent_name"]: agent["is_shared"] for agent in response.json()["agents"]} == {
+        "personal": False,
+        "mind_alice": False,
+    }
 
 
 def test_agent_user_sees_shared_connection_without_management(shared_portal: dict[str, Any]) -> None:
