@@ -177,20 +177,18 @@ Update that page in the same PR when a change alters the trust model or anything
 
 ### Step 4: Testing & Quality
 
-- **Test Before Committing**: **NEVER** claim a task is complete without running `pytest` to ensure all tests pass.
 - **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnIngress`, `TurnDispatcher`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot` facade.
   Fake collaborators through the conftest seam installers (`install_generate_response_mock`, `install_send_response_mock`, `replace_edit_regenerator_deps`, and `install_model_providers` for models) or the `*Deps` dataclasses, never by assigning mocks onto bot attributes.
-  A test needing more than 3 patches is a smell that it is testing through the wrong seam.
+  A test needing more than 3 patches is testing through the wrong seam.
   Genuinely end-to-end tests belong in the slim integration files (`test_multi_agent_bot.py`, `test_threading_error.py`), which stay small by design.
+- **Grid and Flow Tests**: A feature that adds a new kind of actor or room adds an actor × ingress-path grid test and at least one multi-step flow test asserting the end state, as in `tests/contacts/test_actor_paths.py` and `tests/contacts/test_scenarios.py`.
 - **NixOS Test Shell**: On NixOS hosts, enter the Node.js 24 dev shell with `nix-shell shell.nix` before running tests; without it, `uv run pytest` fails with `module 'mindroom' has no attribute 'bot'` because `libstdc++.so.6` is missing.
   If `<nixpkgs>` is unresolved, use `nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix`.
   Inside it, run `uv run pytest tests/<file>.py -x -n 0 --no-cov -v`, `just test-backend`, or `just test-saas-backend`; recipe regression tests require `just`, which `shell.nix` and CI install.
   Prefix core runs with `env -u TMPDIR -u TEMP -u TMP` and never set `TMPDIR` yourself: an exported `TMPDIR`, which `nix-shell` always sets, switches `pytest-shm` off and moves test temp files from `/dev/shm` to disk; the pytest header shows `shm: temp root /dev/shm` when it is on.
-- **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing to enforce code style and quality.
+- **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing.
 - **Update Tach Boundaries in the Same PR**: If your PR changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
-- **Handle Linter Issues**:
-  - **False Positives**: The linter may incorrectly flag issues in `pyproject.toml`; these can be ignored.
-  - **Test-Related Errors**: If a pre-commit fix breaks a test (e.g., by removing an unused but necessary fixture), suppress the warning with a `# noqa: <error_code>` comment.
+- **Handle Linter Issues**: Ignore false positives in `pyproject.toml`; if a pre-commit fix breaks a test, such as by removing an unused but necessary fixture, suppress the warning with `# noqa: <error_code>`.
 
 ### Step 5: Refactoring
 
