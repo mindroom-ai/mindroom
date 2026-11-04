@@ -58,6 +58,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
+from mindroom.workers.runtime import idle_worker_cleanup_runs, worker_cleanup_interval_seconds
 from tests.api.conftest import (
     PLATFORM_SSO_SECRET,
     login_with_api_key,
@@ -743,7 +744,7 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         return func(*args, **kwargs)
 
     main.initialize_api_app(main.app, first_runtime)
-    monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
+    monkeypatch.setattr(main, "worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
     monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
     monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
 
@@ -755,6 +756,42 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     )
 
     assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("30", 30.0), ("0", 0.0), ("-5", 0.0), ("inf", 0.0), ("nan", 0.0), ("x", 0.0)],
+)
+def test_worker_cleanup_interval_counts_only_finite_positive_values(tmp_path: Path, raw: str, expected: float) -> None:
+    """An infinite interval would make the cleanup loop wait forever, so it means no cleanup."""
+    runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": raw},
+    )
+
+    assert worker_cleanup_interval_seconds(runtime) == expected
+
+
+@pytest.mark.asyncio
+async def test_worker_cleanup_loop_owns_idle_cleanup_while_it_runs(tmp_path: Path) -> None:
+    """Only while the API server's cleanup loop runs does the runtime count as cleaning up idle workers."""
+    runtime = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30"},
+    )
+    main.initialize_api_app(main.app, runtime)
+    stop_event = asyncio.Event()
+    assert not idle_worker_cleanup_runs(runtime)
+
+    loop = asyncio.create_task(
+        main._worker_cleanup_loop(stop_event, main.app, touch_live_workers=lambda _backend: None),
+    )
+    await asyncio.sleep(0)
+    assert idle_worker_cleanup_runs(runtime)
+    stop_event.set()
+    await loop
+
+    assert not idle_worker_cleanup_runs(runtime)
 
 
 def test_worker_cleanup_touches_live_script_workers_before_maintenance(

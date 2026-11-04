@@ -47,6 +47,7 @@ The root shell includes Linux Chromium only on Linux so the backend and Node.js 
 - For chat flows, send a real message and inspect the actual reply thread.
 - For backend changes, hit the live endpoint on the same instance you started.
 - For frontend changes, capture screenshots and inspect the generated PNGs.
+- `scripts/` has helpers that approve tool-approval cards, summarize LLM request logs, and wait for log lines; [references/core-mindroom.md](references/core-mindroom.md#helper-scripts-and-run-records) describes them.
 
 4. Add exploratory model testing for risky agent-facing behavior.
 - Deterministic model stubs are useful for reproducible protocol and transport assertions, but they do not satisfy this exploratory check because the script already controls every tool choice.

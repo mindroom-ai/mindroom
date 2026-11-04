@@ -13,6 +13,7 @@ from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.commands.handler import generate_welcome_message_for_room
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.contacts.flow import withdraw_removed_contact_invites
 from mindroom.contacts.parties import agent_party
 from mindroom.contacts.store import contact_room_ids, remove_active_contacts
 from mindroom.managed_room_notice import managed_room_join_notice
@@ -411,9 +412,11 @@ class BotRoomLifecycle:
             if removed:
                 self._logger().info("contacts_removed_without_contacts", contact_ids=removed)
         client = self._client()
+        rooms_to_leave = await self._rooms_to_leave()
+        await withdraw_removed_contact_invites(client, config, self.deps.runtime_paths, name, rooms_to_leave)
         await leave_non_dm_rooms(
             client,
-            await self._rooms_to_leave(),
+            rooms_to_leave,
             leave_room_action=lambda room_id: self.deps.change_membership(
                 room_id,
                 "leave",

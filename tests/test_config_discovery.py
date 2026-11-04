@@ -238,6 +238,7 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
                 ("src/mindroom/approval/tool_owners.py", "context.resolve_worker_target"),
                 ("src/mindroom/agent_cli/response_owner.py", "runtime.resolve_worker_target"),
                 ("src/mindroom/custom_tools/dynamic_workflow.py", "context.resolve_worker_target"),
+                ("src/mindroom/tools/approved_egress.py", "context.resolve_worker_target"),
             }
             if (relative_path, ast.unparse(node.func)) in bound_target_calls:
                 continue
