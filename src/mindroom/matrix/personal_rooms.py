@@ -18,7 +18,7 @@ from mindroom.constants import (
     resolve_config_relative_path,
 )
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import set_room_avatar_from_file
@@ -30,6 +30,7 @@ from mindroom.matrix.client_room_admin import (
     get_room_members,
     invite_to_room,
 )
+from mindroom.matrix.invited_rooms_store import is_inviter_allowed
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.personal_room_store import (
     PersonalRoomRecord,
@@ -278,6 +279,7 @@ class PersonalRoomService:
         if await self._observe_owner_membership(record, path, owner_membership, allow_reinvite):
             return None
         await self._invite_owner_if_needed(record, owner_membership, source_room_id)
+        await self._invite_router_if_never_member(record, roster)
         roster = await self._validate_room(record)
         owner_membership = roster.get(record.user_id)
         if await self._observe_owner_membership(record, path, owner_membership, False):
@@ -305,6 +307,24 @@ class PersonalRoomService:
         if not await invite_to_room(self._client(), record.room_id, record.user_id):
             msg = "Personal-room invite failed"
             raise RuntimeError(msg)
+
+    async def _invite_router_if_never_member(self, record: PersonalRoomRecord, roster: dict[str, str]) -> None:
+        """Invite the router, which posts approval cards, into a created room it was never in; one that left stays out.
+
+        An imported room removes a router its record does not list, and a router whose `accept_invites` leaves out
+        this agent never joins, so neither gets an invite. A failed invite is retried at the next reconciliation.
+        """
+        config = self.runtime.config
+        client = self._client()
+        router_id = current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id
+        if (
+            record.adoption is not None
+            or router_id in roster
+            or not is_inviter_allowed(config, self.runtime_paths, ROUTER_AGENT_NAME, client.user_id)
+        ):
+            return
+        assert record.room_id is not None
+        await invite_to_room(client, record.room_id, router_id)
 
     async def _observe_owner_membership(
         self,

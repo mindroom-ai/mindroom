@@ -275,6 +275,7 @@ def service(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatc
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
     save_matrix_state(state, paths)
+    persist_entity_accounts(config, paths)
     monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", server.deliver)
     return PersonalRoomService("helper", runtime, paths, AsyncMock(return_value=True))
 
@@ -477,6 +478,7 @@ async def test_generated_agent_service_serves_only_its_owner(tmp_path: Path, mon
     # Bob may use alice's agent, so only ownership keeps him from a personal room through it.
     data["personal_agents"]["mind"]["agent"]["access"] = {"users": ["@bob:localhost"]}
     config = Config.validate_with_runtime(data, paths)
+    persist_entity_accounts(config, paths)
     runtime = SimpleNamespace(config=config, client=server, agent_reply_memberships=AgentReplyMembershipIndex())
     monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", server.deliver)
     owner = PersonalRoomService("mind_alice", runtime, paths, AsyncMock(return_value=True))
@@ -507,6 +509,7 @@ async def test_generated_agent_service_serves_its_owners_bridge_alias(
     data = deepcopy(PERSONAL_AGENTS_BASE)
     data["authorization"] = {"aliases": {"@alice:localhost": ["@bridge_alice:localhost"]}}
     config = Config.validate_with_runtime(data, paths)
+    persist_entity_accounts(config, paths)
     runtime = SimpleNamespace(config=config, client=server, agent_reply_memberships=AgentReplyMembershipIndex())
     monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", server.deliver)
     owner = PersonalRoomService("mind_alice", runtime, paths, AsyncMock(return_value=True))
@@ -530,6 +533,58 @@ async def test_owner_invited_agents_keep_the_room_valid(tmp_path: Path, monkeypa
     assert server.membership(room_id, "@mindroom_router:localhost") == "join"
     assert server.membership(room_id, "@mindroom_general:localhost") == "invite"
     assert not server.messages
+
+
+@pytest.mark.asyncio
+async def test_a_personal_room_invites_the_router_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Approval cards need the router, so a personal room invites it, and never again once it has left."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    assert server.membership(room_id, "@mindroom_router:localhost") == "invite"
+
+    server.set_member(room_id, "@mindroom_router:localhost", "leave")
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+
+    assert server.membership(room_id, "@mindroom_router:localhost") == "leave"
+    assert not server.kicks
+
+
+@pytest.mark.asyncio
+async def test_a_personal_room_does_not_invite_a_router_that_refuses_the_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router whose accept_invites leaves out the agent would never join, so no invite is left pending."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    owner.runtime.config.router.accept_invites = False
+
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    assert server.membership(room_id, "@mindroom_router:localhost") is None
+
+
+@pytest.mark.asyncio
+async def test_an_imported_room_does_not_invite_an_unlisted_router(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An imported room would remove a router its record does not list, so it is not invited there."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    server.state[room_id] = [
+        event for event in server.state[room_id] if event["state_key"] != "@mindroom_router:localhost"
+    ]
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    record = read_personal_room(path)
+    record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
+    write_personal_room(path, record)
+
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+
+    assert server.membership(room_id, "@mindroom_router:localhost") is None
 
 
 @pytest.mark.asyncio
@@ -838,7 +893,11 @@ async def test_an_imported_room_onboards_its_owner_as_soon_as_the_unattested_per
     router, target = bots(tmp_path, server, monkeypatch, welcome="")
     room_id = await target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server)
     # An imported room its owner has not been invited to yet, holding someone its record does not list.
-    server.state[room_id] = [event for event in server.state[room_id] if event["state_key"] != "@alice:localhost"]
+    server.state[room_id] = [
+        event
+        for event in server.state[room_id]
+        if event["state_key"] not in {"@alice:localhost", "@mindroom_router:localhost"}
+    ]
     path = personal_room_record_path(target.runtime_paths, "helper", "@alice:localhost")
     record = read_personal_room(path)
     record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
@@ -1041,7 +1100,6 @@ def bots(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatch, 
     """Build real router and target bot shells around the stateful transport."""
     owner = service(tmp_path, server, monkeypatch, **settings)
     config = owner.runtime.config
-    persist_entity_accounts(config, owner.runtime_paths)
     runtime = ready_runtime(config, owner.runtime_paths)
     result = []
     for name in ("router", "helper"):
@@ -1769,7 +1827,6 @@ async def test_operator_seed_preserves_room_identity_with_strict_validation(
     """Only an exact trusted seed permits a router-created room with its router present."""
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, welcome="")
-    persist_entity_accounts(owner.runtime.config, owner.runtime_paths)
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     router_id = "@mindroom_router:localhost"
     creator = next(event for event in server.state[room_id] if event["type"] == "m.room.create")
@@ -1928,6 +1985,10 @@ async def test_imported_private_policy_accepts_only_attested_members(
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, welcome="")
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    # An imported room never had the router, which its record does not list.
+    server.state[room_id] = [
+        event for event in server.state[room_id] if event["state_key"] != "@mindroom_router:localhost"
+    ]
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
     record = read_personal_room(path)
     record.welcome_completed = True

@@ -62,6 +62,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 - MindRoom's own router, agent, and team accounts, accounts listed in `bot_accounts`, and the internal `mindroom_user` account never get personal rooms.
 - A human who leaves or is banned from their personal room is not re-added by restarts or backfill.
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
+- MindRoom invites the router into each personal room it created, so [approval cards](tool-approval.md) work there from the first message, unless [`router.accept_invites`](configuration/router.md) leaves out the agent; a router that later leaves is not invited again.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, and any other MindRoom agent invited there is removed the same way, because an adopted room may share its earlier history.
