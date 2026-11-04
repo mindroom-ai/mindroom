@@ -62,7 +62,8 @@ class ContactRecord(BaseModel):
     room_id: str | None = None
     # LEGACY_COMPAT: contact records without request and decision dates
     # Legacy format: a record in tracking/contacts.json with no requested_at or decided_at field.
-    # Last legacy release: v2026.11.117 wrote records without them; the next release dates every new request and decision.
+    # Last legacy release: unreleased replacement; v2026.11.118, the newest release when this was written, and every
+    # release before it write records without them; the replacement dates every new request and decision.
     # Handling: both read as None, so the Connections page shows no date for such a contact; nothing is migrated.
     # Coverage: tests/contacts/test_store.py::test_a_record_written_before_dates_reads_them_unset
     requested_at: datetime | None = None
