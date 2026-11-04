@@ -287,7 +287,7 @@ async def test_a_declined_retry_is_answered_in_the_thread_that_retried(tmp_path:
     record = await _ask(world, SECOND_THREAD)
 
     bob = _context(world.config, world.paths, "mind_bob", CO_OWNER, world.runtime)
-    await flow.decline_contact(bob, "mind_bob", record.id)
+    await flow.decline_contact(flow.tool_actor(bob, "mind_bob"), record.id)
 
     [(_room_id, notice)] = _answers(world)
     assert notice.content["body"].startswith(f"{CO_OWNER} declined contact {record.id}")
@@ -386,7 +386,7 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(tmp_pat
     room_id = await _accepted_and_relayed(world)
     alice = _context(world.config, world.paths, "mind_alice", OWNER, world.runtime)
 
-    await flow.remove_contact(alice, "mind_alice", _stored(world.paths)[0].id)
+    await flow.remove_contact(flow.tool_actor(alice, "mind_alice"), _stored(world.paths)[0].id)
     refused = await _matrix_message(world, "mind_alice", room_id, message="Still there?")
 
     assert refused["message"].endswith("was removed, so nothing more can be sent into its room")

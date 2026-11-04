@@ -1,11 +1,14 @@
-"""The contact operations an agent's tools run: request, accept, decline, update, remove, and list.
+"""The contact operations: request, accept, decline, update, remove, and list.
 
-Each operation first checks that the requester owns the agent it runs for, then that they own a side of the contact.
-Every refusal is a ``ValueError`` whose text is meant for the agent that called.
+An agent's contacts tools run every operation, and the Connections page runs accept, decline, update, and remove.
+Each runs for a ``ContactActor``: a tool call first checks that the requester owns the agent it runs for, and the
+page acts for its signed-in user; each operation then checks that the owner owns a side of the contact.
+Every refusal is a ``ValueError`` whose text is meant for whoever acted.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
@@ -43,6 +46,8 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import nio
 
     from mindroom.bot import AgentBot
@@ -67,8 +72,26 @@ _CONTACT_ROOM_STATE = [
 ]
 
 
-def _own_party(context: ToolRuntimeContext, agent_name: str) -> ContactParty:
-    """Return the party of ``agent_name`` when it is a personal agent with contacts that the requester owns."""
+@dataclass(frozen=True)
+class ContactActor:
+    """The owner a contact operation acts for, and the runtime it acts in.
+
+    ``agent_name`` is the owner's agent whose contacts tools run the operation, or None when the owner acts on the
+    Connections page. ``agent_bot`` returns the bot of a configured agent, running or not, or None.
+    """
+
+    owner: str
+    agent_name: str | None
+    config: Config
+    runtime_paths: RuntimePaths
+    agent_bot: Callable[[str], AgentBot | None]
+
+
+def tool_actor(context: ToolRuntimeContext, agent_name: str) -> ContactActor:
+    """Return the owner of ``agent_name`` acting through its contacts tools, refusing anyone else.
+
+    ``agent_name`` must be a personal agent with contacts.
+    """
     config = context.current_config
     if config.personal_agent_instance(agent_name) is None:
         msg = f"{agent_name} is not a personal agent; only personal agents can have contacts"
@@ -80,7 +103,14 @@ def _own_party(context: ToolRuntimeContext, agent_name: str) -> ContactParty:
     if resolve_human_requester_alias(context.requester_id, config, context.runtime_paths) != party.owner:
         msg = f"Only {party.owner} may use the contacts of {agent_name}"
         raise ValueError(msg)
-    return party
+    orchestrator = context.orchestrator
+    return ContactActor(
+        owner=party.owner,
+        agent_name=agent_name,
+        config=config,
+        runtime_paths=context.runtime_paths,
+        agent_bot=(lambda _name: None) if orchestrator is None else orchestrator.agent_bots.get,
+    )
 
 
 def _validate_side_tools(
@@ -106,16 +136,15 @@ def _side_terms(config: Config, runtime_paths: RuntimePaths, record: ContactReco
     return rules, ", ".join(contact_turn_tools(config, runtime_paths, agent_name, record, side))
 
 
-def own_side_terms(context: ToolRuntimeContext, record: ContactRecord) -> str:
-    """Return the rules and tools the caller's agent has in a contact, or nothing when the caller's side is a person.
+def own_side_terms(actor: ContactActor, record: ContactRecord) -> str:
+    """Return the rules and tools the owner's agent has in a contact, or nothing when the owner's side is a person.
 
     An approval card shows only the call's arguments, and a call that leaves them out applies the configured defaults.
     """
-    config, paths = context.current_config, context.runtime_paths
-    side = record.owner_side(resolve_human_requester_alias(context.requester_id, config, paths))
+    side = record.owner_side(actor.owner)
     if side is None or (party := record.party(side)).kind != "agent":
         return ""
-    rules, tools = _side_terms(config, paths, record, side)
+    rules, tools = _side_terms(actor.config, actor.runtime_paths, record, side)
     return (
         f"\nRules {party.id} follows in this contact:\n{rules}\n"
         f"Tools it may use there: {tools}. Change them with update_contact."
@@ -158,14 +187,15 @@ def _request_poster(config: Config, runtime_paths: RuntimePaths, owner: str) -> 
     return personal
 
 
-async def _post_request_notice(context: ToolRuntimeContext, record: ContactRecord) -> ContactRecord:
+async def _post_request_notice(actor: ContactActor, record: ContactRecord) -> ContactRecord:
     """Post the request as a new thread in the target owner's personal room and store its event ID.
 
     Return the contact as stored, notice event ID included.
     """
-    config, paths = context.current_config, context.runtime_paths
+    config, paths = actor.config, actor.runtime_paths
     poster, room_id = _request_poster(config, paths, record.target.owner)
-    client = None if context.orchestrator is None else context.orchestrator.running_entity_client(poster)
+    bot = actor.agent_bot(poster)
+    client = bot.client if bot is not None and bot.running else None
     if client is None:
         msg = f"{poster} is not running, so it cannot post the request; ask again later"
         raise ValueError(msg)
@@ -264,8 +294,9 @@ async def request_contact(
     reason its requester gave last. Asking again with other rules or tools is refused, because only ``update_contact``
     changes them.
     """
-    config, paths = context.current_config, context.runtime_paths
-    own = _own_party(context, agent_name)
+    actor = tool_actor(context, agent_name)
+    config, paths = actor.config, actor.runtime_paths
+    own = ContactParty(kind="agent", id=agent_name, owner=actor.owner)
     target_party = resolve_target(config, paths, target)
     if not reason.strip():
         msg = "A reason is required, so the other owner knows why you ask"
@@ -273,7 +304,7 @@ async def request_contact(
     if party == "me":
         if rules is not None or tools is not None:
             raise ValueError(_PERSON_HAS_NO_SIDE)
-        requester, side = person_party(config, paths, context.requester_id), ContactSide()
+        requester, side = person_party(config, paths, actor.owner), ContactSide()
     else:
         requester, side = own, ContactSide()
         _change_side(side, rules, _validate_side_tools(config, paths, agent_name, tools))
@@ -314,35 +345,57 @@ async def request_contact(
 
     record = await run_blocking_until_complete(update_contacts, paths, create)
     if record.status == "pending" and record.notice_event_id is None:
-        return await _post_request_notice(context, record), True
+        return await _post_request_notice(actor, record), True
     return record, False
 
 
-def _bot(context: ToolRuntimeContext, agent_name: str) -> AgentBot | None:
-    return None if context.orchestrator is None else context.orchestrator.agent_bots.get(agent_name)
-
-
-async def _post_to_origin(context: ToolRuntimeContext, record: ContactRecord, agent_name: str, body: str) -> None:
-    """Post a notice in the thread a request came from as one agent; one that fails is logged, as the decision stands.
+async def _post_in_thread(
+    actor: ContactActor,
+    record: ContactRecord,
+    agent_name: str,
+    room_id: str,
+    thread_id: str | None,
+    body: str,
+) -> None:
+    """Post a notice in one thread as one agent; one that fails is logged, as the decision it reports stands.
 
     The notice mentions nobody, so a Matrix ID it names stays plain text and pings no one.
     """
-    bot = _bot(context, agent_name)
+    bot = actor.agent_bot(agent_name)
     sent = None
     if bot is not None and bot.client is not None:
         latest_thread_event_id = await bot.conversation_reader.latest_thread_event_id(
-            room_id=record.origin_room_id,
-            thread_id=record.origin_thread_id,
+            room_id=room_id,
+            thread_id=thread_id,
         )
         content = build_message_content(
             body,
-            thread_event_id=record.origin_thread_id,
+            thread_event_id=thread_id,
             latest_thread_event_id=latest_thread_event_id,
             extra_content={SKIP_MENTIONS_KEY: True, "m.mentions": {}},
         )
-        sent = await send_message_result(bot.client, record.origin_room_id, content)
+        sent = await send_message_result(bot.client, room_id, content)
     if sent is None:
-        logger.warning("contact_origin_post_failed", contact_id=record.id, agent_name=agent_name)
+        logger.warning("contact_thread_post_failed", contact_id=record.id, agent_name=agent_name, room_id=room_id)
+
+
+async def _post_to_origin(actor: ContactActor, record: ContactRecord, agent_name: str, body: str) -> None:
+    """Post a notice in the thread a request came from as one agent."""
+    await _post_in_thread(actor, record, agent_name, record.origin_room_id, record.origin_thread_id, body)
+
+
+async def _answer_request_thread(actor: ContactActor, record: ContactRecord, body: str) -> None:
+    """Answer the request's thread in the owner's personal room after a decision made on the Connections page.
+
+    A decision through a tool was made in that thread already, and a request whose notice never landed has none.
+    """
+    if actor.agent_name is not None or record.notice_event_id is None:
+        return
+    personal = personal_room_of(actor.config, actor.runtime_paths, record.target.owner)
+    if personal is None:
+        return
+    poster, room_id = personal
+    await _post_in_thread(actor, record, poster, room_id, record.notice_event_id, body)
 
 
 def _room_creator(record: ContactRecord) -> str:
@@ -353,7 +406,7 @@ def _room_creator(record: ContactRecord) -> str:
     return record.target.id if record.target.kind == "agent" else record.requester.id
 
 
-def _running_agents(context: ToolRuntimeContext, record: ContactRecord) -> dict[str, tuple[AgentBot, nio.AsyncClient]]:
+def _running_agents(actor: ContactActor, record: ContactRecord) -> dict[str, tuple[AgentBot, nio.AsyncClient]]:
     """Return the bot and client of each agent party, refusing before anything changes when one is not running.
 
     An agent party that lost its contacts since the request is refused too, because its contacts read as removed.
@@ -362,10 +415,10 @@ def _running_agents(context: ToolRuntimeContext, record: ContactRecord) -> dict[
     for party in (record.requester, record.target):
         if party.kind != "agent":
             continue
-        if agent_party(context.current_config, party.id) is None:
+        if agent_party(actor.config, party.id) is None:
             msg = f"contacts are not enabled for {party.id}, so the contact room cannot be set up"
             raise ValueError(msg)
-        bot = _bot(context, party.id)
+        bot = actor.agent_bot(party.id)
         client = None if bot is None or not bot.running else bot.client
         if bot is None or client is None:
             msg = f"{party.id} is not running, so the contact room cannot be set up; accept again later"
@@ -375,7 +428,7 @@ def _running_agents(context: ToolRuntimeContext, record: ContactRecord) -> dict[
 
 
 async def _seat_parties(
-    context: ToolRuntimeContext,
+    actor: ContactActor,
     record: ContactRecord,
     room_id: str,
     agents: dict[str, tuple[AgentBot, nio.AsyncClient]],
@@ -386,7 +439,7 @@ async def _seat_parties(
     Each user goes into ``invited`` before being asked, so a setup that stops, cancelled mid-request included, knows
     whose invitation may stand.
     """
-    paths = context.runtime_paths
+    paths = actor.runtime_paths
     creator = _room_creator(record)
     _, client = agents[creator]
     speakers = party_matrix_ids(record.requester, paths) | party_matrix_ids(record.target, paths)
@@ -428,13 +481,13 @@ async def _withdraw_owner_invites(
             )
 
 
-async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord, room_id: str) -> None:
+async def _leave_contact_room(actor: ContactActor, record: ContactRecord, room_id: str) -> None:
     """Make the running agents of a contact leave its room.
 
     Each agent leaves even when another's leave raises, which is only logged, so the caller's own outcome stands.
     """
     for party in (record.requester, record.target):
-        if party.kind != "agent" or (bot := _bot(context, party.id)) is None or not bot.running:
+        if party.kind != "agent" or (bot := actor.agent_bot(party.id)) is None or not bot.running:
             continue
         try:
             await bot.change_local_membership(room_id, "leave")
@@ -442,7 +495,7 @@ async def _leave_contact_room(context: ToolRuntimeContext, record: ContactRecord
             logger.exception("contact_room_leave_failed", contact_id=record.id, agent_name=party.id, room_id=room_id)
 
 
-async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecord, agent_name: str) -> None:
+async def _announce_acceptance(actor: ContactActor, record: ContactRecord, agent_name: str) -> None:
     """Start the requesting agent's turn in the thread it asked from, as its owner, so it continues its task.
 
     A person who asked has no agent to continue, so the accepting agent tells their thread, when it is in that room.
@@ -452,7 +505,7 @@ async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecor
     target = record.target.id
     requester = record.requester
     if requester.kind == "agent":
-        bot = _bot(context, requester.id)
+        bot = actor.agent_bot(requester.id)
         kickoff = None
         if bot is not None:
             # Its logs name the requester's thread it goes to, not the accepting turn's.
@@ -470,48 +523,40 @@ async def _announce_acceptance(context: ToolRuntimeContext, record: ContactRecor
         if kickoff is None:
             logger.warning("contact_origin_post_failed", contact_id=record.id, agent_name=requester.id)
         return
-    bot = _bot(context, agent_name)
+    bot = actor.agent_bot(agent_name)
     joined = None if bot is None else await bot.current_joined_room_ids()
     if joined is None or record.origin_room_id not in joined:
         logger.info("contact_acceptance_notice_skipped", contact_id=record.id, agent_name=agent_name)
         return
     await _post_to_origin(
-        context,
+        actor,
         record,
         agent_name,
         f"{target} accepted your contact request. The contact room is {record.room_id}.",
     )
 
 
-async def _pending_request(
-    context: ToolRuntimeContext,
-    agent_name: str,
-    contact_id: str,
-    decision: _Decision,
-) -> ContactRecord:
-    """Return a pending request to the caller's owner, refusing unless the caller is the agent of their personal room.
+async def _pending_request(actor: ContactActor, contact_id: str, decision: _Decision) -> tuple[ContactRecord, str]:
+    """Return a pending request to the owner and the agent of their personal room, which answers for them.
 
-    The request asked the owner in their personal room, so no other agent of theirs accepts or declines it.
+    The request asked the owner in their personal room, so through a tool only that agent accepts or declines it.
     """
-    config, paths = context.current_config, context.runtime_paths
-    own = _own_party(context, agent_name)
-    book = await run_blocking_until_complete(read_contacts, paths)
-    record, side = _owned(book, contact_id, own.owner)
+    book = await run_blocking_until_complete(read_contacts, actor.runtime_paths)
+    record, side = _owned(book, contact_id, actor.owner)
     if side != "target":
         msg = f"Only {record.target.owner} may {decision} this contact"
         raise ValueError(msg)
     if record.status != "pending":
         raise ValueError(_NOT_PENDING[decision])
-    poster, _ = _request_poster(config, paths, own.owner)
-    if agent_name != poster:
-        msg = f"Only {poster}, the agent of {own.owner}'s personal room, may {decision} this contact"
+    poster, _ = _request_poster(actor.config, actor.runtime_paths, actor.owner)
+    if actor.agent_name not in {None, poster}:
+        msg = f"Only {poster}, the agent of {actor.owner}'s personal room, may {decision} this contact"
         raise ValueError(msg)
-    return record
+    return record, poster
 
 
 async def accept_contact(
-    context: ToolRuntimeContext,
-    agent_name: str,
+    actor: ContactActor,
     contact_id: str,
     *,
     rules: str | None,
@@ -525,13 +570,13 @@ async def accept_contact(
     pending, to be replaced by the next room; the room it replaces stays a removed contact's, because an agent whose
     leave failed may still be in it.
     """
-    config, paths = context.current_config, context.runtime_paths
-    record = await _pending_request(context, agent_name, contact_id, "accept")
+    config, paths = actor.config, actor.runtime_paths
+    record, poster = await _pending_request(actor, contact_id, "accept")
     target = record.target
     if target.kind == "person" and (rules is not None or tools is not None):
         raise ValueError(_PERSON_HAS_NO_SIDE)
     checked = _validate_side_tools(config, paths, target.id, tools)
-    agents = _running_agents(context, record)
+    agents = _running_agents(actor, record)
     _, client = agents[_room_creator(record)]
     room_name = f"{party_name(config, record.requester)} ↔ {party_name(config, target)}"
     room_id = await create_room(client, room_name, initial_state=_CONTACT_ROOM_STATE)
@@ -561,7 +606,7 @@ async def accept_contact(
     invited: list[str] = []
     try:
         await run_blocking_until_complete(update_contacts, paths, register)
-        await _seat_parties(context, record, room_id, agents, invited)
+        await _seat_parties(actor, record, room_id, agents, invited)
         accepted = await run_blocking_until_complete(update_contacts, paths, activate)
     # Any failure, a cancellation included, leaves the room unless the store already made it the active contact's:
     # the store write finishes before a cancellation propagates, and agents never rejoin a contact room on their own.
@@ -569,15 +614,20 @@ async def accept_contact(
         current = _by_id(await run_blocking_until_complete(read_contacts, paths), contact_id)
         if current.status != "active" or current.room_id != room_id:
             await _withdraw_owner_invites(client, record, room_id, invited)
-            await _leave_contact_room(context, record, room_id)
+            await _leave_contact_room(actor, record, room_id)
         raise
-    await _announce_acceptance(context, accepted, agent_name)
+    await _announce_acceptance(actor, accepted, poster)
+    await _answer_request_thread(
+        actor,
+        accepted,
+        f"Accepted on the Connections page. The contact room is {accepted.room_id}.",
+    )
     return accepted
 
 
-async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_id: str) -> ContactRecord:
+async def decline_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
     """Decline a pending request for its target owner and tell the thread it came from."""
-    await _pending_request(context, agent_name, contact_id, "decline")
+    await _pending_request(actor, contact_id, "decline")
 
     def decline(book: ContactBook) -> ContactRecord:
         record = _by_id(book, contact_id)
@@ -587,56 +637,60 @@ async def decline_contact(context: ToolRuntimeContext, agent_name: str, contact_
         record.decided_at = datetime.now(UTC)
         return record.model_copy(deep=True)
 
-    record = await run_blocking_until_complete(update_contacts, context.runtime_paths, decline)
+    record = await run_blocking_until_complete(update_contacts, actor.runtime_paths, decline)
     # A person who asked has no agent to tell.
     if record.requester.kind == "agent":
         await _post_to_origin(
-            context,
+            actor,
             record,
             record.requester.id,
             f"{record.target.owner} declined contact {record.id} with {record.target.id}; "
             "they must remove it before you can ask again.",
         )
+    await _answer_request_thread(actor, record, "Declined on the Connections page.")
     return record
 
 
 async def update_contact(
-    context: ToolRuntimeContext,
-    agent_name: str,
+    actor: ContactActor,
     contact_id: str,
     *,
     rules: str | None,
     tools: list[str] | None,
 ) -> ContactRecord:
-    """Change the rules or tools of the caller's own side of a contact; a field left None stays, and blank rules clear."""
-    own = _own_party(context, agent_name)
+    """Change the rules or tools of the owner's own side of a contact; a field left None stays, and blank rules clear.
+
+    The side's agent must still have contacts, since it may be another agent than the one whose tools ask.
+    """
     if rules is None and tools is None:
         msg = "Nothing to change: give rules, tools, or both"
         raise ValueError(msg)
-    config = context.current_config
+    config, paths = actor.config, actor.runtime_paths
 
     def update(book: ContactBook) -> ContactRecord:
-        record, side = _owned(book, contact_id, own.owner)
+        record, side = _owned(book, contact_id, actor.owner)
         if record.status in {"declined", "removed"}:
             msg = f"A {record.status} contact cannot be changed"
             raise ValueError(msg)
         if (party := record.party(side)).kind != "agent":
             raise ValueError(_PERSON_HAS_NO_SIDE)
-        _change_side(record.side(side), rules, _validate_side_tools(config, context.runtime_paths, party.id, tools))
+        if agent_party(config, party.id) is None:
+            msg = f"contacts are not enabled for {party.id}"
+            raise ValueError(msg)
+        _change_side(record.side(side), rules, _validate_side_tools(config, paths, party.id, tools))
         return record.model_copy(deep=True)
 
-    return await run_blocking_until_complete(update_contacts, context.runtime_paths, update)
+    return await run_blocking_until_complete(update_contacts, paths, update)
 
 
-async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_id: str) -> ContactRecord:
+async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
     """Remove a contact for either owner, except that only the owner who declined a contact may remove it.
 
     The contact's agents leave its room and stop keeping it across restarts.
     """
-    own = _own_party(context, agent_name)
 
     def remove(book: ContactBook) -> ContactRecord:
-        record, side = _owned(book, contact_id, own.owner)
+        record, side = _owned(book, contact_id, actor.owner)
         if record.status == "removed":
             msg = "The contact is already removed"
             raise ValueError(msg)
@@ -647,9 +701,9 @@ async def remove_contact(context: ToolRuntimeContext, agent_name: str, contact_i
         record.status = "removed"
         return record.model_copy(deep=True)
 
-    record = await run_blocking_until_complete(update_contacts, context.runtime_paths, remove)
+    record = await run_blocking_until_complete(update_contacts, actor.runtime_paths, remove)
     if record.room_id is not None:
-        await _leave_contact_room(context, record, record.room_id)
+        await _leave_contact_room(actor, record, record.room_id)
     return record
 
 
@@ -673,18 +727,23 @@ def _listed(config: Config, runtime_paths: RuntimePaths, record: ContactRecord, 
     }
 
 
+def _owner_contacts(runtime_paths: RuntimePaths, owner: str) -> list[tuple[ContactRecord, SideName]]:
+    """Return the owner's contacts that are not removed, each with the owner's side, in the order they were asked."""
+    return [
+        (record, side)
+        for record in read_contacts(runtime_paths).contacts
+        if (side := record.owner_side(owner)) is not None and record.status != "removed"
+    ]
+
+
 def list_contacts(context: ToolRuntimeContext, agent_name: str) -> str:
     """Return the caller-owner's live contacts with their own side, and the personal agents they can ask, as YAML."""
-    own = _own_party(context, agent_name)
-    config, paths = context.current_config, context.runtime_paths
-    contacts = [
-        _listed(config, paths, record, side)
-        for record in read_contacts(paths).contacts
-        if (side := record.owner_side(own.owner)) is not None and record.status != "removed"
-    ]
+    actor = tool_actor(context, agent_name)
+    config, paths = actor.config, actor.runtime_paths
+    contacts = [_listed(config, paths, record, side) for record, side in _owner_contacts(paths, actor.owner)]
     contactable = [
         {"agent": name, "owner": party.owner}
         for name in config.agents
-        if (party := agent_party(config, name)) is not None and party.owner != own.owner
+        if (party := agent_party(config, name)) is not None and party.owner != actor.owner
     ]
     return yaml.safe_dump({"contacts": contacts, "contactable_agents": contactable}, sort_keys=False)

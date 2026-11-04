@@ -7,26 +7,24 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.contacts import flow
-from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from mindroom.contacts.store import ContactRecord
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
 # The owner approves these on a card, because the model issuing the call also reads untrusted content.
 _CONFIRMED = frozenset({"request_contact", "accept_contact", "update_contact"})
 
 
-def _asked(context: ToolRuntimeContext, record: ContactRecord, *, posted: bool) -> str:
+def _asked(actor: flow.ContactActor, record: ContactRecord, *, posted: bool) -> str:
     """Say where a request stands for the owner who just made it; only a posted request notice asked anyone.
 
     A person who asked has no agent to tell in this thread, so they learn of an acceptance from the room invitation.
     """
-    owner = resolve_human_requester_alias(context.requester_id, context.current_config, context.runtime_paths)
+    owner = actor.owner
     if posted and record.requester.owner == owner:
         answer = (
             "you are told in this thread when they accept or decline"
@@ -105,7 +103,8 @@ class ContactsTools(Toolkit):
             )
         except ValueError as exc:
             return f"Error: {exc}"
-        return _asked(context, record, posted=posted) + flow.own_side_terms(context, record)
+        actor = flow.tool_actor(context, self.agent_name)
+        return _asked(actor, record, posted=posted) + flow.own_side_terms(actor, record)
 
     async def accept_contact(
         self,
@@ -120,11 +119,11 @@ class ContactsTools(Toolkit):
         then the requesting agent is told in the thread it asked from and continues there.
         """
         try:
-            context = require_tool_runtime_context()
-            record = await flow.accept_contact(context, self.agent_name, contact_id, rules=rules, tools=tools)
+            actor = flow.tool_actor(require_tool_runtime_context(), self.agent_name)
+            record = await flow.accept_contact(actor, contact_id, rules=rules, tools=tools)
         except ValueError as exc:
             return f"Error: {exc}"
-        return f"Accepted. Contact room: {record.room_id}." + flow.own_side_terms(context, record)
+        return f"Accepted. Contact room: {record.room_id}." + flow.own_side_terms(actor, record)
 
     async def decline_contact(self, contact_id: str) -> str:
         """Decline a pending contact request that asks your owner, and tell the thread it came from.
@@ -132,7 +131,10 @@ class ContactsTools(Toolkit):
         The requester cannot ask again until your owner removes the declined contact.
         """
         try:
-            record = await flow.decline_contact(require_tool_runtime_context(), self.agent_name, contact_id)
+            record = await flow.decline_contact(
+                flow.tool_actor(require_tool_runtime_context(), self.agent_name),
+                contact_id,
+            )
         except ValueError as exc:
             return f"Error: {exc}"
         return f"Declined contact {record.id}."
@@ -149,11 +151,11 @@ class ContactsTools(Toolkit):
         Your owner approves the change on a card.
         """
         try:
-            context = require_tool_runtime_context()
-            record = await flow.update_contact(context, self.agent_name, contact_id, rules=rules, tools=tools)
+            actor = flow.tool_actor(require_tool_runtime_context(), self.agent_name)
+            record = await flow.update_contact(actor, contact_id, rules=rules, tools=tools)
         except ValueError as exc:
             return f"Error: {exc}"
-        return f"Updated contact {record.id}." + flow.own_side_terms(context, record)
+        return f"Updated contact {record.id}." + flow.own_side_terms(actor, record)
 
     async def remove_contact(self, contact_id: str) -> str:
         """Remove a contact; the agents leave its room and the owners keep it and its history.
@@ -161,7 +163,10 @@ class ContactsTools(Toolkit):
         Either owner may remove a contact, but only the owner who declined a request may remove the declined contact.
         """
         try:
-            record = await flow.remove_contact(require_tool_runtime_context(), self.agent_name, contact_id)
+            record = await flow.remove_contact(
+                flow.tool_actor(require_tool_runtime_context(), self.agent_name),
+                contact_id,
+            )
         except ValueError as exc:
             return f"Error: {exc}"
         return f"Removed contact {record.id}."

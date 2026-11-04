@@ -332,8 +332,7 @@ async def test_a_notice_that_cannot_be_posted_is_an_error_and_the_request_stays(
         await _request(config, paths, runtime)
     assert [record.status for record in _stored(paths)] == ["pending"]
 
-    runtime.clients["mind_bob"] = None
-    runtime.orchestrator.running_entity_client.side_effect = runtime.clients.get
+    runtime.bots["mind_bob"].running = False
     with pytest.raises(ValueError, match=r"^mind_bob is not running"):
         await _request(config, paths, runtime)
 
@@ -492,7 +491,10 @@ async def test_declined_pair_refused(tmp_path: Path) -> None:
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
-    await flow.decline_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
+    await flow.decline_contact(
+        flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
+        record.id,
+    )
 
     with pytest.raises(ValueError, match=rf"^{DECLINED}$"):
         await _request(config, paths, runtime)
@@ -500,12 +502,18 @@ async def test_declined_pair_refused(tmp_path: Path) -> None:
         await _request(config, paths, runtime, agent_name="mind_bob", requester_id=CO_OWNER, target="mind_alice")
 
     with pytest.raises(ValueError, match=rf"^Only {CO_OWNER} may remove a declined contact$"):
-        await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
+        await flow.remove_contact(
+            flow.tool_actor(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"),
+            record.id,
+        )
     assert [stored.status for stored in _stored(paths)] == ["declined"]
     with pytest.raises(ValueError, match=rf"^{DECLINED}$"):
         await _request(config, paths, runtime)
 
-    await flow.remove_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
+    await flow.remove_contact(
+        flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
+        record.id,
+    )
     again = await _pending(config, paths, runtime)
     assert (again.status, again.id != record.id) == ("pending", True)
 
@@ -574,13 +582,15 @@ async def test_decline_by_target_owner_only_and_notifies_origin(tmp_path: Path) 
 
     for caller, requester in (("mind_alice", OWNER), ("mind_bob", CAROL)):
         with pytest.raises(ValueError, match=r"^Only .* may"):
-            await flow.decline_contact(_context(config, paths, caller, requester, runtime), caller, record.id)
+            await flow.decline_contact(
+                flow.tool_actor(_context(config, paths, caller, requester, runtime), caller),
+                record.id,
+            )
     assert _stored(paths)[0].status == "pending"
 
     with _delivered() as send:
         declined = await flow.decline_contact(
-            _context(config, paths, "mind_bob", CO_OWNER, runtime),
-            "mind_bob",
+            flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
             record.id,
         )
 
@@ -600,7 +610,10 @@ async def test_decline_by_target_owner_only_and_notifies_origin(tmp_path: Path) 
     for name in TOOLS:
         runtime.sent(name).assert_not_awaited()
     with pytest.raises(ValueError, match=r"^Only a pending contact can be declined"):
-        await flow.decline_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
+        await flow.decline_contact(
+            flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
+            record.id,
+        )
 
 
 @pytest.mark.asyncio
@@ -612,12 +625,14 @@ async def test_only_the_personal_room_agent_declines(tmp_path: Path) -> None:
     refusal = rf"^Only mind_bob, the agent of {CO_OWNER}'s personal room, may decline this contact$"
 
     with pytest.raises(ValueError, match=refusal):
-        await flow.decline_contact(_context(config, paths, "work_bob", CO_OWNER, runtime), "work_bob", record.id)
+        await flow.decline_contact(
+            flow.tool_actor(_context(config, paths, "work_bob", CO_OWNER, runtime), "work_bob"),
+            record.id,
+        )
     assert _stored(paths)[0].status == "pending"
     with _delivered():
         declined = await flow.decline_contact(
-            _context(config, paths, "mind_bob", CO_OWNER, runtime),
-            "mind_bob",
+            flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
             record.id,
         )
 
@@ -631,7 +646,10 @@ async def test_a_person_requester_is_told_nothing_on_decline(tmp_path: Path) -> 
     config, paths = _setup(tmp_path)
     runtime = _runtime()
     record = await _pending(config, paths, runtime, party="me")
-    await flow.decline_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
+    await flow.decline_contact(
+        flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
+        record.id,
+    )
 
     assert _stored(paths)[0].status == "declined"
     for name in TOOLS:
@@ -646,9 +664,9 @@ async def test_an_unknown_contact_is_refused(tmp_path: Path) -> None:
     record = await _pending(config, paths, runtime)
     for call in (flow.decline_contact, flow.remove_contact):
         with pytest.raises(ValueError, match=r"^There is no contact nope"):
-            await call(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", "nope")
+            await call(flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"), "nope")
         with pytest.raises(ValueError, match=rf"^There is no contact {record.id}"):
-            await call(_context(config, paths, "mind_carol", CAROL, runtime), "mind_carol", record.id)
+            await call(flow.tool_actor(_context(config, paths, "mind_carol", CAROL, runtime), "mind_carol"), record.id)
 
 
 @pytest.mark.asyncio
@@ -659,26 +677,31 @@ async def test_update_only_own_side(tmp_path: Path) -> None:
     record = await _pending(config, paths, runtime, rules="Be brief")
 
     alice = _context(config, paths, "mind_alice", OWNER, runtime)
-    updated = await flow.update_contact(alice, "mind_alice", record.id, rules="Only dinner", tools=["calculator"])
+    updated = await flow.update_contact(
+        flow.tool_actor(alice, "mind_alice"),
+        record.id,
+        rules="Only dinner",
+        tools=["calculator"],
+    )
     assert (updated.requester_side.rules, updated.requester_side.tools) == ("Only dinner", ["calculator"])
     assert (updated.target_side.rules, updated.target_side.tools) == (None, None)
 
     bob = _context(config, paths, "mind_bob", CO_OWNER, runtime)
-    updated = await flow.update_contact(bob, "mind_bob", record.id, rules="No dates", tools=None)
+    updated = await flow.update_contact(flow.tool_actor(bob, "mind_bob"), record.id, rules="No dates", tools=None)
     assert (updated.requester_side.rules, updated.requester_side.tools) == ("Only dinner", ["calculator"])
     assert (updated.target_side.rules, updated.target_side.tools) == ("No dates", None)
 
-    cleared = await flow.update_contact(alice, "mind_alice", record.id, rules="  ", tools=None)
+    cleared = await flow.update_contact(flow.tool_actor(alice, "mind_alice"), record.id, rules="  ", tools=None)
     assert cleared.requester_side.rules is None
     assert cleared.requester_side.tools == ["calculator"]
 
     with pytest.raises(ValueError, match=r"^Not among the tools a contact may use: browser"):
-        await flow.update_contact(alice, "mind_alice", record.id, rules=None, tools=["browser"])
+        await flow.update_contact(flow.tool_actor(alice, "mind_alice"), record.id, rules=None, tools=["browser"])
     with pytest.raises(ValueError, match=r"^Nothing to change"):
-        await flow.update_contact(alice, "mind_alice", record.id, rules=None, tools=None)
+        await flow.update_contact(flow.tool_actor(alice, "mind_alice"), record.id, rules=None, tools=None)
     carol = _context(config, paths, "mind_carol", CAROL, runtime)
     with pytest.raises(ValueError, match=rf"^There is no contact {record.id}"):
-        await flow.update_contact(carol, "mind_carol", record.id, rules="x", tools=None)
+        await flow.update_contact(flow.tool_actor(carol, "mind_carol"), record.id, rules="x", tools=None)
     assert _stored(paths) == [cleared]
 
 
@@ -690,12 +713,12 @@ async def test_update_refuses_a_person_side_and_a_finished_contact(tmp_path: Pat
     record = await _pending(config, paths, runtime, party="me")
     alice = _context(config, paths, "mind_alice", OWNER, runtime)
     with pytest.raises(ValueError, match=r"^A person has no rules or tools"):
-        await flow.update_contact(alice, "mind_alice", record.id, rules="x", tools=None)
+        await flow.update_contact(flow.tool_actor(alice, "mind_alice"), record.id, rules="x", tools=None)
 
     other = await _pending(config, paths, runtime, target=CAROL)
-    await flow.remove_contact(alice, "mind_alice", other.id)
+    await flow.remove_contact(flow.tool_actor(alice, "mind_alice"), other.id)
     with pytest.raises(ValueError, match=r"^A removed contact cannot be changed"):
-        await flow.update_contact(alice, "mind_alice", other.id, rules="x", tools=None)
+        await flow.update_contact(flow.tool_actor(alice, "mind_alice"), other.id, rules="x", tools=None)
 
 
 @pytest.mark.asyncio
@@ -709,7 +732,10 @@ async def test_remove_by_either_owner_leaves_room(tmp_path: Path) -> None:
         contact_room_ids(config, paths, "mind_alice") == contact_room_ids(config, paths, "mind_bob") == {CONTACT_ROOM}
     )
 
-    removed = await flow.remove_contact(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob", record.id)
+    removed = await flow.remove_contact(
+        flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
+        record.id,
+    )
 
     assert removed.status == "removed"
     assert _stored(paths) == [removed]
@@ -720,7 +746,10 @@ async def test_remove_by_either_owner_leaves_room(tmp_path: Path) -> None:
     for client in runtime.clients.values():
         client.room_leave.assert_not_awaited()
     with pytest.raises(ValueError, match=r"^The contact is already removed"):
-        await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
+        await flow.remove_contact(
+            flow.tool_actor(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"),
+            record.id,
+        )
 
 
 @pytest.mark.asyncio
@@ -730,7 +759,10 @@ async def test_the_requesting_owner_removes_a_pending_contact_without_leaving_an
     runtime = _runtime()
     record = await _pending(config, paths, runtime)
 
-    removed = await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
+    removed = await flow.remove_contact(
+        flow.tool_actor(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"),
+        record.id,
+    )
 
     assert removed.status == "removed"
     for name in TOOLS:
@@ -909,8 +941,7 @@ async def test_declining_dates_the_decision(tmp_path: Path) -> None:
     record = await _pending(config, paths, runtime)
     with _delivered():
         declined = await flow.decline_contact(
-            _context(config, paths, "mind_bob", CO_OWNER, runtime),
-            "mind_bob",
+            flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
             record.id,
         )
     assert declined.decided_at is not None

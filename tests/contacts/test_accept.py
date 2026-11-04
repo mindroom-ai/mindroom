@@ -17,7 +17,7 @@ import yaml
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
-from mindroom.contacts.store import _contacts_path, contact_room_ids
+from mindroom.contacts.store import _contacts_path, contact_room_ids, update_contacts
 from mindroom.contacts.turns import _ContactAdmission, contact_admission, contact_room
 from mindroom.custom_tools.contacts import ContactsTools
 from mindroom.entity_resolution import current_entity_id
@@ -38,6 +38,7 @@ from tests.contacts.test_tools import (
     _data,
     _delivered,
     _pending,
+    _request,
     _Runtime,
     _runtime,
     _setup,
@@ -109,8 +110,7 @@ async def _accept(
     tools: list[str] | None = None,
 ) -> ContactRecord:
     return await flow.accept_contact(
-        _context(config, paths, agent_name, requester_id, runtime),
-        agent_name,
+        flow.tool_actor(_context(config, paths, agent_name, requester_id, runtime), agent_name),
         contact_id,
         rules=rules,
         tools=tools,
@@ -271,7 +271,7 @@ async def test_accept_saves_rules_and_tools_after_validation(tmp_path: Path) -> 
     runtime = _runtime()
     record = await _pending(config, paths, runtime, rules="Be brief")
     bob = _context(config, paths, "mind_bob", CO_OWNER, runtime)
-    await flow.update_contact(bob, "mind_bob", record.id, rules=None, tools=["calculator"])
+    await flow.update_contact(flow.tool_actor(bob, "mind_bob"), record.id, rules=None, tools=["calculator"])
 
     with _matrix() as matrix:
         refusal = r"^Not among the tools a contact may use: browser; allowed: calculator, matrix_message$"
@@ -369,8 +369,11 @@ async def test_accept_refuses_non_pending(tmp_path: Path) -> None:
     declined = await _pending(config, paths, runtime, target=CAROL)
     removed = await _pending(config, paths, runtime, party="me", target="mind_carol")
     carol = _context(config, paths, "mind_carol", CAROL, runtime)
-    await flow.decline_contact(carol, "mind_carol", declined.id)
-    await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", removed.id)
+    await flow.decline_contact(flow.tool_actor(carol, "mind_carol"), declined.id)
+    await flow.remove_contact(
+        flow.tool_actor(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"),
+        removed.id,
+    )
 
     with _matrix() as matrix:
         await _accept(config, paths, runtime, accepted.id)
@@ -598,7 +601,10 @@ async def test_room_cleanup_keeps_an_active_contact_room_for_its_agents_and_leav
         await _accept(config, paths, runtime, active.id)
     with _matrix(REMOVED_ROOM):
         await _accept(config, paths, runtime, removed.id, agent_name="mind_carol", requester_id=CAROL)
-    await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", removed.id)
+    await flow.remove_contact(
+        flow.tool_actor(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"),
+        removed.id,
+    )
 
     left: list[str] = []
 
@@ -731,7 +737,10 @@ async def test_a_contact_room_is_never_kept_as_an_invited_room(
         remember_invited_room(invited_rooms_path(paths, "mind_alice"), room_id)
     assert _room_lifecycle(config, paths, "mind_alice").invited_room_ids() == {ADHOC_ROOM}
 
-    await flow.remove_contact(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice", record.id)
+    await flow.remove_contact(
+        flow.tool_actor(_context(config, paths, "mind_alice", OWNER, runtime), "mind_alice"),
+        record.id,
+    )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
     lifecycle = _room_lifecycle(config, paths, "mind_alice")
     await lifecycle.join_configured_rooms()
@@ -772,3 +781,116 @@ async def test_accepting_dates_the_decision(tmp_path: Path) -> None:
     assert record.requested_at is not None
     assert accepted.decided_at >= record.requested_at
     assert _stored(paths) == [accepted]
+
+
+def _portal(config: Config, paths: RuntimePaths, runtime: _Runtime, user_id: str = CO_OWNER) -> flow.ContactActor:
+    """Return the owner acting on the Connections page, with the runtime's bots."""
+    return flow.ContactActor(
+        owner=user_id,
+        agent_name=None,
+        config=config,
+        runtime_paths=paths,
+        agent_bot=runtime.bots.get,
+    )
+
+
+def _thread_posts(send: AsyncMock, room_id: str) -> list[tuple[Any, str, str]]:
+    """Return each message sent into ``room_id`` as its client, thread, and body."""
+    return [
+        (call.args[0], call.args[2]["m.relates_to"]["event_id"], call.args[2]["body"])
+        for call in send.await_args_list
+        if call.args[1] == room_id
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_owner_accepts_on_the_portal_and_the_request_thread_says_so(tmp_path: Path) -> None:
+    """The owner accepts without their personal-room agent, which then answers the request's thread."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    with _matrix(), _delivered("$decided") as send:
+        accepted = await flow.accept_contact(_portal(config, paths, runtime), record.id, rules=None, tools=None)
+
+    assert (accepted.status, accepted.room_id) == ("active", CONTACT_ROOM)
+    assert _thread_posts(send, BOB_ROOM) == [
+        (
+            runtime.clients["mind_bob"],
+            "$notice",
+            f"Accepted on the Connections page. The contact room is {CONTACT_ROOM}.",
+        ),
+    ]
+    runtime.sent("mind_alice").assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_declines_on_the_portal_and_both_threads_hear_it(tmp_path: Path) -> None:
+    """A decline on the page answers the request's thread and still tells the requesting agent's thread."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+
+    with _delivered("$decided") as send:
+        declined = await flow.decline_contact(_portal(config, paths, runtime), record.id)
+
+    assert declined.status == "declined"
+    assert _thread_posts(send, BOB_ROOM) == [
+        (runtime.clients["mind_bob"], "$notice", "Declined on the Connections page."),
+    ]
+    assert [thread for _client, thread, _body in _thread_posts(send, ORIGIN_ROOM)] == [ORIGIN_THREAD]
+
+
+@pytest.mark.asyncio
+async def test_a_portal_decision_on_a_request_never_posted_answers_no_thread(tmp_path: Path) -> None:
+    """A request whose notice never reached its owner has no thread to answer, and the decision stands."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    with _delivered(None), pytest.raises(ValueError, match=r"could not be posted"):
+        await _request(config, paths, runtime)
+    (record,) = _stored(paths)
+
+    with _matrix(), _delivered("$decided") as send:
+        accepted = await flow.accept_contact(_portal(config, paths, runtime), record.id, rules=None, tools=None)
+
+    assert accepted.status == "active"
+    assert _thread_posts(send, BOB_ROOM) == []
+
+
+@pytest.mark.asyncio
+async def test_a_tool_accept_still_needs_the_owners_personal_room_agent(tmp_path: Path) -> None:
+    """Through a tool, only the agent of the owner's personal room may accept, and it posts nothing more there."""
+    config, paths = _setup(tmp_path, work=True)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime)
+    with pytest.raises(ValueError, match=r"^Only mind_bob, the agent of @bob:localhost's personal room, may accept"):
+        await flow.accept_contact(
+            flow.tool_actor(_context(config, paths, "work_bob", CO_OWNER, runtime), "work_bob"),
+            record.id,
+            rules=None,
+            tools=None,
+        )
+    with _matrix(), _delivered("$decided") as send:
+        await flow.accept_contact(
+            flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
+            record.id,
+            rules=None,
+            tools=None,
+        )
+    assert _thread_posts(send, BOB_ROOM) == []
+
+
+@pytest.mark.asyncio
+async def test_updating_a_side_whose_agent_has_no_contacts_is_refused(tmp_path: Path) -> None:
+    """A side whose agent lost contacts or left the config cannot be changed."""
+    config, paths = _setup(tmp_path)
+    runtime = _runtime()
+    record = await _pending(config, paths, runtime, target=CAROL)
+
+    def orphan(book: Any) -> None:  # noqa: ANN401
+        stored = next(stored for stored in book.contacts if stored.id == record.id)
+        stored.requester = stored.requester.model_copy(update={"id": "gone_alice"})
+
+    update_contacts(paths, orphan)
+    with pytest.raises(ValueError, match=r"^contacts are not enabled for gone_alice$"):
+        await flow.update_contact(_portal(config, paths, runtime, OWNER), record.id, rules="Be brief.", tools=None)
