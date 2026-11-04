@@ -8,41 +8,39 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Contacts } from "./Contacts";
-import type { ContactView, ContactsPage } from "./types";
+import type { ContactAgent, ContactView, ContactsPage } from "./types";
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status });
 
-const agent = {
+const agent: ContactAgent = {
   agent_name: "mind_bob",
-  display_name: "Bob's Mind",
   configured_rules: ["Never share keys."],
-  default_tools: ["calculator"],
   judged: true,
   tool_choices: [
     {
       name: "calculator",
       display_name: "Calculator",
-      icon: null,
       provider: null,
-      executes_code: false,
-      reaches_files: false,
+      reach: "none",
     },
     {
       name: "shell",
       display_name: "Shell Commands",
-      icon: null,
       provider: null,
-      executes_code: true,
-      reaches_files: true,
+      reach: "code",
+    },
+    {
+      name: "duckdb",
+      display_name: "DuckDB",
+      provider: null,
+      reach: "unconfined",
     },
     {
       name: "google_drive",
       display_name: "Google Drive",
-      icon: null,
       provider: "google_drive",
-      executes_code: false,
-      reaches_files: true,
+      reach: "files",
     },
   ],
 };
@@ -64,7 +62,6 @@ const contact = (overrides: Partial<ContactView>): ContactView => ({
   reason: "Plan the dinner",
   room_id: null,
   rules: null,
-  tools: null,
   effective_tools: ["calculator", "matrix_message"],
   requested_at: "2026-11-03T09:00:00Z",
   decided_at: null,
@@ -81,12 +78,16 @@ type Handler = (
   init?: RequestInit,
 ) => Promise<Response> | undefined;
 
-function installApi(contacts: ContactsPage, extra?: Handler) {
+function installApi(
+  contacts: ContactsPage | (() => ContactsPage),
+  extra?: Handler,
+) {
   vi.mocked(fetch).mockImplementation(async (input, init) => {
     const path = String(input);
     const answer = extra?.(path, init);
     if (answer) return answer;
-    if (path === "/api/connections/contacts") return json(contacts);
+    if (path === "/api/connections/contacts")
+      return json(typeof contacts === "function" ? contacts() : contacts);
     if (path === "/api/connections/agents/mind_bob/state")
       return json({
         connected: { google_drive: false },
@@ -96,6 +97,9 @@ function installApi(contacts: ContactsPage, extra?: Handler) {
     throw new Error(`Unexpected request: ${path}`);
   });
 }
+
+const requests = (path: string) =>
+  vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === path);
 
 const posts = () =>
   vi
@@ -146,9 +150,8 @@ describe("contacts page", () => {
       page([
         contact({
           status: "active",
-          rules: "Share only free or busy.",
-          tools: ["calculator", "shell"],
-          effective_tools: ["calculator", "shell", "matrix_message"],
+          rules: "- Share only free or busy.",
+          effective_tools: ["calculator", "shell", "duckdb", "matrix_message"],
         }),
       ]),
     );
@@ -160,6 +163,11 @@ describe("contacts page", () => {
     expect(
       within(card).getByText(
         "Runs code: the other side can ask it to reach anything your agent's worker or process can.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(card).getByText(
+        "Not limited to your agent's files: the other side can ask it to read or change anything your agent's worker or process can.",
       ),
     ).toBeVisible();
     expect(
@@ -203,9 +211,16 @@ describe("contacts page", () => {
     render(<Contacts />);
     fireEvent.click(await screen.findByRole("button", { name: "Accept…" }));
     const dialog = await screen.findByRole("dialog");
-    fireEvent.click(
-      within(dialog).getByRole("checkbox", { name: "Shell Commands" }),
+    expect(dialog).toHaveTextContent(
+      "Bob's Mind and Alice's Mind get a shared room to talk in.",
     );
+    const shell = within(dialog).getByRole("checkbox", {
+      name: "Shell Commands",
+    });
+    expect(shell).toHaveAccessibleDescription(
+      "Runs code: the other side can ask it to reach anything your agent's worker or process can.",
+    );
+    fireEvent.click(shell);
     fireEvent.click(within(dialog).getByRole("button", { name: "Accept" }));
     expect(
       await screen.findByRole("heading", { name: "Active" }),
@@ -286,5 +301,211 @@ describe("contacts page", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "mind_alice is not running, so try again",
     );
+  });
+  it("saves only the tools when a tool is taken away", async () => {
+    const active = contact({
+      status: "active",
+      effective_tools: ["calculator", "shell", "matrix_message"],
+    });
+    installApi(page([active]), (path, init) =>
+      path === "/api/connections/contacts/c1/update" && init?.method === "POST"
+        ? Promise.resolve(json(page([active])))
+        : undefined,
+    );
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit…" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", { name: "Shell Commands" }),
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(posts()).toEqual([
+        ["/api/connections/contacts/c1/update", { tools: ["calculator"] }],
+      ]),
+    );
+  });
+
+  it("sends nothing when nothing was changed", async () => {
+    installApi(page([contact({ status: "active" })]));
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit…" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Save",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(posts()).toEqual([]);
+  });
+
+  it("declines a request, saying neither side can ask again", async () => {
+    installApi(page([contact({})]), (path, init) =>
+      path === "/api/connections/contacts/c1/decline" && init?.method === "POST"
+        ? Promise.resolve(json(page([contact({ status: "declined" })])))
+        : undefined,
+    );
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Decline…" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "Neither of you can ask again until you remove the declined request.",
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Decline" }));
+    expect(
+      await screen.findByText(
+        "You declined. Remove it to let either of you ask again.",
+      ),
+    ).toBeVisible();
+    expect(posts()).toEqual([["/api/connections/contacts/c1/decline", {}]]);
+  });
+
+  it("withdraws a request you sent", async () => {
+    installApi(page([contact({ side: "requester" })]), (path, init) =>
+      path === "/api/connections/contacts/c1/remove" && init?.method === "POST"
+        ? Promise.resolve(json(page([])))
+        : undefined,
+    );
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Withdraw…" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Withdraw",
+      }),
+    );
+    await waitFor(() =>
+      expect(posts()).toEqual([["/api/connections/contacts/c1/remove", {}]]),
+    );
+  });
+
+  it("offers only declining a request to an agent whose contacts are off", async () => {
+    installApi({
+      agents: [],
+      contacts: [contact({ effective_tools: null })],
+    });
+    render(<Contacts />);
+    const card = await screen.findByRole("article", { name: "Alice's Mind" });
+    expect(
+      within(card).getByText(
+        "Contacts are off for Bob's Mind, so its rules and tools cannot be shown or changed.",
+      ),
+    ).toBeVisible();
+    expect(within(card).queryByRole("button", { name: "Accept…" })).toBeNull();
+    expect(
+      within(card).getByRole("button", { name: "Decline…" }),
+    ).toBeVisible();
+  });
+
+  it("says what it is doing while a change runs", async () => {
+    let finish: (response: Response) => void = () => undefined;
+    installApi(page([contact({})]), (path, init) =>
+      path === "/api/connections/contacts/c1/accept" && init?.method === "POST"
+        ? new Promise<Response>((resolve) => {
+            finish = resolve;
+          })
+        : undefined,
+    );
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Accept…" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Accept",
+      }),
+    );
+    const card = screen.getByRole("article", { name: "Alice's Mind" });
+    expect(await within(card).findByRole("status")).toHaveTextContent(
+      "Accepting…",
+    );
+    expect(
+      within(card).getByRole("button", { name: "Decline…" }),
+    ).toBeDisabled();
+    finish(
+      json(
+        page([
+          contact({ status: "active", decided_at: "2026-11-04T10:00:00Z" }),
+        ]),
+      ),
+    );
+    expect(await screen.findByText(/Active since/)).toBeVisible();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("reloads the contacts after a refused change", async () => {
+    let contacts = page([contact({})]);
+    installApi(
+      () => contacts,
+      (path, init) => {
+        if (
+          path !== "/api/connections/contacts/c1/accept" ||
+          init?.method !== "POST"
+        )
+          return undefined;
+        contacts = page([]);
+        return Promise.resolve(
+          json({ detail: "Only a pending contact can be accepted" }, 409),
+        );
+      },
+    );
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Accept…" }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Accept",
+      }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Only a pending contact can be accepted");
+    await waitFor(() => expect(alert).toHaveFocus());
+    expect(
+      await screen.findByText(
+        "No contacts yet. Ask your agent in your personal room to get in touch with someone.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("says when the contacts cannot be loaded", async () => {
+    installApi(page([]), (path) =>
+      path === "/api/connections/contacts"
+        ? Promise.resolve(json({}, 500))
+        : undefined,
+    );
+    render(<Contacts />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not complete the request. Try again.",
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("loads each agent's accounts once, not again after every change", async () => {
+    installApi(page([contact({ status: "active" })]), (path, init) =>
+      path === "/api/connections/contacts/c1/update" && init?.method === "POST"
+        ? Promise.resolve(
+            json(page([contact({ status: "active", rules: "x" })])),
+          )
+        : undefined,
+    );
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit…" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Your rules"), {
+      target: { value: "x" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("x")).toBeVisible();
+    expect(requests("/api/connections/agents/mind_bob/state")).toHaveLength(1);
+  });
+
+  it("dates a declined contact by its decision", async () => {
+    installApi(
+      page([
+        contact({ status: "declined", decided_at: "2026-11-04T10:00:00Z" }),
+      ]),
+    );
+    render(<Contacts />);
+    const card = await screen.findByRole("article", { name: "Alice's Mind" });
+    expect(card).toHaveTextContent(/Declined \d/);
+    expect(card).not.toHaveTextContent(/Active since/);
   });
 });

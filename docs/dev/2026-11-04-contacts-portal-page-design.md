@@ -46,9 +46,8 @@ A stolen portal session can already connect accounts and allow Agent Keys, so ac
 
 `contacts/flow.py` took a `ToolRuntimeContext` and an agent name for every operation, though accept, decline, update, and remove only need the owner, the config, and the running bots.
 The operations now take a `ContactActor` naming the owner and, for tool calls, the agent the owner acts through.
-The tools build one after their existing owner check, and the portal builds one for the signed-in user with no agent.
 Building a fake tool context in the API was rejected, because it would invent a room, thread, and turn that do not exist.
-Requesting and listing stay tool-only and keep their tool context, because a request needs the conversation it came from.
+Requesting keeps its tool context, because a request needs the conversation it came from; the page lists contacts in its own shape rather than through the tool's listing, which is written for a model.
 
 Accepting and declining through a tool still require the agent of the owner's personal room, because that is where the request was asked; the portal acts as the owner, so it has no agent to check, and the personal-room agent posts any notice it needs.
 After a decision made on the page, that agent posts it in the request's thread, so the thread does not keep asking for an answer that was already given, and a later reply there gets a clear refusal instead of a stale question.
@@ -57,23 +56,20 @@ Accepting, declining, and removing make agents create, post to, join, or leave r
 Updating rules and tools only writes the store, so it needs no slot.
 The runtime lends the API a lookup of running agent bots for this, rather than the orchestrator itself, because the API needs nothing else from it.
 
-### Updating a side checks that its agent still has contacts
-
-An update names a contact, not an agent, so the side's agent can be one that lost `contacts` or left the config since the contact was made.
-The update now refuses that with `contacts are not enabled for <agent>`, instead of failing on the missing agent.
-
 ### Tool warnings come from tool metadata
 
-Each tool a contact may use is shown with what its reach means for the other side, derived from metadata every tool already declares: `executes_code` reaches everything the agent's worker or process can, a non-`none` `file_access` reaches the agent's files, and an OAuth `auth_provider` acts with the owner's connected account.
+Each tool a contact may use is shown with what its reach means for the other side, derived from metadata every tool already declares and the agent's `file_access`.
+A tool that runs code reaches everything the agent's worker or process can, and so does an `unconfined` tool, or an `agent` tool on an agent with `file_access: unrestricted`, since nothing limits it to the agent's files; only an `agent` tool on a confined agent reaches just the agent's files.
+The server works this out, because it depends on the agent's `file_access`, which the page does not have, and a warning that understates a tool's reach misleads the owner at the moment they grant it.
+An OAuth `auth_provider` acts with the owner's connected account, unless a shared service account serves the provider.
 The warnings say what the other side can ask for, matching the security warning in the contacts docs, at the moment the owner chooses the tool.
 
-A tool that uses an account the owner has not connected is flagged, because contact turns run as the owner and would fail to use it.
+A tool that uses an account the owner has not connected is flagged, because contact turns run as the owner and would fail to use it; a provider a shared service account serves is never flagged, because the owner has no account of their own to connect there.
 The flag reuses the per-agent connection state the Agents page already loads, so it needs no new route and always agrees with that page.
 
 ### Requests and decisions are dated
 
-Contact records gain `requested_at`, set when a request is first stored, and `decided_at`, set when it is accepted or declined, so the page can say since when a contact is active and sort by it.
-Records written before these fields existed read them as unset, and the page then shows no date.
+Contact records gain `requested_at`, set when a request is first stored, and `decided_at`, set when it is accepted or declined, so the page can say when a request was made and since when a contact is active or declined.
 
 ## Accepted Limitations
 

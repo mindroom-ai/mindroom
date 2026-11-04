@@ -34,16 +34,19 @@ const SECTIONS: readonly {
 /**
  * Whether each of the owner's agents has its accounts connected, by provider,
  * so a contact tool that needs an account the owner has not connected is
- * flagged. An agent whose state cannot be loaded is simply unknown.
+ * flagged. An agent whose state cannot be loaded is simply unknown. Each
+ * agent's state loads once, not again after every change to a contact.
  */
 function useConnectedAccounts(page: ContactsPage | null) {
   const [connected, setConnected] = useState<
     Record<string, Record<string, boolean>>
   >({});
+  // Agent names hold no newline, so the joined list changes only with the agents.
+  const agentNames =
+    page?.agents.map((agent) => agent.agent_name).join("\n") ?? "";
   useEffect(() => {
-    if (!page) return;
     const controller = new AbortController();
-    for (const { agent_name } of page.agents)
+    for (const agent_name of agentNames.split("\n").filter(Boolean))
       void requestConnection<AgentState>(
         `/api/connections/agents/${encodeURIComponent(agent_name)}/state`,
         controller.signal,
@@ -57,16 +60,25 @@ function useConnectedAccounts(page: ContactsPage | null) {
         })
         .catch(() => undefined);
     return () => controller.abort();
-  }, [page]);
+  }, [agentNames]);
   return connected;
 }
 
 export function Contacts() {
   const [page, setPage] = useState<ContactsPage | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<{
+    id: string;
+    action: ContactAction;
+  } | null>(null);
   const operation = useRef<AbortController | null>(null);
+  const alert = useRef<HTMLDivElement>(null);
   const connected = useConnectedAccounts(page);
+
+  // An error is said at the top, so bring it into view from a card far below.
+  useEffect(() => {
+    if (error) alert.current?.focus();
+  }, [error]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -97,7 +109,7 @@ export function Contacts() {
     operation.current?.abort();
     const controller = new AbortController();
     operation.current = controller;
-    setBusy(contact.id);
+    setBusy({ id: contact.id, action });
     setError(null);
     try {
       const next = await requestConnection<ContactsPage>(
@@ -108,8 +120,14 @@ export function Contacts() {
       );
       if (!controller.signal.aborted) setPage(next);
     } catch (cause) {
-      if (!controller.signal.aborted)
-        setError(errorText(cause, "Could not change this contact. Try again."));
+      if (controller.signal.aborted) return;
+      setError(errorText(cause, "Could not change this contact. Try again."));
+      // A refusal often means the contact changed elsewhere, so show it as it is now.
+      await requestConnection<ContactsPage>(contactsPath, controller.signal)
+        .then((next) => {
+          if (!controller.signal.aborted) setPage(next);
+        })
+        .catch(() => undefined);
     } finally {
       if (!controller.signal.aborted) setBusy(null);
     }
@@ -130,7 +148,7 @@ export function Contacts() {
           use there.
         </ConnectionsHeader>
         {error && (
-          <Alert variant="destructive" role="alert">
+          <Alert ref={alert} tabIndex={-1} variant="destructive" role="alert">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
@@ -175,6 +193,7 @@ export function Contacts() {
                         : undefined
                     }
                     busy={busy !== null}
+                    working={busy?.id === contact.id ? busy.action : null}
                     onAction={(action, terms) =>
                       void act(contact, action, terms)
                     }

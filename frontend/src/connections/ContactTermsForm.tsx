@@ -9,28 +9,42 @@ export interface TermsDraft {
   tools: string[];
 }
 
-/**
- * What a tool lets the other side reach, said where the owner chooses it.
- * Running code reaches everything, so it is the only note such a tool needs.
- */
+/** Why `matrix_message` is on every contact's tool list. */
+export const ALWAYS_OFFERED = "Always offered, so your agent can answer.";
+
+/** One rule per nonblank line, without its bullet, as the contact policy reads them. */
+export function ruleLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim().replace(/^[-*]\s+/, ""))
+    .filter(Boolean);
+}
+
+const REACH_NOTES: Record<ContactToolChoice["reach"], string | null> = {
+  code: "Runs code: the other side can ask it to reach anything your agent's worker or process can.",
+  unconfined:
+    "Not limited to your agent's files: the other side can ask it to read or change anything your agent's worker or process can.",
+  files:
+    "Reaches your agent's files: the other side can ask for what it can read and change what it can write, such as MEMORY.md.",
+  none: null,
+};
+
+/** What a tool lets the other side reach, said where the owner chooses it. */
 export function ToolReach({
   choice,
   connected,
+  connectLink = true,
 }: {
   choice: ContactToolChoice;
   /** Whether the agent's account for the tool is connected, `undefined` when unknown. */
   connected: boolean | undefined;
+  /** Link to the Agents page; off in a dialog, where leaving the page would lose the owner's choices. */
+  connectLink?: boolean;
 }) {
-  const notes: string[] = [];
-  if (choice.executes_code)
-    notes.push(
-      "Runs code: the other side can ask it to reach anything your agent's worker or process can.",
-    );
-  else if (choice.reaches_files)
-    notes.push(
-      "Reaches your agent's files: the other side can ask for what it can read and change what it can write, such as MEMORY.md.",
-    );
-  if (choice.provider) notes.push("Acts with your connected account.");
+  const notes = [
+    REACH_NOTES[choice.reach],
+    choice.provider && "Acts with your connected account.",
+  ].filter((note): note is string => Boolean(note));
   return (
     <>
       {notes.map((note) => (
@@ -41,13 +55,17 @@ export function ToolReach({
       {choice.provider && connected === false && (
         <span className="block text-xs text-amber-700 dark:text-amber-400">
           Not connected, so contact turns cannot use it.{" "}
-          <a
-            href="/connections"
-            onClick={openInPage}
-            className="font-medium underline underline-offset-4"
-          >
-            Connect it
-          </a>
+          {connectLink ? (
+            <a
+              href="/connections"
+              onClick={openInPage}
+              className="font-medium underline underline-offset-4"
+            >
+              Connect it
+            </a>
+          ) : (
+            "Connect it on the Agents page."
+          )}
         </span>
       )}
     </>
@@ -56,15 +74,16 @@ export function ToolReach({
 
 /** The rules that always apply, which the owner can read but not change. */
 export function ConfiguredRules({ rules }: { rules: string[] }) {
-  if (rules.length === 0) return null;
+  const lines = rules.flatMap(ruleLines);
+  if (lines.length === 0) return null;
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium text-muted-foreground">
         Always apply, set by your administrator
       </p>
       <ul className="list-disc space-y-0.5 pl-5 text-sm">
-        {rules.map((rule) => (
-          <li key={rule}>{rule}</li>
+        {lines.map((rule, index) => (
+          <li key={index}>{rule}</li>
         ))}
       </ul>
     </div>
@@ -123,6 +142,7 @@ export function ContactTermsForm({
               <Checkbox
                 id={id}
                 className="mt-0.5"
+                aria-describedby={`${id}-reach`}
                 checked={draft.tools.includes(choice.name)}
                 onCheckedChange={(checked) =>
                   toggle(choice.name, checked === true)
@@ -132,12 +152,15 @@ export function ContactTermsForm({
                 <label htmlFor={id} className="block text-sm">
                   {choice.display_name}
                 </label>
-                <ToolReach
-                  choice={choice}
-                  connected={
-                    choice.provider ? connected?.[choice.provider] : undefined
-                  }
-                />
+                <span id={`${id}-reach`}>
+                  <ToolReach
+                    choice={choice}
+                    connected={
+                      choice.provider ? connected?.[choice.provider] : undefined
+                    }
+                    connectLink={false}
+                  />
+                </span>
               </span>
             </div>
           );
@@ -157,7 +180,7 @@ export function ContactTermsForm({
               Matrix Message
             </label>
             <span className="block text-xs text-muted-foreground">
-              Always offered, so your agent can answer.
+              {ALWAYS_OFFERED}
             </span>
           </span>
         </div>

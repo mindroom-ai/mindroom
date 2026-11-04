@@ -3,8 +3,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
+  ALWAYS_OFFERED,
   ConfiguredRules,
   ContactTermsForm,
+  ruleLines,
   ToolReach,
   type TermsDraft,
 } from "./ContactTermsForm";
@@ -18,6 +20,13 @@ import type {
 export type ContactAction = "accept" | "decline" | "update" | "remove";
 
 type Dialog = ContactAction | null;
+
+const WORKING: Record<ContactAction, string> = {
+  accept: "Accepting…",
+  decline: "Declining…",
+  update: "Saving…",
+  remove: "Removing…",
+};
 
 function DateValue({ value }: { value: string }) {
   const date = new Date(value);
@@ -57,7 +66,7 @@ function statusLine(contact: ContactView): string | null {
     return `Waiting for ${owner} to answer.`;
   if (contact.status === "declined")
     return contact.side === "target"
-      ? "You declined. Remove it to let them ask again."
+      ? "You declined. Remove it to let either of you ask again."
       : `${owner} declined. They can remove it to let you ask again.`;
   return null;
 }
@@ -89,10 +98,7 @@ function YourTerms({
   const choices = new Map(
     agent.tool_choices.map((choice) => [choice.name, choice]),
   );
-  const ownRules = (contact.rules ?? "")
-    .split("\n")
-    .map((rule) => rule.trim())
-    .filter(Boolean);
+  const ownRules = ruleLines(contact.rules ?? "");
   return (
     <div className="grid gap-4 text-sm sm:grid-cols-2">
       <div className="space-y-2">
@@ -104,8 +110,8 @@ function YourTerms({
               Yours for this contact
             </p>
             <ul className="list-disc space-y-0.5 pl-5">
-              {ownRules.map((rule) => (
-                <li key={rule}>{rule}</li>
+              {ownRules.map((rule, index) => (
+                <li key={index}>{rule}</li>
               ))}
             </ul>
           </div>
@@ -142,7 +148,7 @@ function YourTerms({
           <li>
             <span className="block">Matrix Message</span>
             <span className="block text-xs text-muted-foreground">
-              Always offered, so your agent can answer.
+              {ALWAYS_OFFERED}
             </span>
           </li>
         </ul>
@@ -161,12 +167,16 @@ export function ContactCard({
   agent,
   connected,
   busy,
+  working,
   onAction,
 }: {
   contact: ContactView;
   agent: ContactAgent | undefined;
   connected: Record<string, boolean> | undefined;
+  /** A change to any contact is running, so none can start. */
   busy: boolean;
+  /** The change to this contact that is running. */
+  working: ContactAction | null;
   onAction: (action: ContactAction, terms?: ContactTerms) => void;
 }) {
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -190,6 +200,8 @@ export function ContactCard({
   };
   const pending = contact.status === "pending";
   const askedYou = pending && contact.side === "target";
+  // An agent whose contacts are off cannot open a contact room, so its request can only be declined.
+  const canAccept = askedYou && (contact.you.kind === "person" || editable);
   const canRemove =
     contact.status === "active" ||
     (pending && contact.side === "requester") ||
@@ -200,7 +212,7 @@ export function ContactCard({
       ? {
           title: "Remove this contact?",
           description:
-            "The agents leave the contact room. You keep the room and its history.",
+            "The agents in this contact leave its room. You keep the room and its history.",
           label: "Remove…",
         }
       : pending
@@ -211,7 +223,7 @@ export function ContactCard({
           }
         : {
             title: "Remove the declined request?",
-            description: "They can then ask again.",
+            description: "Either of you can then ask again.",
             label: "Remove…",
           };
   const form = agent && (
@@ -265,24 +277,20 @@ export function ContactCard({
                 </a>
               </Button>
             )}
+            {canAccept && (
+              <Button size="sm" disabled={busy} onClick={() => open("accept")}>
+                Accept…
+              </Button>
+            )}
             {askedYou && (
-              <>
-                <Button
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => open("accept")}
-                >
-                  Accept…
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => open("decline")}
-                >
-                  Decline…
-                </Button>
-              </>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => open("decline")}
+              >
+                Decline…
+              </Button>
             )}
             {editable && !askedYou && contact.status !== "declined" && (
               <Button
@@ -309,6 +317,11 @@ export function ContactCard({
         <blockquote className="border-l-2 pl-3 text-sm italic text-muted-foreground">
           {contact.reason}
         </blockquote>
+        {working && (
+          <p role="status" className="text-sm text-muted-foreground">
+            {WORKING[working]}
+          </p>
+        )}
         {status && <p className="text-sm">{status}</p>}
         {contact.status !== "declined" && (
           <YourTerms contact={contact} agent={agent} connected={connected} />
@@ -319,7 +332,7 @@ export function ContactCard({
         title={`Accept ${contact.other.display_name}?`}
         description={
           contact.you.kind === "agent"
-            ? "The agents get a shared room to talk in. The other side can start turns of your agent there, with your authority and the tools you choose below."
+            ? `${contact.you.display_name} and ${contact.other.display_name} get a shared room to talk in. The other side can start turns of your agent there, with your authority and the tools you choose below.`
             : `You and ${contact.other.display_name} get a shared room to talk in.`
         }
         confirmLabel="Accept"
@@ -343,7 +356,7 @@ export function ContactCard({
       <ConfirmDialog
         open={dialog === "decline"}
         title="Decline this request?"
-        description="They cannot ask again until you remove the declined request."
+        description="Neither of you can ask again until you remove the declined request."
         confirmLabel="Decline"
         onCancel={() => setDialog(null)}
         onConfirm={() => confirm("decline")}

@@ -350,20 +350,20 @@ export interface EgressLogRecord {
 export interface ContactToolChoice {
   name: string;
   display_name: string;
-  icon: string | null;
-  /** The OAuth provider whose connected account the tool acts with. */
+  /** The OAuth provider whose connected account the tool acts with, `null` for a shared service account. */
   provider: string | null;
-  executes_code: boolean;
-  reaches_files: boolean;
+  /**
+   * `code`: runs code; `unconfined`: not confined to the agent's files;
+   * `files`: confined to them; `none`: reaches neither.
+   */
+  reach: "code" | "unconfined" | "files" | "none";
 }
 
 /** One of the owner's agents with contacts, and what applies to all its contacts. */
 export interface ContactAgent {
   agent_name: string;
-  display_name: string;
   /** Rules from the configuration, which apply to every contact and cannot be removed. */
   configured_rules: string[];
-  default_tools: string[];
   /** A judge checks each message against the rules before it is sent. */
   judged: boolean;
   /** Every choice but `matrix_message`, which every contact offers. */
@@ -389,8 +389,6 @@ export interface ContactView {
   room_id: string | null;
   /** The owner's own rules for this contact. */
   rules: string | null;
-  /** The owner's chosen tools, or `null` for the agent's defaults. */
-  tools: string[] | null;
   /** What a contact turn offers now, or `null` without terms to show. */
   effective_tools: string[] | null;
   requested_at: string | null;
