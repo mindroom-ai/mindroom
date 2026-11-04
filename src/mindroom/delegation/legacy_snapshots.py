@@ -2,7 +2,8 @@
 
 A child snapshot is ``dataclasses.asdict`` of a ``DelegationChild``. Its copies sit in the subagent's session file,
 which nothing deletes, and in a parent run's delegation state, among its children and behind its pending calls. Each
-copy is rewritten where it is stored before anything reads it, so the readers in ``state`` take only the current shape.
+copy is rewritten where it is stored before anything reads it, so the readers in ``state`` take only the current shape,
+except for the fields ``DelegationChild`` defaults itself because run metadata is rewritten only by a layout step.
 """
 
 from __future__ import annotations

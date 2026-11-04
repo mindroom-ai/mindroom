@@ -2357,6 +2357,7 @@ path = "mindroom.matrix.personal_rooms"
 depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.managed_room_notice",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.room_power",
@@ -6931,6 +6932,7 @@ from = ["mindroom.thread_export"]
 
 [[interfaces]]
 expose = [
+    "normal_worker_key",
     "normalize_worker_key_part",
     "SHARED_DIRECTORIES_DIRNAME",
     "ResolvedWorkerTarget",
@@ -6959,6 +6961,8 @@ expose = [
     "resolved_worker_key_scope",
     "shared_storage_root",
     "serialize_tool_execution_identity",
+    "subagent_worker_key",
+    "subagent_worker_state_scope_key",
     "supports_tool_name_for_worker_scope",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",

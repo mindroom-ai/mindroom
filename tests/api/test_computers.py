@@ -862,7 +862,7 @@ async def test_background_maintenance_snapshots_computers_on_owning_loop(
             return WorkerMaintenanceResult((), ())
 
         monkeypatch.setattr(store, "active_worker_keys", collect)
-        monkeypatch.setattr(api_main, "_worker_cleanup_interval_seconds", lambda _paths: 0.001)
+        monkeypatch.setattr(api_main, "worker_cleanup_interval_seconds", lambda _paths: 0.001)
         monkeypatch.setattr(
             api_main,
             "lease_configured_primary_worker_manager",

@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_between
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_key_agent_name, worker_log_id
+from mindroom.tool_system.worker_routing import (
+    resolved_worker_key_scope,
+    subagent_worker_state_scope_key,
+    worker_key_agent_name,
+    worker_log_id,
+)
 from mindroom.workers.backend import WorkerStartTimeoutError
 from mindroom.workers.models import WorkerReadyProgress
 
@@ -204,14 +209,20 @@ class WorkerStartReporter:
             "worker_cold_start",
             worker=worker_log_id(worker_key),
             backend=self._progress.backend_name,
-            # Only a background script's run-pinned worker borrows the state of another worker's scope.
-            kind="script" if self._spec.state_scope_worker_key is not None else "tool",
+            kind=_worker_kind(self._spec),
             scope=resolved_worker_key_scope(worker_key),
             agent_name=worker_key_agent_name(worker_key),
             outcome=_outcome(error),
             wait_ms=elapsed_ms_between(self._state.started_at, finished_at),
             **self._milestones_ms,
         )
+
+
+def _worker_kind(spec: WorkerSpec) -> str:
+    if subagent_worker_state_scope_key(spec.worker_key) is not None:
+        return "subagent"
+    # Otherwise only a background script's run-pinned worker borrows the state of another worker's scope.
+    return "script" if spec.state_scope_worker_key is not None else "tool"
 
 
 def _outcome(error: BaseException | None) -> str:

@@ -577,6 +577,12 @@
           "x-mindroom": {
             "reference": "agent"
           }
+        },
+        "dedicated_subagent_workers": {
+          "default": false,
+          "description": "Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
+          "title": "Dedicated Subagent Workers",
+          "type": "boolean"
         }
       },
       "required": [
