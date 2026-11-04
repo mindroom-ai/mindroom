@@ -218,6 +218,12 @@ The exception is deployments that all leave `MINDROOM_PUBLIC_URL` unset and so s
 MindRoom verifies the token a second time after reading `/versions`, because `/versions` shows only the setting after the first verification: if binding came on in between, the second verification refuses the unbound token, and if it went off, the first one already proved the token bound to this deployment.
 The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.
 Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
+MindRoom Chat's iOS app cannot post from a page in the system browser, so it signs that browser in through `/api/connections/session/native/` instead.
+The app posts its token to `start`, which checks it like a Chat sign-in, except that it always requires a homeserver that binds tokens, whatever `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists, because no browser `Origin` vouches for the call.
+The browser that opens the returned `redeem` URL gets a pending cookie, `__Host-mindroom_connections_session_native` or, on a plain HTTP local portal, `mindroom_connections_session_native`, and the app gets a nonce through `mindroom://connections/confirm`.
+The app confirms the nonce with its own token, which must name the user who started, and the browser that opens the returned `continue` URL gets the session only if it holds the pending cookie that nonce was issued for.
+So a forwarded `redeem` URL sends the nonce to the victim's device, where the app cannot confirm it as another user, and a forwarded `continue` URL finds no matching pending cookie.
+Every step's state is single use and expires after 120 seconds, and a session started this way never opens the dashboard.
 
 ## Known gaps
 

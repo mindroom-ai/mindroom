@@ -106,6 +106,34 @@ async def _dashboard_allowed(
         return False
 
 
+async def verified_connections_user(openid_token: MatrixOpenIDToken, request: Request, paths: RuntimePaths) -> str:
+    """Return the Matrix user a token names when it verifies for this deployment and the user has portal access."""
+    try:
+        matrix_user_id = await verify_matrix_openid(openid_token, paths, request_origin=str(request.base_url))
+    except MatrixOpenIDError as error:
+        raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
+    # Any homeserver user can obtain a valid token, so only users with portal access get a session.
+    app_state = config_lifecycle.app_state(request.app)
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    user = resolve_connection_user(snapshot, matrix_user_id, membership_index=app_state.runtime.agent_reply_memberships)
+    if not user.visible_agent_names:
+        raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
+    return matrix_user_id
+
+
+def set_portal_cookie(response: Response, name: str, value: str, *, max_age: int) -> None:
+    """Set one Connections portal cookie, `Secure` under the `__Host-` name an HTTPS portal uses."""
+    response.set_cookie(
+        name,
+        value,
+        max_age=max_age,
+        path="/",
+        secure=name.startswith("__Host-"),
+        httponly=True,
+        samesite="lax",
+    )
+
+
 async def _start_session(
     openid_token: MatrixOpenIDToken,
     client_origin: str,
@@ -127,32 +155,15 @@ async def _start_session(
             "or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS",
             headers=CONNECTIONS_HEADERS,
         )
-    try:
-        matrix_user_id = await verify_matrix_openid(openid_token, paths, request_origin=str(request.base_url))
-    except MatrixOpenIDError as error:
-        raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
-    # Any homeserver user can obtain a valid token, so only users with portal access get a session.
-    app_state = config_lifecycle.app_state(request.app)
+    matrix_user_id = await verified_connections_user(openid_token, request, paths)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    user = resolve_connection_user(snapshot, matrix_user_id, membership_index=app_state.runtime.agent_reply_memberships)
-    if not user.visible_agent_names:
-        raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
     token = issue_connections_session(
         matrix_user_id,
         now=time.time(),
         dashboard=await _dashboard_allowed(openid_token, matrix_user_id, snapshot),
     )
     response.headers.update(CONNECTIONS_HEADERS)
-    cookie = connections_session_cookie(origin)
-    response.set_cookie(
-        cookie,
-        token,
-        max_age=CONNECTIONS_SESSION_SECONDS,
-        path="/",
-        secure=cookie.startswith("__Host-"),
-        httponly=True,
-        samesite="lax",
-    )
+    set_portal_cookie(response, connections_session_cookie(origin), token, max_age=CONNECTIONS_SESSION_SECONDS)
     return matrix_user_id
 
 
