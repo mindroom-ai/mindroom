@@ -8914,6 +8914,7 @@ mindroom-agent tools call website read_url '{"url": "https://example.org/status.
 
 Inside a background script, `mindroom-agent` offers only `tools call`, which waits until the call finishes and does not accept `--call-id` or `--timeout`.
 It prints the toolkit, function, status, and outcome: `completed` exits `0`, `failed` exits `1`, and `indeterminate` exits `4`, so a script must not repeat that call automatically.
+A call is `failed` only when MindRoom recorded it as failed; when the CLI cannot read the call's final receipt, for example because the gateway refused the lookup after accepting the call, it reports `indeterminate`.
 A failed or indeterminate call also prints its `call_id`, and its outcome gives the error and its `kind`.
 A refused command exits `2`, and a missing script capability exits `4` without a receipt.
 

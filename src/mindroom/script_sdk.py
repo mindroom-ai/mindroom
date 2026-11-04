@@ -35,7 +35,10 @@ _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 
 
 class MindRoomToolCallError(RuntimeError):
-    """Stable framework or transport failure returned by the script gateway."""
+    """Stable framework or transport failure returned by the script gateway.
+
+    `state` is the terminal receipt's state, `failed` or `indeterminate`, or None when no receipt settled the call.
+    """
 
     def __init__(
         self,
@@ -44,11 +47,13 @@ class MindRoomToolCallError(RuntimeError):
         kind: str,
         retryable: bool,
         call_id: str,
+        state: str | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.retryable = retryable
         self.call_id = call_id
+        self.state = state
 
     @classmethod
     def from_receipt(cls, receipt: _Receipt) -> MindRoomToolCallError:
@@ -62,6 +67,7 @@ class MindRoomToolCallError(RuntimeError):
             kind=str(kind or receipt.state),
             retryable=retryable is True,
             call_id=receipt.call_id,
+            state=receipt.state,
         )
 
 

@@ -323,6 +323,7 @@ def test_script_sdk_raises_stable_terminal_error(monkeypatch: pytest.MonkeyPatch
     assert exc_info.value.kind == "capability_revoked"
     assert exc_info.value.retryable is False
     assert exc_info.value.call_id == "stable-call"
+    assert exc_info.value.state == "failed"
 
 
 def test_script_sdk_raises_typed_approval_denial(

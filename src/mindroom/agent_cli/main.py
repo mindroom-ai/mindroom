@@ -159,8 +159,8 @@ def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
         outcome = MindRoomTools().call(args.toolkit, args.function, **read_call_arguments(args))
     except MindRoomToolCallError as exc:
         error = {"error": str(exc), "kind": exc.kind}
-        # An indeterminate call may have had its side effect, so it must not read as a failure to retry.
-        status = "indeterminate" if exc.kind == "indeterminate" else "failed"
+        # Only a failed receipt proves the call did not run; any other error leaves its side effect unknown.
+        status = "failed" if exc.state == "failed" else "indeterminate"
         return receipt | {"call_id": exc.call_id, "status": status, "outcome": error}
     except RuntimeError as exc:
         raise AgentCliUnavailableError(str(exc)) from exc

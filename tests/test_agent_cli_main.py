@@ -6,7 +6,10 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import urllib.request
+from email.message import Message
 from io import BytesIO, TextIOWrapper
+from urllib.error import HTTPError
 
 import pytest
 
@@ -239,3 +242,33 @@ def test_a_background_script_prints_a_result_at_the_gateway_limit(capsys, monkey
 
     assert main(["tools", "call", "file.read_file", "{}"]) == 0
     assert json.loads(capsys.readouterr().out)["outcome"] == "x" * 65_500
+
+
+def test_a_refused_receipt_lookup_leaves_the_accepted_call_indeterminate(capsys, monkeypatch, tmp_path) -> None:
+
+    _in_background_script(monkeypatch, tmp_path)
+    pending = _script_gateway(monkeypatch, "pending")
+    accept = urllib.request.urlopen
+
+    def urlopen(request, *, timeout) -> BytesIO:
+        if request.method == "POST":
+            return accept(request, timeout=timeout)
+        # The requester lost access after the call was accepted, so the gateway refuses to show its receipt.
+        raise HTTPError(request.full_url, 404, "Not Found", Message(), BytesIO(b'{"detail":"unavailable"}'))
+
+    monkeypatch.setattr("mindroom.script_sdk.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("mindroom.script_sdk.time.sleep", lambda _seconds: None)
+
+    assert main(["tools", "call", "matrix_message.matrix_message", "{}"]) == 4
+    output = json.loads(capsys.readouterr().out)
+    assert (output["call_id"], output["status"]) == ("call-1", "indeterminate")
+    assert len(pending) == 1
+
+
+def test_a_background_script_without_its_capability_exits_4(capsys, monkeypatch, tmp_path) -> None:
+
+    _in_background_script(monkeypatch, tmp_path)
+    (tmp_path / "capability").unlink()
+
+    assert main(["tools", "call", "a.b", "{}"]) == 4
+    assert json.loads(capsys.readouterr().out)["error"] == "The MindRoom script capability token is unavailable."
