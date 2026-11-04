@@ -625,6 +625,9 @@ ignore = [
   "UP042",    # `StrEnum` migration is outside the scope of hook maintenance
   "UP047",    # PEP 695 type-parameter migration is outside the scope of hook maintenance
 ]
+per-file-ignores.".claude/skills/*/scripts/*" = [
+  "INP001", # Part of an implicit namespace package (standalone skill scripts)
+]
 per-file-ignores.".github/scripts/*" = [
   "INP001", # Part of an implicit namespace package (standalone scripts)
 ]
