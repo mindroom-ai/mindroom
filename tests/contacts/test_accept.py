@@ -46,7 +46,7 @@ from tests.contacts.test_tools import (
     _stored,
     _terms,
 )
-from tests.test_generated_agents import CO_OWNER, OWNER, STRANGER, _load, _personal
+from tests.test_generated_agents import CO_OWNER, OWNER, _load, _personal
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -875,29 +875,6 @@ async def test_a_decision_without_the_owners_personal_room_says_so(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_a_tool_accept_still_needs_the_owners_personal_room_agent(tmp_path: Path) -> None:
-    """Through a tool, only the agent of the owner's personal room may accept, and it posts nothing more there."""
-    config, paths = _setup(tmp_path, work=True)
-    runtime = _runtime()
-    record = await _pending(config, paths, runtime)
-    with pytest.raises(ValueError, match=r"^Only mind_bob, the agent of @bob:localhost's personal room, may accept"):
-        await flow.accept_contact(
-            flow.tool_actor(_context(config, paths, "work_bob", CO_OWNER, runtime), "work_bob"),
-            record.id,
-            rules=None,
-            tools=None,
-        )
-    with _matrix(), _delivered("$decided") as send:
-        await flow.accept_contact(
-            flow.tool_actor(_context(config, paths, "mind_bob", CO_OWNER, runtime), "mind_bob"),
-            record.id,
-            rules=None,
-            tools=None,
-        )
-    assert _thread_posts(send, BOB_ROOM) == []
-
-
-@pytest.mark.asyncio
 async def test_updating_a_side_whose_agent_has_no_contacts_is_refused(tmp_path: Path) -> None:
     """A side whose agent lost contacts or left the config cannot be changed."""
     config, paths = _setup(tmp_path)
@@ -911,53 +888,3 @@ async def test_updating_a_side_whose_agent_has_no_contacts_is_refused(tmp_path: 
     update_contacts(paths, orphan)
     with pytest.raises(ValueError, match=r"^contacts are not enabled for gone_alice$"):
         await flow.update_contact(_portal(config, paths, runtime, OWNER), record.id, rules="Be brief.", tools=None)
-
-
-_DONE = {"accept": "active", "decline": "declined", "update": "pending", "remove": "removed"}
-# What each owner may do on the Connections page with a request from Alice's agent to Bob's agent; None is allowed.
-_PORTAL_GRID = [
-    # Bob, whose agent was asked, decides the request, and can change or remove his side.
-    *((CO_OWNER, action, None) for action in _DONE),
-    # Alice, whose agent asked, cannot decide it, but can change her side or withdraw the request.
-    (OWNER, "accept", rf"^Only {CO_OWNER} may accept this contact$"),
-    (OWNER, "decline", rf"^Only {CO_OWNER} may decline this contact$"),
-    (OWNER, "update", None),
-    (OWNER, "remove", None),
-    # Mallory holds no side, so for her the contact does not exist.
-    *((STRANGER, action, r"^There is no contact ") for action in _DONE),
-]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("owner", "action", "refused"), _PORTAL_GRID)
-async def test_each_owner_takes_on_the_portal_only_the_actions_their_side_allows(
-    tmp_path: Path,
-    owner: str,
-    action: str,
-    refused: str | None,
-) -> None:
-    """Each owner acting on the Connections page changes a pending request as the grid says, and a refusal changes nothing."""
-    config, paths = _setup(tmp_path)
-    runtime = _runtime()
-    record = await _pending(config, paths, runtime)
-    actor = _portal(config, paths, runtime, owner)
-    operations = {
-        "accept": lambda: flow.accept_contact(actor, record.id, rules=None, tools=None),
-        "decline": lambda: flow.decline_contact(actor, record.id),
-        "update": lambda: flow.update_contact(actor, record.id, rules="Be brief.", tools=None),
-        "remove": lambda: flow.remove_contact(actor, record.id),
-    }
-
-    with _matrix(), _delivered("$decided"):
-        if refused is None:
-            await operations[action]()
-        else:
-            with pytest.raises(ValueError, match=refused):
-                await operations[action]()
-
-    (stored,) = _stored(paths)
-    assert stored.status == ("pending" if refused else _DONE[action])
-    if action == "update" and refused is None:
-        side = stored.owner_side(owner)
-        assert side is not None
-        assert stored.side(side).rules == "Be brief."

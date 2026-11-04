@@ -300,10 +300,11 @@ async def request_contact(
 ) -> tuple[ContactActor, ContactRecord, bool]:
     """Record a contact request from ``agent_name`` or its owner, post it to the target owner, and return it.
 
-    It also returns the owner it acted for, and a flag that says whether this call posted a request notice. A pending or active contact between the same two parties,
-    in either direction, is returned instead of a new one; a pending one's request notice is posted when it never landed,
-    and a repeat by its requester then replaces its reason and the room and thread its answer goes to. Asking again with other
-    rules or tools is refused, because only ``update_contact`` changes them.
+    It returns the contact actor the request ran as, the request, and whether this call posted a request notice. A
+    pending or active contact between the same two parties, in either direction, is returned instead of a new one; a
+    pending one's request notice is posted when it never landed, and a repeat by its requester then replaces its reason
+    and the room and thread its answer goes to. Asking again with other rules or tools is refused, because only
+    ``update_contact`` changes them.
     """
     actor = tool_actor(context, agent_name)
     config, paths = actor.config, actor.runtime_paths
