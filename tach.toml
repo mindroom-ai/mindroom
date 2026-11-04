@@ -1916,6 +1916,17 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.connections_native"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.api.connections_session",
+    "mindroom.api.connections_session_cookie",
+    "mindroom.matrix_openid",
+    "mindroom.origins",
+]
+
+[[modules]]
 path = "mindroom.api.connections_session"
 depends_on = [
     "mindroom.api.auth",
@@ -1993,6 +2004,7 @@ depends_on = [
     "mindroom.api.computers",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
+    "mindroom.api.connections_native",
     "mindroom.api.connections_session",
     "mindroom.api.thread_exports",
     "mindroom.agent_policy",
