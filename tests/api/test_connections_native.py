@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
@@ -17,6 +19,7 @@ from mindroom.api import connections_native, main
 from mindroom.api.connections_native import _validated_native_next
 from mindroom.api.connections_session_cookie import read_connections_session
 from tests.api.test_connections_signin import (
+    CHAT_ORIGIN,
     CONNECTIONS_SESSION_COOKIE,
     PORTAL_ORIGIN,
     _serve,
@@ -34,6 +37,7 @@ PENDING_COOKIE = f"{CONNECTIONS_SESSION_COOKIE}_native"
 CONFIRM_PREFIX = "mindroom://connections/confirm?nonce="
 CONNECT_LINK = "/api/oauth/google_drive/authorize?connect_token=x&execution_scope=user_agent"
 TAP_AGAIN = "Tap the link in the MindRoom app again."
+IOS_APP_ORIGIN = "capacitor://localhost"
 
 
 def _token(name: str) -> dict[str, Any]:
@@ -58,11 +62,28 @@ def redeem(browser: TestClient, started: Response) -> Response:
     return browser.get(started.json()["redeem_url"], follow_redirects=False)
 
 
+def callback_url_of(redeemed: Response) -> str:
+    """Return the custom-scheme callback URL the redeem page opens, after checking the page shows it in both ways.
+
+    The page, not a redirect, carries it: iOS may drop a cookie set on a response that redirects to the callback scheme.
+    """
+    assert redeemed.status_code == 200, redeemed.text
+    assert redeemed.headers["content-type"].startswith("text/html")
+    assert "location" not in redeemed.headers
+    refresh = re.search(r'<meta http-equiv="refresh" content="0;url=([^"]*)"', redeemed.text)
+    link = re.search(r'<a href="([^"]*)"', redeemed.text)
+    assert refresh is not None, redeemed.text
+    assert link is not None, redeemed.text
+    url = html.unescape(refresh.group(1))
+    assert html.unescape(link.group(1)) == url
+    return url
+
+
 def nonce_of(redeemed: Response) -> str:
     """Return the nonce the redeem step hands to the app through its custom-scheme callback."""
-    location = redeemed.headers["location"]
-    assert location.startswith(CONFIRM_PREFIX), location
-    return location.removeprefix(CONFIRM_PREFIX)
+    url = callback_url_of(redeemed)
+    assert url.startswith(CONFIRM_PREFIX), url
+    return url.removeprefix(CONFIRM_PREFIX)
 
 
 def confirm(browser: TestClient, nonce: str, name: str = "alice") -> Response:
@@ -79,9 +100,7 @@ def run_native_flow(client: TestClient, name: str = "alice", next_path: str | No
     """Run start, redeem, confirm, and continue as `name` with `client` as the browser; return the continue response."""
     started = native_start(client, name, next_path)
     assert started.status_code == 200, started.text
-    redeemed = redeem(client, started)
-    assert redeemed.status_code == 303, redeemed.text
-    confirmed = confirm(client, nonce_of(redeemed), name)
+    confirmed = confirm(client, nonce_of(redeem(client, started)), name)
     assert confirmed.status_code == 200, confirmed.text
     return continue_in(client, confirmed)
 
@@ -114,8 +133,7 @@ def test_native_flow_signs_browser_in_and_opens_next(signin: dict[str, Any]) -> 
     assert "no-store" in started.headers["cache-control"]
 
     redeemed = redeem(browser, started)
-    assert redeemed.status_code == 303, redeemed.text
-    assert redeemed.headers["location"].startswith(CONFIRM_PREFIX)
+    assert callback_url_of(redeemed).startswith(CONFIRM_PREFIX)
     assert "no-store" in redeemed.headers["cache-control"]
     assert redeemed.headers["referrer-policy"] == "no-referrer"
     pending = redeemed.headers["set-cookie"]
@@ -196,9 +214,7 @@ def test_forwarded_redeem_cannot_be_confirmed_by_another_user(signin: dict[str, 
     signin["binds"].return_value = True
     attacker = signin["client"]
     victim = TestClient(main.app, base_url=PORTAL_ORIGIN)
-    redeemed = redeem(victim, native_start(attacker))
-    assert redeemed.status_code == 303, redeemed.text
-    nonce = nonce_of(redeemed)
+    nonce = nonce_of(redeem(victim, native_start(attacker)))
 
     refused = confirm(victim, nonce, "bob")
     assert refused.status_code == 403, refused.text
@@ -255,7 +271,6 @@ def test_expired_states_are_refused(signin: dict[str, Any], monkeypatch: pytest.
     signin["binds"].return_value = True
     browser = signin["client"]
     redeemed = redeem(browser, native_start(browser))
-    assert redeemed.status_code == 303, redeemed.text
     later = time.time() + 121
     monkeypatch.setattr(time, "time", lambda: later)
     refused = confirm(browser, nonce_of(redeemed))
@@ -273,7 +288,7 @@ def test_native_flow_on_plain_http_local_backend(signin: dict[str, Any]) -> None
     assert started.status_code == 200, started.text
     assert started.json()["redeem_url"].startswith(f"{local}{NATIVE}/redeem?start=")
     redeemed = redeem(browser, started)
-    assert redeemed.status_code == 303, redeemed.text
+    assert callback_url_of(redeemed).startswith(CONFIRM_PREFIX)
     pending = redeemed.headers["set-cookie"]
     assert pending.startswith("mindroom_connections_session_native=")
     assert "Secure" not in pending
@@ -361,6 +376,31 @@ def test_browser_refusals_ask_to_tap_the_link_again(signin: dict[str, Any], path
     assert "unknown-secret" not in response.text
 
 
+@pytest.mark.parametrize("path", ["redeem", "continue"])
+def test_browser_steps_without_their_query_ask_to_tap_the_link_again(signin: dict[str, Any], path: str) -> None:
+    """A hand-made URL without its `start` or `confirmed` parameter gets the same page, not a 401 body."""
+    response = signin["client"].get(f"{NATIVE}/{path}", follow_redirects=False)
+    _expect_tap_again_page(response)
+    assert "Invalid sign-in request" not in response.text
+
+
+def test_redeem_page_escapes_the_callback_url(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The callback URL is HTML-escaped wherever the page repeats it, so a nonce can never break out of its attribute."""
+    signin["binds"].return_value = True
+    real_issue = connections_native.issue_opaque_oauth_state
+    hostile = 'x"><b>&amp;'
+
+    def issue(paths: Any, *, kind: str, **kwargs: Any) -> str:  # noqa: ANN401
+        token = real_issue(paths, kind=kind, **kwargs)
+        return hostile if kind == "connections_native_nonce" else token
+
+    monkeypatch.setattr(connections_native, "issue_opaque_oauth_state", issue)
+    redeemed = redeem(signin["client"], native_start(signin["client"]))
+    assert callback_url_of(redeemed) == f"{CONFIRM_PREFIX}{hostile}"
+    assert hostile not in redeemed.text
+    assert "<b>" not in redeemed.text
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [("POST", "start"), ("GET", "redeem?start=s"), ("POST", "confirm"), ("GET", "continue?confirmed=k")],
@@ -380,3 +420,75 @@ def test_native_sign_in_refuses_plain_http_outside_local_addresses(
     assert response.status_code == 403, response.text
     assert response.json() == {"detail": "Connections require an HTTPS public origin, or HTTP on a local address"}
     signin["verifier"].assert_not_awaited()
+
+
+def _preflight(client: TestClient, origin: str, path: str = f"{NATIVE}/start", method: str = "POST") -> Response:
+    return client.options(
+        path,
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": method,
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+
+def test_native_cors_allows_only_the_ios_app(signin: dict[str, Any]) -> None:
+    """The app's WebView origin may call the native routes, without credentials; no other origin may."""
+    client = signin["client"]
+    allowed = _preflight(client, IOS_APP_ORIGIN)
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.headers["access-control-allow-origin"] == IOS_APP_ORIGIN
+    assert "access-control-allow-credentials" not in allowed.headers
+    confirm_allowed = _preflight(client, IOS_APP_ORIGIN, f"{NATIVE}/confirm")
+    assert confirm_allowed.headers["access-control-allow-origin"] == IOS_APP_ORIGIN
+    for origin in ("https://evil.example", CHAT_ORIGIN, PORTAL_ORIGIN, "http://localhost:5173"):
+        refused = _preflight(client, origin)
+        assert "access-control-allow-origin" not in refused.headers, origin
+        assert "access-control-allow-credentials" not in refused.headers, origin
+
+
+def test_native_cors_ignores_the_dashboard_wildcard_opt_in(signin: dict[str, Any]) -> None:
+    """Allowing every dashboard origin does not widen the native routes."""
+    _serve(signin, MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS="true")
+    client = signin["client"]
+    assert _preflight(client, IOS_APP_ORIGIN).headers["access-control-allow-origin"] == IOS_APP_ORIGIN
+    refused = _preflight(client, "https://evil.example")
+    assert "access-control-allow-origin" not in refused.headers
+    # The dashboard keeps its own opt-in.
+    assert (
+        _preflight(client, "https://evil.example", "/api/health", "GET").headers["access-control-allow-origin"] == "*"
+    )
+
+
+def test_native_cors_applies_to_the_responses_and_leaves_origin_checks_out_of_the_handlers(
+    signin: dict[str, Any],
+) -> None:
+    """The app can read start's answer; another origin gets the same answer but cannot read it."""
+    signin["binds"].return_value = True
+    app = _app(signin["client"])
+    body = {"openid_token": _token("alice")}
+    from_app = app.post(f"{NATIVE}/start", json=body, headers={"Origin": IOS_APP_ORIGIN})
+    assert from_app.status_code == 200, from_app.text
+    assert from_app.headers["access-control-allow-origin"] == IOS_APP_ORIGIN
+    assert "access-control-allow-credentials" not in from_app.headers
+    from_other = app.post(f"{NATIVE}/start", json=body, headers={"Origin": "https://evil.example"})
+    assert from_other.status_code == 200, from_other.text
+    assert "access-control-allow-origin" not in from_other.headers
+    from_no_origin = app.post(f"{NATIVE}/start", json=body)
+    assert from_no_origin.status_code == 200, from_no_origin.text
+    assert "access-control-allow-origin" not in from_no_origin.headers
+
+
+def test_connections_paths_outside_native_keep_their_cors(signin: dict[str, Any]) -> None:
+    """The portal's other routes do not trust the iOS app's origin, and the deployment's own origin still works."""
+    client = signin["client"]
+    path = "/api/connections/session"
+    app_origin = _preflight(client, IOS_APP_ORIGIN, path)
+    assert "access-control-allow-origin" not in app_origin.headers
+    own = _preflight(client, PORTAL_ORIGIN, path)
+    assert own.headers["access-control-allow-origin"] == PORTAL_ORIGIN
+    assert own.headers["access-control-allow-credentials"] == "true"
+    # Only the native prefix is special: a sibling path does not match it.
+    sibling = _preflight(client, IOS_APP_ORIGIN, "/api/connections/session/nativeish/start")
+    assert "access-control-allow-origin" not in sibling.headers

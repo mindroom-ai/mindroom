@@ -89,6 +89,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
+_NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
+_IOS_APP_ORIGIN = "capacitor://localhost"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
@@ -138,16 +140,20 @@ class _RuntimeDashboardCorsMiddleware:
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
-        origins = (
-            allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
-            if path.startswith("/api/computers")
-            else gateway_cors_origins(paths, path)
-        )
-        settings = (
-            _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
-            if origins is not None
-            else _dashboard_cors_settings(paths)
-        )
+        if path.startswith(_NATIVE_SIGN_IN_PATH):
+            # Only MindRoom Chat's iOS app calls these routes from a page, and it sends no cookies.
+            settings = _DashboardCorsSettings((_IOS_APP_ORIGIN,), allow_credentials=False)
+        else:
+            origins = (
+                allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
+                if path.startswith("/api/computers")
+                else gateway_cors_origins(paths, path)
+            )
+            settings = (
+                _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
+                if origins is not None
+                else _dashboard_cors_settings(paths)
+            )
         middleware = self._middleware_by_settings.get(settings)
         if middleware is None:
             middleware = CORSMiddleware(

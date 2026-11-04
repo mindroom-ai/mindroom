@@ -223,7 +223,9 @@ The app posts its token to `start`, which checks it like a Chat sign-in, except 
 The browser that opens the returned `redeem` URL gets a pending cookie, `__Host-mindroom_connections_session_native` or, on a plain HTTP local portal, `mindroom_connections_session_native`, and the app gets a nonce through `mindroom://connections/confirm`.
 The app confirms the nonce with its own token, which must name the user who started, and the browser that opens the returned `continue` URL gets the session only if it holds the pending cookie that nonce was issued for.
 So a forwarded `redeem` URL sends the nonce to the victim's device, where the app cannot confirm it as another user, and a forwarded `continue` URL finds no matching pending cookie.
+The `redeem` step answers a page that opens the app's URL, rather than a redirect to it, because iOS may drop a cookie set on a redirect to a custom scheme.
 Every step's state is single use and expires after 120 seconds, and a session started this way never opens the dashboard.
+Only `capacitor://localhost`, the app's own origin, may call these routes from a page, without credentials, whatever the dashboard's CORS settings say; the handlers do not check `Origin`, since the app's own bound token is the proof.
 
 ## Known gaps
 

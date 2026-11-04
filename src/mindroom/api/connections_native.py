@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 import re
 import time
 from typing import TYPE_CHECKING
@@ -61,6 +62,24 @@ _TAP_AGAIN_PAGE = """<!doctype html>
   <body>
     <h1>Sign-in expired</h1>
     <p>This sign-in expired or was already used. Tap the link in the MindRoom app again.</p>
+  </body>
+</html>
+"""
+
+
+# The sign-in sheet closes on the first navigation to the app's callback scheme. This page, not a redirect, performs it:
+# iOS may drop a cookie set on a response that redirects straight to that scheme, and the flow needs the pending cookie.
+_REDEEMED_PAGE = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="0;url={url}">
+    <title>Signing in</title>
+  </head>
+  <body>
+    <h1>Signing in</h1>
+    <p>Returning to the MindRoom app. If nothing happens, <a href="{url}">tap here to continue</a>.</p>
   </body>
 </html>
 """
@@ -130,6 +149,10 @@ def _tap_again_page() -> HTMLResponse:
     return HTMLResponse(_TAP_AGAIN_PAGE, status_code=400, headers=CONNECTIONS_HEADERS)
 
 
+def _redeemed_page(callback_url: str) -> HTMLResponse:
+    return HTMLResponse(_REDEEMED_PAGE.format(url=html.escape(callback_url)), headers=CONNECTIONS_HEADERS)
+
+
 @router.post("/start")
 async def start_native_sign_in(body: _NativeStart, request: Request, response: Response) -> _NativeStarted:
     """Return the URL the app opens in the system browser to start signing it in as the token's user."""
@@ -143,22 +166,20 @@ async def start_native_sign_in(body: _NativeStart, request: Request, response: R
 
 
 @router.get("/redeem")
-async def redeem_native_start(request: Request, start: str) -> Response:
+async def redeem_native_start(request: Request, start: str | None = None) -> Response:
     """Mark this browser with a pending cookie and hand the app a nonce to confirm through its callback URL."""
     paths, origin = _paths_and_origin(request)
+    if start is None:
+        return _tap_again_page()
     try:
         started = consume_opaque_oauth_state(paths, kind=_START, token=start)
     except OAuthProviderError:
         return _tap_again_page()
     pending = _issue(paths, _PENDING, user=started["user"], next=started["next"])
     nonce = _issue(paths, _NONCE, user=started["user"], pending=_digest(pending))
-    redirect = RedirectResponse(
-        f"mindroom://connections/confirm?nonce={nonce}",
-        status_code=303,
-        headers=CONNECTIONS_HEADERS,
-    )
-    connections_session.set_portal_cookie(redirect, _pending_cookie(origin), pending, max_age=_STATE_SECONDS)
-    return redirect
+    page = _redeemed_page(f"mindroom://connections/confirm?nonce={nonce}")
+    connections_session.set_portal_cookie(page, _pending_cookie(origin), pending, max_age=_STATE_SECONDS)
+    return page
 
 
 @router.post("/confirm")
@@ -180,9 +201,11 @@ async def confirm_native_sign_in(body: _NativeConfirm, request: Request, respons
 
 
 @router.get("/continue")
-async def continue_native_sign_in(request: Request, confirmed: str) -> Response:
+async def continue_native_sign_in(request: Request, confirmed: str | None = None) -> Response:
     """Start the portal session in the browser holding the confirmed pending cookie, then open `next`."""
     paths, origin = _paths_and_origin(request)
+    if confirmed is None:
+        return _tap_again_page()
     try:
         confirmation = consume_opaque_oauth_state(paths, kind=_CONFIRMED, token=confirmed)
     except OAuthProviderError:
