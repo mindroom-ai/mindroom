@@ -69,7 +69,7 @@ _GUEST_REMOVAL_NOTICE = (
 _AGENT_REMOVAL_REASON = "This room existed before it became a personal room, so other agents can't join"
 _AGENT_REMOVAL_NOTICE = (
     "I removed {agents} because this room existed before it became a personal room, "
-    "and only the agents it already had can stay here. "
+    "and only the agents its personal-room record lists can stay here. "
     "Inviting {pronoun} here again will remove {pronoun} again."
 )
 _AGENT_REMOVAL_ADVICE = " To talk to {agents}, create a new room and invite {pronoun}."

@@ -768,7 +768,7 @@ async def test_an_unattested_agent_is_removed_from_an_imported_room(
     notices = [message["content"]["body"] for message in server.messages.values() if message["room_id"] == room_id]
     assert notices == [
         "I removed @mindroom_blank:localhost, RouterAgent, and Writer because this room existed before it became "
-        "a personal room, and only the agents it already had can stay here. "
+        "a personal room, and only the agents its personal-room record lists can stay here. "
         "Inviting them here again will remove them again. "
         "To talk to @mindroom_blank:localhost and Writer, create a new room and invite them. "
         "To keep RouterAgent here, ask an operator to list it in this room's personal-room record.",
