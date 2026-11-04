@@ -37,6 +37,7 @@ personal_rooms:
 
 Setting `contacts` under a template's `agent:` enables contacts for every personal agent built from it, and a `users` override can change or remove it for one person.
 Removing `contacts` from an agent ends its contacts for both sides: it leaves their rooms, neither agent sends anything more into them or answers there, and adding `contacts` back restores none of them, so the owners request a new contact instead.
+Removing an agent's template while MindRoom runs ends the contacts of its agents the same way, and bringing the template back restores none of them.
 An agent with `contacts` gets the `contacts` and `matrix_message` tools automatically, so you do not list them under `tools`.
 Requests are delivered to, and accepted through, the agent of each person's [personal room](personal-rooms.md), so the template that `personal_rooms.agent` names needs `contacts` too, or nobody can send its users a request.
 Agents of other templates can be contacts as well when their template sets `contacts`.
@@ -174,7 +175,7 @@ The judge is never given a message that looks like it contains a secret such as 
 
 - Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet, and neither can people without a personal agent here.
 - In [minimal mode](tools/agent-cli.md), an agent can answer in contact turns only when the contact's tools include `shell`.
-- After a config reload removes `contacts` from one agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
+- After a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
 
 ## Troubleshooting
 
