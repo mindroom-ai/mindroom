@@ -333,6 +333,7 @@ def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, i
         "email": f"{user}@example.org",
         "is_administrator": is_administrator,
         "egress_enabled": False,
+        "contacts_enabled": False,
         "dashboard_url": "/",
     }
     assert "no-store" in response.headers["cache-control"]
@@ -409,6 +410,13 @@ def test_me_says_whether_agent_keys_are_enabled(portal: dict[str, Any], *, broke
         response = portal["client"].get("/api/connections/me", headers=portal["headers"][user])
         assert response.status_code == 200, response.text
         assert response.json()["egress_enabled"] is broker_on
+
+
+def test_me_says_contacts_are_off_without_an_agent_with_contacts(portal: dict[str, Any]) -> None:
+    """A user who owns no personal agent with contacts gets no Contacts page link."""
+    response = portal["client"].get("/api/connections/me", headers=portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    assert response.json()["contacts_enabled"] is False
 
 
 def test_me_needs_a_signed_identity_and_takes_no_target(portal: dict[str, Any]) -> None:

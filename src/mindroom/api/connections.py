@@ -23,6 +23,7 @@ from mindroom.api.connection_agents import (
 )
 from mindroom.api.egress_credentials import EgressCredentialService, egress_services_for_agent
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.contacts.parties import owner_contact_agents
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.logging_config import get_logger
@@ -31,6 +32,7 @@ from mindroom.matrix.users import create_agent_http_client
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
@@ -136,6 +138,7 @@ class ConnectionsIdentity(BaseModel):
     """Who the Connections pages are open for, and whether the administrator dashboard is open to them too.
 
     `egress_enabled` says whether the egress broker is on, so the pages link the Agent Keys page only then.
+    `contacts_enabled` says whether the user owns a personal agent with contacts, so the pages link the Contacts page.
     `dashboard_url` is where administrators open the dashboard: `MINDROOM_DASHBOARD_URL` when set, else this origin's `/`.
     `display_name` is the user's Matrix display name, or their localpart when the homeserver has none to give.
     """
@@ -145,6 +148,7 @@ class ConnectionsIdentity(BaseModel):
     email: str | None
     is_administrator: bool
     egress_enabled: bool
+    contacts_enabled: bool
     dashboard_url: str
 
 
@@ -383,8 +387,8 @@ async def _matrix_display_name(user_id: str, runtime_paths: RuntimePaths) -> str
 async def me(request: Request, response: Response) -> ConnectionsIdentity:
     """Return the signed-in identity for the Connections pages' header.
 
-    Any signed user gets an answer, with or without agents, so both pages can show
-    "Signed in as", link the dashboard to administrators, and link the Agent Keys page while the broker is on.
+    Any signed user gets an answer, with or without agents, so every page can show "Signed in as", link the dashboard
+    to administrators, link the Agent Keys page while the broker is on, and link the Contacts page to contact owners.
     """
     response.headers.update(CONNECTIONS_HEADERS)
     auth_user = await require_connections_user(request)
@@ -392,12 +396,17 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
         raise HTTPException(400, "Query parameters are not accepted", headers=CONNECTIONS_HEADERS)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     matrix_user_id = auth_user.matrix_user_id
+    config = snapshot.runtime_config
+    contacts_enabled = config is not None and bool(
+        owner_contact_agents(config, resolve_human_requester_alias(matrix_user_id, config, snapshot.runtime_paths)),
+    )
     return ConnectionsIdentity(
         matrix_user_id=matrix_user_id,
         display_name=await _matrix_display_name(matrix_user_id, snapshot.runtime_paths),
         email=auth_user.email,
         is_administrator=is_administrator(matrix_user_id, snapshot),
         egress_enabled=egress_broker_enabled(snapshot.runtime_paths),
+        contacts_enabled=contacts_enabled,
         dashboard_url=dashboard_link(request),
     )
 

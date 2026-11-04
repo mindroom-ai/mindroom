@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.contacts.parties import (
     agent_party,
+    owner_contact_agents,
     party_matrix_ids,
     person_party,
     personal_room_of,
@@ -162,3 +163,13 @@ def test_personal_room_of_is_none_without_personal_rooms(tmp_path: Path) -> None
     """Without the personal_rooms setting, no user has a personal room."""
     config, paths = _setup(tmp_path, contacts={})
     assert personal_room_of(config, paths, OWNER) is None
+
+
+def test_owner_contact_agents_lists_only_the_owners_agents_with_contacts(tmp_path: Path) -> None:
+    """An owner's agents with contacts are listed; another owner's agents and an authored agent with contacts are not."""
+    config, _ = _setup(tmp_path, contacts={})
+    assert owner_contact_agents(config, OWNER) == ["mind_alice"]
+    assert owner_contact_agents(config, CO_OWNER) == ["mind_bob"]
+    assert owner_contact_agents(config, CAROL) == []
+    config, _ = _setup(tmp_path / "off")
+    assert owner_contact_agents(config, OWNER) == []

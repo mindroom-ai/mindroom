@@ -1910,6 +1910,7 @@ depends_on = [
     "mindroom.api.connection_agents",
     "mindroom.api.egress_credentials",
     "mindroom.constants",
+    "mindroom.contacts.parties",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.egress_broker",
     "mindroom.tool_system.plugins",
