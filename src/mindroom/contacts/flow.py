@@ -387,11 +387,6 @@ async def _post_in_thread(
         logger.warning("contact_thread_post_failed", contact_id=record.id, agent_name=agent_name, room_id=room_id)
 
 
-async def _post_to_origin(actor: ContactActor, record: ContactRecord, agent_name: str, body: str) -> None:
-    """Post a notice in the thread a request came from as one agent."""
-    await _post_in_thread(actor, record, agent_name, record.origin_room_id, record.origin_thread_id, body)
-
-
 async def _answer_request_thread(
     actor: ContactActor,
     record: ContactRecord,
@@ -536,10 +531,12 @@ async def _announce_acceptance(actor: ContactActor, record: ContactRecord, agent
     if joined is None or record.origin_room_id not in joined:
         logger.info("contact_acceptance_notice_skipped", contact_id=record.id, agent_name=agent_name)
         return
-    await _post_to_origin(
+    await _post_in_thread(
         actor,
         record,
         agent_name,
+        record.origin_room_id,
+        record.origin_thread_id,
         f"{target} accepted your contact request. The contact room is {record.room_id}.",
     )
 
@@ -657,10 +654,12 @@ async def decline_contact(actor: ContactActor, contact_id: str) -> ContactRecord
     record = await run_blocking_until_complete(update_contacts, actor.runtime_paths, decline)
     # A person who asked has no agent to tell.
     if record.requester.kind == "agent":
-        await _post_to_origin(
+        await _post_in_thread(
             actor,
             record,
             record.requester.id,
+            record.origin_room_id,
+            record.origin_thread_id,
             f"{record.target.owner} declined contact {record.id} with {record.target.id}; "
             "they must remove it before you can ask again.",
         )
