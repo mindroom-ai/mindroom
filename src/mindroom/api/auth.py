@@ -74,6 +74,7 @@ _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _CONNECTIONS_SESSION_FLOW_SCOPE_KEY = "mindroom.connections_session_flow"
 # Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
 _CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
+CONNECTIONS_SIGN_IN_REQUIRED = "Connections sign-in required"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
 _JWT_MAX_BYTES = 16 * 1024
@@ -893,7 +894,7 @@ async def require_connections_user(request: Request) -> SignedMatrixUser:
     else:
         if not _request_auth_state(request).settings.trusted_upstream.enabled:
             # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
-            raise HTTPException(status_code=401, detail="Connections sign-in required")
+            raise HTTPException(status_code=401, detail=CONNECTIONS_SIGN_IN_REQUIRED)
         auth_user = await _require_signed_matrix_user(request, label="Connections")
     page_user = request.headers.get(_CONNECTIONS_USER_HEADER)
     if page_user is not None and page_user != auth_user.matrix_user_id:

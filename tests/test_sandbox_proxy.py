@@ -25,7 +25,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import patch
 
 import httpx
@@ -108,9 +108,11 @@ from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
     agent_workspace_root_path,
+    resolve_unscoped_worker_key,
     resolve_worker_key,
     resolve_worker_target,
     serialize_tool_execution_identity,
+    subagent_worker_key,
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
@@ -120,6 +122,7 @@ from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.compatibility import worker_health_payload
 from mindroom.workers.models import ConfiguredWorkerBackend, WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     ExecuteRequest,
@@ -4816,6 +4819,120 @@ def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypat
     assert route.worker_scope == "user"
     assert worker_handle is ensured_handle
     assert fake_manager.ensure_calls == [expected_worker_key]
+
+
+class _SpecRecordingWorkerManager:
+    """Record each worker spec a route ensures, answering with one ready handle."""
+
+    def __init__(self) -> None:
+        self.specs: list[WorkerSpec] = []
+
+    def ensure_worker(
+        self,
+        spec: WorkerSpec,
+        *,
+        now: float | None = None,
+        progress_sink: object = None,
+    ) -> WorkerHandle:
+        _ = now, progress_sink
+        self.specs.append(spec)
+        return WorkerHandle(
+            worker_id="worker",
+            worker_key=spec.worker_key,
+            endpoint="http://worker:8766/api/sandbox-runner/execute",
+            auth_token=_TEST_AUTH_TOKEN,
+            status="ready",
+            backend_name="kubernetes",
+            last_used_at=10.0,
+            created_at=10.0,
+        )
+
+
+_PLACED_SUBAGENT_ID = "d" * 32
+_PLACED_SESSION_ID = f"delegate:lead:code:{_PLACED_SUBAGENT_ID}"
+
+
+def _placed_identity(session_id: str | None = _PLACED_SESSION_ID) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=session_id,
+    )
+
+
+def _route_for(
+    runtime_paths: RuntimePaths,
+    worker_target: ResolvedWorkerTarget,
+    manager: _SpecRecordingWorkerManager,
+) -> WorkerRoute:
+    route, _handle = sandbox_proxy_module._worker_route(
+        runtime_paths=runtime_paths,
+        runtime_config=None,
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_target=worker_target,
+        worker_manager=cast("WorkerBackend", manager),
+        base_dir=None,
+    )
+    return route
+
+
+def test_placed_session_pins_scoped_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A placed subagent's scoped call ensures its own worker, which serves its normal worker's state."""
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url=None, execution_mode=None)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_backend_kind", lambda _paths: WorkerBackendKind.KUBERNETES)
+    target = _worker_target(runtime_paths, "user_agent", "code", _placed_identity(), private_agent_names=frozenset())
+    assert target.worker_key is not None
+    manager = _SpecRecordingWorkerManager()
+
+    with dedicated_worker_placement(_PLACED_SESSION_ID, DedicatedWorkerPlacement(_PLACED_SUBAGENT_ID, "large")):
+        route = _route_for(runtime_paths, target, manager)
+
+    pinned = subagent_worker_key(target.worker_key, _PLACED_SUBAGENT_ID)
+    assert manager.specs == [
+        WorkerSpec(
+            pinned,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=target.worker_key,
+            resource_profile="large",
+        ),
+    ]
+    assert (route.worker_key, route.worker_scope, route.private_agent_names) == (pinned, "user_agent", [])
+
+
+def test_placed_session_pins_unscoped_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A placed subagent of an agent without a worker scope gets a worker pinned below its unscoped key."""
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url=None, execution_mode=None)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_backend_kind", lambda _paths: WorkerBackendKind.DOCKER)
+    target = _worker_target(runtime_paths, None, "code", _placed_identity())
+    manager = _SpecRecordingWorkerManager()
+    unscoped_key = resolve_unscoped_worker_key("code")
+
+    with dedicated_worker_placement(_PLACED_SESSION_ID, DedicatedWorkerPlacement(_PLACED_SUBAGENT_ID)):
+        route = _route_for(runtime_paths, target, manager)
+
+    pinned = subagent_worker_key(unscoped_key, _PLACED_SUBAGENT_ID)
+    assert manager.specs == [WorkerSpec(pinned, state_scope_worker_key=unscoped_key)]
+    assert (route.worker_key, route.worker_scope) == (pinned, None)
+
+
+def test_unplaced_session_routes_to_its_normal_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another session's placement leaves a call on its normal worker."""
+    runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url=None, execution_mode=None)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_backend_kind", lambda _paths: WorkerBackendKind.KUBERNETES)
+    target = _worker_target(runtime_paths, "shared", "code", _placed_identity(session_id="delegate:lead:code:other"))
+    assert target.worker_key is not None
+    manager = _SpecRecordingWorkerManager()
+
+    with dedicated_worker_placement(_PLACED_SESSION_ID, DedicatedWorkerPlacement(_PLACED_SUBAGENT_ID)):
+        route = _route_for(runtime_paths, target, manager)
+
+    assert manager.specs == [WorkerSpec(target.worker_key)]
+    assert route.worker_key == target.worker_key
 
 
 def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> None:

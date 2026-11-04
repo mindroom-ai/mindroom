@@ -68,7 +68,7 @@ A contact needs an agent on at least one side and two different owners.
 Asking again for a pair that already has a pending or active contact returns that contact instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `update_contact`.
 If the first request's notice never reached the other owner, asking again posts it with the new reason, and the answer comes to the conversation that asked again.
 After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
-Removing a contact makes its agents leave the contact room; the owners keep the room and its history.
+Removing a contact makes its agents leave the contact room and withdraws the invitation of an owner who never joined it; owners who joined keep the room and its history.
 From then on its agents send nothing more into that room, and no message there starts their turns.
 
 ## Configuration
@@ -181,6 +181,7 @@ The judge is never given a message that looks like it contains a secret such as 
 
 - Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet, and neither can people without a personal agent here.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
+- After a config reload removes `contacts` from one agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
 
 ## Troubleshooting
 

@@ -1,5 +1,7 @@
 """The contact operations: request, accept, decline, update, remove, and list.
 
+It also withdraws the stale invitations to a removed contact's room that an agent leaves at a reload or start.
+
 An agent's contacts tools run every operation, and the Connections page runs accept, decline, update, and remove.
 Each runs for a ``ContactActor``: a tool call first checks that the requester owns the agent it runs for, and the
 page acts for its signed-in user; each operation then checks that the owner owns a side of the contact.
@@ -34,6 +36,7 @@ from mindroom.contacts.store import (
     ContactRecord,
     ContactSide,
     SideName,
+    agent_contacts,
     owner_contacts,
     read_contacts,
     update_contacts,
@@ -42,12 +45,12 @@ from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.entity_resolution import current_entity_id
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.client_room_admin import create_room, invite_to_room, kick_from_room
+from mindroom.matrix.client_room_admin import create_room, get_room_members, invite_to_room, kick_from_room
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
 
     import nio
 
@@ -299,9 +302,9 @@ async def request_contact(
     """Record a contact request from ``agent_name`` or its owner ``actor``, asked in ``context``'s thread, and post it.
 
     The flag says whether this call posted a request notice. A pending or active contact between the same two parties,
-    in either direction, is returned unchanged instead, and its request notice is posted when it never landed, with the
-    reason its requester gave last. Asking again with other rules or tools is refused, because only ``update_contact``
-    changes them.
+    in either direction, is returned instead of a new one; a pending one's request notice is posted when it never landed,
+    and a repeat by its requester then replaces its reason and the room and thread its answer goes to. Asking again with other
+    rules or tools is refused, because only ``update_contact`` changes them.
     """
     config, paths = actor.config, actor.runtime_paths
     own = ContactParty(kind="agent", id=agent_name, owner=actor.owner)
@@ -464,7 +467,7 @@ async def _withdraw_owner_invites(
     room_id: str,
     invited: list[str],
 ) -> None:
-    """Withdraw the owners' invitations to an abandoned contact room, so none leads them to a dead room.
+    """Withdraw the owners' invitations among ``invited`` to a contact room its agents leave, so none leads to a dead room.
 
     Only the creating agent, which is still in the room, can withdraw them; invited agents leave on their own.
     A withdrawal that fails or raises is only logged, so the agents still leave.
@@ -482,6 +485,43 @@ async def _withdraw_owner_invites(
                 user_id=user_id,
                 room_id=room_id,
             )
+
+
+async def _withdraw_unjoined_owner_invites(client: nio.AsyncClient, record: ContactRecord, room_id: str) -> None:
+    """Withdraw the invitations of the owners who never joined a removed contact's room, as its creating agent.
+
+    Once its agents leave, such an invitation leads to a room nobody is left to let them into, while owners who joined
+    keep the room and its history. The member list is read again just before each owner's withdrawal, so an owner who
+    joins while the other's invitation is withdrawn stays; one who joins between that read and the withdrawal does not.
+    A member list that cannot be read withdraws nothing for that owner.
+    """
+    for owner in (record.requester.owner, record.target.owner):
+        joined = await get_room_members(client, room_id)
+        if joined is not None and owner not in joined:
+            await _withdraw_owner_invites(client, record, room_id, [owner])
+
+
+async def withdraw_removed_contact_invites(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    leaving: Collection[str],
+) -> None:
+    """Withdraw unjoined owners' invitations to the removed contacts' rooms this agent created and is about to leave.
+
+    An agent leaves such a room on a reload that takes its contacts away, and at its next start when the removal did
+    not make it leave, as when the other agent lost its contacts.
+    """
+    for record, _side in await run_blocking_until_complete(agent_contacts, config, runtime_paths, agent_name):
+        room_id = record.room_id
+        if (
+            room_id is not None
+            and room_id in leaving
+            and record.status == "removed"
+            and _room_creator(record) == agent_name
+        ):
+            await _withdraw_unjoined_owner_invites(client, record, room_id)
 
 
 async def _leave_contact_room(actor: ContactActor, record: ContactRecord, room_id: str) -> None:
@@ -702,7 +742,8 @@ async def update_contact(
 async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
     """Remove a contact for either owner, except that only the owner who declined a contact may remove it.
 
-    The contact's agents leave its room and stop keeping it across restarts.
+    The contact's agents leave its room and stop keeping it across restarts, its creating agent first withdrawing the
+    invitations of owners who never joined; a creator that is not running does so when it leaves at its next start.
     """
 
     def remove(book: ContactBook) -> ContactRecord:
@@ -719,6 +760,9 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
 
     record = await run_blocking_until_complete(update_contacts, actor.runtime_paths, remove)
     if record.room_id is not None:
+        running = _running_bot(actor, _room_creator(record))
+        if running is not None:
+            await _withdraw_unjoined_owner_invites(running[1], record, record.room_id)
         await _leave_contact_room(actor, record, record.room_id)
     return record
 

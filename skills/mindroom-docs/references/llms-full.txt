@@ -1791,6 +1791,7 @@ agents:
 | `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `file` and `coding` also use the agent's [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
+| `dedicated_subagent_workers` | bool | `false` | Let this agent run a subagent in a worker of its own on the Docker or Kubernetes worker backend; see [Dedicated workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports) |
 
 Unset fields that appear in the inheritance table under [Defaults](#defaults) take the `defaults` value; a per-agent value overrides it.
@@ -7309,7 +7310,8 @@ It applies only when MindRoom creates the room, and never joins someone who alre
   Leaving and rejoining an onboarding room re-invites them to their existing personal room, except after a ban or for an adopted room.
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
-  Adopted rooms instead allow only the participants listed in their record, and any other MindRoom agent invited there is removed the same way, because an adopted room may share its earlier history.
+  Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.
+  Any other MindRoom agent invited there is removed with a notice suggesting a new room with that agent, or, for the router, an operator listing it in the room's record.
 - Personal rooms survive restarts and room cleanup, even after `personal_rooms` is removed.
   Disabling the feature stops new onboarding but does not remove existing rooms or access.
 
@@ -7725,7 +7727,7 @@ A contact needs an agent on at least one side and two different owners.
 Asking again for a pair that already has a pending or active contact returns that contact instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `update_contact`.
 If the first request's notice never reached the other owner, asking again posts it with the new reason, and the answer comes to the conversation that asked again.
 After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
-Removing a contact makes its agents leave the contact room; the owners keep the room and its history.
+Removing a contact makes its agents leave the contact room and withdraws the invitation of an owner who never joined it; owners who joined keep the room and its history.
 From then on its agents send nothing more into that room, and no message there starts their turns.
 
 ## Configuration
@@ -7838,6 +7840,7 @@ The judge is never given a message that looks like it contains a secret such as 
 
 - Agents of another MindRoom deployment, on this homeserver or another one, cannot be contacted yet, and neither can people without a personal agent here.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
+- After a config reload removes `contacts` from one agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
 
 ## Troubleshooting
 
@@ -14696,6 +14699,8 @@ run_subagent(
     skills: list[str] | None = None,
     knowledge: list[str] | None = None,
     profile: str | None = None,
+    dedicated_worker: bool = False,
+    resource_profile: Literal["small", "standard", "large"] | None = None,
 ) -> str
 continue_subagent(subagent_id: str, message: str) -> str
 ```
@@ -14705,6 +14710,7 @@ Include the relevant facts, constraints, and expected output in `task`, because 
 Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
 Set `model` to an alias from `models:` to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
 Set `minimal=True` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), which saves tokens when the child does not need its full system prompt.
+Set `dedicated_worker=True` to run the child's worker tools in a worker of its own; see [Dedicated Workers](#dedicated-workers).
 The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
 Delegated runs do not create a Matrix thread and cannot ask the user interactive questions.
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
@@ -14742,6 +14748,42 @@ Common errors:
 - `Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up.` - the child's previous turn has not finished.
 - `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a workflow participant, whose tools work only inside its run.
 - `Cannot delegate an empty task. Please provide a task description.` - `task` or `message` is empty.
+
+### Dedicated Workers
+
+With the Docker or Kubernetes worker backend, a subagent can run its worker tools, such as `shell`, `python`, and `file`, in a worker of its own instead of the worker it shares with its agent's other subagents.
+Use it when an agent runs several subagents at once or a subagent does heavy work, so they do not compete for one worker's CPU and memory.
+Set `dedicated_subagent_workers: true` on the calling agent; MindRoom then offers `dedicated_worker` and, on Kubernetes, `resource_profile` in its `run_subagent`.
+The runtime must also run idle-worker cleanup, because every such subagent gets a new worker: the API server runs it when `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is above 0, which both Helm charts set, so `mindroom run --no-api` offers no dedicated workers.
+
+```yaml
+agents:
+  lead:
+    display_name: Lead
+    delegate_to: [lead]
+    dedicated_subagent_workers: true
+    worker_tools: [shell, file, python]
+```
+
+```python
+run_subagent(task="Build the parser branch and run its tests.", dedicated_worker=True, resource_profile="large")
+```
+
+`resource_profile` is `small`, `standard`, or `large`, the [background script profiles](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings); omitting it gives the worker the normal worker resources.
+The worker sees the same workspace, shared directories, and knowledge as the subagent's normal worker, with the same file access, leased tool settings, and shared credentials.
+Credentials and settings saved in the normal worker's own credential store and packages installed into its environment are not there, so a subagent that needs extra packages installs them again or uses a virtual environment in the workspace.
+The subagent's first worker call waits for the new worker to start, and `continue_subagent` follow-ups use the same worker while it exists.
+The worker is removed once it has been idle for the worker idle timeout, also while the subagent waits for an approval (`MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` or `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`, 30 minutes by default), which stops any process the subagent left running there; a later follow-up starts a new one.
+If the calling agent loses the setting or the backend stops supporting dedicated workers, the subagent's next attempt, including a call it resumes after an approval, uses its normal worker.
+A [background script](https://docs.mindroom.chat/tools/background-scripts/) the subagent starts calls its tools on the subagent's normal worker, because it outlives the subagent's turn.
+MindRoom Chat's Computer panel for [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) shows the agent's normal worker, never a subagent's dedicated one.
+
+Errors:
+
+- `Cannot delegate: <caller> may not run subagents in dedicated workers.` - the calling agent does not set `dedicated_subagent_workers: true`.
+- `Cannot delegate: dedicated workers need the docker or kubernetes worker backend and idle-worker cleanup, which the API server runs when MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS is above 0.` - use a dedicated worker backend, run the API server, and set the cleanup interval.
+- `Cannot delegate: resource_profile requires dedicated_worker=true.` - a profile sizes only a dedicated worker.
+- `Cannot delegate: resource_profile requires the kubernetes worker backend.` - Docker workers have no resource profiles.
 
 ### Authored Subagents
 
@@ -16357,7 +16399,10 @@ An agent's connect and reset links, which it posts when a tool needs an account,
 The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
 Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
 
-When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity, or asks the user to open Connections from Chat.
+When the window that opened the portal does not answer within five seconds, such as a page that only linked to it, the portal does not trust the browser's existing session, which may belong to another account than Chat's: it goes to Chat's sign-in page described below, and without one shows its message, which a later answer from Chat still replaces with the signed-in portal.
+When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity.
+Without a session or upstream identity, it sends the browser to `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, so list the Chat origin people use first: Chat keeps its login per origin.
+When that Chat has this backend as its only backend, it signs the user in there and opens the portal again; a browser that comes back still signed out gets a link to that page instead, and without such an origin the portal asks the user to open Connections from Chat.
 If two Connections tabs, on any of its pages, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 
 ## From The iOS App
@@ -16413,7 +16458,7 @@ Without that mapping, when trusted upstream auth is enabled with `MINDROOM_TRUST
 The session lasts one hour.
 A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication, and every API route stays protected; API requests without a valid sign-in return `401`.
-`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
+`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in; the signed-in answer and the `Connections sign-in required` 401 carry `sign_in_url`, naming that Chat page, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists a web origin.
 
 Apart from the dashboard rule below, a session authenticates only these paths:
 
@@ -16881,7 +16926,8 @@ The model sees the effective file access and the unconfined tools in its tool ex
 ## Connections portal sign-in
 
 This section holds the mechanics behind [opening Connections from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat).
-The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to 30 seconds.
+The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to five seconds; without an answer it signs in through Chat's page below rather than trusting the browser's existing session, which may belong to another account, and while it shows its message instead, an answer that arrives later still signs in.
+That page, also where a signed-out direct visit goes, is the `sign_in_url` that `GET /api/connections/session` names, `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which comes only from configuration; the portal never sends the same tab there twice in a row, and links to it the second time instead.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.
@@ -19339,6 +19385,7 @@ Forward these paths to the MindRoom API:
 | `/mcp/oauth/.well-known/oauth-authorization-server` | Compatibility discovery alias |
 
 Browser consent lives at `/connections/mcp/authorize`, inside the authenticated browser prefix, so keep it out of any other frontend's service-worker navigation fallback.
+A browser that reaches it without a Connections session gets a page asking the person to sign in to Connections, for example by opening Connections from MindRoom Chat, and reload; other refusals are pages too.
 Machine endpoints must receive MCP and OAuth responses, not an access proxy's HTML login page.
 Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers.
 Forward the exact `/mcp` path without adding a trailing slash.
@@ -20050,7 +20097,7 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.namePrefix` | `MINDROOM_KUBERNETES_WORKER_NAME_PREFIX` | `mindroom-worker` | Prefix for worker resource names |
 | `workers.kubernetes.runtimeClassName` | `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME` | Cluster default | RuntimeClass for all dedicated workers, including background-script workers |
 | `workers.kubernetes.resources` | `MINDROOM_KUBERNETES_WORKER_CPU_REQUEST`, `_CPU_LIMIT`, `_MEMORY_REQUEST`, `_MEMORY_LIMIT` | `100m`, `500m`, `256Mi`, `1Gi` | Worker container resources |
-| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required |
+| `workers.kubernetes.scriptResources` | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE`, `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | `small`; profiles in `values.yaml` | The `small`, `standard`, and `large` [background script](https://docs.mindroom.chat/tools/background-scripts/) resource profiles, all three required; a [dedicated subagent worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) that names a profile uses it too |
 | `workers.kubernetes.nodeName`, `colocateWithControlPlaneNode` | `MINDROOM_KUBERNETES_WORKER_NODE_NAME`, `MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE` | Unset, `false` | Pin workers to one node (see [Storage Requirements](#storage-requirements)) |
 | `workers.kubernetes.extraEnv` | `MINDROOM_KUBERNETES_WORKER_ENV_JSON` | `{}` | Extra environment variables for worker pods |
 | _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` | `1Gi` | Size of each worker's `/tmp` |
@@ -21715,7 +21762,9 @@ Who a grant covers depends on the agent's effective [worker scope](https://docs.
 |---|---|
 | `user_agent` | The requester's own worker for that agent |
 | `shared` or unset | That agent's worker |
-| `user` | Not supported; the request fails with `approved egress is not supported for worker_scope=user` |
+| `user` | Not supported, except from a subagent's dedicated worker; the request fails with `approved egress is not supported for worker_scope=user` |
+
+A grant that a subagent running in a [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope, and grants made for the agent or its normal worker do not apply there, so the subagent requests its own.
 
 ### Temporary Full Access
 
@@ -22579,7 +22628,7 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 |-------|---------|
 | `worker` | The worker's log ID, the hash other worker logs name it by and the end of its state directory name |
 | `backend` | `kubernetes` or `docker` |
-| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, otherwise `tool` |
+| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, otherwise `tool` |
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |

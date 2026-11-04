@@ -66,6 +66,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "context_files",
         "created_agents_per_owner",
         "credential_managers",
+        "dedicated_subagent_workers",
         "delegate_to",
         "file_access",
         "include_default_tools",

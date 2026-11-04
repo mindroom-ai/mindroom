@@ -96,6 +96,7 @@ Forward these paths to the MindRoom API:
 | `/mcp/oauth/.well-known/oauth-authorization-server` | Compatibility discovery alias |
 
 Browser consent lives at `/connections/mcp/authorize`, inside the authenticated browser prefix, so keep it out of any other frontend's service-worker navigation fallback.
+A browser that reaches it without a Connections session gets a page asking the person to sign in to Connections, for example by opening Connections from MindRoom Chat, and reload; other refusals are pages too.
 Machine endpoints must receive MCP and OAuth responses, not an access proxy's HTML login page.
 Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers.
 Forward the exact `/mcp` path without adding a trailing slash.

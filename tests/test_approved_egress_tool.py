@@ -17,9 +17,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
+from mindroom.egress.policy import EgressGrantSubject
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, subagent_worker_key
 from mindroom.tools import approved_egress as approved_egress_module
+from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from tests.agent_tool_helpers import blocking_entrypoint, toolkit_offers
 
 if TYPE_CHECKING:
@@ -282,6 +286,7 @@ def test_request_network_access_posts_worker_key_grant(
 
     context = SimpleNamespace(
         agent_name="assistant",
+        session_id=None,
         room_id="!room:server",
         resolved_thread_id=None,
         thread_id="$thread",
@@ -326,6 +331,53 @@ def test_request_network_access_posts_worker_key_grant(
         "thread_id": "$thread",
         "ttl_seconds": 300,
     }
+
+
+@pytest.mark.parametrize(
+    ("worker_scope", "normal_key"),
+    [
+        ("shared", "v1:default:shared:assistant"),
+        (None, "v1:default:unscoped:assistant"),
+        ("user", "v1:default:user:~@user:server"),
+        ("user_agent", "v1:default:user_agent:~@user:server:assistant"),
+    ],
+)
+def test_a_subagent_with_its_own_worker_is_granted_access_for_that_worker(
+    tmp_path: Path,
+    worker_scope: str | None,
+    normal_key: str,
+) -> None:
+    """The proxy knows a subagent's own worker by its key, so its grant names that key instead of its agent."""
+    subagent_id = "a" * 32
+    session_id = f"delegate:assistant:assistant:{subagent_id}"
+    config = Config(agents={"assistant": AgentConfig(display_name="Assistant", worker_scope=worker_scope)})
+    identity = ToolExecutionIdentity("matrix", "assistant", "@user:server", "!room:server", None, None, session_id)
+    runtime_paths = _runtime_paths(tmp_path)
+    context = SimpleNamespace(
+        agent_name="assistant",
+        session_id=session_id,
+        config=config,
+        execution_identity=identity,
+        runtime_paths=runtime_paths,
+        # As ToolRuntimeContext.resolve_worker_target resolves it for an agent dispatch.
+        resolve_worker_target=lambda: (
+            resolve_agent_execution("assistant", config, runtime_paths, identity).worker_target
+        ),
+    )
+
+    with dedicated_worker_placement(session_id, DedicatedWorkerPlacement(subagent_id)):
+        subject = approved_egress_module._grant_subject(context)
+
+    assert subject == EgressGrantSubject(
+        subject_type="worker_key",
+        subject=subagent_worker_key(normal_key, subagent_id),
+    )
+    # Outside the subagent's attempt the agent's own rule applies, which refuses a user-scope worker.
+    if worker_scope == "user":
+        with pytest.raises(RuntimeError, match="not supported for worker_scope=user"):
+            approved_egress_module._grant_subject(context)
+    else:
+        assert approved_egress_module._grant_subject(context) != subject
 
 
 def test_a_bare_run_reads_the_policy_settings_from_the_env_file(
@@ -470,6 +522,7 @@ def _shared_worker_context() -> SimpleNamespace:
     )
     return SimpleNamespace(
         agent_name="assistant",
+        session_id=None,
         room_id="!room:server",
         resolved_thread_id=None,
         thread_id="$thread",

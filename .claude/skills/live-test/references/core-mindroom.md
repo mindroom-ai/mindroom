@@ -328,6 +328,28 @@ If `matty threads` looks empty or flaky, use `matty messages --format json` to d
 - Give background commands absolute paths, including `nix-shell /abs/path/shell.nix`; a leading `cd` is not always applied to a backgrounded command.
 - A Stop or other reaction whose handler keeps failing stays pending and blocks every later event of that agent in the room; check `pending_event_failed` in the log when an agent stops answering.
 
+## Helper Scripts and Run Records
+
+The standard-library scripts in `scripts/` run from the repo root as `uv run python .claude/skills/live-test/scripts/<name>.py`; `--help` shows their options.
+
+- `approval_cards.py list|wait|approve "$room_id"` lists a room's tool-approval cards with their current status, waits for a pending one, or approves one with `✅`, as the account whose token is in `LIVE_TEST_ACCESS_TOKEN`; only the card's approver can approve it.
+  A card is an `io.mindroom.tool_approval` event from the router, not an `m.room.message`, with `tool_name`, `arguments`, `agent_name`, `approver_user_id`, `thread_id`, and `status: pending`; each status change is an `m.replace` edit of the same type whose `m.new_content.status` is `approved`, `denied`, or `expired`.
+- `llm_requests.py` summarizes the request log that `debug.log_llm_requests: true` writes: each request's time, agent, room, thread, requester, and offered tools, with `--grep` and `--show` to search the bodies.
+- `wait_for.py` polls a URL, or a log regex after a byte offset, instead of a guessed `sleep`; anchor `--fail-regex` on the level, such as `\[error`, because a bare `invalid` also matches `agent_reply_memberships_invalidated`.
+
+The backend log and `mindroom_data/tracking/tool_calls.jsonl`, which records every tool call with its sanitized arguments and result, use UTC with a `Z` suffix.
+The LLM request log `mindroom_data/logs/llm_requests/llm-requests-YYYY-MM-DD.jsonl` uses local time with an offset and names its files by local date, so compare parsed times, not strings; `llm_requests.py` prints UTC.
+Before each scenario, note `date -u +%Y-%m-%dT%H:%M:%S` and the backend log's byte size (`stat -c %s`), so later reads and waits start there.
+
+Gotchas:
+
+- In zsh, an unquoted `$var` holding several words stays one argument; write `${=var}` to split it.
+- Approving two cards from parallel threads at once reaches race paths that one card at a time never does.
+- Changing `personal_rooms.agent` collides on the personal-room aliases unless `personal_rooms.alias_prefix` changes too.
+- Changing a plugin's entry in `config.yaml`, its settings included, restarts every bot.
+- A user must join a room before the client API reads its timeline; an invitation is not enough.
+- `docker logs mindroom-synapse 2>&1 | grep /typing/` shows whether anything sent typing notices.
+
 ## Live API Checks
 
 When a change affects the bundled API, hit the live endpoint on the instance you started instead of testing a different local server by accident.

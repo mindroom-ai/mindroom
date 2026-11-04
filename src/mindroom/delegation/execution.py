@@ -1015,6 +1015,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             parent_tool_call_id=tool.tool_call_id,
             parent_requirement_id=pause_id,
             persona=target.persona,
+            dedicated_worker=target.dedicated_worker,
+            worker_resource_profile=target.resource_profile,
         )
         state.children.append(child)
     # The liveness claim spans the child's run and its settlement, so recovery never takes the child mid-failure.

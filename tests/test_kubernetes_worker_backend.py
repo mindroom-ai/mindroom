@@ -42,6 +42,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    subagent_worker_key,
     worker_dir_name,
     worker_id_for_key,
     worker_log_id,
@@ -3395,6 +3396,40 @@ def test_kubernetes_script_worker_mounts_the_owning_private_workspace(tmp_path: 
     assert f"private_instances/{worker_dir_name(worker_key)}/mind" not in set(mount_paths.values())
 
 
+def test_kubernetes_subagent_worker_mounts_its_normal_workers_private_workspace(tmp_path: Path) -> None:
+    """A subagent's own worker mounts the private workspace of its normal worker, and its own worker root."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    state_scope_worker_key = "v1:tenant-123:user_agent:~@alice:localhost:mind"
+    worker_key = subagent_worker_key(state_scope_worker_key, "b" * 32)
+    _materialize_private_workspace(backend.storage_root, state_scope_worker_key, "@alice:localhost")
+
+    backend.ensure_worker(
+        _spec(
+            worker_key,
+            private_agent_names=frozenset({"mind"}),
+            state_scope_worker_key=state_scope_worker_key,
+            resource_profile="large",
+        ),
+        now=10.0,
+    )
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in container["volumeMounts"]}
+    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(state_scope_worker_key)}"
+    expected_private_subpath = f"private_instances/{worker_dir_name(state_scope_worker_key)}"
+
+    assert {path: subpath for path, subpath in mount_paths.items() if "private_instances" in path} == {
+        f"{expected_private_root}/mind/mind_data": f"{expected_private_subpath}/mind/mind_data",
+    }
+    assert mount_paths[f"/app/worker/workers/{worker_dir_name(worker_key)}"] == f"workers/{worker_dir_name(worker_key)}"
+    assert container["resources"] == backend.config.script_resource_profiles["large"]
+
+
 def test_kubernetes_script_worker_rejects_an_unrelated_state_scope() -> None:
     """A worker spec cannot use the state-scope field to mount another identity's files."""
     backend, apps_api, _core_api = _backend()
@@ -3746,6 +3781,182 @@ def test_kubernetes_backend_unready_workers_respect_idle_expiry(stored_status: s
         assert deployment.spec.replicas == 1
         assert handle.worker_id in core_api.services
         assert handle.worker_id in core_api.secrets
+
+
+def _expire(apps_api: _FakeAppsApi, worker_id: str, *, replicas: int) -> None:
+    deployment = apps_api.deployments[worker_id]
+    deployment.metadata.annotations["mindroom.ai/last-used-at"] = "0.0"
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "ready" if replicas else "idle"
+    deployment.spec.replicas = replicas
+
+
+@pytest.mark.parametrize("replicas", [1, 0], ids=["running", "scaled-down"])
+def test_kubernetes_cleanup_removes_an_expired_subagent_worker(tmp_path: Path, replicas: int) -> None:
+    """A subagent's own worker idle past the timeout is removed with its state, while normal and script workers stay."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    base_key = "v1:test:user_agent:@alice:example.test:watcher"
+    script_key = script_worker_key_for_run(base_key, f"script-{'c' * 32}")
+    subagent_key = subagent_worker_key(base_key, "d" * 32)
+    handles = {
+        key: backend.ensure_worker(
+            _spec(key, private_agent_names=frozenset(), state_scope_worker_key=None if key == base_key else base_key),
+            now=0.0,
+        )
+        for key in (base_key, script_key, subagent_key)
+    }
+    for key, handle in handles.items():
+        _expire(apps_api, handle.worker_id, replicas=replicas if key == subagent_key else 1)
+    subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
+
+    subagent_id = handles[subagent_key].worker_id
+    cleaned = backend.cleanup_idle_workers(now=10.0)
+    if replicas:
+        # A running one is scaled down like any idle worker first, and removed on the next pass.
+        assert {handle.worker_key for handle in cleaned} == {base_key, script_key, subagent_key}
+        assert apps_api.deployments[subagent_id].spec.replicas == 0
+        assert subagent_root.is_dir()
+        cleaned = backend.cleanup_idle_workers(now=11.0)
+        assert {handle.worker_key for handle in cleaned} == {subagent_key}
+    else:
+        assert {handle.worker_key for handle in cleaned} == {base_key, script_key, subagent_key}
+
+    assert subagent_id not in apps_api.deployments
+    assert subagent_id not in core_api.services
+    assert subagent_id not in core_api.secrets
+    assert subagent_root.exists() is False
+    for key in (base_key, script_key):
+        assert apps_api.deployments[handles[key].worker_id].spec.replicas == 0
+        assert (backend.storage_root / backend._state_subpath(key)).is_dir()
+
+
+def test_kubernetes_cleanup_goes_on_when_a_subagent_worker_cannot_be_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subagent worker whose removal fails stays for the next pass, and the pass still scales other workers down."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    normal = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
+    _expire(apps_api, subagent.worker_id, replicas=0)
+    _expire(apps_api, normal.worker_id, replicas=1)
+
+    def fail(worker_key: str) -> None:
+        msg = f"cannot remove {worker_key}"
+        raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(backend, "_retire_worker_locked", fail)
+    with capture_logs() as logs:
+        cleaned = backend.cleanup_idle_workers(now=10.0)
+
+    assert [handle.worker_key for handle in cleaned] == [_TEST_SCOPED_WORKER_KEY_B]
+    assert apps_api.deployments[normal.worker_id].spec.replicas == 0
+    assert subagent.worker_id in apps_api.deployments
+    assert [entry["worker"] for entry in logs if entry["event"] == "subagent_worker_retire_failed"] == [
+        worker_log_id(subagent_key),
+    ]
+
+
+def test_kubernetes_cleanup_retries_a_subagent_worker_whose_removal_failed_midway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A removal the cluster refuses midway keeps the Deployment, the pass goes on, and the next pass removes the rest."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    _expire(apps_api, subagent.worker_id, replicas=0)
+    subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
+    normal = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
+    _expire(apps_api, normal.worker_id, replicas=1)
+    delete_secret = backend._resources.delete_secret
+
+    def unavailable_once(secret_name: str) -> None:
+        # The cluster answers 503 once, as an API server under load does, after the Service is already gone.
+        monkeypatch.setattr(backend._resources, "delete_secret", delete_secret)
+        del secret_name
+        raise _FakeApiError(503)
+
+    monkeypatch.setattr(backend._resources, "delete_secret", unavailable_once)
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [_TEST_SCOPED_WORKER_KEY_B]
+    assert apps_api.deployments[normal.worker_id].spec.replicas == 0
+    assert subagent.worker_id in apps_api.deployments
+    assert subagent_root.is_dir()
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=11.0)] == [subagent_key]
+    assert subagent.worker_id not in apps_api.deployments
+    assert subagent_root.exists() is False
+
+
+def test_kubernetes_cleanup_stops_then_removes_a_failed_subagent_worker(tmp_path: Path) -> None:
+    """A subagent worker whose start failed is stopped once expired and removed on the next pass."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    deployment = apps_api.deployments[subagent.worker_id]
+    deployment.metadata.annotations["mindroom.ai/last-used-at"] = "0.0"
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "failed"
+
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [subagent_key]
+    assert apps_api.deployments[subagent.worker_id].spec.replicas == 0
+    assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=11.0)] == [subagent_key]
+    assert subagent.worker_id not in apps_api.deployments
+
+
+def test_kubernetes_cleanup_removes_a_subagent_worker_with_read_only_directories(tmp_path: Path) -> None:
+    """Read-only directories a tool left in a worker's files, such as Go's module cache, do not block its removal."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    subagent = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    _expire(apps_api, subagent.worker_id, replicas=0)
+    locked = backend.storage_root / backend._state_subpath(subagent_key) / "cache" / "readonly"
+    locked.mkdir(parents=True)
+    (locked / "module.go").write_text("package m\n", encoding="utf-8")
+    locked.chmod(0o555)
+    subagent_root = backend.storage_root / backend._state_subpath(subagent_key)
+    try:
+        assert [handle.worker_key for handle in backend.cleanup_idle_workers(now=10.0)] == [subagent_key]
+    finally:
+        if locked.exists():
+            locked.chmod(0o755)
+
+    assert subagent.worker_id not in apps_api.deployments
+    assert subagent_root.exists() is False
+
+
+def test_kubernetes_cleanup_keeps_a_subagent_worker_inside_the_idle_timeout(tmp_path: Path) -> None:
+    """A subagent's own worker used within the idle timeout keeps running."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, idle_timeout_seconds=5.0)
+    subagent_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "d" * 32)
+    handle = backend.ensure_worker(_spec(subagent_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=6.0)
+
+    assert backend.cleanup_idle_workers(now=10.0) == []
+    assert apps_api.deployments[handle.worker_id].spec.replicas == 1
 
 
 def test_kubernetes_backend_cleanup_skips_locked_worker() -> None:
@@ -5027,6 +5238,19 @@ def test_kubernetes_backend_logs_a_script_worker_cold_start_as_script() -> None:
 
     [record] = _cold_start_records(logs)
     assert (record["kind"], record["scope"], record["agent_name"]) == ("script", "user_agent", "code")
+    assert record["worker"] == worker_log_id(worker_key)
+
+
+def test_kubernetes_backend_logs_a_subagent_worker_cold_start_as_subagent() -> None:
+    """A subagent's own worker logs its start as ``subagent`` with its normal worker's scope and agent."""
+    backend, _apps_api, _core_api = _backend()
+    worker_key = subagent_worker_key(_TEST_SCOPED_WORKER_KEY_A, "c" * 32)
+
+    with capture_logs() as logs:
+        backend.ensure_worker(_spec(worker_key, state_scope_worker_key=_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    [record] = _cold_start_records(logs)
+    assert (record["kind"], record["scope"], record["agent_name"]) == ("subagent", "shared", "code")
     assert record["worker"] == worker_log_id(worker_key)
 
 

@@ -46,7 +46,10 @@ _OWNER = ToolExecutionIdentity(
     resolved_thread_id="$thread",
     session_id="parent-session",
 )
-_CHILD_FIELDS = {field.name for field in fields(DelegationChild)}
+# Fields `DelegationChild` itself defaults for snapshots stored before them (see its LEGACY_COMPAT marker); the rewrite
+# leaves them out, and every reader takes these values for them.
+_MODEL_DEFAULTED_CHILD_FIELDS: dict[str, object] = {"dedicated_worker": False, "worker_resource_profile": None}
+_CHILD_FIELDS = {field.name for field in fields(DelegationChild)} - set(_MODEL_DEFAULTED_CHILD_FIELDS)
 _PAUSED_NOTICE = "I have tools to execute, but I need confirmation."
 _PERSONA_FIELDS = {field.name for field in fields(SubagentPersona)}
 
@@ -109,6 +112,8 @@ def _run_state(paths: RuntimePaths) -> dict[str, Any]:
 def _view(child: DelegationChild) -> dict[str, Any]:
     """Every value a reader takes from ``child``, as the fixtures' views record it."""
     seen = asdict(child)
+    for name, default in _MODEL_DEFAULTED_CHILD_FIELDS.items():
+        assert seen.pop(name) == default
     if child.persona is not None:
         seen["persona"] |= {"kept_skills": child.persona.kept_skills, "kept_knowledge": child.persona.kept_knowledge}
     return json.loads(json.dumps(seen))

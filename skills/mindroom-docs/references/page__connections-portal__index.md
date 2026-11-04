@@ -26,7 +26,10 @@ An agent's connect and reset links, which it posts when a tool needs an account,
 The portal opens only `/api/oauth/<provider>/authorize` and `/api/oauth/<provider>/reset` links on its own origin.
 Opened outside Chat, a link works in a browser that still holds that requester's session, and otherwise asks for the dashboard login.
 
-When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity, or asks the user to open Connections from Chat.
+When the window that opened the portal does not answer within five seconds, such as a page that only linked to it, the portal does not trust the browser's existing session, which may belong to another account than Chat's: it goes to Chat's sign-in page described below, and without one shows its message, which a later answer from Chat still replaces with the signed-in portal.
+When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) identity.
+Without a session or upstream identity, it sends the browser to `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, so list the Chat origin people use first: Chat keeps its login per origin.
+When that Chat has this backend as its only backend, it signs the user in there and opens the portal again; a browser that comes back still signed out gets a link to that page instead, and without such an origin the portal asks the user to open Connections from Chat.
 If two Connections tabs, on any of its pages, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 
 ## From The iOS App
@@ -82,7 +85,7 @@ Without that mapping, when trusted upstream auth is enabled with `MINDROOM_TRUST
 The session lasts one hour.
 A restart signs everyone out; opening Connections from Chat again signs the user in again.
 The portal shell at `/connections` is served without authentication, and every API route stays protected; API requests without a valid sign-in return `401`.
-`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in.
+`GET /api/connections/session` returns the signed-in Matrix ID, or `401` without a sign-in; the signed-in answer and the `Connections sign-in required` 401 carry `sign_in_url`, naming that Chat page, when `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists a web origin.
 
 Apart from the dashboard rule below, a session authenticates only these paths:
 

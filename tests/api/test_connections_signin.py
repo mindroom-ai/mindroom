@@ -410,7 +410,7 @@ def test_session_reads_catalog_as_matrix_user(signin: dict[str, Any]) -> None:
     assert client.get("/api/connections").status_code == 401
     anonymous = client.get("/api/connections/session")
     assert anonymous.status_code == 401
-    assert anonymous.json() == {"detail": "Connections sign-in required"}
+    assert anonymous.json() == {"detail": "Connections sign-in required", "sign_in_url": f"{CHAT_ORIGIN}/connections"}
     assert "no-store" in anonymous.headers["cache-control"]
     assert anonymous.headers["referrer-policy"] == "no-referrer"
 
@@ -420,9 +420,41 @@ def test_session_reads_catalog_as_matrix_user(signin: dict[str, Any]) -> None:
     assert catalog.json()["agents"][0]["agent_display_name"] == "Personal Mind"
     session = client.get("/api/connections/session")
     assert session.status_code == 200
-    assert session.json() == {"matrix_user_id": "@alice:example.org"}
+    # Named when signed in too: a portal Chat opened but that never got Chat's answer signs in through that page.
+    assert session.json() == {"matrix_user_id": "@alice:example.org", "sign_in_url": f"{CHAT_ORIGIN}/connections"}
     assert "no-store" in session.headers["cache-control"]
     assert session.headers["referrer-policy"] == "no-referrer"
+
+
+def test_signed_out_probe_names_the_first_listed_web_chat(signin: dict[str, Any]) -> None:
+    """The portal sends signed-out visitors to /connections on the first web MindRoom Chat the operator lists."""
+    _serve(
+        signin,
+        MINDROOM_CONNECTIONS_ALLOWED_ORIGINS=f'["capacitor://localhost", "{CHAT_ORIGIN}", "https://other-chat.example.org"]',
+    )
+    anonymous = signin["client"].get("/api/connections/session")
+    assert anonymous.status_code == 401
+    assert anonymous.json()["sign_in_url"] == f"{CHAT_ORIGIN}/connections"
+    assert "no-store" in anonymous.headers["cache-control"]
+
+
+@pytest.mark.parametrize("origins", [None, "[]", '["capacitor://localhost"]', "not json"])
+def test_signed_out_probe_names_no_chat_without_a_listed_web_chat(signin: dict[str, Any], origins: str | None) -> None:
+    """Without a listed web Chat, the portal cannot know which Chat signs people in, so it names none."""
+    env = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": origins} if origins is not None else {}
+    paths = replace(
+        signin["paths"],
+        process_env={
+            **{k: v for k, v in signin["paths"].process_env.items() if k != "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS"},
+            **env,
+        },
+    )
+    main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, signin["payload"])
+    anonymous = signin["client"].get("/api/connections/session")
+    assert anonymous.status_code == 401
+    assert anonymous.json() == {"detail": "Connections sign-in required"}
 
 
 def test_portal_needs_no_connections_agent(signin: dict[str, Any]) -> None:
@@ -430,7 +462,7 @@ def test_portal_needs_no_connections_agent(signin: dict[str, Any]) -> None:
     _serve(signin, MINDROOM_CONNECTIONS_AGENT="")
     client = signin["client"]
     assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
+    assert client.get("/api/connections/session").json()["matrix_user_id"] == "@alice:example.org"
     assert [agent["agent_name"] for agent in client.get("/api/connections").json()["agents"]] == ["personal"]
     assert client.get("/api/oauth/google_drive/success").status_code == 200
     _connect_state(client)
@@ -700,7 +732,7 @@ def test_session_cookie_ignored_for_admin_on_dashboard_routes(
     client, upstream = _serve_with_trusted_upstream(signin, monkeypatch, payload)
 
     assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
+    assert client.get("/api/connections/session").json()["matrix_user_id"] == "@alice:example.org"
     assert client.get(_DASHBOARD_ROUTE).status_code == 401
     assert client.get(_DASHBOARD_ROUTE, headers=upstream("alice")).status_code == 200
 
@@ -722,7 +754,18 @@ def test_upstream_identity_refuses_a_page_showing_another_account(
         "/api/connections/session",
         headers={**upstream("bob"), "X-MindRoom-Connections-User": "@bob:example.org"},
     )
-    assert matching.json() == {"matrix_user_id": "@bob:example.org"}
+    assert matching.json()["matrix_user_id"] == "@bob:example.org"
+
+
+def test_trusted_upstream_signed_out_probe_names_no_chat(
+    signin: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behind a trusted upstream, a request without its identity is the upstream's to sign in, not Chat's."""
+    client, _upstream = _serve_with_trusted_upstream(signin, monkeypatch, signin["payload"])
+    anonymous = client.get("/api/connections/session")
+    assert anonymous.status_code == 401
+    assert "sign_in_url" not in anonymous.json()
 
 
 def test_expired_session_is_rejected(signin: dict[str, Any]) -> None:
