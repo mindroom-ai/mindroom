@@ -420,7 +420,8 @@ def test_session_reads_catalog_as_matrix_user(signin: dict[str, Any]) -> None:
     assert catalog.json()["agents"][0]["agent_display_name"] == "Personal Mind"
     session = client.get("/api/connections/session")
     assert session.status_code == 200
-    assert session.json() == {"matrix_user_id": "@alice:example.org"}
+    # Named when signed in too: a portal Chat opened but that never got Chat's answer signs in through that page.
+    assert session.json() == {"matrix_user_id": "@alice:example.org", "sign_in_url": f"{CHAT_ORIGIN}/connections"}
     assert "no-store" in session.headers["cache-control"]
     assert session.headers["referrer-policy"] == "no-referrer"
 
@@ -461,7 +462,7 @@ def test_portal_needs_no_connections_agent(signin: dict[str, Any]) -> None:
     _serve(signin, MINDROOM_CONNECTIONS_AGENT="")
     client = signin["client"]
     assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
+    assert client.get("/api/connections/session").json()["matrix_user_id"] == "@alice:example.org"
     assert [agent["agent_name"] for agent in client.get("/api/connections").json()["agents"]] == ["personal"]
     assert client.get("/api/oauth/google_drive/success").status_code == 200
     _connect_state(client)
@@ -731,7 +732,7 @@ def test_session_cookie_ignored_for_admin_on_dashboard_routes(
     client, upstream = _serve_with_trusted_upstream(signin, monkeypatch, payload)
 
     assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
+    assert client.get("/api/connections/session").json()["matrix_user_id"] == "@alice:example.org"
     assert client.get(_DASHBOARD_ROUTE).status_code == 401
     assert client.get(_DASHBOARD_ROUTE, headers=upstream("alice")).status_code == 200
 
@@ -753,7 +754,7 @@ def test_upstream_identity_refuses_a_page_showing_another_account(
         "/api/connections/session",
         headers={**upstream("bob"), "X-MindRoom-Connections-User": "@bob:example.org"},
     )
-    assert matching.json() == {"matrix_user_id": "@bob:example.org"}
+    assert matching.json()["matrix_user_id"] == "@bob:example.org"
 
 
 def test_trusted_upstream_signed_out_probe_names_no_chat(

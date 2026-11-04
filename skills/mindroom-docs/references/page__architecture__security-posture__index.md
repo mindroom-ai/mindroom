@@ -194,8 +194,8 @@ The model sees the effective file access and the unconfined tools in its tool ex
 ## Connections portal sign-in
 
 This section holds the mechanics behind [opening Connections from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat).
-The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to five seconds; without an answer it checks the existing session like a direct visit, and an answer that arrives later still signs in and reloads the page when it is another account.
-A signed-out direct visit goes to the `sign_in_url` that `GET /api/connections/session` names, `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which comes only from configuration; the portal leaves at most once per tab before linking to it instead.
+The portal asks the window that opened it for a Matrix OpenID token over `postMessage`, waiting up to five seconds; without an answer it signs in through Chat's page below rather than trusting the browser's existing session, which may belong to another account, and an answer that arrives later still signs in.
+That page, also where a signed-out direct visit goes, is the `sign_in_url` that `GET /api/connections/session` names, `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which comes only from configuration; the portal leaves at most once per tab before linking to it instead.
 It then posts the token and the origin of Chat's message to `POST /api/connections/session`.
 Chat's `/connections` page instead submits the token as a form to `POST /api/connections/session/handoff`, a top-level cross-origin post whose `Origin` header the browser sets, and MindRoom checks that header the same way before redirecting to `/connections/`; the token travels in the form body, never in a URL.
 MindRoom checks that origin against `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which defaults to MindRoom's hosted Chat plus, for a portal on a local address, any Chat on a local address; under that default, MindRoom also reads `/_matrix/client/versions` and refuses sign-in unless the homeserver binds tokens.

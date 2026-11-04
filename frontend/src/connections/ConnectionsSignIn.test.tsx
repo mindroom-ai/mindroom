@@ -2,14 +2,13 @@ import { StrictMode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionsSignIn } from "./ConnectionsSignIn";
-import { openAgentLink, openChatSignIn, reloadPortal } from "./navigation";
+import { openAgentLink, openChatSignIn } from "./navigation";
 import { requestConnection, setSignedInUser } from "./request";
 
 vi.mock("./navigation", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./navigation")>()),
   openAgentLink: vi.fn(),
   openChatSignIn: vi.fn(),
-  reloadPortal: vi.fn(),
 }));
 
 const SESSION = "/api/connections/session";
@@ -113,7 +112,6 @@ beforeEach(() => {
   setOpener({ postMessage: vi.fn() });
   vi.mocked(openAgentLink).mockClear();
   vi.mocked(openChatSignIn).mockClear();
-  vi.mocked(reloadPortal).mockClear();
 });
 afterEach(() => {
   cleanup();
@@ -189,49 +187,51 @@ describe("ConnectionsSignIn with an opener", () => {
     expect(await sentUser()).toBe("@bob:example.org");
   });
 
-  it("uses the existing session when the opener does not answer within five seconds", async () => {
-    // A tab can keep an opener that is not MindRoom Chat, such as a page that linked to the portal.
+  it("goes through Chat's page, not an existing session, when the opener does not answer within five seconds", async () => {
+    // The session may belong to another account than the one Chat is signed in to.
     vi.useFakeTimers();
-    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
+    installBackend({
+      get: json({
+        matrix_user_id: "@alice:example.org",
+        sign_in_url: CHAT_SIGN_IN,
+      }),
+    });
     renderGate();
     await act(() => vi.advanceTimersByTimeAsync(4_999));
-    expect(screen.getByRole("status")).toBeInTheDocument();
     expect(fetch).not.toHaveBeenCalled();
     await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(openChatSignIn).toHaveBeenCalledWith(CHAT_SIGN_IN);
+    expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+  });
+
+  it("does not show an existing session when the opener does not answer and nothing names a Chat", async () => {
+    vi.useFakeTimers();
+    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByText(OPEN_FROM_CHAT)).toBeInTheDocument();
+    expect(screen.queryByText("Portal content")).not.toBeInTheDocument();
+  });
+
+  it("signs in a late answer from Chat", async () => {
+    // A slow homeserver can make Chat answer after the five seconds.
+    vi.useFakeTimers();
+    installBackend();
+    renderGate();
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByText(OPEN_FROM_CHAT)).toBeInTheDocument();
+    answerFromOpener("bob");
+    await act(() => vi.advanceTimersByTimeAsync(0));
     expect(screen.getByText("Portal content")).toBeInTheDocument();
-    expect(sessionCalls("GET")).toHaveLength(1);
-    expect(sessionCalls("POST")).toHaveLength(0);
+    expect(sessionCalls("POST")).toHaveLength(1);
+    // Chat answers every ready message, but one late answer is enough.
+    answerFromOpener("carol");
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(sessionCalls("POST")).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
     vi.useRealTimers();
-    expect(await sentUser()).toBe("@alice:example.org");
-  });
-
-  it("signs in a late answer from Chat and reloads when it is another account", async () => {
-    // A slow homeserver can make Chat answer after the fallback showed an older session.
-    vi.useFakeTimers();
-    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
-    renderGate();
-    await act(() => vi.advanceTimersByTimeAsync(5_000));
-    expect(screen.getByText("Portal content")).toBeInTheDocument();
-    answerFromOpener("bob");
-    await act(() => vi.advanceTimersByTimeAsync(0));
-    expect(sessionCalls("POST")).toHaveLength(1);
-    expect(reloadPortal).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the page when a late answer from Chat is the account it shows", async () => {
-    vi.useFakeTimers();
-    installBackend({ get: json({ matrix_user_id: "@alice:example.org" }) });
-    renderGate();
-    await act(() => vi.advanceTimersByTimeAsync(5_000));
-    answerFromOpener("alice");
-    await act(() => vi.advanceTimersByTimeAsync(0));
-    expect(sessionCalls("POST")).toHaveLength(1);
-    expect(reloadPortal).not.toHaveBeenCalled();
-    // Chat answers every ready message, but one late answer is enough.
-    answerFromOpener("bob");
-    await act(() => vi.advanceTimersByTimeAsync(0));
-    expect(sessionCalls("POST")).toHaveLength(1);
+    expect(await sentUser()).toBe("@bob:example.org");
   });
 
   it("sends a signed-out visitor to MindRoom Chat when the opener does not answer", async () => {
