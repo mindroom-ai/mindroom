@@ -53,11 +53,14 @@ def main() -> None:
             print(f"ok {args.url}")
             return
         if args.log and args.log.exists():
+            # Each poll searches everything after the offset again, so the earlier of the two matches decides.
             text = args.log.read_bytes()[args.offset :].decode(errors="replace")
-            if args.fail_regex and (failed := re.search(args.fail_regex, text)):
+            matched = re.search(args.regex, text) if args.regex else None
+            failed = re.search(args.fail_regex, text) if args.fail_regex else None
+            if failed and (matched is None or failed.start() <= matched.start()):
                 print(f"FAIL {_line_at(text, failed)[:800]}")
                 sys.exit(3)
-            if args.regex and (matched := re.search(args.regex, text)):
+            if matched:
                 print(_line_at(text, matched)[:800])
                 return
         time.sleep(args.interval)

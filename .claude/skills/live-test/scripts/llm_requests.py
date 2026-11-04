@@ -27,13 +27,22 @@ def _utc(timestamp: str) -> datetime:
 
 
 def _tool_names(body: dict[str, Any]) -> list[str | None]:
-    """Return the names of the tools a request body offers, in the OpenAI, Anthropic, and Gemini shapes."""
+    """Return the names of the tools a request body offers, in the OpenAI, Anthropic, and Gemini shapes.
+
+    A Gemini body is the google-genai call, with its tools under ``config``, and a native tool such as
+    ``google_search`` named only by its key.
+    """
     names: list[str | None] = []
-    for tool in body.get("tools") or []:
+    for tool in body.get("tools") or (body.get("config") or {}).get("tools") or []:
         if declarations := tool.get("function_declarations") or tool.get("functionDeclarations"):
             names += [declaration.get("name") for declaration in declarations]
         else:
-            names.append(tool.get("name") or (tool.get("function") or {}).get("name") or tool.get("type"))
+            names.append(
+                tool.get("name")
+                or (tool.get("function") or {}).get("name")
+                or tool.get("type")
+                or next(iter(tool), None),
+            )
     return names
 
 

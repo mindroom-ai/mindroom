@@ -4,11 +4,12 @@ Reads and reacts as the account whose access token is in ``LIVE_TEST_ACCESS_TOKE
 approver to approve it, on ``MATRIX_HOMESERVER`` (default ``http://localhost:8008``):
 
     approval_cards.py list '!room:localhost'
-    approval_cards.py wait '!room:localhost' --tool contacts --timeout 300
+    approval_cards.py wait '!room:localhost' --tool request_contact --timeout 300
     approval_cards.py approve '!room:localhost' [card_event_id]
 
 ``list`` prints one JSON line per card with the status its latest edit gives it.
-``wait`` prints the newest pending card, optionally for one tool, once one exists, and exits 1 on timeout.
+``wait`` prints the newest pending card, optionally for one tool function such as ``request_contact`` rather than a
+toolkit such as ``contacts``, once one exists, and exits 1 on timeout.
 ``approve`` reacts with ✅ to the given card, or to the newest pending card.
 """
 
@@ -96,7 +97,7 @@ def main() -> None:
     parser.add_argument("command", choices=["list", "wait", "approve"])
     parser.add_argument("room_id")
     parser.add_argument("card_event_id", nargs="?", help="approve: the card to approve instead of the newest pending")
-    parser.add_argument("--tool", help="wait: only a card for this tool")
+    parser.add_argument("--tool", help="wait: only a card for this function name, such as request_contact")
     parser.add_argument("--timeout", type=float, default=300, help="wait: seconds before giving up")
     parser.add_argument("--limit", type=int, default=300, help="how many recent room events to scan")
     args = parser.parse_args()
