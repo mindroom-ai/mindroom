@@ -38,8 +38,9 @@ _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 class MindRoomToolCallError(RuntimeError):
     """Stable framework or transport failure returned by the script gateway.
 
-    `state` is the terminal receipt's state, `failed` or `indeterminate`; `rejected` when the gateway refused every
-    submission, so the call never ran; or None when the call may have been accepted but no receipt settled it.
+    `state` is the terminal receipt's state, `failed` or `indeterminate`; `rejected` when the arguments or every
+    submission were refused, so the call never ran; or None when the call may have been accepted but no receipt
+    settled it.
     """
 
     def __init__(
@@ -264,6 +265,8 @@ def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[
             kind="invalid_arguments",
             retryable=False,
             call_id=call_id,
+            # Raised before any submission, so the call never ran.
+            state="rejected",
         ) from None
     return cast("dict[str, object]", wire_arguments)
 

@@ -17,6 +17,7 @@ from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.config.resolution import agent_policy
+from mindroom.constants import subprocess_path_with_prepends
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import (
@@ -771,7 +772,10 @@ class ScriptRunManager:
         socket_path = await asyncio.to_thread(ensure_shell_supervisor)
         environment = {**os.environ, **context.runtime_paths.process_env}
         # The script runs on MindRoom's interpreter, so its `mindroom-agent` comes first on PATH.
-        environment["PATH"] = os.pathsep.join(filter(None, (str(Path(sys.executable).parent), environment.get("PATH"))))
+        environment["PATH"] = (
+            subprocess_path_with_prepends(environment.get("PATH"), prepend_entries=(str(Path(sys.executable).parent),))
+            or ""
+        )
         try:
             refusal = await launch_supervised_script(
                 socket_path,

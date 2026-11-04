@@ -118,7 +118,7 @@ Calls within one run execute one at a time, in order.
 The SDK retries transient failures automatically without repeating the side effect.
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
-Its `state` is `failed` or `indeterminate` from the call's final receipt, `rejected` when the gateway refused every submission so the tool never ran, and `None` when the call may have been accepted but no final receipt settled it.
+Its `state` is `failed` or `indeterminate` from the call's final receipt, `rejected` when its arguments or every submission were refused so the tool never ran, and `None` when the call may have been accepted but no final receipt settled it.
 A denied approval raises a non-retryable error with kind `approval_denied`.
 A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
