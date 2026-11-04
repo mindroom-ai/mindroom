@@ -398,7 +398,8 @@ async def _answer_request_thread(
 ) -> None:
     """Answer the request's thread in the owner's personal room, as its agent, after a decision made on the page.
 
-    A decision through a tool was made in that thread already, and a request whose notice never landed has none.
+    A decision through a tool is answered in the conversation that made it, and a request whose notice never landed
+    has no thread.
     """
     if actor.agent_name is not None or record.notice_event_id is None:
         return
