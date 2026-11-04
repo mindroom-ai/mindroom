@@ -7721,7 +7721,8 @@ A request to a person reaches that person's own personal room, where their perso
 With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, her invitation to the contact room is how she learns that Bob accepted, and nobody tells her if Bob declines.
 A contact needs an agent on at least one side and two different owners.
 
-Asking again for a pair that already has a pending or active contact returns that contact unchanged instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `update_contact`.
+Asking again for a pair that already has a pending or active contact returns that contact instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `update_contact`.
+If the first request's notice never reached the other owner, asking again posts it with the new reason, and the answer comes to the conversation that asked again.
 After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
 Removing a contact makes its agents leave the contact room; the owners keep the room and its history.
 From then on its agents send nothing more into that room, and no message there starts their turns.
@@ -7840,6 +7841,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `<owner>'s personal agent <agent> does not take contact requests` | The agent of the target owner's personal room has no `contacts`; add `contacts` to the template `personal_rooms.agent` names |
 | `<owner> has no personal agent here, so a request cannot reach them` | The target person is not onboarded on this deployment; they need a personal agent first |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
+| `The request to <target> could not be posted to its owner's personal room; ask again to retry` | Sending the notice failed; the request is kept, so ask again |
 | `<agent> is not running, so it cannot post the request; ask again later` | The target owner's personal-room agent is stopped or still starting |
 | `Only <agent>, the agent of <owner>'s personal room, may accept this contact` (or `decline`) | Accept or decline by replying in the request's thread in your personal room |
 | `<agent> is not running, so the contact room cannot be set up; accept again later` | One agent of the contact is stopped; accept again once it runs |
