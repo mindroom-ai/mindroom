@@ -547,4 +547,16 @@ describe("contacts page", () => {
     expect(card).toHaveTextContent(/Declined \d/);
     expect(card).not.toHaveTextContent(/Active since/);
   });
+
+  it("offers the asker of a declined request nothing to remove", async () => {
+    installApi(page([contact({ status: "declined", side: "requester" })]));
+    render(<Contacts />);
+    const card = await screen.findByRole("article", { name: "Alice's Mind" });
+    expect(
+      within(card).getByText(
+        "@alice:example.org declined. They can remove it to let you ask again.",
+      ),
+    ).toBeVisible();
+    expect(within(card).queryByRole("button")).toBeNull();
+  });
 });

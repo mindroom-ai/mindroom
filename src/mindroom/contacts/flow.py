@@ -289,7 +289,6 @@ def _existing_contact(
 
 
 async def request_contact(
-    actor: ContactActor,
     context: ToolRuntimeContext,
     agent_name: str,
     *,
@@ -298,14 +297,15 @@ async def request_contact(
     rules: str | None,
     tools: list[str] | None,
     party: Literal["agent", "me"],
-) -> tuple[ContactRecord, bool]:
-    """Record a contact request from ``agent_name`` or its owner ``actor``, asked in ``context``'s thread, and post it.
+) -> tuple[ContactActor, ContactRecord, bool]:
+    """Record a contact request from ``agent_name`` or its owner, post it to the target owner, and return it.
 
-    The flag says whether this call posted a request notice. A pending or active contact between the same two parties,
+    It also returns the owner it acted for, and a flag that says whether this call posted a request notice. A pending or active contact between the same two parties,
     in either direction, is returned instead of a new one; a pending one's request notice is posted when it never landed,
     and a repeat by its requester then replaces its reason and the room and thread its answer goes to. Asking again with other
     rules or tools is refused, because only ``update_contact`` changes them.
     """
+    actor = tool_actor(context, agent_name)
     config, paths = actor.config, actor.runtime_paths
     own = ContactParty(kind="agent", id=agent_name, owner=actor.owner)
     target_party = resolve_target(config, paths, target)
@@ -356,8 +356,8 @@ async def request_contact(
 
     record = await run_blocking_until_complete(update_contacts, paths, create)
     if record.status == "pending" and record.notice_event_id is None:
-        return await _post_request_notice(actor, record), True
-    return record, False
+        return actor, await _post_request_notice(actor, record), True
+    return actor, record, False
 
 
 async def _post_in_thread(
@@ -761,9 +761,9 @@ async def remove_contact(actor: ContactActor, contact_id: str) -> ContactRecord:
 
     record = await run_blocking_until_complete(update_contacts, actor.runtime_paths, remove)
     if record.room_id is not None:
-        running = _running_bot(actor, _room_creator(record))
-        if running is not None:
-            await _withdraw_unjoined_owner_invites(running[1], record, record.room_id)
+        if (running := _running_bot(actor, _room_creator(record))) is not None:
+            _, client = running
+            await _withdraw_unjoined_owner_invites(client, record, record.room_id)
         await _leave_contact_room(actor, record, record.room_id)
     return record
 

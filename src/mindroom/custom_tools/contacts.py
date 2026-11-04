@@ -90,11 +90,8 @@ class ContactsTools(Toolkit):
         you are told in this thread when they accept or decline, or with `party="me"` your owner is invited to the contact room when they accept.
         """
         try:
-            context = require_tool_runtime_context()
-            actor = flow.tool_actor(context, self.agent_name)
-            record, posted = await flow.request_contact(
-                actor,
-                context,
+            actor, record, posted = await flow.request_contact(
+                require_tool_runtime_context(),
                 self.agent_name,
                 target=target,
                 reason=reason,
