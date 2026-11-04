@@ -75,6 +75,8 @@ export interface ConnectionsIdentity {
   is_administrator: boolean;
   /** The egress broker is on, so the Agent Keys page exists. */
   egress_enabled: boolean;
+  /** The user owns a personal agent with contacts, so the Contacts page is linked. */
+  contacts_enabled: boolean;
   /** Where administrators open the dashboard, on this origin or its own host. */
   dashboard_url: string;
 }
@@ -342,4 +344,66 @@ export interface EgressLogRecord {
   status: number;
   /** The error code the broker refused with; `null` for a request it forwarded. */
   code: string | null;
+}
+
+/** A tool a contact of the agent may use, and what it lets the other side reach. */
+export interface ContactToolChoice {
+  name: string;
+  display_name: string;
+  icon: string | null;
+  /** The OAuth provider whose connected account the tool acts with. */
+  provider: string | null;
+  executes_code: boolean;
+  reaches_files: boolean;
+}
+
+/** One of the owner's agents with contacts, and what applies to all its contacts. */
+export interface ContactAgent {
+  agent_name: string;
+  display_name: string;
+  /** Rules from the configuration, which apply to every contact and cannot be removed. */
+  configured_rules: string[];
+  default_tools: string[];
+  /** A judge checks each message against the rules before it is sent. */
+  judged: boolean;
+  /** Every choice but `matrix_message`, which every contact offers. */
+  tool_choices: ContactToolChoice[];
+}
+
+export interface ContactPartyView {
+  kind: "agent" | "person";
+  id: string;
+  owner: string;
+  display_name: string;
+}
+
+/** One contact as its owner sees it: only the owner's own side. */
+export interface ContactView {
+  id: string;
+  status: "pending" | "active" | "declined";
+  side: "requester" | "target";
+  you: ContactPartyView;
+  other: ContactPartyView;
+  reason: string;
+  /** The room of an active contact. */
+  room_id: string | null;
+  /** The owner's own rules for this contact. */
+  rules: string | null;
+  /** The owner's chosen tools, or `null` for the agent's defaults. */
+  tools: string[] | null;
+  /** What a contact turn offers now, or `null` without terms to show. */
+  effective_tools: string[] | null;
+  requested_at: string | null;
+  decided_at: string | null;
+}
+
+export interface ContactsPage {
+  agents: ContactAgent[];
+  contacts: ContactView[];
+}
+
+/** The rules and tools sent for one side; a field left out keeps what is set. */
+export interface ContactTerms {
+  rules?: string;
+  tools?: string[];
 }
