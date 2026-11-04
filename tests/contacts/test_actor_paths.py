@@ -85,7 +85,7 @@ async def _message(config: Config, paths: RuntimePaths, actor: str) -> dict[str,
     Recipient discovery must offer Bob's agent there, though its access never admits Alice, whom that send is for.
     """
     if actor != "counterparty agent":
-        return {"msgtype": "m.text", "body": "Are you free on Friday?"}
+        return {}
     context = _context(config, paths)
     sent = await _call(context, message="Are you free on Friday?", recipient="mind_bob")
     assert sent["status"] == "ok", sent

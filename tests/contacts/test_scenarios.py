@@ -195,7 +195,6 @@ def _world(tmp_path: Path) -> _World:
         bot = world.runtime.bots[name]
         bot.client = client
         bot.change_local_membership = AsyncMock(side_effect=partial(world.server.membership, account))
-        bot.current_joined_room_ids = AsyncMock(side_effect=partial(world.server.joined, account))
         bot.hook_context.send_message = build_hook_message_sender(
             client,
             config,
@@ -253,18 +252,14 @@ def _answers(world: _World) -> list[tuple[str, _Event]]:
     ]
 
 
-def _assert_world_invariants(world: _World, *, kept_until_restart: frozenset[tuple[str, str]] = frozenset()) -> None:
-    """Check what every flow leaves behind: no stranded invitation or membership, answers in place, and quiet notices.
-
-    ``kept_until_restart`` names each agent and room whose membership only that agent's next restart ends.
-    """
+def _assert_world_invariants(world: _World) -> None:
+    """Check what every flow leaves behind: no stranded invitation or membership, answers in place, and quiet notices."""
     for room_id, room in world.server.rooms.items():
         if room_id not in world.activated:
             # A room that never became active leaves nobody invited to it.
             assert not room.invited, f"{sorted(room.invited)} stay invited to dead {room_id}"
     for name, home in HOME_ROOMS.items():
         kept = home | contact_room_ids(world.config, world.paths, name)
-        kept |= {room_id for agent_name, room_id in kept_until_restart if agent_name == name}
         stray = world.server.joined(_account(world.paths, name)) - kept
         assert not stray, f"{name} stays in rooms nothing keeps it in: {sorted(stray)}"
     latest = world.latest_ask
@@ -383,7 +378,7 @@ async def _accepted_and_relayed(world: _World) -> str:
 
 
 async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(tmp_path: Path) -> None:
-    """After either owner removes a contact, its agents are gone from the room and matrix_message sends nothing there."""
+    """After Alice removes the contact, its agents are gone from the room and her agent's matrix_message sends nothing there."""
     world = _world(tmp_path)
     room_id = await _accepted_and_relayed(world)
     alice = _context(world.config, world.paths, "mind_alice", OWNER, world.runtime)
@@ -408,15 +403,7 @@ async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(t
     world.config = _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER), _personal(CAROL)])
 
     # The reload reconciles the rooms of only the agent whose contacts changed.
-    deps = _room_lifecycle(world.config, world.paths, "mind_alice").deps
-    await BotRoomLifecycle(
-        replace(
-            deps,
-            runtime=SimpleNamespace(client=world.runtime.clients["mind_alice"], config=world.config),
-            change_membership=world.runtime.bots["mind_alice"].change_local_membership,
-            get_configured_rooms=partial(sorted, HOME_ROOMS["mind_alice"]),
-        ),
-    ).leave_unconfigured_rooms()
+    await _reconcile_rooms(world, "mind_alice")
 
     for name in ("mind_alice", "mind_bob"):
         refused = await _matrix_message(world, name, room_id, message="Still there?")
@@ -426,5 +413,22 @@ async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(t
     # Bob's agent stays in the removed contact's room, where it starts and sends nothing, until its own restart: an
     # accepted limitation in docs/dev/2026-11-01-agent-contacts-design.md.
     assert (room.members, room.invited) == ({_account(world.paths, "mind_bob")}, {OWNER, CO_OWNER})
+
+    # Its restart reconciles its rooms, and it leaves.
+    await _reconcile_rooms(world, "mind_bob")
+    assert (room.members, room.invited) == (set(), {OWNER, CO_OWNER})
     assert len(room.timeline) == 1
-    _assert_world_invariants(world, kept_until_restart=frozenset({("mind_bob", room_id)}))
+    _assert_world_invariants(world)
+
+
+async def _reconcile_rooms(world: _World, name: str) -> None:
+    """Leave the rooms nothing keeps an agent in, as a reload or restart does for each agent it reconciles."""
+    deps = _room_lifecycle(world.config, world.paths, name).deps
+    await BotRoomLifecycle(
+        replace(
+            deps,
+            runtime=SimpleNamespace(client=world.runtime.clients[name], config=world.config),
+            change_membership=world.runtime.bots[name].change_local_membership,
+            get_configured_rooms=partial(sorted, HOME_ROOMS[name]),
+        ),
+    ).leave_unconfigured_rooms()
