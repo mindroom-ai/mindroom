@@ -264,9 +264,9 @@ async def request_contact(
     """Record a contact request from ``agent_name`` or its owner, post it to the target owner, and return it.
 
     The flag says whether this call posted a request notice. A pending or active contact between the same two parties,
-    in either direction, is returned unchanged instead, and its request notice is posted when it never landed, with the
-    reason its requester gave last. Asking again with other rules or tools is refused, because only ``update_contact``
-    changes them.
+    in either direction, is returned instead of a new one, and its request notice is posted when it never landed; a
+    repeat by its requester then replaces its reason and the room and thread its answer goes to. Asking again with other
+    rules or tools is refused, because only ``update_contact`` changes them.
     """
     config, paths = context.current_config, context.runtime_paths
     own = _own_party(context, agent_name)
