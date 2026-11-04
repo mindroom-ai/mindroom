@@ -23,13 +23,12 @@ from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
 from mindroom.contacts.store import contact_room_ids
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
-from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
-from tests.contacts.test_accept import NOT_PENDING, _accept, _room_lifecycle
+from tests.contacts.test_accept import NOT_PENDING, _accept, _account, _room_lifecycle
 from tests.contacts.test_matrix_message_policy import _reset_rate_limit  # noqa: F401 - autouse pytest fixture
 from tests.contacts.test_tools import (
     _ORIGIN,
@@ -183,16 +182,13 @@ class _World:
     # Each room an acceptance made a contact's active room, which its owners keep with their invitations once it ends.
     activated: set[str] = field(default_factory=set)
 
-    def account(self, agent_name: str) -> str:
-        return current_entity_id(agent_name, self.paths).full_id
-
 
 def _world(tmp_path: Path) -> _World:
     """Seat each agent and its owner in their home rooms, and run each agent's bot on the server."""
     config, paths = _setup(tmp_path)
     world = _World(config, paths, _Homeserver(), _runtime())
     for name, rooms in HOME_ROOMS.items():
-        account = world.account(name)
+        account = _account(world.paths, name)
         world.server.rooms |= {room_id: _Room(creator=account, members={account, OWNERS[name]}) for room_id in rooms}
         client = world.server.client(account)
         world.runtime.clients[name] = client
@@ -254,7 +250,7 @@ def _answers(world: _World) -> list[tuple[str, _Event]]:
         for room_id, room in world.server.rooms.items()
         if room_id not in contact_rooms
         for event in room.timeline
-        if event.sender == world.account("mind_alice")
+        if event.sender == _account(world.paths, "mind_alice")
     ]
 
 
@@ -268,7 +264,7 @@ def _assert_world_invariants(world: _World, *, kept_until_restart: frozenset[tup
         if room_id in world.activated:
             continue
         agents = {
-            world.account(party.id)
+            _account(world.paths, party.id)
             for record in contacts
             if record.room_id == room_id
             for party in (record.requester, record.target)
@@ -279,7 +275,7 @@ def _assert_world_invariants(world: _World, *, kept_until_restart: frozenset[tup
     for name, home in HOME_ROOMS.items():
         kept = home | contact_room_ids(world.config, world.paths, name)
         kept |= {room_id for agent_name, room_id in kept_until_restart if agent_name == name}
-        stray = world.server.joined(world.account(name)) - kept
+        stray = world.server.joined(_account(world.paths, name)) - kept
         assert not stray, f"{name} stays in rooms nothing keeps it in: {sorted(stray)}"
     latest = world.asks[-1]
     for room_id, event in _answers(world):
@@ -321,10 +317,13 @@ async def test_an_accepted_retry_kicks_off_in_the_thread_that_retried(tmp_path: 
 
     assert accepted.room_id is not None
     room = world.server.rooms[accepted.room_id]
-    assert (room.members, room.invited) == ({world.account("mind_alice"), world.account("mind_bob")}, {OWNER, CO_OWNER})
+    assert (room.members, room.invited) == (
+        {_account(world.paths, "mind_alice"), _account(world.paths, "mind_bob")},
+        {OWNER, CO_OWNER},
+    )
     [(_room_id, kickoff)] = _answers(world)
     # Only a mentioned agent answers a message in a room with other responders.
-    assert kickoff.content["m.mentions"] == {"user_ids": [world.account("mind_alice")]}
+    assert kickoff.content["m.mentions"] == {"user_ids": [_account(world.paths, "mind_alice")]}
     _assert_world_invariants(world)
 
 
@@ -332,7 +331,7 @@ async def test_a_seating_that_fails_after_the_invitations_strands_no_owner(tmp_p
     """An agent that cannot join leaves its owners no invitation to the abandoned room, and the next acceptance works."""
     world = _world(tmp_path)
     record = await _ask(world)
-    world.server.refused_joins.add(world.account("mind_alice"))
+    world.server.refused_joins.add(_account(world.paths, "mind_alice"))
 
     with pytest.raises(ValueError, match=r"^mind_alice could not join the contact room"):
         await _bob_accepts(world, record.id)
@@ -374,7 +373,10 @@ async def test_the_acceptance_that_loses_a_race_strands_no_owner(tmp_path: Path)
         await first
 
     assert [stored.status for stored in _stored(world.paths)] == ["active", "removed"]
-    assert world.server.rooms[second.room_id].members == {world.account("mind_alice"), world.account("mind_bob")}
+    assert world.server.rooms[second.room_id].members == {
+        _account(world.paths, "mind_alice"),
+        _account(world.paths, "mind_bob"),
+    }
     assert len(_answers(world)) == 1
     _assert_world_invariants(world)
 
@@ -388,7 +390,7 @@ async def _accepted_and_relayed(world: _World) -> str:
     sent = await _matrix_message(world, "mind_alice", accepted.room_id, message="Free Friday?", recipient="mind_bob")
     assert sent["status"] == "ok", sent
     [relay] = world.server.rooms[accepted.room_id].timeline
-    assert relay.content["m.mentions"] == {"user_ids": [world.account("mind_bob")]}
+    assert relay.content["m.mentions"] == {"user_ids": [_account(world.paths, "mind_bob")]}
     return accepted.room_id
 
 
@@ -435,6 +437,6 @@ async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(t
     room = world.server.rooms[room_id]
     # Bob's agent stays in the removed contact's room, where it starts and sends nothing, until its own restart: an
     # accepted limitation in docs/dev/2026-11-01-agent-contacts-design.md.
-    assert (room.members, room.invited) == ({world.account("mind_bob")}, {OWNER, CO_OWNER})
+    assert (room.members, room.invited) == ({_account(world.paths, "mind_bob")}, {OWNER, CO_OWNER})
     assert len(room.timeline) == 1
     _assert_world_invariants(world, kept_until_restart=frozenset({("mind_bob", room_id)}))

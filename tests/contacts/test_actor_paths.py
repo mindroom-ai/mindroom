@@ -44,20 +44,20 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 RUN, REFUSED, IGNORED = "run", "refused", "ignored"
-PATHS = ("message", "reaction", "edit", "message hook post", "reaction hook post")
-# What each actor's event does in Bob's agent's contact room, by path. "run" passes the message precheck, runs the
-# reaction hooks, reaches the edit regenerator, or runs the message hooks; "refused" logs contact_room_sender_refused
-# and runs nothing; "ignored" runs nothing, as for the agent's own messages and another agent's edits in any room.
+PATHS = ("message", "edit", "message hook post", "reaction hook post")
+# What each actor's event does in Bob's agent's contact room, by path. "run" passes the message precheck, reaches the
+# edit regenerator, runs the message hooks, or runs the reaction hooks; "refused" logs contact_room_sender_refused and
+# runs nothing; "ignored" runs nothing, as for the agent's own messages and another agent's edits in any room.
 # The agent's own reactions run its reaction hooks as in any room, and the room refuses their posts.
 # fmt: off
 ACTIVE = {
-    #                      message  reaction edit     message hook reaction hook
-    "owner":              (RUN,     RUN,     RUN,     RUN,         RUN),
-    "counterparty owner": (RUN,     RUN,     RUN,     RUN,         RUN),
-    "counterparty agent": (RUN,     RUN,     IGNORED, RUN,         RUN),
-    "administrator":      (REFUSED, REFUSED, REFUSED, REFUSED,     REFUSED),
-    "stranger":           (REFUSED, REFUSED, REFUSED, REFUSED,     REFUSED),
-    "agent itself":       (IGNORED, RUN,     IGNORED, IGNORED,     RUN),
+    #                      message  edit     message hook reaction hook
+    "owner":              (RUN,     RUN,     RUN,         RUN),
+    "counterparty owner": (RUN,     RUN,     RUN,         RUN),
+    "counterparty agent": (RUN,     IGNORED, RUN,         RUN),
+    "administrator":      (REFUSED, REFUSED, REFUSED,     REFUSED),
+    "stranger":           (REFUSED, REFUSED, REFUSED,     REFUSED),
+    "agent itself":       (IGNORED, IGNORED, IGNORED,     RUN),
 }
 # fmt: on
 # A removed contact's room starts nothing for anyone else, its agent's owner included.
@@ -124,17 +124,17 @@ async def _dispatch(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageT
     await drain_coalescing(bot)
 
 
-def _hooks(bot: AgentBot, ran: list[str], posted: list[str | None], *, posts: bool) -> None:
-    """Install hooks on every message and reaction that note they ran and, when ``posts``, post into the room."""
+def _hooks(bot: AgentBot, ran: list[str], posted: list[str | None]) -> None:
+    """Install hooks on every message and reaction that note they ran and post into the room."""
 
     async def note(kind: str, ctx: MessageReceivedContext | ReactionReceivedContext) -> None:
         ran.append(kind)
-        if posts:
-            posted.append(await ctx.send_message(CONTACT_ROOM, "Bob is free on Friday."))
+        posted.append(await ctx.send_message(CONTACT_ROOM, "Bob is free on Friday."))
 
     @hook(EVENT_MESSAGE_RECEIVED)
     async def on_message(ctx: MessageReceivedContext) -> None:
         await note("message", ctx)
+        # A message that runs the hooks starts no reply then, so the grid checks only that they ran.
         ctx.suppress = True
 
     @hook(EVENT_REACTION_RECEIVED)
@@ -156,7 +156,7 @@ async def test_each_actor_on_each_path_is_run_refused_or_ignored_as_the_table_sa
     path: str,
     expected: str,
 ) -> None:
-    """Nothing reaches the room from any path: a hook's post into it is refused, and no reply starts there."""
+    """No path reaches the room: a hook's post into it is refused, and a refused or ignored event starts no reply."""
     config, paths = _setup(tmp_path)
     _contact(paths)
     sender = SENDERS[actor] if SENDERS[actor].startswith("@") else _agent(paths, SENDERS[actor])
@@ -169,11 +169,10 @@ async def test_each_actor_on_each_path_is_run_refused_or_ignored_as_the_table_sa
     install_generate_response_mock(bot, generate)
     ran: list[str] = []
     posted: list[str | None] = []
-    _hooks(bot, ran, posted, posts=path.endswith("hook post"))
+    _hooks(bot, ran, posted)
     room = _contact_room(paths)
     steps: dict[str, Callable[[], Awaitable[object]]] = {
         "message": lambda: _precheck(bot, room, _text(sender, content)),
-        "reaction": lambda: _react(bot, room, sender),
         "edit": lambda: _edit(bot, room, sender),
         "message hook post": lambda: _dispatch(bot, room, _text(sender, content)),
         "reaction hook post": lambda: _react(bot, room, sender),
@@ -182,12 +181,12 @@ async def test_each_actor_on_each_path_is_run_refused_or_ignored_as_the_table_sa
     with capture_logs() as logs:
         passed_precheck = await steps[path]()
     events = {log["event"] for log in logs}
-    # The edit regenerator reports each edit it handles; none here regenerates, as a contact turn's reply never shows.
+    # An edit that reaches the edit regenerator logs edit_not_regenerated, as no turn of the edited message is recorded.
     handled = passed_precheck is True or bool(ran) or "edit_not_regenerated" in events
     outcome = REFUSED if "contact_room_sender_refused" in events else RUN if handled else IGNORED
 
     assert outcome == expected
     assert not (outcome == REFUSED and handled)
-    assert posted == ([None] if path.endswith("hook post") and outcome == RUN else [])
+    assert posted == [None] * len(ran)
     assert [call for call in bot.client.room_send.await_args_list if call.kwargs["room_id"] == CONTACT_ROOM] == []
     generate.assert_not_awaited()
