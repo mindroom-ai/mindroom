@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+SIGN_IN_NOT_ALLOWED = "Connections sign-in is not allowed from this client"
+
 
 class _SignInRoute(APIRoute):
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
@@ -145,7 +147,7 @@ async def _start_session(
     # Without this allowlist a page the victim visits could hand the portal an attacker's token.
     origin = deployment_origin(paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
     if not connections_client_origin_allowed(paths, client_origin, origin):
-        raise HTTPException(403, "Connections sign-in is not allowed from this client", headers=CONNECTIONS_HEADERS)
+        raise HTTPException(403, SIGN_IN_NOT_ALLOWED, headers=CONNECTIONS_HEADERS)
     # Without binding, any backend a user opens from Chat could replay their token here. Request headers cannot show
     # that a portal is out of such a backend's reach, so only an operator's explicit list accepts that risk.
     if not connections_origins_configured(paths) and not await homeserver_binds_openid_audience(paths):

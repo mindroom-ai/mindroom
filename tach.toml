@@ -1922,6 +1922,7 @@ depends_on = [
     "mindroom.api.connections_session",
     "mindroom.api.connections_session_cookie",
     "mindroom.matrix_openid",
+    "mindroom.origins",
 ]
 
 [[modules]]

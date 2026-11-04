@@ -216,6 +216,7 @@ The record is fixed at sign-in, because a session started before binding was nev
 Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
 MindRoom Chat's iOS app cannot post from a page in the system browser, so it signs that browser in through `/api/connections/session/native/` instead.
 The app posts its token to `start`, which checks it like a Chat sign-in, except that it always requires a homeserver that binds tokens, whatever `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists, because no browser `Origin` vouches for the call.
+That list stays the operator's off switch: `start` and `confirm` refuse with 403 while it is `[]` or invalid, before they issue or consume any state, but its web origins never apply to the app.
 The browser that opens the returned `redeem` URL gets a pending cookie, `__Host-mindroom_connections_session_native` or, on a plain HTTP local portal, `mindroom_connections_session_native`, and the app gets a nonce through `mindroom://connections/confirm`.
 The app confirms the nonce with its own token, which must name the user who started, and the browser that opens the returned `continue` URL gets the session only if it holds the pending cookie that nonce was issued for.
 So a forwarded `redeem` URL sends the nonce to the victim's device, where the app cannot confirm it as another user, and a forwarded `continue` URL finds no matching pending cookie.

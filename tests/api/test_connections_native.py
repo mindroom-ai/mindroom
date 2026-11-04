@@ -181,6 +181,58 @@ def test_native_start_requires_binding(signin: dict[str, Any], monkeypatch: pyte
     signin["verifier"].assert_not_awaited()
 
 
+SIGN_IN_OFF_LISTS = [
+    pytest.param("[]", id="empty-list"),
+    # One bad entry (plain HTTP on a public host) invalidates the whole list, which fails closed.
+    pytest.param(f'["{CHAT_ORIGIN}", "http://chat.example.org"]', id="list-with-an-invalid-entry"),
+]
+
+
+@pytest.mark.parametrize("origins", SIGN_IN_OFF_LISTS)
+def test_native_start_honors_the_chat_sign_in_off_switch(
+    signin: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    origins: str,
+) -> None:
+    """An operator who turned sign-in from Chat off also turns off the app's: no token is verified, no state issued."""
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS=origins)
+    signin["binds"].return_value = True
+    issue = Mock(wraps=connections_native.issue_opaque_oauth_state)
+    monkeypatch.setattr(connections_native, "issue_opaque_oauth_state", issue)
+    started = native_start(signin["client"])
+    assert started.status_code == 403, started.text
+    assert started.json() == {"detail": "Connections sign-in is not allowed from this client"}
+    assert "no-store" in started.headers["cache-control"]
+    issue.assert_not_called()
+    signin["verifier"].assert_not_awaited()
+
+
+def test_native_confirm_honors_the_chat_sign_in_off_switch(signin: dict[str, Any]) -> None:
+    """Turning sign-in off between the app's start and confirm refuses the confirm and leaves its nonce unspent."""
+    signin["binds"].return_value = True
+    browser = signin["client"]
+    nonce = nonce_of(redeem(browser, native_start(browser)))
+    signin["verifier"].reset_mock()
+
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="[]")
+    refused = confirm(browser, nonce)
+    assert refused.status_code == 403, refused.text
+    assert refused.json() == {"detail": "Connections sign-in is not allowed from this client"}
+    assert "no-store" in refused.headers["cache-control"]
+    signin["verifier"].assert_not_awaited()
+
+    _serve(signin)
+    assert confirm(browser, nonce).status_code == 200
+
+
+@pytest.mark.parametrize("origins", ["", f'["{CHAT_ORIGIN}"]'])
+def test_native_sign_in_does_not_need_its_own_origin_in_the_list(signin: dict[str, Any], origins: str) -> None:
+    """Unset, or listing only web Chat origins, leaves the app's sign-in on."""
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS=origins)
+    signin["binds"].return_value = True
+    assert run_native_flow(signin["client"]).status_code == 303
+
+
 def test_native_start_rejects_unknown_token(signin: dict[str, Any]) -> None:
     """A token the homeserver does not vouch for gets the same 401 as the web sign-in."""
     signin["binds"].return_value = True

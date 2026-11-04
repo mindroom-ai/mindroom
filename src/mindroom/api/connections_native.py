@@ -30,6 +30,7 @@ from mindroom.matrix_openid import (
 )
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state
+from mindroom.origins import connections_sign_in_enabled
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -119,12 +120,15 @@ def _paths_and_origin(request: Request) -> tuple[RuntimePaths, str]:
     return paths, require_connections_public_origin(request, paths)
 
 
-async def _require_binding(paths: RuntimePaths) -> None:
-    """Refuse unless the homeserver binds tokens, whatever `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` says.
+async def _require_native_sign_in(paths: RuntimePaths) -> None:
+    """Refuse when the operator turned sign-in off, or when the homeserver does not bind tokens.
 
-    No browser Origin vouches for these calls, so the token is the only proof: an unbound one could be replayed here
-    by any backend the user opened from Chat, which could then finish this flow in its own browser.
+    `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` is only the off switch here: the app has no web origin to list.
+    No browser Origin vouches for these calls either, so the token is the only proof: an unbound one could be replayed
+    here by any backend the user opened from Chat, which could then finish this flow in its own browser.
     """
+    if not connections_sign_in_enabled(paths):
+        raise HTTPException(403, connections_session.SIGN_IN_NOT_ALLOWED, headers=CONNECTIONS_HEADERS)
     if not await connections_session.homeserver_binds_openid_audience(paths):
         raise HTTPException(
             403,
@@ -158,7 +162,7 @@ async def start_native_sign_in(body: _NativeStart, request: Request, response: R
     """Return the URL the app opens in the system browser to start signing it in as the token's user."""
     paths, origin = _paths_and_origin(request)
     next_path = _validated_native_next(body.next)
-    await _require_binding(paths)
+    await _require_native_sign_in(paths)
     user = await connections_session.verified_connections_user(body.openid_token, request, paths)
     start = _issue(paths, _START, user=user, next=next_path)
     response.headers.update(CONNECTIONS_HEADERS)
@@ -186,7 +190,7 @@ async def redeem_native_start(request: Request, start: str | None = None) -> Res
 async def confirm_native_sign_in(body: _NativeConfirm, request: Request, response: Response) -> _NativeConfirmed:
     """Confirm the nonce with the app's own token, which must name the user who started this sign-in."""
     paths, origin = _paths_and_origin(request)
-    await _require_binding(paths)
+    await _require_native_sign_in(paths)
     # Consumed before the token is checked, so a refused confirmation cannot be retried.
     try:
         nonce = consume_opaque_oauth_state(paths, kind=_NONCE, token=body.nonce)
