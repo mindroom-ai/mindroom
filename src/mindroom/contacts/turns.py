@@ -87,7 +87,7 @@ def contact_session_check(config: Config, runtime_paths: RuntimePaths, agent_nam
     The other side drove those conversations, so memory, the knowledge graph, and exploration leave them out, even
     once the agent's ``contacts`` was removed.
     """
-    rooms = contact_room_ids(config, runtime_paths, agent_name, include_removed=True)
+    rooms = contact_room_ids(config, runtime_paths, agent_name, any_status=True)
     return lambda session_id: any(session_in_room(session_id, room_id) for room_id in rooms)
 
 
@@ -103,7 +103,9 @@ def contact_tool_choices(config: Config, runtime_paths: RuntimePaths, agent_name
     """Return the agent's own tools that a contact may offer, judging plugin tools like built-in ones."""
     registry = config_plugins(config, runtime_paths).tools
     authored = config.expand_tool_names([entry.name for entry in authored_tool_entries(config, agent_name)])
-    return [name for name in authored if not config.is_tool_preset(name) and not _refused_tool(name, registry)]
+    choices = [name for name in authored if not config.is_tool_preset(name) and not _refused_tool(name, registry)]
+    # Every contact gets matrix_message, so choosing it is valid even when the agent's own tools leave it out.
+    return choices if "matrix_message" in choices else [*choices, "matrix_message"]
 
 
 def contact_turn_tools(

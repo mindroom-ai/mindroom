@@ -243,7 +243,7 @@ class BotRoomLifecycle:
         invited = read_invited_rooms(paths, config, self.deps.agent_name)
         if not invited:
             return invited
-        return invited - contact_room_ids(config, paths, self.deps.agent_name, include_removed=True)
+        return invited - contact_room_ids(config, paths, self.deps.agent_name, any_status=True)
 
     async def _invited_room_ids_after_joined_invites(self) -> frozenset[str]:
         """Return invited rooms once every pending invite this client already joined is persisted.

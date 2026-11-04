@@ -282,6 +282,12 @@ def test_a_plugin_tool_that_needs_a_room_is_never_offered_in_a_contact_turn(tmp_
     assert _tools(config, paths, ContactSide(tools=["calculator", "room_poster"])) == ("calculator", "matrix_message")
 
 
+def test_matrix_message_is_a_valid_choice_even_when_the_agents_own_tools_leave_it_out(tmp_path: Path) -> None:
+    """Every contact gets matrix_message, so an owner may name it as the only tool of a text-only contact."""
+    config, paths = _setup(tmp_path, tools=("calculator",))
+    assert "matrix_message" in contact_tool_choices(config, paths, "mind_bob")
+
+
 _ANSWER = "Answer the other side only by calling matrix_message to send into this room"
 
 
