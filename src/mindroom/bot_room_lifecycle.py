@@ -403,10 +403,8 @@ class BotRoomLifecycle:
         A personal agent without contacts leaves its contact rooms, so it ends those contacts in the store first.
         """
         config, name = self._config(), self.deps.agent_name
-        if config.personal_agent_instance(name) is not None and agent_party(config, name) is None:
-            removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
-            if removed:
-                self._logger().info("contacts_removed_without_contacts", contact_ids=removed)
+        if agent_party(config, name) is None:
+            await self._end_contacts(config)
         client = self._client()
         rooms_to_leave = await self._rooms_to_leave()
         await withdraw_removed_contact_invites(client, config, self.deps.runtime_paths, name, rooms_to_leave)
@@ -420,8 +418,13 @@ class BotRoomLifecycle:
         )
 
     async def leave_all_rooms(self, *, timeout_seconds: float) -> None:
-        """Leave non-DM rooms before sync stops, bounding durable command waits."""
+        """Leave non-DM rooms for entity removal before sync stops, bounding durable command waits.
+
+        A removed personal agent leaves its contact rooms too, so it ends those contacts first, as one without contacts
+        does. A reload removes an entity before it publishes the config without it, so this config still names it.
+        """
         client = self._client()
+        config = self._config()
         deadline = asyncio.get_running_loop().time() + timeout_seconds
 
         async def leave(room_id: str) -> bool:
@@ -433,8 +436,16 @@ class BotRoomLifecycle:
                 return False
 
         try:
+            await self._end_contacts(config)
             joined_rooms = await get_joined_rooms(client)
             if joined_rooms:
+                await withdraw_removed_contact_invites(
+                    client,
+                    config,
+                    self.deps.runtime_paths,
+                    self.deps.agent_name,
+                    joined_rooms,
+                )
                 await leave_non_dm_rooms(
                     client,
                     joined_rooms,
@@ -442,6 +453,15 @@ class BotRoomLifecycle:
                 )
         except Exception:
             self._logger().exception("Error leaving rooms during cleanup")
+
+    async def _end_contacts(self, config: Config) -> None:
+        """Mark a personal agent's active contacts removed before it leaves their rooms, ending them for both sides."""
+        name = self.deps.agent_name
+        if config.personal_agent_instance(name) is None:
+            return
+        removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
+        if removed:
+            self._logger().info("contacts_removed_as_agent_leaves", contact_ids=removed)
 
     async def _rooms_to_leave(self) -> list[str]:
         """Return joined rooms this bot should now leave before DM filtering."""
