@@ -311,20 +311,24 @@ class PersonalRoomService:
     async def _invite_router_if_never_member(self, record: PersonalRoomRecord, roster: dict[str, str]) -> None:
         """Invite the router, which posts approval cards, into a created room it was never in; one that left stays out.
 
-        An imported room removes a router its record does not list, and a router whose `accept_invites` leaves out
-        this agent never joins, so neither gets an invite. A failed invite is retried at the next reconciliation.
+        Adopted rooms keep the participants their record lists, and a router whose `accept_invites` leaves out this
+        agent never joins, so neither gets an invite. A failed invite fails this attempt, which onboarding retries.
         """
-        config = self.runtime.config
+        if record.adoption is not None:
+            return
         client = self._client()
         router_id = current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id
-        if (
-            record.adoption is not None
-            or router_id in roster
-            or not is_inviter_allowed(config, self.runtime_paths, ROUTER_AGENT_NAME, client.user_id)
+        if router_id in roster or not is_inviter_allowed(
+            self.runtime.config,
+            self.runtime_paths,
+            ROUTER_AGENT_NAME,
+            client.user_id,
         ):
             return
         assert record.room_id is not None
-        await invite_to_room(client, record.room_id, router_id)
+        if not await invite_to_room(client, record.room_id, router_id):
+            msg = "Personal-room router invite failed"
+            raise RuntimeError(msg)
 
     async def _observe_owner_membership(
         self,

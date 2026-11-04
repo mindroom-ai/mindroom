@@ -128,6 +128,7 @@ class MatrixServer:
         self.aliases: dict[str, str] = {}
         self.messages: dict[str, dict[str, Any]] = {}
         self.fail_invite = False
+        self.refused_invites: set[str] = set()
         self.fail_kick = False
         self.unkickable: set[str] = set()
         self.kicks: list[tuple[str, str]] = []
@@ -216,7 +217,7 @@ class MatrixServer:
 
     async def room_invite(self, room_id: str, user_id: str) -> object:
         """Record an invitation or simulate an unavailable server."""
-        if self.fail_invite:
+        if self.fail_invite or user_id in self.refused_invites:
             return nio.RoomInviteError("retry", "M_UNKNOWN")
         self.set_member(room_id, user_id, "invite")
         return nio.RoomInviteResponse()
@@ -548,6 +549,26 @@ async def test_a_personal_room_invites_the_router_once(tmp_path: Path, monkeypat
 
     assert server.membership(room_id, "@mindroom_router:localhost") == "leave"
     assert not server.kicks
+
+
+@pytest.mark.asyncio
+async def test_a_failed_router_invite_fails_the_attempt_and_the_retry_invites_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Onboarding retries a failed attempt, so a router invite the server refused is sent again."""
+    server = MatrixServer()
+    server.refused_invites.add("@mindroom_router:localhost")
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    with pytest.raises(RuntimeError, match="router invite"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    server.refused_invites.clear()
+
+    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    assert server.create_count == 1
+    assert server.membership(room_id, "@mindroom_router:localhost") == "invite"
+    assert server.membership(room_id, "@alice:localhost") == "invite"
 
 
 @pytest.mark.asyncio
