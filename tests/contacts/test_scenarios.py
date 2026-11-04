@@ -252,13 +252,16 @@ def _answers(world: _World) -> list[tuple[str, _Event]]:
     ]
 
 
-def _assert_world_invariants(world: _World) -> None:
-    """Check what every flow leaves behind: no stranded invitation or membership, answers in place, and quiet notices."""
+def _assert_world_invariants(world: _World, stranded: frozenset[str] = frozenset()) -> None:
+    """Check what every flow leaves behind: no stranded invitation or membership, answers in place, and quiet notices.
+
+    ``stranded`` names the invitations a flow knowingly leaves in a dead room, as when its member list cannot be read.
+    """
     active = {record.room_id for record in _stored(world.paths) if record.status == "active"}
     for room_id, room in world.server.rooms.items():
         if room_id not in active:
             # Only an active contact's room keeps invitations: one never activated, or whose contact ended, has none.
-            assert not room.invited, f"{sorted(room.invited)} stay invited to dead {room_id}"
+            assert room.invited <= stranded, f"{sorted(room.invited - stranded)} stay invited to dead {room_id}"
     for name, home in HOME_ROOMS.items():
         kept = home | contact_room_ids(world.config, world.paths, name)
         stray = world.server.joined(_account(world.paths, name)) - kept
@@ -367,10 +370,9 @@ async def test_the_acceptance_that_loses_a_race_strands_no_owner(tmp_path: Path)
 
 
 async def _accepted_and_relayed(world: _World) -> str:
-    """Return the room of a contact Bob accepted, which Alice joined and Bob did not, where her agent wrote to Bob's."""
+    """Return the room of a contact Bob accepted, where Alice's agent already wrote to Bob's."""
     record = await _ask(world)
     room_id = await _bob_accepts(world, record.id)
-    assert await world.server.membership(OWNER, room_id, "join")
     # Bob's agent never admits Alice by access, yet her agent can name it as recipient there and so wake it.
     sent = await _matrix_message(world, "mind_alice", room_id, message="Free Friday?", recipient="mind_bob")
     assert sent["status"] == "ok", sent
@@ -379,13 +381,33 @@ async def _accepted_and_relayed(world: _World) -> str:
     return room_id
 
 
-async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("joining", "members_unreadable", "left"),
+    [
+        # Neither owner joined, so neither keeps an invitation to the room its agents left.
+        (set(), False, (set(), set())),
+        # Alice, who joined, keeps the room and its history, and Bob, who never joined, holds no invitation to it.
+        ({OWNER}, False, ({OWNER}, set())),
+        # Bob's agent, which created the room, cannot read who joined, so it withdraws nothing and removes no member.
+        ({OWNER}, True, ({OWNER}, {CO_OWNER})),
+    ],
+)
+async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(
+    tmp_path: Path,
+    joining: set[str],
+    members_unreadable: bool,
+    left: tuple[set[str], set[str]],
+) -> None:
     """After Alice removes the contact, its agents are gone from the room and her agent's matrix_message sends nothing there.
 
-    Alice, who joined, keeps the room and its history, and Bob, who never joined, no longer holds an invitation to it.
+    An owner who joined keeps the room and its history, and an owner who never joined no longer holds an invitation to it.
     """
     world = _world(tmp_path)
     room_id = await _accepted_and_relayed(world)
+    for owner in joining:
+        assert await world.server.membership(owner, room_id, "join")
+    if members_unreadable:
+        world.runtime.clients["mind_bob"].joined_members = AsyncMock(return_value=nio.JoinedMembersError("unavailable"))
     alice = _context(world.config, world.paths, "mind_alice", OWNER, world.runtime)
 
     await flow.remove_contact(alice, "mind_alice", _stored(world.paths)[0].id)
@@ -393,9 +415,9 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(tmp_pat
 
     assert refused["message"].endswith("was removed, so nothing more can be sent into its room")
     room = world.server.rooms[room_id]
-    assert (room.members, room.invited) == ({OWNER}, set())
+    assert (room.members, room.invited) == left
     assert len(room.timeline) == 1
-    _assert_world_invariants(world)
+    _assert_world_invariants(world, stranded=frozenset(left[1]))
 
 
 @pytest.mark.parametrize(
@@ -418,6 +440,7 @@ async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(
     """
     world = _world(tmp_path)
     room_id = await _accepted_and_relayed(world)
+    assert await world.server.membership(OWNER, room_id, "join")
     data = _data()
     data["personal_agents"]["mind"]["users"] = {OWNERS[losing]: {"contacts": None}}
     world.config = _load(tmp_path, data, entries=[_personal(), _personal(CO_OWNER), _personal(CAROL)])
