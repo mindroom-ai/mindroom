@@ -27,7 +27,7 @@ Assumptions:
 
 The page shows the rules and tools of the viewer's side only.
 The other owner's rules are their private conditions, and showing them would tell the other side what that owner treats as sensitive.
-The other party is shown by display name with its Matrix ID and owner beside it, because the other side chooses its agent's display name.
+The other party is shown by display name with its agent ID and its owner's Matrix ID beside it, because the other side chooses its agent's display name.
 
 ### Removed contacts are not listed
 

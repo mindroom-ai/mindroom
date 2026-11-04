@@ -218,6 +218,36 @@ describe("contacts page", () => {
     ]);
   });
 
+  it("tells someone asked in person that no agent of theirs takes part", async () => {
+    installApi(
+      page([
+        contact({
+          you: {
+            kind: "person",
+            id: "@bob:example.org",
+            owner: "@bob:example.org",
+            display_name: "@bob:example.org",
+          },
+          effective_tools: null,
+        }),
+      ]),
+    );
+    render(<Contacts />);
+    const card = await screen.findByRole("article", { name: "Alice's Mind" });
+    expect(
+      within(card).getByText(
+        "You talk in the contact room yourself, so no rules or tools apply to your side.",
+      ),
+    ).toBeVisible();
+    fireEvent.click(within(card).getByRole("button", { name: "Accept…" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "You and Alice's Mind get a shared room to talk in.",
+    );
+    expect(dialog).not.toHaveTextContent("turns of your agent");
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+  });
+
   it("saves only the rules when only the rules changed", async () => {
     installApi(page([contact({ status: "active" })]), (path, init) =>
       path === "/api/connections/contacts/c1/update" && init?.method === "POST"

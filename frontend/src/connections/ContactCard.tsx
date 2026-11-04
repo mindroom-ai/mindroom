@@ -317,7 +317,11 @@ export function ContactCard({
       <ConfirmDialog
         open={dialog === "accept"}
         title={`Accept ${contact.other.display_name}?`}
-        description="The agents get a shared room to talk in. The other side can start turns of your agent there, with your authority and the tools you choose below."
+        description={
+          contact.you.kind === "agent"
+            ? "The agents get a shared room to talk in. The other side can start turns of your agent there, with your authority and the tools you choose below."
+            : `You and ${contact.other.display_name} get a shared room to talk in.`
+        }
         confirmLabel="Accept"
         destructive={false}
         onCancel={() => setDialog(null)}
