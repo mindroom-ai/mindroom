@@ -18,7 +18,7 @@ from mindroom.constants import (
     resolve_config_relative_path,
 )
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry, prepared_entity_names_by_user_id
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import set_room_avatar_from_file
@@ -63,6 +63,16 @@ _OWNERSHIP_EVENT = "org.mindroom.personal_room"
 _GUEST_REMOVAL_REASON = "Personal rooms are private to their owner"
 _GUEST_REMOVAL_NOTICE = (
     "This room is private to {owner}, so I removed {guests}. To work with other people, use a shared room."
+)
+# Only imported rooms remove agents: a room MindRoom created hides history from before an invite.
+_AGENT_REMOVAL_REASON = (
+    "This room existed before it became a personal room, so other agents can't join; create a new room with this agent"
+)
+_AGENT_REMOVAL_NOTICE = (
+    "I removed {agents} because this room existed before it became a personal room, "
+    "and only the agents it already had may see its earlier history. "
+    "To work with {agents}, create a new room with just you and {agents}. "
+    "Inviting {pronoun} here again will remove {pronoun} again."
 )
 # Retries for a removal a member event could not finish. After the last one,
 # the next member event in the room or a restart reconciliation of an eligible
@@ -489,8 +499,10 @@ class PersonalRoomService:
         """Remove members the room does not permit, then tell the room why once."""
         assert record.room_id is not None
         client = self._client()
+        agents = set(filter(self._is_agent, guests))
         for user_id in sorted(guests):
-            response = await client.room_kick(record.room_id, user_id, reason=_GUEST_REMOVAL_REASON)
+            reason = _AGENT_REMOVAL_REASON if user_id in agents else _GUEST_REMOVAL_REASON
+            response = await client.room_kick(record.room_id, user_id, reason=reason)
             if not isinstance(response, nio.RoomKickResponse):
                 # A guest whose power level matches the agent's stays until
                 # someone removes it; other failures are transient.
@@ -498,9 +510,18 @@ class PersonalRoomService:
                 msg = "Personal-room guest removal failed"
                 raise (PersonalRoomValidationError if forbidden else RuntimeError)(msg)
         logger.info("personal_room_guests_removed", room_id=record.room_id, removed_count=len(guests))
-        content = build_message_content(
-            _GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(guests))),
-        )
+        notices = []
+        if people := guests - agents:
+            notices.append(_GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(people))))
+        if agents:
+            config = self.runtime.config
+            names = prepared_entity_names_by_user_id(config, self.runtime_paths)
+            shown = sorted(
+                config.entity_display_name(names[user_id]) if user_id in names else user_id for user_id in agents
+            )
+            pronoun = "it" if len(agents) == 1 else "them"
+            notices.append(_AGENT_REMOVAL_NOTICE.format(agents=", ".join(shown), pronoun=pronoun))
+        content = build_message_content(" ".join(notices))
         content["msgtype"] = "m.notice"
         membership_event_ids = "|".join(
             str(state.get(("m.room.member", user_id), {}).get("event_id", user_id)) for user_id in sorted(guests)
