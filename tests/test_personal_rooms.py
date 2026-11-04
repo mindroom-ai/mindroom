@@ -552,23 +552,33 @@ async def test_a_personal_room_invites_the_router_once(tmp_path: Path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_a_failed_router_invite_fails_the_attempt_and_the_retry_invites_it(
+async def test_a_refused_router_invite_holds_up_only_itself_and_is_retried(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Onboarding retries a failed attempt, so a router invite the server refused is sent again."""
+    """The owner is joined and welcomed despite a refused router invite, and the retry sends that invite again."""
     server = MatrixServer()
     server.refused_invites.add("@mindroom_router:localhost")
-    owner = service(tmp_path, server, monkeypatch, welcome="")
+    owner = service(tmp_path, server, monkeypatch, auto_join_requester=True)
+
+    async def admin_join(_client: MatrixServer, room_id: str, user_id: str) -> bool:
+        server.set_member(room_id, user_id, "join")
+        return True
+
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.admin_join_room_user", admin_join)
     with pytest.raises(RuntimeError, match="router invite"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    room_id = server.aliases["#personal_481a6d9da9e7b569dd3c:localhost"]
+    assert server.membership(room_id, "@alice:localhost") == "join"
+    assert [message["room_id"] for message in server.messages.values()] == [room_id]
+    assert server.membership(room_id, "@mindroom_router:localhost") is None
+
     server.refused_invites.clear()
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
 
-    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-
-    assert server.create_count == 1
+    assert server.create_count == len(server.messages) == 1
     assert server.membership(room_id, "@mindroom_router:localhost") == "invite"
-    assert server.membership(room_id, "@alice:localhost") == "invite"
 
 
 @pytest.mark.asyncio

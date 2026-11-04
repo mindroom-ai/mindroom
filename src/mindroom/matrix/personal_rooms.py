@@ -251,6 +251,7 @@ class PersonalRoomService:
                 settings = self._require_current_settings(user_id, source_room_id)
                 if source_room_id == record.source_room_id:
                     await self._confirm(record, path, settings, source_client)
+                await self._invite_router_if_never_member(record)
                 return record.room_id
         except _PolicyChangedError:
             return None
@@ -279,7 +280,6 @@ class PersonalRoomService:
         if await self._observe_owner_membership(record, path, owner_membership, allow_reinvite):
             return None
         await self._invite_owner_if_needed(record, owner_membership, source_room_id)
-        await self._invite_router_if_never_member(record, roster)
         roster = await self._validate_room(record)
         owner_membership = roster.get(record.user_id)
         if await self._observe_owner_membership(record, path, owner_membership, False):
@@ -308,24 +308,26 @@ class PersonalRoomService:
             msg = "Personal-room invite failed"
             raise RuntimeError(msg)
 
-    async def _invite_router_if_never_member(self, record: PersonalRoomRecord, roster: dict[str, str]) -> None:
+    async def _invite_router_if_never_member(self, record: PersonalRoomRecord) -> None:
         """Invite the router, which posts approval cards, into a created room it was never in; one that left stays out.
 
-        Adopted rooms keep the participants their record lists, and a router whose `accept_invites` leaves out this
-        agent never joins, so neither gets an invite. A failed invite fails this attempt, which onboarding retries.
+        Runs once the owner's onboarding is done, so a refused router invite never holds up the owner's join or welcome;
+        it fails this attempt, which onboarding retries. Adopted rooms keep the participants their record lists, and a
+        router whose `accept_invites` leaves out this agent never joins, so neither gets an invite.
         """
         if record.adoption is not None:
             return
         client = self._client()
-        router_id = current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id
-        if router_id in roster or not is_inviter_allowed(
-            self.runtime.config,
-            self.runtime_paths,
-            ROUTER_AGENT_NAME,
-            client.user_id,
-        ):
+        if not is_inviter_allowed(self.runtime.config, self.runtime_paths, ROUTER_AGENT_NAME, client.user_id):
             return
         assert record.room_id is not None
+        router_id = current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id
+        response = await client.room_get_state_event(record.room_id, "m.room.member", router_id)
+        if isinstance(response, nio.RoomGetStateEventResponse):
+            return
+        if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
+            msg = "Personal-room router membership unavailable"
+            raise RuntimeError(msg)
         if not await invite_to_room(client, record.room_id, router_id):
             msg = "Personal-room router invite failed"
             raise RuntimeError(msg)
