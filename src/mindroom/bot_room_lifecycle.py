@@ -426,16 +426,9 @@ class BotRoomLifecycle:
         client = self._client()
         config = self._config()
         try:
-            await self._end_contacts(config)
             joined_rooms = await get_joined_rooms(client)
+            await self._end_removed_agent_contacts(client, config, joined_rooms or [])
             if joined_rooms:
-                await withdraw_removed_contact_invites(
-                    client,
-                    config,
-                    self.deps.runtime_paths,
-                    self.deps.agent_name,
-                    joined_rooms,
-                )
                 # The leave budget starts after the invitation withdrawals, so a slow one never keeps the agent joined.
                 deadline = asyncio.get_running_loop().time() + timeout_seconds
 
@@ -455,19 +448,30 @@ class BotRoomLifecycle:
         except Exception:
             self._logger().exception("Error leaving rooms during cleanup")
 
-    async def _end_contacts(self, config: Config) -> None:
-        """Mark a personal agent's active contacts removed before it leaves their rooms, ending them for both sides.
+    async def _end_removed_agent_contacts(self, client: nio.AsyncClient, config: Config, leaving: list[str]) -> None:
+        """End a removed agent's contacts and withdraw unjoined owners' invitations to the contact rooms it is leaving.
 
-        A contacts store that cannot be read or written is only logged, so it never keeps the agent in those rooms.
+        A contacts store that cannot be read or written is only logged, so it never keeps a removed agent in its rooms.
         """
+        try:
+            await self._end_contacts(config)
+            if leaving:
+                await withdraw_removed_contact_invites(
+                    client,
+                    config,
+                    self.deps.runtime_paths,
+                    self.deps.agent_name,
+                    leaving,
+                )
+        except (OSError, ValueError):
+            self._logger().exception("contacts_end_failed_as_agent_leaves")
+
+    async def _end_contacts(self, config: Config) -> None:
+        """Mark a personal agent's active contacts removed before it leaves their rooms, ending them for both sides."""
         name = self.deps.agent_name
         if config.personal_agent_instance(name) is None:
             return
-        try:
-            removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
-        except (OSError, ValueError):
-            self._logger().exception("contacts_end_failed_as_agent_leaves")
-            return
+        removed = await asyncio.to_thread(remove_active_contacts, self.deps.runtime_paths, name)
         if removed:
             self._logger().info("contacts_removed_as_agent_leaves", contact_ids=removed)
 

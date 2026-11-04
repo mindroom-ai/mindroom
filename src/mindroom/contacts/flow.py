@@ -454,16 +454,10 @@ async def withdraw_removed_contact_invites(
 ) -> None:
     """Withdraw unjoined owners' invitations to the removed contacts' rooms this agent created and is about to leave.
 
-    An agent leaves such a room on a reload that takes its contacts away, and at its next start when the removal did
-    not make it leave, as when the other agent lost its contacts.
-    A contacts store that cannot be read withdraws nothing and is only logged, so the agent still leaves.
+    An agent leaves such a room on a reload that takes its contacts away or removes the agent, and at its next start
+    when the removal did not make it leave, as when the other agent lost its contacts.
     """
-    try:
-        contacts = await run_blocking_until_complete(agent_contacts, config, runtime_paths, agent_name)
-    except (OSError, ValueError):
-        logger.exception("contact_room_invite_withdrawal_skipped", agent_name=agent_name)
-        return
-    for record, _side in contacts:
+    for record, _side in await run_blocking_until_complete(agent_contacts, config, runtime_paths, agent_name):
         room_id = record.room_id
         if (
             room_id is not None
