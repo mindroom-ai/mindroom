@@ -387,18 +387,6 @@ def test_removing_makes_the_agents_leave_and_drops_the_contact(portal: dict[str,
         portal["bots"][name].change_local_membership.assert_awaited_once_with(CONTACT_ROOM, "leave")
 
 
-def test_a_corrupt_store_is_unavailable_without_details(portal: dict[str, Any]) -> None:
-    """An unreadable contacts file answers 503 without naming the file."""
-    path = portal["paths"].storage_root / "tracking" / "contacts.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not json", encoding="utf-8")
-    for response in (
-        portal["client"].get("/api/connections/contacts", headers=portal["headers"]["alice"]),
-        _post(portal, "alice", "ab/remove"),
-    ):
-        assert (response.status_code, response.json()["detail"]) == (503, "Contacts are unavailable")
-
-
 def test_query_parameters_and_unsigned_requests_are_refused(portal: dict[str, Any]) -> None:
     """The routes take no target from the address and need a signed identity."""
     client = portal["client"]

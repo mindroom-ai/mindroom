@@ -12,14 +12,6 @@ export interface TermsDraft {
 /** Why `matrix_message` is on every contact's tool list. */
 export const ALWAYS_OFFERED = "Always offered, so your agent can answer.";
 
-/** One rule per nonblank line, without its bullet, as the contact policy reads them. */
-export function ruleLines(text: string): string[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim().replace(/^[-*]\s+/, ""))
-    .filter(Boolean);
-}
-
 const REACH_NOTES: Record<ContactToolChoice["reach"], string | null> = {
   code: "Runs code: the other side can ask it to reach anything your agent's worker or process can.",
   unconfined:
@@ -75,16 +67,17 @@ export function ToolReach({
 
 /** The rules that always apply, which the owner can read but not change. */
 export function ConfiguredRules({ rules }: { rules: string[] }) {
-  const lines = rules.flatMap(ruleLines);
-  if (lines.length === 0) return null;
+  if (rules.length === 0) return null;
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium text-muted-foreground">
         Always apply, set by your administrator
       </p>
       <ul className="list-disc space-y-0.5 pl-5 text-sm">
-        {lines.map((rule, index) => (
-          <li key={index}>{rule}</li>
+        {rules.map((rule, index) => (
+          <li key={index} className="whitespace-pre-wrap">
+            {rule}
+          </li>
         ))}
       </ul>
     </div>

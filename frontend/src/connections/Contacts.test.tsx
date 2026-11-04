@@ -169,7 +169,7 @@ describe("contacts page", () => {
     render(<Contacts />);
     const card = await screen.findByRole("article", { name: "Alice's Mind" });
     expect(within(card).getByText("Never share keys.")).toBeVisible();
-    expect(within(card).getByText("Share only free or busy.")).toBeVisible();
+    expect(within(card).getByText("- Share only free or busy.")).toBeVisible();
     expect(within(card).getByText("Shell Commands")).toBeVisible();
     expect(
       within(card).getByText(

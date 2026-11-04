@@ -6,7 +6,6 @@ import {
   ALWAYS_OFFERED,
   ConfiguredRules,
   ContactTermsForm,
-  ruleLines,
   ToolReach,
   type TermsDraft,
 } from "./ContactTermsForm";
@@ -99,22 +98,17 @@ function YourTerms({
   const choices = new Map(
     agent.tool_choices.map((choice) => [choice.name, choice]),
   );
-  const ownRules = ruleLines(contact.rules ?? "");
   return (
     <div className="grid gap-4 text-sm sm:grid-cols-2">
       <div className="space-y-2">
         <h4 className="font-medium">Rules</h4>
         <ConfiguredRules rules={agent.configured_rules} />
-        {ownRules.length > 0 ? (
+        {contact.rules ? (
           <div className="space-y-1">
             <p className="text-xs font-medium text-muted-foreground">
               Yours for this contact
             </p>
-            <ul className="list-disc space-y-0.5 pl-5">
-              {ownRules.map((rule, index) => (
-                <li key={index}>{rule}</li>
-              ))}
-            </ul>
+            <p className="whitespace-pre-wrap">{contact.rules}</p>
           </div>
         ) : (
           <p className="text-muted-foreground">

@@ -21,7 +21,6 @@ from mindroom.contacts.store import (
     PartyKind,
     SideName,
     owner_contacts,
-    read_contacts,
 )
 from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.oauth.service import oauth_provider_service_account_configured
@@ -212,19 +211,15 @@ def _contact_view(config: Config, runtime_paths: RuntimePaths, record: ContactRe
 
 
 def _page(viewer: _Viewer) -> ContactsPage:
-    """Build the owner's page; an unreadable contacts file is unavailable rather than an error naming the file."""
+    """Build the owner's page."""
     config, paths = viewer.config, viewer.runtime_paths
-    try:
-        owned = owner_contacts(paths, viewer.owner)
-    except ValueError as exc:
-        raise HTTPException(503, _UNAVAILABLE, headers=CONNECTIONS_HEADERS) from exc
     return ContactsPage(
         agents=[
             _agent_view(config, paths, name, settings)
             for name in owner_contact_agents(config, viewer.owner)
             if (settings := config.agents[name].contacts) is not None
         ],
-        contacts=[_contact_view(config, paths, record, side) for record, side in owned],
+        contacts=[_contact_view(config, paths, record, side) for record, side in owner_contacts(paths, viewer.owner)],
     )
 
 
@@ -256,15 +251,8 @@ async def _change(
     *,
     moves_agents: bool,
 ) -> ContactsPage:
-    """Run one change for the signed-in owner and answer with their page; a refusal is a 409 saying why.
-
-    The store is read first, so an unreadable file is unavailable rather than a refusal naming the file.
-    """
+    """Run one change for the signed-in owner and answer with their page; a refusal is a 409 saying why."""
     require_connections_same_origin(request, viewer.runtime_paths)
-    try:
-        await run_blocking_until_complete(read_contacts, viewer.runtime_paths)
-    except ValueError as exc:
-        raise HTTPException(503, _UNAVAILABLE, headers=CONNECTIONS_HEADERS) from exc
     actor = flow.ContactActor(
         owner=viewer.owner,
         agent_name=None,
