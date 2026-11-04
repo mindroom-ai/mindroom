@@ -101,7 +101,7 @@ class _Homeserver:
     rooms: dict[str, _Room] = field(default_factory=dict)
     # Users whose next join fails, as when the server has not processed their invitation yet.
     refused_joins: set[str] = field(default_factory=set)
-    # Rooms whose next message the server never receives, as when the connection drops.
+    # Rooms whose next message the server rejects, as a real server does with M_FORBIDDEN.
     refused_sends: set[str] = field(default_factory=set)
     _ids: count[int] = field(default_factory=lambda: count(1))
 
@@ -158,8 +158,10 @@ class _Homeserver:
 
     async def _send(self, sender: str, *, room_id: str, content: dict[str, Any], **_send: object) -> object:
         room = self.rooms[room_id]
-        if room_id in self.refused_sends or sender not in room.members:
+        if room_id in self.refused_sends:
             self.refused_sends.discard(room_id)
+            return nio.RoomSendError("not sent", "M_FORBIDDEN", room_id=room_id)
+        if sender not in room.members:
             return nio.RoomSendError("not sent", "M_FORBIDDEN", room_id=room_id)
         room.timeline.append(_Event(sender, content))
         return nio.RoomSendResponse(f"$event{next(self._ids)}", room_id)
