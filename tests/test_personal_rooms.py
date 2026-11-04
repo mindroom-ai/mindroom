@@ -582,6 +582,51 @@ async def test_a_refused_router_invite_holds_up_only_itself_and_is_retried(
 
 
 @pytest.mark.asyncio
+async def test_a_router_invite_that_never_returns_fails_the_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client retries a rate-limited invite without end, so a time limit fails the attempt instead of the lock waiting."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    invite = server.room_invite
+
+    async def hang_for_router(room_id: str, user_id: str) -> object:
+        if user_id == "@mindroom_router:localhost":
+            await asyncio.Event().wait()
+        return await invite(room_id, user_id)
+
+    monkeypatch.setattr(server, "room_invite", hang_for_router)
+    monkeypatch.setattr("mindroom.matrix.personal_rooms._ROUTER_INVITE_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(TimeoutError):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+    room_id = server.aliases["#personal_481a6d9da9e7b569dd3c:localhost"]
+    assert server.membership(room_id, "@alice:localhost") == "invite"
+    assert server.membership(room_id, "@mindroom_router:localhost") is None
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_router_membership_is_not_taken_for_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client parses an error other than 404 as a state response, which must not count as the router being a member."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, welcome="")
+    read_state = server.room_get_state_event
+
+    async def forbid_router_membership(room_id: str, event_type: str, state_key: str = "") -> object:
+        if state_key == "@mindroom_router:localhost":
+            return nio.RoomGetStateEventResponse({"errcode": "M_FORBIDDEN"}, event_type, state_key, room_id)
+        return await read_state(room_id, event_type, state_key)
+
+    monkeypatch.setattr(server, "room_get_state_event", forbid_router_membership)
+    with pytest.raises(RuntimeError, match="router membership unavailable"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+
+
+@pytest.mark.asyncio
 async def test_a_personal_room_does_not_invite_a_router_that_refuses_the_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

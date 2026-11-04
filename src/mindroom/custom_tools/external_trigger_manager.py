@@ -133,7 +133,7 @@ class ExternalTriggerManagerTools(Toolkit):
         """Create an external trigger endpoint using caller-supplied public key material.
 
         Deliveries need the router in the target room.
-        In a room without it, such as a personal room, call `invite_router` first.
+        In a room without it, call `invite_router` first.
 
         Args:
             trigger_id: Route-safe trigger id for `/api/triggers/{trigger_id}`.

@@ -70,6 +70,7 @@ _GUEST_REMOVAL_NOTICE = (
 # owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
+_ROUTER_INVITE_TIMEOUT_SECONDS = 10.0
 
 
 async def is_onboarding_room_member(source_client: nio.AsyncClient, user_id: str, source_room_id: str) -> bool:
@@ -312,7 +313,8 @@ class PersonalRoomService:
         """Invite the router, which posts approval cards, into a created room it was never in; one that left stays out.
 
         Runs once the owner's onboarding is done, so a refused router invite never holds up the owner's join or welcome;
-        it fails this attempt, which onboarding retries. Adopted rooms keep the participants their record lists, and a
+        it fails this attempt, which onboarding retries. A time limit stops a rate-limited invite, which the client
+        retries without end, from holding the owner's lock. Adopted rooms keep the participants their record lists, and a
         router whose `accept_invites` leaves out this agent never joins, so neither gets an invite.
         """
         if record.adoption is not None:
@@ -322,13 +324,16 @@ class PersonalRoomService:
             return
         assert record.room_id is not None
         router_id = current_entity_id(ROUTER_AGENT_NAME, self.runtime_paths).full_id
-        response = await client.room_get_state_event(record.room_id, "m.room.member", router_id)
-        if isinstance(response, nio.RoomGetStateEventResponse):
-            return
-        if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
-            msg = "Personal-room router membership unavailable"
-            raise RuntimeError(msg)
-        if not await invite_to_room(client, record.room_id, router_id):
+        async with asyncio.timeout(_ROUTER_INVITE_TIMEOUT_SECONDS):
+            response = await client.room_get_state_event(record.room_id, "m.room.member", router_id)
+            # The client parses an error other than 404 as this response, with the error as its content.
+            if isinstance(response, nio.RoomGetStateEventResponse) and "membership" in response.content:
+                return
+            if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
+                msg = "Personal-room router membership unavailable"
+                raise RuntimeError(msg)
+            invited = await invite_to_room(client, record.room_id, router_id)
+        if not invited:
             msg = "Personal-room router invite failed"
             raise RuntimeError(msg)
 
