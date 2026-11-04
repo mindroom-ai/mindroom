@@ -179,7 +179,7 @@ Update that page in the same PR when a change alters the trust model or anything
 
 - **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnIngress`, `TurnDispatcher`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot` facade.
   Fake collaborators through the conftest seam installers (`install_generate_response_mock`, `install_send_response_mock`, `replace_edit_regenerator_deps`, and `install_model_providers` for models) or the `*Deps` dataclasses, never by assigning mocks onto bot attributes.
-  A test needing more than 3 patches is testing through the wrong seam.
+  A test needing more than 3 patches likely tests through the wrong seam.
   Genuinely end-to-end tests belong in the slim integration files (`test_multi_agent_bot.py`, `test_threading_error.py`), which stay small by design.
 - **Grid and Flow Tests**: A feature that adds a new kind of actor or room adds an actor × ingress-path grid test and at least one multi-step flow test asserting the end state, as in `tests/contacts/test_actor_paths.py` and `tests/contacts/test_scenarios.py`.
 - **NixOS Test Shell**: On NixOS hosts, enter the Node.js 24 dev shell with `nix-shell shell.nix` before running tests; without it, `uv run pytest` fails with `module 'mindroom' has no attribute 'bot'` because `libstdc++.so.6` is missing.
