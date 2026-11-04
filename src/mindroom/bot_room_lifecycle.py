@@ -425,7 +425,7 @@ class BotRoomLifecycle:
         """
         client = self._client()
         config = self._config()
-        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        deadline = 0.0
 
         async def leave(room_id: str) -> bool:
             try:
@@ -446,6 +446,8 @@ class BotRoomLifecycle:
                     self.deps.agent_name,
                     joined_rooms,
                 )
+                # The leave budget starts after the invitation withdrawals, so a slow one never keeps the agent joined.
+                deadline = asyncio.get_running_loop().time() + timeout_seconds
                 await leave_non_dm_rooms(
                     client,
                     joined_rooms,

@@ -533,6 +533,34 @@ async def test_removing_an_agent_ends_its_contact_for_both_sides(
     assert contact_room_ids(restored, world.paths, removed) == frozenset()
 
 
+async def test_a_slow_invitation_withdrawal_leaves_a_removed_agent_its_whole_leave_budget(tmp_path: Path) -> None:
+    """The creator's withdrawals outlast the leave budget, and it still leaves its contact room."""
+    world = _world(tmp_path)
+    room_id = await _accepted_and_relayed(world)
+    client = world.runtime.clients["mind_bob"]
+    kick = client.room_kick.side_effect
+
+    async def slow_kick(kicked_room_id: str, user_id: str, **kick_args: object) -> object:
+        await asyncio.sleep(0.3)
+        return await kick(kicked_room_id, user_id, **kick_args)
+
+    client.room_kick.side_effect = slow_kick
+    bot = world.runtime.bots["mind_bob"]
+    change = bot.change_local_membership.side_effect
+
+    async def yielding_change(changed_room_id: str, membership: str) -> bool:
+        # A real membership command waits on the server, which is where an exhausted budget would cut it off.
+        await asyncio.sleep(0)
+        return await change(changed_room_id, membership)
+
+    bot.change_local_membership.side_effect = yielding_change
+
+    await _lifecycle(world, "mind_bob").leave_all_rooms(timeout_seconds=0.2)
+
+    room = world.server.rooms[room_id]
+    assert (room.members, room.invited) == ({_account(world.paths, "mind_alice")}, set())
+
+
 def _lifecycle(world: _World, name: str) -> BotRoomLifecycle:
     """Return the room lifecycle of an agent's bot on the world's server, configured for its home rooms."""
     deps = _room_lifecycle(world.config, world.paths, name).deps
