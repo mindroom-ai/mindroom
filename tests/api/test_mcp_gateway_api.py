@@ -591,7 +591,10 @@ def test_consent_checks_signed_user_origin_and_csrf(gateway_client: TestClient, 
     _, url = _authorize(client)
     assert client.get(url).status_code in {401, 403}
     fields = _consent(client, url, signed_headers("alice"))
-    assert client.get(url, headers=signed_headers("bob")).status_code == 400
+    stolen = client.get(url, headers=signed_headers("bob"))
+    assert stolen.status_code == 400
+    assert "Consent is invalid, expired, or belongs to another user" in stolen.text
+    assert stolen.headers["content-type"].startswith("text/html")
     for headers, data in [
         ({**signed_headers("bob"), "Origin": ORIGIN}, {**fields, "decision": "allow"}),
         ({**signed_headers("alice"), "Origin": "https://evil.example.org"}, {**fields, "decision": "allow"}),
@@ -995,7 +998,12 @@ def test_chat_session_approves_clients_without_trusted_upstream_auth(gateway_app
             "X-Trusted-Email": "alice@example.org",
             "Authorization": "Bearer owner-key",
         }
-        assert client.get(consent_url, headers=forged).status_code == 401
+        refused = client.get(consent_url, headers=forged)
+        assert refused.status_code == 401
+        # A browser without a session gets a page that says how to sign in, not a JSON refusal.
+        assert refused.headers["content-type"].startswith("text/html")
+        assert "opening Connections from MindRoom Chat" in refused.text
+        assert "no-store" in refused.headers["cache-control"]
         assert client.get("/api/connections/mcp/clients", headers=forged).status_code == 401
 
         client.cookies.set(

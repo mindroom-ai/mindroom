@@ -38,7 +38,7 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp_gateway.accounts import GatewayAccounts
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
-from mindroom.mcp_gateway.consent import render_consent_page
+from mindroom.mcp_gateway.consent import render_consent_error_page, render_consent_page
 from mindroom.mcp_gateway.execution import run_gateway_sync
 from mindroom.mcp_gateway.external_auth import ExternalAuth, ExternalAuthSettings
 from mindroom.mcp_gateway.oauth import GatewayOAuthProvider, gateway_public_origin
@@ -64,6 +64,19 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _MACHINE_HEADERS = {**CONNECTIONS_HEADERS, "Access-Control-Allow-Origin": "*"}
+_CONSENT_PAGE_HEADERS = {
+    **CONNECTIONS_HEADERS,
+    # Native browser form POSTs send Origin:null under no-referrer.
+    # Keep an origin for CSRF checks without exposing the consent URL.
+    "Referrer-Policy": "strict-origin",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+}
+_CONSENT_SIGN_IN_MESSAGE = (
+    "Sign in to Connections in this browser first, for example by opening Connections from MindRoom Chat, "
+    "then reload this page."
+)
 
 
 async def _check_search_access(
@@ -553,6 +566,19 @@ async def _metadata(request: Request) -> Response:
 
 
 async def _consent(request: Request) -> Response:
+    try:
+        return await _consent_page(request)
+    except HTTPException as exc:
+        # People open this page in a browser, so a refusal is a page that says what to do, not raw JSON.
+        message = _CONSENT_SIGN_IN_MESSAGE if exc.status_code == 401 else str(exc.detail)
+        return HTMLResponse(
+            render_consent_error_page(message),
+            status_code=exc.status_code,
+            headers={**(exc.headers or {}), **_CONSENT_PAGE_HEADERS},
+        )
+
+
+async def _consent_page(request: Request) -> Response:
     runtime = _local_runtime(request)
     user = await require_connections_user(request)
     owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
@@ -619,15 +645,7 @@ async def _consent(request: Request) -> Response:
             state=state,
             csrf_token=consent.csrf_token,
         ),
-        headers={
-            **CONNECTIONS_HEADERS,
-            # Native browser form POSTs send Origin:null under no-referrer.
-            # Keep an origin for CSRF checks without exposing the consent URL.
-            "Referrer-Policy": "strict-origin",
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
-            "X-Frame-Options": "DENY",
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=_CONSENT_PAGE_HEADERS,
     )
 
 
