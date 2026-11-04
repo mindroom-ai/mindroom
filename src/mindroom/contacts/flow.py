@@ -113,6 +113,22 @@ def tool_actor(context: ToolRuntimeContext, agent_name: str) -> ContactActor:
     )
 
 
+def owner_actor(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    user_id: str,
+    agent_bot: Callable[[str], AgentBot | None],
+) -> ContactActor:
+    """Return a signed-in user acting on their own contacts directly, outside any agent's tools."""
+    return ContactActor(
+        owner=resolve_human_requester_alias(user_id, config, runtime_paths),
+        agent_name=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_bot=agent_bot,
+    )
+
+
 def _validate_side_tools(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -727,7 +743,7 @@ def _listed(config: Config, runtime_paths: RuntimePaths, record: ContactRecord, 
     }
 
 
-def _owner_contacts(runtime_paths: RuntimePaths, owner: str) -> list[tuple[ContactRecord, SideName]]:
+def owner_contacts(runtime_paths: RuntimePaths, owner: str) -> list[tuple[ContactRecord, SideName]]:
     """Return the owner's contacts that are not removed, each with the owner's side, in the order they were asked."""
     return [
         (record, side)
@@ -740,7 +756,7 @@ def list_contacts(context: ToolRuntimeContext, agent_name: str) -> str:
     """Return the caller-owner's live contacts with their own side, and the personal agents they can ask, as YAML."""
     actor = tool_actor(context, agent_name)
     config, paths = actor.config, actor.runtime_paths
-    contacts = [_listed(config, paths, record, side) for record, side in _owner_contacts(paths, actor.owner)]
+    contacts = [_listed(config, paths, record, side) for record, side in owner_contacts(paths, actor.owner)]
     contactable = [
         {"agent": name, "owner": party.owner}
         for name in config.agents

@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import _ContactStatus
+    from mindroom.contacts.store import ContactStatus
     from mindroom.turns.facts import IngressFacts
 
 ADMIN = "@admin:localhost"
@@ -69,7 +69,7 @@ def _contact(
     paths: RuntimePaths,
     *,
     requester: ContactParty = ALICE_AGENT,
-    status: _ContactStatus = "active",
+    status: ContactStatus = "active",
     room_id: str | None = CONTACT_ROOM,
 ) -> None:
     """Store contact ``c1`` between ``requester`` and Bob's agent, with its room unless it never had one."""
@@ -125,7 +125,7 @@ def test_a_person_counterparty_is_admitted_under_any_of_their_aliases(tmp_path: 
 
 
 @pytest.mark.parametrize("status", ["pending", "declined"])
-def test_no_contact_room_admits_nothing(tmp_path: Path, status: _ContactStatus) -> None:
+def test_no_contact_room_admits_nothing(tmp_path: Path, status: ContactStatus) -> None:
     """Another room, an agent that is no party, and a contact that never had a room leave the event as it is."""
     config, paths = _setup(tmp_path)
     _contact(paths)

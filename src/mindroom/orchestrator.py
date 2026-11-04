@@ -1402,6 +1402,7 @@ class _MultiAgentOrchestrator:
             scheduled_tasks=self.scheduled_tasks,
             thread_export_runner=self._thread_export_runner,
             leave_matrix_room=self.leave_matrix_room,
+            agent_bot=lambda agent_name: self.agent_bots.get(agent_name),
             active_calls=self.active_call_identities,
             active_script_runs=self._script_runtime.active_runs,
             config_reload_status=lambda: self.config_reload.status,

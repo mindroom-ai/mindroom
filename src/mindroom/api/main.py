@@ -30,6 +30,7 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
+from mindroom.api.connections_contacts import router as connections_contacts_router
 from mindroom.api.connections_native import router as connections_native_router
 from mindroom.api.connections_session import router as connections_session_router
 
@@ -453,6 +454,7 @@ app.include_router(auth_router)
 app.include_router(connections_session_router)
 app.include_router(connections_native_router)
 app.include_router(connections_router)
+app.include_router(connections_contacts_router)
 app.include_router(egress_credentials_router)
 install_gateway_routes(app)
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])

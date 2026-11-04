@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 type _PartyKind = Literal["agent", "person"]
-type _ContactStatus = Literal["pending", "active", "declined", "removed"]
+type ContactStatus = Literal["pending", "active", "declined", "removed"]
 type SideName = Literal["requester", "target"]
 
 _SIDES: tuple[SideName, SideName] = ("requester", "target")
@@ -50,7 +50,7 @@ class ContactRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    status: _ContactStatus
+    status: ContactStatus
     requester: ContactParty
     target: ContactParty
     reason: str

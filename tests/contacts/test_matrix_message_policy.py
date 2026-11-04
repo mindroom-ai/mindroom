@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import _ContactStatus
+    from mindroom.contacts.store import ContactStatus
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 CONTACT_ROOM = "!contact:localhost"
@@ -92,7 +92,7 @@ def _setup(tmp_path: Path, *, administrators: tuple[str, ...] = ()) -> tuple[Con
     return config, paths
 
 
-def _contact(paths: RuntimePaths, status: _ContactStatus = "active") -> None:
+def _contact(paths: RuntimePaths, status: ContactStatus = "active") -> None:
     """Store contact ``c1`` between Alice's and Bob's agents, whose room is the contact room."""
     record = ContactRecord(
         id="c1",
@@ -641,7 +641,7 @@ async def test_a_send_the_agent_message_limit_catches_up_with_while_the_policy_r
 async def test_no_send_into_a_contact_room_takes_an_idempotency_key(
     tmp_path: Path,
     room_id: str,
-    status: _ContactStatus,
+    status: ContactStatus,
 ) -> None:
     """A keyed retry would deliver a message prepared under the contact's earlier rules, so no key is accepted there."""
     config, paths = _setup(tmp_path)

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from mindroom.api.config_lifecycle import ApiState
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
+    from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
@@ -46,6 +47,8 @@ class EmbeddedRuntime:
     scheduled_tasks: ScheduledTaskRuntime
     thread_export_runner: WorkspaceThreadExportRunner
     leave_matrix_room: Callable[[str, str], Awaitable[bool]]
+    # The current bot of a configured agent, running or not, for contact changes made on the Connections page.
+    agent_bot: Callable[[str], AgentBot | None]
     active_calls: Callable[[], list[ActiveResponseIdentity]]
     active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]]
     config_reload_status: Callable[[], ConfigReloadStatus]

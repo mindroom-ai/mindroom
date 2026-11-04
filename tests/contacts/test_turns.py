@@ -92,7 +92,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.contacts.store import _ContactStatus
+    from mindroom.contacts.store import ContactStatus
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_turn import ResponseTurnContext
 
@@ -151,7 +151,7 @@ def _record(
     *,
     requester: ContactParty = ALICE_AGENT,
     target_side: ContactSide | None = None,
-    status: _ContactStatus = "active",
+    status: ContactStatus = "active",
 ) -> ContactRecord:
     """Return contact ``c1`` between ``requester`` and Bob's agent, with its room."""
     return ContactRecord(
