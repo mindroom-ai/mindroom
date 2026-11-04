@@ -193,3 +193,13 @@ class ToolMetadata:
     def mcp_available(self) -> bool:
         """Whether MCP gateway calls, which run without a Matrix room or an agent conversation, can use the tool."""
         return not (self.requires_room_context or self.requires_conversation)
+
+
+def unconfined_by_file_access(metadata: ToolMetadata, file_access: str) -> bool:
+    """Return whether an agent's ``file_access`` setting leaves a tool's local file access unconfined.
+
+    An ``unconfined`` tool always is, and a tool that follows the setting is under ``unrestricted`` access.
+    """
+    return metadata.file_access is ToolFileAccess.UNCONFINED or (
+        metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted"
+    )

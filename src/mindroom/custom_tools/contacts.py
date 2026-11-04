@@ -91,7 +91,9 @@ class ContactsTools(Toolkit):
         """
         try:
             context = require_tool_runtime_context()
+            actor = flow.tool_actor(context, self.agent_name)
             record, posted = await flow.request_contact(
+                actor,
                 context,
                 self.agent_name,
                 target=target,
@@ -100,7 +102,6 @@ class ContactsTools(Toolkit):
                 tools=tools,
                 party=party,
             )
-            actor = flow.tool_actor(context, self.agent_name)
         except ValueError as exc:
             return f"Error: {exc}"
         return _asked(actor.owner, record, posted=posted) + flow.own_side_terms(actor, record)

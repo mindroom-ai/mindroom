@@ -169,8 +169,10 @@ async def _request(
     **options: Any,  # noqa: ANN401
 ) -> ContactRecord:
     fields: dict[str, Any] = {"reason": "Plan the dinner", "rules": None, "tools": None, "party": "agent"}
+    context = _context(config, paths, agent_name, requester_id, runtime, origin)
     record, _asked = await flow.request_contact(
-        _context(config, paths, agent_name, requester_id, runtime, origin),
+        flow.tool_actor(context, agent_name),
+        context,
         agent_name,
         target=target,
         **(fields | options),

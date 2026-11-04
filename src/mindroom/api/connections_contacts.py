@@ -26,7 +26,7 @@ from mindroom.contacts.store import (
 from mindroom.contacts.turns import contact_tool_choices, contact_turn_tools
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.declarations import ToolFileAccess, unconfined_by_file_access
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
@@ -151,9 +151,7 @@ def _reach(metadata: ToolMetadata, agent_file_access: FileAccess) -> _ToolReach:
     """Return what the other side can ask a tool to reach; `unrestricted` file access confines no tool to the files."""
     if metadata.executes_code:
         return "code"
-    if metadata.file_access is ToolFileAccess.UNCONFINED or (
-        metadata.file_access is ToolFileAccess.AGENT and agent_file_access == "unrestricted"
-    ):
+    if unconfined_by_file_access(metadata, agent_file_access):
         return "unconfined"
     return "files" if metadata.file_access is ToolFileAccess.AGENT else "none"
 

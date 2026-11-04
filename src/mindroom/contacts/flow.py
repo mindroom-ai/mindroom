@@ -286,6 +286,7 @@ def _existing_contact(
 
 
 async def request_contact(
+    actor: ContactActor,
     context: ToolRuntimeContext,
     agent_name: str,
     *,
@@ -295,14 +296,13 @@ async def request_contact(
     tools: list[str] | None,
     party: Literal["agent", "me"],
 ) -> tuple[ContactRecord, bool]:
-    """Record a contact request from ``agent_name`` or its owner, post it to the target owner, and return it.
+    """Record a contact request from ``agent_name`` or its owner ``actor``, asked in ``context``'s thread, and post it.
 
     The flag says whether this call posted a request notice. A pending or active contact between the same two parties,
     in either direction, is returned unchanged instead, and its request notice is posted when it never landed, with the
     reason its requester gave last. Asking again with other rules or tools is refused, because only ``update_contact``
     changes them.
     """
-    actor = tool_actor(context, agent_name)
     config, paths = actor.config, actor.runtime_paths
     own = ContactParty(kind="agent", id=agent_name, owner=actor.owner)
     target_party = resolve_target(config, paths, target)

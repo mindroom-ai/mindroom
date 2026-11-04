@@ -6766,6 +6766,7 @@ expose = [
     "ToolStatus",
     "ToolValidationInfo",
     "is_matrix_room_runtime_function",
+    "unconfined_by_file_access",
 ]
 from = ["mindroom.tool_system.declarations"]
 
