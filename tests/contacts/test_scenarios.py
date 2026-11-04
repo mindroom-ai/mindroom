@@ -211,12 +211,12 @@ async def _ask(world: _World, origin: MessageTarget = _ORIGIN) -> ContactRecord:
     return await _request(world.config, world.paths, world.runtime, origin=origin)
 
 
-async def _bob_accepts(world: _World, contact_id: str) -> ContactRecord:
-    """Bob's agent accepts the request for him, and the world notes the room the acceptance made active."""
+async def _bob_accepts(world: _World, contact_id: str) -> str:
+    """Bob's agent accepts the request for him; return the room the acceptance made active, which the world notes."""
     accepted = await _accept(world.config, world.paths, world.runtime, contact_id)
     assert accepted.room_id is not None
     world.activated.add(accepted.room_id)
-    return accepted
+    return accepted.room_id
 
 
 async def _ask_unseen(world: _World) -> None:
@@ -304,10 +304,9 @@ async def test_an_accepted_retry_kicks_off_in_the_thread_that_retried(tmp_path: 
     await _ask_unseen(world)
     record = await _ask(world, RETRY_ORIGIN)
 
-    accepted = await _bob_accepts(world, record.id)
+    room_id = await _bob_accepts(world, record.id)
 
-    assert accepted.room_id is not None
-    room = world.server.rooms[accepted.room_id]
+    room = world.server.rooms[room_id]
     assert (room.members, room.invited) == (
         {_account(world.paths, "mind_alice"), _account(world.paths, "mind_bob")},
         {OWNER, CO_OWNER},
@@ -334,11 +333,10 @@ async def test_a_seating_that_fails_after_the_invitations_strands_no_owner(tmp_p
     assert (abandoned.members, abandoned.invited) == (set(), set())
     _assert_world_invariants(world)
 
-    accepted = await _bob_accepts(world, record.id)
+    room_id = await _bob_accepts(world, record.id)
 
     assert [stored.status for stored in _stored(world.paths)] == ["active", "removed"]
-    assert accepted.room_id is not None
-    assert world.server.rooms[accepted.room_id].invited == {OWNER, CO_OWNER}
+    assert world.server.rooms[room_id].invited == {OWNER, CO_OWNER}
     _assert_world_invariants(world)
 
 
@@ -364,7 +362,7 @@ async def test_the_acceptance_that_loses_a_race_strands_no_owner(tmp_path: Path)
         await first
 
     assert [stored.status for stored in _stored(world.paths)] == ["active", "removed"]
-    assert world.server.rooms[second.room_id].members == {
+    assert world.server.rooms[second].members == {
         _account(world.paths, "mind_alice"),
         _account(world.paths, "mind_bob"),
     }
@@ -375,14 +373,13 @@ async def test_the_acceptance_that_loses_a_race_strands_no_owner(tmp_path: Path)
 async def _accepted_and_relayed(world: _World) -> str:
     """Return the room of a contact Bob accepted, where Alice's agent already wrote to Bob's."""
     record = await _ask(world)
-    accepted = await _bob_accepts(world, record.id)
-    assert accepted.room_id is not None
+    room_id = await _bob_accepts(world, record.id)
     # Bob's agent never admits Alice by access, yet her agent can name it as recipient there and so wake it.
-    sent = await _matrix_message(world, "mind_alice", accepted.room_id, message="Free Friday?", recipient="mind_bob")
+    sent = await _matrix_message(world, "mind_alice", room_id, message="Free Friday?", recipient="mind_bob")
     assert sent["status"] == "ok", sent
-    [relay] = world.server.rooms[accepted.room_id].timeline
+    [relay] = world.server.rooms[room_id].timeline
     assert relay.content["m.mentions"] == {"user_ids": [_account(world.paths, "mind_bob")]}
-    return accepted.room_id
+    return room_id
 
 
 async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(tmp_path: Path) -> None:

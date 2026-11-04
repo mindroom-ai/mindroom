@@ -151,7 +151,8 @@ async def test_each_actor_on_each_path_is_run_refused_or_ignored_as_the_table_sa
     config, paths = _setup(tmp_path)
     _contact(paths)
     sender = SENDERS[actor] if SENDERS[actor].startswith("@") else _agent(paths, SENDERS[actor])
-    content = await _message(config, paths, actor)
+    # Only the message path reads the content, so a recipient-discovery regression fails that path alone.
+    content = await _message(config, paths, actor) if path == "message hook post" else {}
     if status == "removed":
         # Whatever was written while the contact was active, as an event still in flight at its removal is.
         _remove(paths)
