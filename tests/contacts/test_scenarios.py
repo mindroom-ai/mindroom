@@ -7,7 +7,6 @@ invariants every flow must leave behind, whatever happened on the way.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import count
@@ -22,14 +21,15 @@ from mindroom.bot_room_lifecycle import BotRoomLifecycle
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.contacts import flow
 from mindroom.contacts.store import contact_room_ids
-from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.contacts.test_accept import NOT_PENDING, _accept, _account, _room_lifecycle
-from tests.contacts.test_matrix_message_policy import _reset_rate_limit  # noqa: F401 - autouse pytest fixture
+from tests.contacts.test_matrix_message_policy import (  # noqa: F401 - _reset_rate_limit is an autouse pytest fixture
+    _call,
+    _reset_rate_limit,
+)
 from tests.contacts.test_tools import (
     _ORIGIN,
     BOB_ROOM,
@@ -177,8 +177,8 @@ class _World:
     paths: RuntimePaths
     server: _Homeserver
     runtime: _Runtime
-    # Each place Alice asked her agent for a contact, latest last.
-    asks: list[MessageTarget] = field(default_factory=list)
+    # Where Alice last asked her agent for a contact.
+    latest_ask: MessageTarget | None = None
     # Each room an acceptance made a contact's active room, which its owners keep with their invitations once it ends.
     activated: set[str] = field(default_factory=set)
 
@@ -207,7 +207,7 @@ def _world(tmp_path: Path) -> _World:
 
 async def _ask(world: _World, origin: MessageTarget = _ORIGIN) -> ContactRecord:
     """Alice asks her agent at ``origin`` to get in touch with Bob's agent, which posts the request in Bob's room."""
-    world.asks.append(origin)
+    world.latest_ask = origin
     return await _request(world.config, world.paths, world.runtime, origin=origin)
 
 
@@ -238,8 +238,7 @@ async def _matrix_message(world: _World, agent_name: str, room_id: str, **call: 
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
-    with tool_runtime_context(context):
-        return json.loads(await MatrixMessageTools().matrix_message(**call))
+    return await _call(context, **call)
 
 
 def _answers(world: _World) -> list[tuple[str, _Event]]:
@@ -259,27 +258,19 @@ def _assert_world_invariants(world: _World, *, kept_until_restart: frozenset[tup
 
     ``kept_until_restart`` names each agent and room whose membership only that agent's next restart ends.
     """
-    contacts = _stored(world.paths)
     for room_id, room in world.server.rooms.items():
-        if room_id in world.activated:
-            continue
-        agents = {
-            _account(world.paths, party.id)
-            for record in contacts
-            if record.room_id == room_id
-            for party in (record.requester, record.target)
-            if party.kind == "agent"
-        }
-        # An invitation to a room that never became active leads only to one an agent of its contact is still in.
-        assert not room.invited or room.members & agents, f"{sorted(room.invited)} stay invited to dead {room_id}"
+        if room_id not in world.activated:
+            # A room that never became active leaves nobody invited to it.
+            assert not room.invited, f"{sorted(room.invited)} stay invited to dead {room_id}"
     for name, home in HOME_ROOMS.items():
         kept = home | contact_room_ids(world.config, world.paths, name)
         kept |= {room_id for agent_name, room_id in kept_until_restart if agent_name == name}
         stray = world.server.joined(_account(world.paths, name)) - kept
         assert not stray, f"{name} stays in rooms nothing keeps it in: {sorted(stray)}"
-    latest = world.asks[-1]
+    latest = world.latest_ask
+    asked = None if latest is None else (latest.room_id, latest.resolved_thread_id)
     for room_id, event in _answers(world):
-        assert (room_id, event.thread_id) == (latest.room_id, latest.resolved_thread_id), event.content["body"]
+        assert (room_id, event.thread_id) == asked, event.content["body"]
     for room in world.server.rooms.values():
         for event in room.timeline:
             if event.content.get(SKIP_MENTIONS_KEY):
