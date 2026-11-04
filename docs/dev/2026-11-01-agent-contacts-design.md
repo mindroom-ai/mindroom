@@ -211,6 +211,7 @@ A `contacts` object on an agent enables contacts for it and adds the `contacts` 
 - A message that passed its last check can still go one past `defaults.max_consecutive_agent_replies` when another agent message lands in the moment before it is sent.
 - An agent party that restarts or reloads in the under-a-second window between joining the contact room and the acceptance making the contact active leaves the room, because an agent keeps only active contacts' rooms, so the contact goes active without it.
 - An acceptance cut short by a restart leaves the owners' invitations to its room pending, because only the acceptance in progress knows whom it invited.
+- When a config reload removes `contacts` from one agent, the other agent of each of its contacts stays joined in the now-removed contact room until its own restart, starting and sending nothing there.
 - The contact room's refusal covers messages, edits, reactions, and files, but not state events, redactions, typing notices, or live stream frames; a contact turn sends none of them into its room, and only a plugin hook could.
 - An agent that is not a party but is invited into a contact room by hand runs ordinary turns there, which the other side can read.
 - Contact rooms set no power levels of their own, so the creating agent is their only administrator and every other member has the defaults of any room MindRoom creates.
