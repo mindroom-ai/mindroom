@@ -45,6 +45,8 @@ if TYPE_CHECKING:
 
 RUN, REFUSED, IGNORED = "run", "refused", "ignored"
 PATHS = ("edit", "message hook post", "media", "reaction hook post")
+# The hook each path runs when it is admitted; an edit runs none and reaches the edit regenerator instead.
+HOOKS = {"message hook post": "message", "media": "message", "reaction hook post": "reaction"}
 # What each actor's event does in Bob's agent's contact room, by path. "run" reaches the edit regenerator, runs the
 # message hooks on a text message or a file, or runs the reaction hooks; "refused" logs contact_room_sender_refused and
 # runs nothing; "ignored" runs nothing, as for the agent's own messages and another agent's edits in any room.
@@ -181,6 +183,7 @@ async def test_each_actor_on_each_path_is_run_refused_or_ignored_as_the_table_sa
 
     assert outcome == expected
     assert not (outcome == REFUSED and handled)
+    assert ran == ([HOOKS[path]] if outcome == RUN and path in HOOKS else [])
     assert posted == [None] * len(ran)
     assert [call for call in bot.client.room_send.await_args_list if call.kwargs["room_id"] == CONTACT_ROOM] == []
     generate.assert_not_awaited()

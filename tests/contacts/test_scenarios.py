@@ -101,7 +101,8 @@ class _Homeserver:
     rooms: dict[str, _Room] = field(default_factory=dict)
     # Users whose next join fails, as when the server has not processed their invitation yet.
     refused_joins: set[str] = field(default_factory=set)
-    # Rooms whose next message the server rejects, as a real server does with M_FORBIDDEN.
+    # Rooms whose next message the server rejects with M_FORBIDDEN, as when a power-level change took the sender's right
+    # to post away.
     refused_sends: set[str] = field(default_factory=set)
     _ids: count[int] = field(default_factory=lambda: count(1))
 
