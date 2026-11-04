@@ -25,7 +25,13 @@ from mindroom.hooks import (
 from tests.bot_helpers import _hook_plugin, dispatch_reaction_durably
 from tests.conftest import drain_coalescing, install_generate_response_mock
 from tests.contacts.test_admission import ADMIN, CAROL, CONTACT_ROOM, _agent, _contact, _setup
-from tests.contacts.test_matrix_message_policy import _call, _context, _remove, _sent
+from tests.contacts.test_matrix_message_policy import (  # noqa: F401 - _reset_rate_limit is an autouse pytest fixture
+    _call,
+    _context,
+    _remove,
+    _reset_rate_limit,
+    _sent,
+)
 from tests.contacts.test_turns import _bot, _contact_room
 from tests.test_generated_agents import CO_OWNER, OWNER
 

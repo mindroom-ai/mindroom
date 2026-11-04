@@ -30,6 +30,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.contacts.test_accept import NOT_PENDING, _accept, _room_lifecycle
+from tests.contacts.test_matrix_message_policy import _reset_rate_limit  # noqa: F401 - autouse pytest fixture
 from tests.contacts.test_tools import (
     _ORIGIN,
     BOB_ROOM,
@@ -217,11 +218,6 @@ async def _ask_unseen(world: _World) -> None:
     world.server.refused_sends.add(BOB_ROOM)
     with pytest.raises(ValueError, match=r"could not be posted"):
         await _ask(world)
-
-
-@pytest.fixture(autouse=True)
-def _reset_rate_limit() -> None:
-    MatrixMessageTools._recent_actions.clear()
 
 
 async def _matrix_message(world: _World, agent_name: str, room_id: str, **call: object) -> dict[str, Any]:
