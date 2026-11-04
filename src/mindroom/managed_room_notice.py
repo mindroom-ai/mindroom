@@ -44,11 +44,11 @@ def managed_room_notice(*, available: Sequence[str], unavailable: Sequence[str] 
         )
     else:
         text = (
-            f"{_ROOM_RULE}, and {_join_names(unavailable, 'and')} aren't among its agents, so they can't answer here. "
+            f"{_ROOM_RULE}, and {join_names(unavailable, 'and')} aren't among its agents, so they can't answer here. "
             "To talk to them, create a new room and invite them."
         )
     if available:
-        text += f" In this room, you can ask {_join_names(available, 'or')}."
+        text += f" In this room, you can ask {join_names(available, 'or')}."
     return text
 
 
@@ -95,7 +95,7 @@ def managed_room_join_notice(
     return managed_room_notice(available=responder_display_names(addressable, config, runtime_paths))
 
 
-def _join_names(names: Sequence[str], conjunction: str) -> str:
+def join_names(names: Sequence[str], conjunction: str) -> str:
     """Join display names into one phrase."""
     if len(names) == 1:
         return names[0]

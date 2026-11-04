@@ -65,7 +65,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 - In a personal room MindRoom created, the owner may invite other MindRoom agents, and an invited agent sees only messages sent after its invite.
   Anyone else invited into such a room is removed with a notice explaining that the room is private.
   Adopted rooms instead allow only the participants listed in their record, because an adopted room may share its earlier history.
-  Any other MindRoom agent invited there is removed with a notice that names it and suggests a new room with just the inviter and that agent.
+  Any other MindRoom agent invited there is removed with a notice suggesting a new room with that agent, or, for the router, an operator listing it in the room's record.
 - Personal rooms survive restarts and room cleanup, even after `personal_rooms` is removed.
   Disabling the feature stops new onboarding but does not remove existing rooms or access.
 

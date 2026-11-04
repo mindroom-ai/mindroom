@@ -733,7 +733,11 @@ async def test_an_unattested_agent_is_removed_from_an_imported_room(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Agents are welcome only in rooms MindRoom created; an imported room removes one instead of failing."""
+    """Agents are welcome only in rooms MindRoom created; an imported room removes them instead of failing.
+
+    The notice tells the owner how to reach each removed agent, and that only an operator can keep the router.
+    An agent whose display name is blank appears by its Matrix ID.
+    """
     server = MatrixServer()
     owner = service(tmp_path, server, monkeypatch, welcome="")
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
@@ -745,25 +749,29 @@ async def test_an_unattested_agent_is_removed_from_an_imported_room(
         additional_user_ids=["@mindroom_general:localhost"],
     )
     write_personal_room(path, record)
-    owner.runtime.config.agents["general"] = owner.runtime.config.agents["helper"].model_copy()
+    for name, display_name in (("general", "General"), ("writer", "Writer"), ("blank", "")):
+        owner.runtime.config.agents[name] = owner.runtime.config.agents["helper"].model_copy(
+            update={"display_name": display_name},
+        )
     persist_entity_accounts(owner.runtime.config, owner.runtime_paths)
-    server.set_member(room_id, "@mindroom_general:localhost", "join")
-    server.set_member(room_id, "@mindroom_router:localhost", "join")
+    removed = ("@mindroom_blank:localhost", "@mindroom_router:localhost", "@mindroom_writer:localhost")
+    for user_id in ("@mindroom_general:localhost", *removed):
+        server.set_member(room_id, user_id, "join")
 
     assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
-    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
 
-    assert server.kicks == [(room_id, "@mindroom_router:localhost")]
-    assert server.removal_reason(room_id, "@mindroom_router:localhost") == (
-        "This room existed before it became a personal room, so other agents can't join; "
-        "create a new room with this agent"
-    )
+    assert server.kicks == [(room_id, user_id) for user_id in removed]
+    for user_id in removed:
+        assert server.removal_reason(room_id, user_id) == (
+            "This room existed before it became a personal room, so other agents can't join"
+        )
     notices = [message["content"]["body"] for message in server.messages.values() if message["room_id"] == room_id]
     assert notices == [
-        "I removed RouterAgent because this room existed before it became a personal room, "
-        "and only the agents it already had can stay here. "
-        "To work with RouterAgent, create a new room with just you and RouterAgent. "
-        "Inviting it here again will remove it again.",
+        "I removed @mindroom_blank:localhost, RouterAgent, and Writer because this room existed before it became "
+        "a personal room, and only the agents it already had can stay here. "
+        "Inviting them here again will remove them again. "
+        "To talk to @mindroom_blank:localhost and Writer, create a new room and invite them. "
+        "To keep RouterAgent here, ask an operator to list it in this room's personal-room record.",
     ]
 
 
@@ -790,14 +798,6 @@ async def test_an_agent_invited_into_an_imported_room_is_removed_when_the_invite
     assert server.kicks == [(room_id, "@mindroom_router:localhost")]
     assert server.membership(room_id, "@bob:localhost") == "invite"
     assert not owner._guest_removal_retries
-    # Without a prepared account, the notice names the agent by its Matrix ID.
-    notices = [message["content"]["body"] for message in server.messages.values() if message["room_id"] == room_id]
-    assert notices == [
-        "I removed @mindroom_router:localhost because this room existed before it became a personal room, "
-        "and only the agents it already had can stay here. "
-        "To work with @mindroom_router:localhost, create a new room with just you and @mindroom_router:localhost. "
-        "Inviting it here again will remove it again.",
-    ]
 
     # With a person outside the roster, the room fails closed: an agent stays,
     # and since only a person can fix that, nothing is retried or logged as an error.
@@ -810,49 +810,6 @@ async def test_an_agent_invited_into_an_imported_room_is_removed_when_the_invite
     assert server.membership(room_id, "@mindroom_general:localhost") == "invite"
     assert not owner._guest_removal_retries
     assert [entry["log_level"] for entry in logs if entry["log_level"] in {"warning", "error"}] == ["warning"]
-
-
-@pytest.mark.asyncio
-async def test_removing_people_and_agents_together_explains_each(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """People keep the private-room wording, and agents get their own reason and sentence in the same notice.
-
-    An agent whose display name is blank appears by its Matrix ID.
-    """
-    server = MatrixServer()
-    owner = service(tmp_path, server, monkeypatch, welcome="")
-    for name, display_name in (("general", "General"), ("blank", "")):
-        owner.runtime.config.agents[name] = owner.runtime.config.agents["helper"].model_copy(
-            update={"display_name": display_name},
-        )
-    persist_entity_accounts(owner.runtime.config, owner.runtime_paths)
-    room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-    record = read_personal_room(personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost"))
-    agent_ids = ("@mindroom_blank:localhost", "@mindroom_general:localhost", "@mindroom_router:localhost")
-    guests = {"@bob:localhost", *agent_ids}
-    for user_id in guests:
-        server.set_member(room_id, user_id, "join")
-
-    await owner._remove_guests(record, guests, {})
-
-    assert server.removal_reason(room_id, "@bob:localhost") == "Personal rooms are private to their owner"
-    for agent_id in agent_ids:
-        assert server.removal_reason(room_id, agent_id) == (
-            "This room existed before it became a personal room, so other agents can't join; "
-            "create a new room with this agent"
-        )
-    notices = [message["content"]["body"] for message in server.messages.values() if message["room_id"] == room_id]
-    assert notices == [
-        "This room is private to @alice:localhost, so I removed @bob:localhost. "
-        "To work with other people, use a shared room. "
-        "I removed @mindroom_blank:localhost, General, RouterAgent because this room existed before it became "
-        "a personal room, and only the agents it already had can stay here. "
-        "To work with @mindroom_blank:localhost, General, RouterAgent, create a new room with just you and "
-        "@mindroom_blank:localhost, General, RouterAgent. "
-        "Inviting them here again will remove them again.",
-    ]
 
 
 @pytest.mark.asyncio

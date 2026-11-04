@@ -21,6 +21,7 @@ from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry, prepared_entity_names_by_user_id
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
+from mindroom.managed_room_notice import join_names
 from mindroom.matrix.avatar import set_room_avatar_from_file
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import (
@@ -65,15 +66,16 @@ _GUEST_REMOVAL_NOTICE = (
     "This room is private to {owner}, so I removed {guests}. To work with other people, use a shared room."
 )
 # Only imported rooms remove agents: a room MindRoom created hides history from before an invite.
-_AGENT_REMOVAL_REASON = (
-    "This room existed before it became a personal room, so other agents can't join; create a new room with this agent"
-)
+_AGENT_REMOVAL_REASON = "This room existed before it became a personal room, so other agents can't join"
 _AGENT_REMOVAL_NOTICE = (
     "I removed {agents} because this room existed before it became a personal room, "
     "and only the agents it already had can stay here. "
-    "To work with {agents}, create a new room with just you and {agents}. "
     "Inviting {pronoun} here again will remove {pronoun} again."
 )
+_AGENT_REMOVAL_ADVICE = " To talk to {agents}, create a new room and invite {pronoun}."
+# Nobody talks to the router directly, so a new room with it does not help;
+# only an operator listing it in the adoption record lets it stay.
+_ROUTER_REMOVAL_ADVICE = " To keep {router} here, ask an operator to list it in this room's personal-room record."
 # Retries for a removal a member event could not finish. After the last one,
 # the next member event in the room or a restart reconciliation of an eligible
 # owner tries again.
@@ -499,23 +501,16 @@ class PersonalRoomService:
         """Remove members the room does not permit, then tell the room why once."""
         assert record.room_id is not None
         client = self._client()
-        agents = set(filter(self._is_agent, guests))
+        # Validation removes only people from a room MindRoom created and only agents from an adopted one.
+        reason = _GUEST_REMOVAL_REASON if record.adoption is None else _AGENT_REMOVAL_REASON
         # Word the notice before any kick: once the guests are gone, no later
         # validation finds them, so a failure after the kicks would lose it.
-        notices = []
-        if people := guests - agents:
-            notices.append(_GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(people))))
-        if agents:
-            config = self.runtime.config
-            names = prepared_entity_names_by_user_id(config, self.runtime_paths)
-            shown = sorted(
-                (config.entity_display_name(names[user_id]) if user_id in names else "") or user_id
-                for user_id in agents
-            )
-            pronoun = "it" if len(agents) == 1 else "them"
-            notices.append(_AGENT_REMOVAL_NOTICE.format(agents=", ".join(shown), pronoun=pronoun))
+        notice = (
+            _GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(guests)))
+            if record.adoption is None
+            else self._agent_removal_notice(guests)
+        )
         for user_id in sorted(guests):
-            reason = _AGENT_REMOVAL_REASON if user_id in agents else _GUEST_REMOVAL_REASON
             response = await client.room_kick(record.room_id, user_id, reason=reason)
             if not isinstance(response, nio.RoomKickResponse):
                 # A guest whose power level matches the agent's stays until
@@ -524,7 +519,7 @@ class PersonalRoomService:
                 msg = "Personal-room guest removal failed"
                 raise (PersonalRoomValidationError if forbidden else RuntimeError)(msg)
         logger.info("personal_room_guests_removed", room_id=record.room_id, removed_count=len(guests))
-        content = build_message_content(" ".join(notices))
+        content = build_message_content(notice)
         content["msgtype"] = "m.notice"
         membership_event_ids = "|".join(
             str(state.get(("m.room.member", user_id), {}).get("event_id", user_id)) for user_id in sorted(guests)
@@ -537,6 +532,31 @@ class PersonalRoomService:
         )
         if delivered is None:
             logger.warning("Personal-room guest removal notice failed", room_id=record.room_id)
+
+    def _agent_removal_notice(self, agent_ids: set[str]) -> str:
+        """Explain why agents left an adopted room and what the owner can do instead."""
+        config = self.runtime.config
+        entity_names = prepared_entity_names_by_user_id(config, self.runtime_paths)
+        router_removed = any(entity_names.get(user_id) == ROUTER_AGENT_NAME for user_id in agent_ids)
+        agents = sorted(
+            (config.entity_display_name(entity_names[user_id]) if user_id in entity_names else "") or user_id
+            for user_id in agent_ids
+            if entity_names.get(user_id) != ROUTER_AGENT_NAME
+        )
+        router = config.entity_display_name(ROUTER_AGENT_NAME)
+        removed = sorted([*agents, router]) if router_removed else agents
+        notice = _AGENT_REMOVAL_NOTICE.format(
+            agents=join_names(removed, "and"),
+            pronoun="it" if len(removed) == 1 else "them",
+        )
+        if agents:
+            notice += _AGENT_REMOVAL_ADVICE.format(
+                agents=join_names(agents, "and"),
+                pronoun="it" if len(agents) == 1 else "them",
+            )
+        if router_removed:
+            notice += _ROUTER_REMOVAL_ADVICE.format(router=router)
+        return notice
 
     async def guest_membership_event(self, room: nio.MatrixRoom, user_id: str, membership: str) -> None:
         """Remove a person the owner brought into a personal room, or an agent from an imported one, once seen.
