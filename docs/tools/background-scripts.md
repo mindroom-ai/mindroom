@@ -90,6 +90,7 @@ list_scripts(include_finished: bool = True)
 
 - `start_script` requires exactly one of `source` (inline Python) or `path` (relative to the agent workspace), limited to 128 KiB.
   A `path` file is copied at launch, so later edits do not change the running program.
+  The script runs with no command-line arguments, so `sys.argv` holds only its own path.
   `name` is an optional label shown in status and list results.
 - `resource_profile` selects a Kubernetes CPU and memory profile; omitting it uses the configured default.
   `get_script_resource_profiles` shows the default and each profile's exact requests and limits, and start, status, and list results report the selected profile.
@@ -113,7 +114,7 @@ result = tools.call("website", "read_url", url="https://example.org/status.txt")
 print(result, flush=True)
 ```
 
-`MindRoomTools.call(toolkit_name, function_name, **arguments)` blocks until the call finishes and returns a JSON-compatible value.
+`MindRoomTools.call(toolkit_name, function_name, /, **arguments)` takes the toolkit and function positionally, blocks until the call finishes and returns a JSON-compatible value.
 A tool that produces media such as an image returns an object with its text under `content` and an `attachments` list that gives each medium's `kind`, `mime_type`, and `url` when it has one, without the media's bytes.
 Arguments must have an unambiguous strict-JSON representation.
 A result larger than about 64 KiB fails the call with kind `result_too_large`.
@@ -121,9 +122,24 @@ Calls within one run execute one at a time, in order.
 The SDK retries transient failures automatically without repeating the side effect.
 
 Failures raise `MindRoomToolCallError`, which exposes `kind`, `retryable`, and `call_id` so a script can log or stop predictably.
+Its `state` is `failed` or `indeterminate` from the call's final receipt, `rejected` when its arguments or every submission were refused so the tool never ran, and `None` when the call may have been accepted but no final receipt settled it.
 A denied approval raises a non-retryable error with kind `approval_denied`.
 A call a plugin hook declines raises a non-retryable error with kind `tool_failure` whose message gives the hook's reason.
 An `indeterminate` call means MindRoom accepted the call but cannot prove whether its side effect happened, so the script must not repeat it automatically.
+
+A script, or a program it starts, can also call tools with the [agent CLI](agent-cli.md) through the same access:
+
+```bash
+mindroom-agent tools call website read_url '{"url": "https://example.org/status.txt"}'
+```
+
+Inside a background script, `mindroom-agent` offers only `tools call`, which waits until the call finishes and does not accept `--call-id` or `--timeout`.
+It prints the toolkit, function, status, and outcome: `completed` exits `0`, `failed` exits `1`, and `indeterminate` exits `4`, so a script must not repeat that call automatically.
+A call is `failed` when MindRoom recorded it as failed or refused it before recording it, as for a tool outside the run's grants.
+When the CLI cannot read the final receipt of a call MindRoom may have accepted, for example because the gateway refused the lookup, it reports `indeterminate`.
+Inside a script the CLI cannot look a call up again, so check the tool's effect before repeating an `indeterminate` call.
+A failed or indeterminate call also prints its `call_id`, and its outcome gives the error and its `kind`.
+A refused command exits `2`, and a missing script capability exits `4` without a receipt.
 
 ## Complete Watcher Example
 

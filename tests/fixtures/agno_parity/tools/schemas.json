@@ -23920,7 +23920,7 @@
     "functions": [
       {
         "name": "start_script",
-        "description": "Run a Python script in the background.\nProvide exactly one of `source` or `path`.\nA path is relative to this agent's workspace and is snapshotted before execution.",
+        "description": "Run a Python script in the background.\nProvide exactly one of `source` or `path`.\nA path is relative to this agent's workspace and is snapshotted before execution.\nThe script gets no command-line arguments.\nIt calls this agent's tools with `mindroom-agent tools call TOOLKIT FUNCTION '{\"argument\": \"value\"}'`,\nwhich waits for the result, or with `from mindroom.script_sdk import MindRoomTools`\nand `MindRoomTools().call(\"toolkit\", \"function\", argument=\"value\")`.",
         "parameters": {
           "type": "object",
           "properties": {

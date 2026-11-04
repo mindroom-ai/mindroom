@@ -505,6 +505,17 @@ async def test_script_shim_puts_workspace_modules_after_installed_ones(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_script_shim_gives_the_script_only_its_own_path_as_argv(tmp_path: Path) -> None:
+    """A script that parses its command line must not see the shim's source and capability arguments."""
+    workspace, source_path, token_path = _shim_workspace(
+        tmp_path,
+        source="import sys\nprint(sys.argv, flush=True)\n",
+    )
+
+    assert await _run_shim(workspace, source_path, token_path) == str([str(source_path)])
+
+
+@pytest.mark.asyncio
 async def test_script_shim_scrubs_control_state_and_removes_capability_file(tmp_path: Path) -> None:
     """The private shim must narrow the child environment and clean its raw token."""
     workspace, source_path, token_path = _shim_workspace(

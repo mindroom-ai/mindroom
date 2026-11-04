@@ -64,6 +64,10 @@ class ScriptTools(Toolkit):
 
         Provide exactly one of `source` or `path`.
         A path is relative to this agent's workspace and is snapshotted before execution.
+        The script gets no command-line arguments.
+        It calls this agent's tools with `mindroom-agent tools call TOOLKIT FUNCTION '{"argument": "value"}'`,
+        which waits for the result, or with `from mindroom.script_sdk import MindRoomTools`
+        and `MindRoomTools().call("toolkit", "function", argument="value")`.
 
         Args:
             source: Inline Python source code.
