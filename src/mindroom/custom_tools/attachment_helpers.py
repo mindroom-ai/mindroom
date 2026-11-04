@@ -6,9 +6,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.contacts.turns import contact_room
 from mindroom.matrix.client_room_admin import get_room_members, resolve_room_reference
 from mindroom.matrix.projected_thread_membership import resolve_thread_root_event_id
-from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_human_requester_id,
+    resolve_human_requester_alias,
+)
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -38,20 +43,37 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
     )
 
 
-async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
-    """Return whether the requester may act in the given room."""
+async def room_access_allowed(context: ToolRuntimeContext, room_id: str, *, contact_room_ok: bool = False) -> bool:
+    """Return whether the requester may act in the given room.
+
+    The agent's own contact room, active or removed and even as the current room, is open only to callers that set
+    ``contact_room_ok``: they only read it, or they run the contact policy on everything they post there and post
+    nothing into a removed contact's room, as ``matrix_message`` does.
+    From any other room, only the agent's owner, who is only invited to it, may act there, since there the agent
+    speaks for its owner.
+    """
     if not room_id:
+        return False
+    config = context.current_config
+    contact = contact_room(config, context.runtime_paths, room_id, context.agent_name)
+    if contact is not None and not contact_room_ok:
         return False
     if room_id == context.room_id:
         return True
-    return is_sender_allowed_for_responder(
+    if not is_sender_allowed_for_responder(
         context.requester_id,
         context.agent_name,
         room_id,
-        context.current_config,
+        config,
         context.runtime_paths,
         context.require_agent_reply_memberships(),
-    ) and await requester_joined_target_room(context, room_id)
+    ):
+        return False
+    if contact is None:
+        return await requester_joined_target_room(context, room_id)
+    record, side = contact
+    owner = record.party(side).owner
+    return resolve_human_requester_alias(context.requester_id, config, context.runtime_paths) == owner
 
 
 async def resolve_requested_room_id(

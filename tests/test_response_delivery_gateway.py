@@ -938,6 +938,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                         request.target,
                         ending=Failed(FailureCause.ERROR, "boom"),
                         delivery_started=True,
+                        contact_turn=False,
                     )
                     assert outcome is not None
 

@@ -30,6 +30,8 @@ class Suppression(StrEnum):
     HOOK = "suppressed_by_hook"
     SILENT_NO_REPORT = "silent_no_report"
     EMPTY_PROMPT = "empty_prompt"
+    # A contact turn answers the other side only through matrix_message.
+    CONTACT_TURN = "contact_turn"
 
 
 class FailureCause(StrEnum):

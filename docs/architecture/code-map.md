@@ -137,6 +137,13 @@ Matrix sync callback
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
 | `personal_room_lifecycle.py` | Personal-room command and membership policy, personal-agent provisioning from a template, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `personal_agents.py` | Onboarding one user's personal agent: name choice, Matrix account registration, then the roster entry |
+| `config/contacts.py` | Opt-in `contacts` agent settings (rules, default tools, judgment) and the control tools a contact never offers |
+| `contacts/store.py` | The contact records and their primary-only store, and the contact rooms an agent keeps across restarts |
+| `contacts/parties.py` | Who can be a party of a contact (personal agents with `contacts`, and people by canonical Matrix ID), target resolution, how a party is named, the Matrix accounts that speak for a party, and a user's personal room |
+| `contacts/policy.py` | The contact message policy: the consecutive-agent-message limit, the `contact:before_send` hooks, and the optional judge, failing closed, plus an agent's effective rules for a contact |
+| `contacts/turns.py` | Contact turns: the contact a room belongs to, who it admits, that its turns run as the agent's owner, and how a turn of an agent in its own contact room differs from a normal turn |
+| `contacts/flow.py` | The contact operations behind the `contacts` tools: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each checked against the requester's ownership |
+| `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests, acceptances, and rule changes |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `thread_summary/state.py` | `SummaryState`: one walk of a thread's history into trusted summary notices, authorized human pins, and ordinary messages, and the current-title readers listings, exports, and calls share |
 | `thread_summary/schedule.py` | The process's per-thread summary baselines and write locks, the next threshold, and the pre-queue gate |
@@ -436,6 +443,7 @@ Matrix sync callback
 | `matrix/journal_ingress.py` | Typed event classification and replay parsing using Nio provenance |
 | `matrix/message_content.py` | Canonical extraction and sidecar resolution for received Matrix messages and edits |
 | `matrix/message_builder.py` | Message content building helpers |
+| `matrix/guarded_rooms.py` | The one room a task context may send into only from an allowed scope, checked by every Matrix send: a contact turn guards its contact room, and `matrix_message` allows the sends its contact policy approved |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
 | `matrix/provisioning_heartbeat.py` | Best-effort startup and periodic "last seen" heartbeat from paired installs to the hosted provisioning service |
 | `matrix/provisioning_env.py` | Slim environment readers deciding whether a hosted install registers by token, shared secret, or pairing, plus the paired-install client-credential headers (no Matrix/HTTP imports) |
@@ -616,3 +624,4 @@ An agent's conversation database is `agents/<agent>/sessions/<agent>.db`, and pr
 Its tables are named after its sessions table `<agent>_sessions`: `_log_runs` holds a row per run, `_log_messages` a row per stored message, `_log_tools` a row per tool execution, `_log_summaries` the compaction summary rows, `_log_removed` the runs that edits and redactions removed, `_log_meta` the layout version, run counter, and owner, and `_usage` the usage ledger.
 A database converted from the Agno layout keeps its pre-conversion copy beside it as `<agent>.db.pre-storage-v2`, and one converted from layout version 2 or 3 as `<agent>.db.pre-storage-v4`.
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.
+`tracking/contacts.json` holds the contacts between personal agents and people, written only by the primary.

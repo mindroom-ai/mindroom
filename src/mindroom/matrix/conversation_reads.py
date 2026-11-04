@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
@@ -30,6 +31,8 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Sequence
 
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
@@ -358,6 +361,29 @@ async def latest_agent_message_snapshot(
             origin_server_ts=message.revision_ts,
         )
     return None
+
+
+async def consecutive_agent_messages(
+    reader: ConversationReader,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    limit: int,
+) -> int:
+    """Count the newest messages in one conversation that agents or teams wrote, looking back at most ``limit``.
+
+    Any other sender, the router included, ends the run: it writes only for a person.
+    """
+    page = await reader.read(room_id=room_id, thread_id=thread_id, limit=limit)
+    registry = entity_identity_registry(config, runtime_paths)
+    count = 0
+    for message in reversed(page.messages):
+        if registry.current_entity_name_for_user_id(message.sender, include_router=False) is None:
+            break
+        count += 1
+    return count
 
 
 async def complete_thread_history(

@@ -206,7 +206,13 @@ async def end_span_as_locked_turn(
     """End a span a failed outcome left running, as the locked turn's exit does; return the noted outcome."""
     if handle.exited or not isinstance(outcome.ending, Failed):
         return outcome
-    noted = await gateway.end_interrupted_span(handle, target, ending=outcome.ending, delivery_started=True)
+    noted = await gateway.end_interrupted_span(
+        handle,
+        target,
+        ending=outcome.ending,
+        delivery_started=True,
+        contact_turn=False,
+    )
     return outcome if noted is None else noted
 
 

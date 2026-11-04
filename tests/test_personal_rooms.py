@@ -1102,7 +1102,7 @@ async def test_self_command_ignores_forged_requester_and_argument(
     assert not await router._personal_room_lifecycle.handle_command(
         room,
         event,
-        router._ingress_validator.classify(event).lane_requester_id,
+        router._ingress_validator.classify(event, room_id=room.room_id).lane_requester_id,
     )
     assert server.create_count == 1
 
@@ -1471,7 +1471,11 @@ async def test_private_welcome_requester_reaches_existing_ingress(
     await target.personal_rooms.owner_membership_event("!personal1:localhost", "@alice:localhost", "join")
     content = next(iter(server.messages.values()))["content"]
     assert (
-        target._ingress_validator.classify_source(server.user_id, {"content": content}).lane_requester_id
+        target._ingress_validator.classify_source(
+            server.user_id,
+            {"content": content},
+            room_id="!room:localhost",
+        ).lane_requester_id
         == "@alice:localhost"
     )
 
@@ -2821,7 +2825,7 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
             "content": content,
         },
     )
-    facts = target._ingress_validator.classify(event)
+    facts = target._ingress_validator.classify(event, room_id=room.room_id)
     assert await target._ingress_validator.precheck_event(room, event, facts)
     assert facts.lane_requester_id == "@alice:localhost"
     dispatch = await target._turn_dispatcher._prepare_dispatch(
@@ -2880,7 +2884,7 @@ async def test_self_command_rejects_service_account_original_sender_relays(
     assert await router._personal_room_lifecycle.handle_command(
         room,
         event,
-        router._ingress_validator.classify(event).lane_requester_id,
+        router._ingress_validator.classify(event, room_id=room.room_id).lane_requester_id,
     )
     assert server.create_count == 0
 

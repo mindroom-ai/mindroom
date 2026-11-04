@@ -16,7 +16,9 @@ from mindroom.tool_system.tool_environment import ToolEnvironment
 from .context import (
     AgentLifecycleContext,
     BeforeResponseContext,
+    CallHookContext,
     CompactionHookContext,
+    ContactBeforeSendContext,
     CustomEventContext,
     FinalResponseDraft,
     FinalResponseTransformContext,
@@ -64,7 +66,7 @@ class _HookInvocationResult:
 
 def _scope_agent_name(context: HookContext) -> str | None:
     agent_name: str | None = None
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
+    if isinstance(context, CallHookContext):
         agent_name = context.agent_name
     else:
         envelope = message_envelope_for_hook_context(context)
@@ -81,7 +83,7 @@ def _scope_agent_name(context: HookContext) -> str | None:
 
 
 def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
+    if isinstance(context, CallHookContext):
         return (context.room_id,) if context.room_id else ()
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
@@ -306,6 +308,48 @@ async def emit_gate(
             context.declined = hook_context.declined
             context.decline_reason = hook_context.decline_reason
             if context.declined:
+                return
+    finally:
+        _EMIT_DEPTH.reset(token)
+
+
+async def emit_policy(
+    registry: HookRegistry,
+    event_name: str,
+    context: ContactBeforeSendContext,
+) -> None:
+    """Run policy hooks serially in priority order, failing closed.
+
+    After each hook ``context`` takes its ``text``, ``verdict``, and ``feedback``, and the first verdict other than
+    ``send`` stops the chain.
+    A hook that fails or times out denies the send, as does a policy run nested too deeply.
+    """
+    depth = _EMIT_DEPTH.get()
+    if depth >= _MAX_EMIT_DEPTH:
+        logger.warning(
+            "Denying contact policy emission after recursion limit",
+            event_name=event_name,
+            correlation_id=context.correlation_id,
+            max_depth=_MAX_EMIT_DEPTH,
+        )
+        context.deny("Contact policy hooks nested too deeply.")
+        return
+
+    token = _EMIT_DEPTH.set(depth + 1)
+    try:
+        for hook in _eligible_hooks(registry, event_name, context):
+            hook_context = cast(
+                "ContactBeforeSendContext",
+                _bind_hook_context(registry, hook, context),
+            )
+            invocation = await _invoke_hook(hook, hook_context)
+            if not invocation.succeeded:
+                context.deny("A contact policy hook failed.")
+                return
+            context.text = hook_context.text
+            context.verdict = hook_context.verdict
+            context.feedback = hook_context.feedback
+            if context.verdict != "send":
                 return
     finally:
         _EMIT_DEPTH.reset(token)

@@ -58,6 +58,7 @@ nav = [
     { "Rooms & Spaces" = "rooms.md" },
     { "Personal Rooms" = "personal-rooms.md" },
     { "Personal Agents" = "personal-agents.md" },
+    { "Agent Contacts" = "agent-contacts.md" },
     { "Bridges" = "deployment/bridges/index.md" },
     { "Telegram Bridge" = "deployment/bridges/telegram.md" },
   ] },

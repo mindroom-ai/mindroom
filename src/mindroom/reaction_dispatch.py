@@ -252,8 +252,9 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         semantic_consumer: SemanticConsumer | None,
+        facts: IngressFacts,
     ) -> TurnDispatchOutcome:
-        """Classify and execute one reaction that has no completed hook claim."""
+        """Execute one classified reaction that has no completed hook claim."""
         pending_change = (
             await config_confirmation.resolve_reaction_pending_change(
                 self._client(),
@@ -279,7 +280,6 @@ class ReactionDispatcher:
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        facts = self.deps.ingress.classify(event)
         requester_user_id = facts.lane_requester_id
         ticket = self.deps.reserve_prompt_ingress_order(
             room,
@@ -348,9 +348,18 @@ class ReactionDispatcher:
 
     async def dispatch(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:
         """Route one reaction to its sole durable semantic consumer."""
+        facts = self.deps.ingress.classify(event, room_id=room.room_id)
+        # Access would admit an administrator, so a contact room refuses everyone but its parties itself.
+        if facts.contact_refused:
+            self.deps.logger.info(
+                "contact_room_sender_refused",
+                room_id=room.room_id,
+                event_id=event.event_id,
+                sender=event.sender,
+            )
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         semantic_consumer = self.deps.journal_dispatcher.semantic_consumer()
         if semantic_consumer is SemanticConsumer.REACTION_HOOKS:
-            requester_user_id = self.deps.ingress.classify(event).lane_requester_id
-            await self._emit_authorized_reaction_hooks(room, event, requester_user_id)
+            await self._emit_authorized_reaction_hooks(room, event, facts.lane_requester_id)
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        return await self._route_reaction(room, event, semantic_consumer)
+        return await self._route_reaction(room, event, semantic_consumer, facts)

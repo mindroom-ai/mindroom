@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -18,6 +18,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
 )
+from mindroom.contacts.turns import contact_admission, contact_room
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -26,7 +27,9 @@ from mindroom.dispatch_source import (
     source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
+from mindroom.matrix.guarded_rooms import guarded_room
 from mindroom.requester_identity import (
     is_access_checked_requester_id,
     is_human_requester_id,
@@ -47,6 +50,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.turn_store import TurnStore
+
+logger = get_logger(__name__)
 
 # Every bot syncs on its own, so this bot can deliver a newcomer's first message just before the router's
 # sync applies their join. The first gate re-decides on each membership publication for this long; a
@@ -74,6 +79,7 @@ class IngressValidatorDeps:
 
     runtime: BotRuntimeView
     runtime_paths: RuntimePaths
+    agent_name: str
     matrix_id: MatrixID
     turn_store: TurnStore
     turn_policy: _SenderReplyPolicy
@@ -97,15 +103,29 @@ class IngressValidator:
 
     deps: IngressValidatorDeps
 
-    def classify(self, event: _InboundEvent, *, source_kind: str | None = None) -> IngressFacts:
+    def classify(
+        self,
+        event: _InboundEvent,
+        *,
+        source_kind: str | None = None,
+        room_id: str,
+    ) -> IngressFacts:
         """Classify one inbound event's provenance once, before precheck.
 
         ``source_kind`` is the kind its transport fixes (media, voice, edit); without
-        one, a trusted sender's content kind applies, else ``message``.
+        one, a trusted sender's content kind applies, else ``message``. ``room_id``
+        is the room the event arrived in, which decides whether it is a contact turn.
         """
-        return self.classify_source(event.sender, event.source, source_kind=source_kind)
+        return self.classify_source(event.sender, event.source, source_kind=source_kind, room_id=room_id)
 
-    def classify_source(self, sender: str, source: object, *, source_kind: str | None = None) -> IngressFacts:
+    def classify_source(
+        self,
+        sender: str,
+        source: object,
+        *,
+        source_kind: str | None = None,
+        room_id: str,
+    ) -> IngressFacts:
         """Classify provenance from a sender and a Matrix event source, live or stored in history."""
         source_dict = cast("dict[str, Any]", source) if isinstance(source, dict) else {}
         raw_content = source_dict.get("content")
@@ -135,6 +155,22 @@ class IngressValidator:
         )
         lane_requester_id = self._resolve_alias(promoted_requester or sender)
         acting_requester_id = self._acting_requester_id(sender_entity_name, trusted_content, content_source_kind)
+        # The agent's own messages never start a contact turn, so its replies written for the owner stay its echo.
+        contact = (
+            None
+            if sender == self.deps.matrix_id.full_id
+            else contact_admission(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                room_id=room_id,
+                agent_name=self.deps.agent_name,
+                sender_ids=filter(None, (sender, lane_requester_id, acting_requester_id)),
+            )
+        )
+        if contact is not None and contact.requester_id is not None:
+            # Every turn of an agent party in its contact room runs as its owner; anyone else stays the speaker.
+            lane_requester_id = contact.requester_id
+            acting_requester_id = None if self._resolve_alias(sender) == contact.requester_id else contact.requester_id
         original_sender_is_human = original_sender is not None and is_human_requester_id(
             original_sender,
             self.deps.runtime.config,
@@ -161,6 +197,7 @@ class IngressValidator:
             or _final_reply_original_event_id(sender_entity_name, source_dict),
             sender_entity_name=sender_entity_name,
             requester_entity_name=self.managed_entity_name_for_sender(acting_requester_id or lane_requester_id),
+            contact_refused=contact is not None and contact.requester_id is None,
         )
 
     def _is_access_checked(self, user_id: str) -> bool:
@@ -237,6 +274,18 @@ class IngressValidator:
         if not is_edit and await self.deps.turn_store.is_handled(room.room_id, event.event_id):
             return False
 
+        # Access would admit an administrator, so a contact room refuses everyone but its parties itself.
+        if facts.contact_refused:
+            logger.info(
+                "contact_room_sender_refused",
+                agent_name=self.deps.agent_name,
+                room_id=room.room_id,
+                event_id=event.event_id,
+                sender=facts.physical_sender,
+            )
+            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
+            return False
+
         # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
         if not await self._can_reply_once_router_catches_up(facts.run_requester_id, room):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
@@ -258,10 +307,16 @@ class IngressValidator:
         under the fence a configuration change waits at. A denied decision settles
         ``unanswered`` before the fence opens, so what was decided under the old
         authorization is durable before the change applies.
+
+        Every ingress hook runs inside an admitted decision, before any contact turn guards its room, so a decision in
+        a room that is or was this agent's contact room guards it: what the decision runs, those hooks included,
+        reaches that room only through a send the contact's message policy approved.
         """
         async with self.deps.runtime.admission_fence():
             if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id):
-                yield True
+                contact = contact_room(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name)
+                with guarded_room(room_id) if contact is not None else nullcontext():
+                    yield True
                 return
             await self.deps.settle_ignored_sources(unanswered)
             yield False

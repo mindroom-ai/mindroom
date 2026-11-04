@@ -1040,7 +1040,10 @@ class ApprovalContinuationRunner:
         *,
         target: MessageTarget,
     ) -> ResponseRequest:
-        """Rebuild the original response identity for resumed hooks and post-effects."""
+        """Rebuild the original response identity for resumed hooks and post-effects.
+
+        It carries no contact: a contact turn offers no function that asks for approval, so it never pauses.
+        """
         envelope = MessageEnvelope(
             source_event_id=continuation.source_event_ids[0],
             target=target,

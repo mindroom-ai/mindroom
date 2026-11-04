@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from mindroom.dispatch_handoff import PreparedIngress
     from mindroom.event_journal import JournalEvent, PendingTurnView
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.turns.facts import IngressFacts
+    from mindroom.turns.facts import IngressFacts, RunIdentity
 
 # Classify a stored item from its sender and Matrix source the way ingress classifies a live event.
 type _Classify = Callable[[str, Mapping[str, object]], IngressFacts]
@@ -32,7 +32,7 @@ type _ForAnotherParticipant = Callable[[str, Mapping[str, object]], Awaitable[bo
 
 async def has_newer_unresponded_in_thread(
     event: PreparedIngress,
-    requester_user_id: str,
+    run_identity: RunIdentity,
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     may_be_superseded_by_newer_requester_turn: bool,
@@ -42,7 +42,7 @@ async def has_newer_unresponded_in_thread(
     for_another_participant: _ForAnotherParticipant,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
-    """Return True when full thread history proves a newer unhandled requester turn exists.
+    """Return True when full thread history proves a newer unhandled turn of the same run identity exists.
 
     Only a message the journal still owes work can become that turn: one this
     agent already settled without answering, such as a voice note it ignored as
@@ -66,7 +66,7 @@ async def has_newer_unresponded_in_thread(
             message,
             source={"content": message.content},
             body=message.body,
-            requester_user_id=requester_user_id,
+            run_identity=run_identity,
             classify=classify,
             handled=handled,
             for_another_participant=for_another_participant,
@@ -86,12 +86,12 @@ async def _is_unresponded_requester_event(
     *,
     source: Mapping[str, object],
     body: object,
-    requester_user_id: str,
+    run_identity: RunIdentity,
     classify: _Classify,
     handled: Collection[str],
     for_another_participant: _ForAnotherParticipant,
 ) -> bool:
-    """Return whether a normalized candidate is an unanswered requester turn.
+    """Return whether a normalized candidate is an unanswered turn of the same run identity.
 
     The filters SQL cannot express. Whose turn an event really is depends on
     trusted relay metadata inside its content, a router transcript echo is a
@@ -107,10 +107,13 @@ async def _is_unresponded_requester_event(
     row records the terminal outcome separately, so a turn recorded there
     before a crash replays as a pending row afterwards. Trusting pending alone
     would let an already-answered message suppress an older one forever.
+
+    A run identity is the requester plus the speaker who wrote for it, as coalescing keeps them apart, so the
+    senders of a contact room, who all run as its agent's owner, never supersede one another.
     """
     facts = classify(event.sender, source)
     content = source.get("content")
-    if is_router_voice_echo(facts, content) or facts.lane_requester_id != requester_user_id:
+    if is_router_voice_echo(facts, content) or facts.run_identity != run_identity:
         return False
     if event.event_id in handled or await for_another_participant(event.event_id, source):
         return False
@@ -126,7 +129,7 @@ async def has_newer_unresponded_journal_thread_event(
     *,
     room_id: str,
     event: PreparedIngress,
-    requester_user_id: str,
+    run_identity: RunIdentity,
     thread_id: str | None,
     may_be_superseded_by_newer_requester_turn: bool,
     pending_turns: PendingTurnView,
@@ -170,7 +173,7 @@ async def has_newer_unresponded_journal_thread_event(
                 candidate,
                 source=candidate.source,
                 body=body,
-                requester_user_id=requester_user_id,
+                run_identity=run_identity,
                 classify=classify,
                 handled=handled,
                 for_another_participant=for_another_participant,

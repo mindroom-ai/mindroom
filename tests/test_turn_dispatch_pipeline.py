@@ -655,7 +655,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_dispatcher,
                 room,
                 event,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
             )
             await drain_coalescing(bot)
 
@@ -739,7 +739,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_dispatcher,
                 room,
                 event,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
             )
 
         mock_build_payload.assert_not_awaited()
@@ -814,7 +814,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_dispatcher,
                 room,
                 event,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
             )
 
         mock_execute_command.assert_awaited_once()
@@ -891,7 +891,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_dispatcher,
                 room,
                 event,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
             )
 
         mock_full_history.assert_not_awaited()
@@ -966,7 +966,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_dispatcher,
                 room,
                 event,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
                 handled_turn=TurnRecord.create(
                     ["$voice", "$text"],
                     source_event_prompts={"$voice": "voice prompt", "$text": "text prompt"},
@@ -1090,7 +1090,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_dispatcher,
                 room,
                 event,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
                 handled_turn=coalesced_turn,
             )
 
@@ -1150,7 +1150,7 @@ class TestAgentBot(AgentBotTestBase):
                     server_timestamp=event.server_timestamp,
                 ),
                 room,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
                 ticket=ticket,
                 coalescing_key=requester_coalescing_key(room.room_id, None, "@user:localhost"),
             )
@@ -1230,7 +1230,7 @@ class TestAgentBot(AgentBotTestBase):
                 bot._turn_dispatcher,
                 room,
                 event,
-                facts=bot._ingress_validator.classify(event),
+                facts=bot._ingress_validator.classify(event, room_id=room.room_id),
             )
 
         handled_turn = mock_prepare.await_args.args[0].handled_turn
@@ -1253,10 +1253,10 @@ class TestAgentBot(AgentBotTestBase):
         replyless_relay = self._router_relay_event(reply_to=None)
         non_router_relay = self._router_relay_event(sender="@mindroom_general:localhost")
 
-        assert validator.classify(explicit_relay).discovery_event_id == "$user_msg:localhost"
-        assert validator.classify(fallback_relay).discovery_event_id is None
-        assert validator.classify(replyless_relay).discovery_event_id is None
-        assert validator.classify(non_router_relay).discovery_event_id is None
+        assert validator.classify(explicit_relay, room_id="!room:localhost").discovery_event_id == "$user_msg:localhost"
+        assert validator.classify(fallback_relay, room_id="!room:localhost").discovery_event_id is None
+        assert validator.classify(replyless_relay, room_id="!room:localhost").discovery_event_id is None
+        assert validator.classify(non_router_relay, room_id="!room:localhost").discovery_event_id is None
 
     @pytest.mark.asyncio
     async def test_external_trigger_to_private_agent_uses_trigger_owner_as_requester(
@@ -1643,7 +1643,7 @@ class TestAgentBot(AgentBotTestBase):
             outcome = await bot._turn_ingress._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
-                facts=bot._ingress_validator.classify(prepared_event),
+                facts=bot._ingress_validator.classify(prepared_event, room_id=room.room_id),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root:localhost",
             )
@@ -1709,7 +1709,7 @@ class TestAgentBot(AgentBotTestBase):
             outcome = await bot._turn_ingress._dispatch_prepared_text_like_ingress(
                 room=room,
                 prepared_event=prepared_event,
-                facts=bot._ingress_validator.classify(prepared_event),
+                facts=bot._ingress_validator.classify(prepared_event, room_id=room.room_id),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root:localhost",
             )
@@ -1848,7 +1848,7 @@ class TestAgentBot(AgentBotTestBase):
             await bot._voice_ingress.admit(
                 room,
                 voice_event,
-                bot._ingress_validator.classify(voice_event, source_kind=VOICE_SOURCE_KIND),
+                bot._ingress_validator.classify(voice_event, source_kind=VOICE_SOURCE_KIND, room_id=room.room_id),
                 dispatch_timing=None,
                 ticket=ticket,
             )
@@ -1945,7 +1945,7 @@ class TestAgentBot(AgentBotTestBase):
             handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
                 room,
                 sidecar_event,
-                bot._ingress_validator.classify(sidecar_event),
+                bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
@@ -2050,7 +2050,7 @@ class TestAgentBot(AgentBotTestBase):
             handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
                 room,
                 sidecar_event,
-                bot._ingress_validator.classify(sidecar_event),
+                bot._ingress_validator.classify(sidecar_event, room_id=room.room_id),
                 ticket=ticket,
                 coalescing_thread_id="$thread_root",
             )
