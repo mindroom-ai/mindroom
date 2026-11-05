@@ -10,7 +10,9 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 
 ## Decisions
 
-1. A polling service reads each listening agent's own event journal after a durable per-room marker, so one mechanism covers every room and restarts lose and repeat nothing.
+1. A polling service reads each listening agent's own event journal after a durable per-room marker, so one mechanism covers every room and a restart resumes after the last turn that finished.
+   A restart in the middle of a turn runs that turn again, so its tool effects can repeat (see Risks).
+   A room owing a sync-gap repair is repaired before it is read, because the messages a gap skipped are older than those after it, and a marker moved past those would never hear them.
 2. The first run for a room starts at "now", so turning listening on never reads history from before it.
 3. A silent turn runs as the agent, with its identity, instructions, and memory, but offers only `listen.tools` and drops its text, so no tool outside the list can act and nothing can be posted.
 4. Every `listen.tools` entry must be among the agent's own `tools`, and config load fails otherwise.
@@ -51,7 +53,6 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 - Cost without budgets.
   `max_runs_per_hour`, `max_messages`, and a cheaper `model` bound it, and usage under `listening` makes it visible.
 - A restart in the middle of a silent turn, after its tools acted, repeats that turn, so a memory write or reaction may happen twice.
-- Gap repair after downtime can insert messages older than an advanced marker, and those are never heard.
 - The hourly run count lives in memory and starts again after a restart.
 
 ## Open questions

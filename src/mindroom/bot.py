@@ -86,7 +86,6 @@ from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
     EventKind,
-    HistoryRecoveryState,
     PrincipalStore,
 )
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -384,9 +383,7 @@ class AgentBot:
         Redactions inside a gap its sync skipped reach the journal only when the room is repaired, so the lookup runs
         that repair first, as a strict read of the room would.
         """
-        recovery = await self.journal_principal().room_history_recovery(room_id)
-        if recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE:
-            await self._conversation_reader.hydrator.ensure_hydrated(room_id=room_id, thread_id=None)
+        await self._conversation_reader.hydrator.repair_room_history(room_id)
         return await self._turn_store.redacted_event_ids(room_id, event_ids)
 
     def _init_runtime_components(self) -> None:

@@ -25,6 +25,7 @@ from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.service import ListeningService
 from mindroom.listening.turn import run_silent_turn
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.memory.functions import list_all_agent_memories
 from mindroom.response_turn import HandledAttempt
@@ -42,6 +43,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.fakes.summary_model import summary_model
 from tests.identity_helpers import entity_ids
+from tests.journal_helpers import record_room_history_recovery
 from tests.test_event_journal_store import admit, edit, text
 
 if TYPE_CHECKING:
@@ -110,6 +112,16 @@ class _Bot:
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
         )
+
+
+@dataclass
+class _Hydrator:
+    """The bot's hydrator as listening uses it: its real gap repair, over a walk and refetches the test plays."""
+
+    store: PrincipalStore
+    resolve_refreshes: AsyncMock = field(default_factory=AsyncMock)
+    ensure_hydrated: AsyncMock = field(default_factory=AsyncMock)
+    repair_room_history = ConversationHydrator.repair_room_history
 
 
 @dataclass
@@ -217,7 +229,7 @@ def _bot(config: Config, runtime_paths: RuntimePaths, journal: PrincipalStore) -
     scribe = entity_ids(config, runtime_paths)["scribe"]
     client = make_matrix_client_mock(user_id=scribe.full_id)
     client.room_send.return_value = nio.RoomSendResponse("$reaction", ROOM)
-    hydrator = SimpleNamespace(resolve_refreshes=AsyncMock())
+    hydrator = _Hydrator(journal)
     reader = ConversationReader(store=journal, hydrator=cast("Any", hydrator))
     ingress = IngressValidator(
         IngressValidatorDeps(
@@ -585,6 +597,25 @@ async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(
     await listening.service._poll_once(T0 + 200)
 
     assert listening.turns.heard() == ["$a", "$p"]
+
+
+async def test_a_sync_gap_repaired_after_newer_messages_arrived_is_heard(listening: _Listening) -> None:
+    """Messages a sync gap skipped are installed before the room is read, so the marker never passes them unheard."""
+    await listening.service._poll_once(T0)
+    await record_room_history_recovery(listening.journal, ROOM)
+    await listening.say("$after-gap", 30)
+
+    async def repair(*, room_id: str, thread_id: str | None) -> None:
+        assert (room_id, thread_id) == (ROOM, None)
+        await listening.say("$in-gap", 20)
+
+    hydrator = listening.bot.conversation_reader.hydrator
+    cast("AsyncMock", hydrator.ensure_hydrated).side_effect = repair
+
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$in-gap", "$after-gap"]
+    assert listening.marker_event() == "$after-gap"
 
 
 async def test_listening_turned_off_and_on_starts_again_at_the_newest_message(listening: _Listening) -> None:

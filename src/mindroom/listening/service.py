@@ -172,6 +172,8 @@ class ListeningService:
         if marker is None:
             await self._mark(agent_name, room_id, _first_marker(await reader.latest_room_cursor(room_id), now))
             return
+        # What a sync gap skipped is older than what came after it, so it is installed before the marker can pass it.
+        await reader.hydrator.repair_room_history(room_id)
         page = await reader.read_room_after(room_id, marker, listen.max_messages)
         if page.refresh_pending:
             # The page stops before the first message owing a refetch; the marker waits for it.

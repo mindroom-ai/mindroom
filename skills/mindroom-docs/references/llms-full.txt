@@ -1920,7 +1920,7 @@ No more than `max_runs_per_hour` turns run per hour; the count starts again afte
 
 The first run for a room starts at "now".
 The agent never reads history from before listening was turned on, and a room it stops listening in forgets its place.
-The place the agent has reached in each room is kept in `tracking/listening_markers.json`, so a restart loses and repeats nothing.
+After a restart, the agent hears what it had not yet heard, including messages sent while MindRoom was down.
 A message that still awaits a refetch holds the room until it resolves, and MindRoom logs a warning after 10 polls (about 100 seconds).
 
 A listening agent skips:
@@ -1946,7 +1946,6 @@ Listening never posts, so it works in any room, whatever the agent's other setti
 ### Known limits
 
 - A restart in the middle of a silent turn, after its tools have acted, repeats that turn, so a memory write or reaction may happen twice.
-- Gap repair after downtime can insert messages older than the marker has advanced to; those are not heard.
 - Heard text can carry prompt injection that drives the listed tools, so keep `listen.tools` narrow, and give the turn no tool that sends, spends, or deletes.
 
 ## Naming Rules

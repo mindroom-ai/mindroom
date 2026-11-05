@@ -600,6 +600,15 @@ class ConversationHydrator:
             raise RuntimeError(msg)
         return client
 
+    async def repair_room_history(self, room_id: str) -> None:
+        """Install what a sync gap skipped in a room, if a repair is owed, and nothing else.
+
+        The messages a gap skipped reach the journal only through this repair, older than what arrived after the gap.
+        """
+        recovery = await self.store.room_history_recovery(room_id)
+        if recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE:
+            await self.ensure_hydrated(room_id=room_id, thread_id=None)
+
     async def ensure_hydrated(self, *, room_id: str, thread_id: str | None) -> None:
         """Hydrate a conversation once, sharing one task among concurrent readers.
 
