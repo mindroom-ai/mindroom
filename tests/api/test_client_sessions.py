@@ -290,6 +290,16 @@ def test_per_user_cap_evicts_that_users_oldest_session() -> None:
     assert store.lookup(bob.token) == bob
 
 
+def test_exchanges_below_the_global_cap_never_evict_another_users_session() -> None:
+    """Many users signing in up to their own cap, together below the global cap, leave every other session alone."""
+    store = ClientSessionStore()
+    bob = store.create("@bob:example.org")
+    for i in range(40):
+        for _ in range(store.per_user_capacity + 2):
+            store.create(f"@user{i}:example.org")
+    assert store.lookup(bob.token) == bob
+
+
 def test_global_cap_evicts_the_oldest_session() -> None:
     """At the global cap a new session from anyone evicts the globally oldest one, never refusing."""
     store = ClientSessionStore(capacity=3)

@@ -25,7 +25,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _CLIENT_SESSION_TTL_SECONDS = 3600
-_CLIENT_SESSION_CAPACITY = 256
+# About 3 MB when full; high enough that sign-ins evict only their own user's sessions in practice.
+_CLIENT_SESSION_CAPACITY = 10_000
 _CLIENT_SESSIONS_PER_USER = 8
 
 router = APIRouter(prefix="/api/client-sessions")
@@ -43,7 +44,8 @@ class _ClientSession:
 class ClientSessionStore:
     """Hold client sessions in memory only; a restart signs everyone out.
 
-    Memory is bounded without refusing anyone: past a per-user or global cap the oldest session goes.
+    Memory is bounded without refusing anyone: past the per-user cap that user's oldest session goes, and past the
+    global cap the oldest of anyone's, so below the global cap one user's sign-ins never sign another user out.
     The TTL is constant, so insertion order is expiry order and pruning stops at the first live session.
     """
 
