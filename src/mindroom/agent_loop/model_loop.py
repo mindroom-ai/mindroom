@@ -25,6 +25,7 @@ from mindroom.agent_loop.tools import (
     dispatch_tool_calls,
     failed_answer,
     failing_tool_stop_text,
+    ignored_refusal,
     media_follow_up,
     plan_tool_batch,
     tool_result_message,
@@ -127,10 +128,10 @@ class LoopHooks:
       mode's checkpoint of the batch).
     - ``tool_middleware``: wraps every tool call the loop executes, outermost first (job admission, the hook bridge).
     - ``after_tool_batch``: awaited in order with the live messages and the batch's result messages after the
-      results and any media follow-up are appended, before the loop decides to pause or continue; a batch whose
-      result stops the run runs none (queued-message and job notices).
+      results and any media follow-up are appended, before the loop continues; a batch that stops the run, by a
+      result or by calling again a tool refused for failing, runs none (queued-message and job notices).
     - ``on_resume_entry``: awaited in order by a resume with the live messages and the decided calls' results after
-      they are appended, before the loop continues; a resumed batch whose result stops the run runs none.
+      they are appended, before the loop continues; a resumed batch that stops the run runs none.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
       request as sent, when any was (the skill review's capture).
     """
@@ -315,8 +316,7 @@ async def _run_tool_batch(
     Either way every call is recorded, and its start announced, in call order, and its answer reaches the model in
     that order. A refused call's completion is announced next, since its answer already exists, and each call that
     runs announces its completion as it finishes, so a stop that cuts the batch short finds each finished call
-    finished. A batch that calls again a tool the model already read a refusal for ends the run with the line that says
-    why, unless the batch paused: its resume always gets a request.
+    finished.
     """
     assert message.tool_calls
     answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
@@ -353,13 +353,30 @@ async def _run_tool_batch(
             yield ToolCompleted(call.execution.call)
     # The calls that ran tell whether their tools work, in call order whatever order they finished in.
     count_tool_failures(state.record.failing_tools, (call.execution for call in batch.planned))
-    ignored = count_tool_refusals(state.record.failing_tools, batch)
+    count_tool_refusals(state.record.failing_tools, batch)
     progress.calls_so_far += len(executed) + sum(isinstance(call, RefusedCall) and call.counts for call in batch.calls)
-    progress.stopped = await _answer_batch(state.messages, batch.answers(executed), hooks.after_tool_batch)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
     progress.paused = batch.paused or _waits_for_decision(state.record)
-    if ignored is not None and not (progress.stopped or progress.paused):
-        yield _end_for_failing_tool(ignored, state, progress)
+    async for event in _settle_batch(batch.answers(executed), state, progress, hooks.after_tool_batch):
+        yield event
+
+
+async def _settle_batch(
+    results: Sequence[Message],
+    state: LoopState,
+    progress: _Progress,
+    hooks: Sequence[AfterToolBatchHook],
+) -> AsyncIterator[TextDelta]:
+    """Answer a batch whose pause ``progress`` already holds, and end the run if it ignored a refusal for failing.
+
+    A batch that calls again a tool whose refusal the model read ends the run with the line that says why, before
+    another request. A batch that paused leaves that to its resume, which ends the run once it answers the rest of the
+    batch, so a model that pairs the refused tool with a delegation each time is still stopped.
+    """
+    ending = None if progress.paused else ignored_refusal(state.record.failing_tools)
+    progress.stopped = await _answer_batch(state.messages, results, hooks, ends_run=ending is not None)
+    if ending is not None:
+        yield _end_for_failing_tool(ending, state, progress)
 
 
 async def _answer_resumed(
@@ -367,7 +384,7 @@ async def _answer_resumed(
     state: LoopState,
     progress: _Progress,
     hooks: LoopHooks,
-) -> AsyncIterator[ToolStarted | ToolProgress | ToolCompleted]:
+) -> AsyncIterator[ToolStarted | ToolProgress | ToolCompleted | TextDelta]:
     """Answer the requirements a resume decided, in order, as the rest of the batch the run paused in.
 
     Approved calls run from their stored arguments and announce themselves as tool events; denied calls answer with
@@ -413,8 +430,9 @@ async def _answer_resumed(
             execution.external_execution_required = False
             answered.append(execution)
     count_tool_failures(state.record.failing_tools, answered)
-    progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
     progress.paused = _waits_for_decision(state.record)
+    async for event in _settle_batch(results, state, progress, hooks.on_resume_entry):
+        yield event
 
 
 def _entity(record: AnyRunRecord) -> str | None:
@@ -430,20 +448,22 @@ async def _answer_batch(
     messages: list[Message],
     results: Sequence[Message],
     hooks: Sequence[AfterToolBatchHook],
+    *,
+    ends_run: bool,
 ) -> bool:
     """Append one batch's results and return whether the batch stops the run, running ``hooks`` only when it does not.
 
     Each result is one canonical tool message; media leave them first, so a wire that merges results never carries
     them, and reach the model on one user message after the results. Every batch path answers here, so one rule
-    decides the stop: a batch stops the run when any of its results does, counting the results a resumed batch
-    answered before its pause. No later request reads what a hook would add after a batch that stops the run, so none
-    runs.
+    decides the stop: a batch stops the run when ``ends_run`` says the loop ends it or any of its results does,
+    counting the results a resumed batch answered before its pause. No later request reads what a hook would add after
+    a batch that stops the run, so none runs.
     """
     follow_up = media_follow_up(results)
     messages.extend(results)
     if follow_up is not None:
         messages.append(follow_up)
-    if _batch_stops_run(messages):
+    if ends_run or _batch_stops_run(messages):
         return True
     for hook in hooks:
         await hook(messages, results)

@@ -305,16 +305,14 @@ def test_calls_of_a_tool_that_keeps_failing_are_refused_with_its_last_error_whil
     ]
     # Several refusals of one tool in a batch name it once.
     assert batch.refused_for_failures == ("boom",)
-    assert [entry["event"] for entry in logs] == ["failing_tool_call_refused", "failing_tool_call_refused"]
-    assert [entry for entry in logs if entry["event"] == "failing_tool_call_refused"][:1] == [
-        {
-            "event": "failing_tool_call_refused",
-            "log_level": "warning",
-            "entity": "code",
-            "tool_name": "boom",
-            "consecutive_failures": MAX_CONSECUTIVE_TOOL_FAILURES,
-        },
-    ]
+    refused = {
+        "event": "failing_tool_call_refused",
+        "log_level": "warning",
+        "entity": "code",
+        "tool_name": "boom",
+        "consecutive_failures": MAX_CONSECUTIVE_TOOL_FAILURES,
+    }
+    assert logs == [refused, refused]
 
 
 def test_a_tool_one_failure_short_of_the_streak_limit_still_runs() -> None:

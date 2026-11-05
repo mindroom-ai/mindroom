@@ -187,15 +187,15 @@ def count_tool_failures(failing_tools: dict[str, FailingTool], executions: Itera
             tool.last_error = None if error is None else redact_sensitive_text(error, max_length=_MAX_QUOTED_ERROR)
 
 
-def count_tool_refusals(failing_tools: dict[str, FailingTool], batch: ToolBatch) -> str | None:
-    """Count a refusal for each tool ``batch`` refused for failing, and return one an earlier batch refused too, if any.
-
-    The model read that earlier refusal telling it to stop calling the tool, so the run ends. Several refusals of a
-    tool in one batch count once, since the model had read none of them.
-    """
+def count_tool_refusals(failing_tools: dict[str, FailingTool], batch: ToolBatch) -> None:
+    """Count a refusal for each tool ``batch`` refused for failing; several of one tool in a batch count once."""
     for name in batch.refused_for_failures:
         failing_tools[name].refusals += 1
-    return next((name for name in batch.refused_for_failures if failing_tools[name].refusals > 1), None)
+
+
+def ignored_refusal(failing_tools: Mapping[str, FailingTool]) -> str | None:
+    """Return a tool refused for failing in two batches, if any: the model called it again after reading its refusal."""
+    return next((name for name, tool in failing_tools.items() if tool.refusals > 1), None)
 
 
 def failing_tool_stop_text(name: str, tool: FailingTool) -> str:
@@ -470,6 +470,7 @@ __all__ = [
     "dispatch_tool_calls",
     "failed_answer",
     "failing_tool_stop_text",
+    "ignored_refusal",
     "is_media_follow_up",
     "media_follow_up",
     "offered_toolkits",

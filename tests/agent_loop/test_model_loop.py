@@ -428,9 +428,17 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
         ],
     )
     messages = _prompt()
+    batches: list[str | None] = []
+
+    async def after_batch(_messages: list[Message], results: Sequence[Message]) -> None:
+        batches.extend(result.tool_call_id for result in results)
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(boom)), messages)
+        events, record = await _run(
+            spec(model, toolkit(boom)),
+            messages,
+            hooks=LoopHooks(after_tool_batch=(after_batch,)),
+        )
 
     # The tool runs until its streak reaches the limit; the next calls get a refusal quoting its last error.
     assert [message.content for message in messages if message.role == "tool"] == [
@@ -444,6 +452,8 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
     # says why after the text so far.
     stop = f"Stopped: tool boom failed in {limit} requests with no success in between. Its last error: bad link {limit}"
     assert len(model.requests) == limit + 2
+    # No request reads what a batch hook would add after the batch that ends the run, so none runs there.
+    assert batches == [f"c{index}" for index in range(1, limit + 2)]
     assert [event.text for event in events if isinstance(event, TextDelta)][-1] == f"\n\n{stop}"
     assert record.content == f"Fetching the file.\n\n{stop}"
     assert events[-1] == LoopEnded(paused=False)
@@ -635,36 +645,40 @@ async def test_a_resume_keeps_refusing_a_tool_that_was_failing_before_the_pause(
     assert events[-1] == LoopEnded(paused=False)
 
 
-async def test_a_second_refusal_in_a_batch_that_pauses_waits_for_the_resume() -> None:
+async def test_a_batch_that_ignores_a_refusal_and_pauses_ends_the_run_once_its_resume_answers_it() -> None:
+    # A model that pairs the refused tool with a delegation every time would otherwise loop through resumes.
     model = ScriptedModel(
-        [calls(tool_call("boom", "refused", reason="again"), tool_call("echo", "gated", text="hi")), answer("x")],
+        [
+            calls(tool_call("boom", "refused", reason="again"), tool_call("echo", "delegated", text="hi")),
+            answer("never sent"),
+        ],
     )
+    agent = spec(model, toolkit(boom), external(echo))
     record = _record()
     record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad", refusals=1)}
-
-    with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(boom), gated(echo)), _prompt(), record=record)
-
-    assert events[-1] == LoopEnded(paused=True)
-    assert record.failing_tools["boom"].refusals == 2
-    assert not [entry for entry in logs if entry["event"] == "failing_tool_ended_run"]
-
-
-async def test_a_resume_after_a_second_refusal_lets_the_model_read_the_approved_result() -> None:
-    model = ScriptedModel([answer("done")])
-    execution = ToolExecution(tool_call_id="c1", tool_name="echo", tool_args={"text": "approved"})
-    execution.requires_confirmation = True
-    requirement = RunRequirement(execution)
-    requirement.confirm()
-    record = _record()
-    record.tools = [execution]
-    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad", refusals=2)}
     messages = _prompt()
 
-    events, record = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
+    with capture_logs() as logs:
+        events, record = await _run(agent, messages, record=record)
 
-    assert record.content == "done"
+    assert events[-1] == LoopEnded(paused=True)
+    assert not [entry for entry in logs if entry["event"] == "failing_tool_ended_run"]
+
+    stored = RunRecord.from_dict(record.to_dict())
+    [requirement] = stored.requirements
+    requirement.set_external_execution_result("Try the mirror.")
+    with capture_logs() as logs:
+        events, resumed = await _run(agent, messages, record=stored, resumed=[requirement])
+
+    # The resume answers the delegation, then ends with the line that says why, without another request.
+    assert len(model.requests) == 1
+    assert [message.content for message in messages if message.role == "tool"][-1] == "Try the mirror."
+    stop = f"Stopped: tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests with no success in between."
+    assert resumed.content == f"{stop} Its last error: bad"
     assert events[-1] == LoopEnded(paused=False)
+    assert [entry["event"] for entry in logs if entry["event"].startswith("failing_tool_")] == [
+        "failing_tool_ended_run",
+    ]
 
 
 async def test_the_calls_a_resume_answers_count_toward_their_tools_failures() -> None:

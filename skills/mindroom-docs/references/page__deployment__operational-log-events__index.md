@@ -206,9 +206,7 @@ Skill reviews also log this record under the reviewed agent's name, with a fixed
 
 ### `failing_tool_call_refused`
 
-Logged for each call the loop refuses because the tool's calls failed in 8 model requests of one turn, with no success of it in between.
-Several failed calls in one request count once; calls the loop answered without running (unknown tools, undecodable arguments, the call limit, denied approvals) do not count.
-The model gets the tool's last error and is told to stop calling it; the run's other tools keep working.
+Logged for each call refused because its tool keeps failing, as [`max_tool_calls_per_turn`](https://docs.mindroom.chat/configuration/agents/#configuration-options) describes.
 
 | Field | Meaning |
 |-------|---------|
@@ -220,8 +218,7 @@ The refused call's result quotes the tool's last error, and a tool that raises a
 
 ### `failing_tool_ended_run`
 
-Logged once when the model calls a refused tool again in a later request, after reading the refusal.
-The run ends before its next model request, and the reply ends with a line naming the tool and its last error.
+Logged once when the model calls a refused tool again and the turn ends.
 
 | Field | Meaning |
 |-------|---------|
