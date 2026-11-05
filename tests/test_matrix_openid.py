@@ -14,6 +14,7 @@ from mindroom.matrix_openid import (
     MatrixOpenIDError,
     MatrixOpenIDToken,
     homeserver_binds_openid_audience,
+    homeserver_openid_binding,
     verify_matrix_openid,
 )
 from tests.computer_helpers import ComputerPeer
@@ -286,18 +287,22 @@ async def test_binding_probe_false_without_the_flag(
             lambda: web.json_response({"unstable_features": {"io.mindroom.openid_audience": True}, "pad": "x" * 20000}),
             {"error": "ByteLimitExceededError"},
         ),
+        (
+            lambda: web.json_response([{"unstable_features": {"io.mindroom.openid_audience": True}}]),
+            {"error": "JSON list, not an object"},
+        ),
     ],
-    ids=["server-error", "redirect", "not-json", "oversized"],
+    ids=["server-error", "redirect", "not-json", "oversized", "not-an-object"],
 )
-async def test_binding_probe_false_on_bad_responses(
+async def test_binding_probe_fails_on_bad_responses(
     versions_server: _VersionsServer,
     answer: Callable[[], web.Response],
     why: dict[str, object],
 ) -> None:
-    """Any answer that is not a small, direct JSON confirmation means no binding, with a warning saying why."""
+    """An answer that is not a small, direct JSON object is a failed check, with a warning saying why."""
     paths = await versions_server(answer())
     with capture_logs() as logs:
-        assert await homeserver_binds_openid_audience(paths) is False
+        assert await homeserver_openid_binding(paths) is None
     assert _warnings(logs) == [{"event": _BINDING_CHECK_FAILED, **why}]
 
 
