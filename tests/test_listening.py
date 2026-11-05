@@ -15,6 +15,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
 from mindroom.config.main import Config
 from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, tracking_dir
@@ -34,6 +35,7 @@ from mindroom.response_turn import HandledAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.tool_system.events import FailedReply
+from tests.access_schema_support import joined_members_response, with_responder_access
 from tests.authorization_helpers import isolated_membership_index, make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -593,6 +595,52 @@ async def test_who_the_agent_hears_by_every_ingress_path(
         assert 'thread_id="$root"' in turn.prompt
 
 
+async def test_a_newcomer_the_agent_saw_join_is_heard_once_the_router_applies_the_join(listening: _Listening) -> None:
+    """Bots sync on their own, so a newcomer's message keeps the marker, reported once, until membership has them."""
+    config = with_responder_access(listening.config, "scribe", current_room_members=True)
+    scribe = listening.bot.matrix_id.full_id
+    control = AsyncMock()
+    control.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM])
+    control.joined_members.return_value = joined_members_response(ROOM, scribe)
+    index = AgentReplyMembershipIndex(clock=lambda: 0.0)
+    await index.refresh(config, listening.runtime_paths, control)
+    seen = nio.MatrixRoom(ROOM, scribe)
+    seen.add_member(ALICE, None, None)
+    listening.bot.client.rooms[ROOM] = seen
+    service = ListeningService(
+        runtime_paths=listening.runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"scribe": cast("AgentBot", listening.bot)},
+        agent_reply_memberships=index,
+    )
+    await service._poll_once(T0)
+    await listening.say("$hello", 10)
+    before = listening.marker()
+
+    with capture_logs() as logs:
+        await service._poll_once(T0 + 100)
+        await service._poll_once(T0 + 110)
+
+    assert listening.turns.contexts == []
+    assert listening.marker() == before
+    assert len([log for log in logs if "membership" in log["event"]]) == 1
+    join = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": "$join",
+            "sender": ALICE,
+            "state_key": ALICE,
+            "origin_server_ts": _ms(5),
+            "content": {"membership": "join"},
+        },
+    )
+    assert isinstance(join, nio.RoomMemberEvent)
+    index.apply_member_event(config, ROOM, join, control_user_id="@router:example.org")
+    await service._poll_once(T0 + 120)
+
+    assert listening.turns.heard() == ["$hello"]
+
+
 async def test_a_listened_room_the_agent_has_not_joined_waits_and_is_reported_once(listening: _Listening) -> None:
     """Listening does not join rooms: an unjoined listened room is reported once and heard from once the agent joins."""
     joined = listening.bot.client.rooms
@@ -739,7 +787,6 @@ async def test_hourly_cap_skips_and_keeps_marker(
     assert listening.turns.heard() == ["$b"]
 
 
-@pytest.mark.parametrize("error_replies", [False, True], ids=["raises", "fails"])
 async def test_the_hourly_cap_counts_each_turn_from_its_own_start(
     tmp_path: Path,
     journal_store: EventJournalStore,
@@ -810,6 +857,7 @@ async def test_a_reload_governs_every_turn_that_starts_after_it(
     assert [ctx.tool_names for ctx in listening.turns.contexts] == [("react",), ("react",)]
 
 
+@pytest.mark.parametrize("error_replies", [False, True], ids=["raises", "fails"])
 async def test_turn_error_keeps_marker(listening: _Listening, error_replies: bool) -> None:
     """A turn that raises, or ends with a failure, keeps the marker and is retried on the next poll."""
     await listening.service._poll_once(T0)

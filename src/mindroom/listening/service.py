@@ -150,6 +150,8 @@ class ListeningService:
     _contact_rooms: set[tuple[str, str]] = field(default_factory=set, init=False)
     # Listened rooms the agent has not joined, whose wait was reported, until it joins.
     _unjoined: set[tuple[str, str]] = field(default_factory=set, init=False)
+    # Rooms whose wait for a sender's membership to resolve was reported, until it resolves.
+    _membership_pending: set[tuple[str, str]] = field(default_factory=set, init=False)
     _loop: SupervisedLoop = field(init=False)
 
     def __post_init__(self) -> None:
@@ -263,12 +265,16 @@ class ListeningService:
             return
         try:
             heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
-            if not heard:
-                await self._mark(agent_name, room_id, page.last_cursor)
-                return
-            due = await self._due(bot, agent_name, room_id, heard, page.last_cursor, listen, config, now)
+            due = heard and await self._due(bot, agent_name, room_id, heard, page.last_cursor, listen, config, now)
         except ReplyMembershipPendingError:
-            logger.info("Listening waits for room membership to resolve", agent=agent_name, room_id=room_id)
+            # The marker stays, so a sender whose join the router has yet to apply is heard once it has.
+            if (agent_name, room_id) not in self._membership_pending:
+                self._membership_pending.add((agent_name, room_id))
+                logger.info("Listening waits for room membership to resolve", agent=agent_name, room_id=room_id)
+            return
+        self._membership_pending.discard((agent_name, room_id))
+        if not heard:
+            await self._mark(agent_name, room_id, page.last_cursor)
             return
         # A reload while the room was read decides again on the next poll, so the turn runs under the current config.
         if not due or self.config_provider() is not config or not self._start_run(agent_name, room_id, listen, clock()):
@@ -390,8 +396,10 @@ class ListeningService:
 
         Like a reply, a message is judged by whom it speaks for, as ingress classifies it: the person a trusted relay
         names rather than the relaying account. The agent's own messages and senders not allowed to reach it in the
-        room are left out.
+        room are left out. As for a reply, the agent's own view of the room lets a sender it has seen join wait for the
+        router to apply the join, which raises ``ReplyMembershipPendingError``, rather than be left out.
         """
+        observed_room = bot.client.rooms.get(room_id) if bot.client is not None else None
         heard: list[ResolvedVisibleMessage] = []
         for message in messages:
             if message.sender == bot.matrix_id.full_id:
@@ -405,6 +413,7 @@ class ListeningService:
                 self.runtime_paths,
                 self.agent_reply_memberships,
                 require_resolved_membership=True,
+                observed_room=observed_room,
             ):
                 continue
             # An entity's reply written for someone stays its author's; a relayed message is its original sender's.
