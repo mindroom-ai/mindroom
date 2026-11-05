@@ -29,6 +29,7 @@ from mindroom.llm.media import Audio
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_runner import ResponseRunner
 from mindroom.room_reply_modes import (
     _store_path,
     clear_room_reply_mode_override,
@@ -663,3 +664,64 @@ async def test_router_still_echoes_an_unanswered_voice_message_in_a_mentions_roo
         "Router agent is transcribing…",
         "🎤 what is on today",
     ]
+
+
+async def _mention_general(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+    await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$event", "@general hello", mention="general"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "send", "transcript", "nudges"),
+    [
+        pytest.param("mentions", _send_text, "", False, id="untagged-text-mentions"),
+        pytest.param("mentions", _mention_general, "", True, id="text-mentioning-general-mentions"),
+        pytest.param("auto", _send_text, "", True, id="untagged-text-auto"),
+        pytest.param("mentions", _send_voice, "🎤 what is on today", False, id="untagged-voice-mentions"),
+        pytest.param(
+            "mentions",
+            _send_voice,
+            "🎤 @general what is on today",
+            True,
+            id="voice-mentioning-general-mentions",
+        ),
+    ],
+)
+async def test_unanswered_chatter_does_not_nudge_a_running_response(
+    tmp_path: Path,
+    mode: RoomReplyMode,
+    send: Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]],
+    transcript: str,
+    *,
+    nudges: bool,
+) -> None:
+    """While general is still answering in a `thread_mode: room` room, a message nobody will answer leaves it alone.
+
+    A message the room's reply mode leaves to nobody neither asks general's running response to wrap up nor gets the
+    ⏳ that says it waits for an approval; a message general will answer does both.
+    """
+    with (
+        patch.object(ResponseRunner, "has_active_response_for_target", return_value=True),
+        patch.object(ResponseRunner, "reserve_waiting_human_message", autospec=True, return_value=None) as reserve,
+        patch("mindroom.turns.ingress.mark_waiting_for_approval") as text_waits,
+        patch("mindroom.voice.ingress.mark_waiting_for_approval") as voice_waits,
+    ):
+        await _who_acts(
+            tmp_path,
+            send,
+            ("general",),
+            mode,
+            voice={"enabled": True, "visible_router_echo": False},
+            transcript=transcript,
+            room_mode=True,
+        )
+
+    general_id = current_entity_id("general", test_runtime_paths(tmp_path)).full_id
+    nudged = [call for call in reserve.call_args_list if call.kwargs["response_envelope"].agent_name == "general"]
+    shown_waiting = [
+        call
+        for call in (*text_waits.call_args_list, *voice_waits.call_args_list)
+        if call.args[0].matrix_id.full_id == general_id
+    ]
+    assert bool(nudged) is nudges
+    assert bool(shown_waiting) is nudges

@@ -681,13 +681,14 @@ class TurnPolicy:
         wrote follow the room's ordinary rules.
         """
         context = dispatch.context
-        if context.mentioned_agents or not dispatch.envelope.origin.may_answer_interactive_prompt:
-            return False
-        config = self.deps.runtime.config
-        if config.get_room_reply_mode(self.deps.runtime_paths, dispatch.target.room_id) != "mentions":
+        if not self._reply_mode_requires_mention(
+            dispatch.target.room_id,
+            dispatch.envelope,
+            mentions_an_agent=bool(context.mentioned_agents),
+        ):
             return False
         # A thread whose history could not be read in full proves no reply, so it needs a mention too.
-        if get_agents_in_thread(context.planning_thread_history, config, self.deps.runtime_paths):
+        if get_agents_in_thread(context.planning_thread_history, self.deps.runtime.config, self.deps.runtime_paths):
             return False
         return not self._should_queue_follow_up_in_active_response_thread(
             context=context,
@@ -695,6 +696,35 @@ class TurnPolicy:
             source_envelope=dispatch.envelope,
             has_active_response_for_target=has_active_response_for_target,
         )
+
+    def reply_mode_leaves_unanswered(
+        self,
+        room: nio.MatrixRoom,
+        source: dict[str, Any],
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+    ) -> bool:
+        """Return whether a `mentions` room is sure to leave this arriving message to nobody, before any thread is read.
+
+        Only a message outside any thread is sure to be left: no agent took part in it and it is no follow-up. Ingress
+        asks this so such a message neither asks a running response to wrap up nor shows that it waits for an approval.
+        """
+        if target.source_thread_id is not None:
+            return False
+        mentioned_agents, _am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+            source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=bool(mentioned_agents))
+
+    def _reply_mode_requires_mention(self, room_id: str, envelope: MessageEnvelope, *, mentions_an_agent: bool) -> bool:
+        """Return whether this is a person's message that mentions no agent or team in a `mentions` room."""
+        if mentions_an_agent or not envelope.origin.may_answer_interactive_prompt:
+            return False
+        return self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room_id) == "mentions"
 
     def _only_the_contact_answerer(
         self,

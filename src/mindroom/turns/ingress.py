@@ -252,7 +252,9 @@ class TurnIngress:
         ticket: IngressTicket,
     ) -> None:
         """Queue one prepared text or media event; the gate decides busy-conversation routing."""
-        if self._event_allows_queued_notice(room, event, envelope):
+        # A message the room's reply mode leaves to nobody must not cut a running response short or show it waits.
+        unanswered = self.deps.turn_policy.reply_mode_leaves_unanswered(room, event.source, target, envelope)
+        if not unanswered and self._event_allows_queued_notice(room, event, envelope):
             ticket.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
@@ -265,7 +267,8 @@ class TurnIngress:
             ticket=ticket,
             coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id),
         )
-        mark_waiting_for_approval(self.deps, room, event.source, target, envelope)
+        if not unanswered:
+            mark_waiting_for_approval(self.deps, room, event.source, target, envelope)
 
     async def _should_skip_router_before_shared_ingress_work(
         self,
