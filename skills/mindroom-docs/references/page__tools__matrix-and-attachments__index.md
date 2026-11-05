@@ -217,7 +217,7 @@ stop_agent_reply("researcher")
 
 `react(event_id, emoji)` adds an emoji reaction to a message in the current room.
 Unlike `matrix_message`, it cannot send, edit, or read messages, so it suits an agent that may only acknowledge, such as a [listening agent](https://docs.mindroom.chat/configuration/agents/#listening).
-It returns an error without reacting when the emoji is blank or the event is not in the current room.
+It returns an error without reacting when the emoji is blank, longer than 8 characters, or contains a space, or when the event is not in the current room.
 It shares `matrix_message`'s rate limit for the room (12 actions per 30 seconds), so using both is no way around it.
 
 ```yaml
