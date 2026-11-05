@@ -220,7 +220,7 @@ agents:
 | `quiet_seconds` | int, >= 10 | `60` | Seconds without a message the agent hears before the silent turn runs |
 | `max_messages` | int, 1 to 500 | `200` | Most messages one silent turn reads; the rest wait for the next turn |
 | `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour for the agent, shared by its listened rooms in turn; further due runs are skipped, logged, and what was heard is kept |
-| `tools` | list | `[memory, react]` | The only tools a silent turn may use, at least one, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools`, and `matrix_message` is refused |
+| `tools` | list | `[memory, react]` | The only tools a silent turn may use, at least one, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools`. `matrix_message`, presets, and tools that act with the agent's authority beyond the room, such as `delegate` and `self_config`, are refused |
 | `model` | string or null | `null` | Key of an entry under `models:` for silent turns; unset uses the agent's `model` |
 
 ### What a silent turn does

@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
+from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.listening import ListenConfig
 from mindroom.config.main import Config
 from tests.conftest import test_runtime_paths
@@ -107,6 +108,25 @@ def test_listen_matrix_message_rejected(tmp_path: Path) -> None:
                 {"rooms": ["lobby"], "tools": ["react", "matrix_message.send_message"]},
                 ("react", "matrix_message"),
             ),
+            test_runtime_paths(tmp_path),
+        )
+
+
+@pytest.mark.parametrize("tool", sorted(CONTACT_CONTROL_TOOLS))
+def test_listen_control_tools_rejected(tmp_path: Path, tool: str) -> None:
+    """A tool that acts with the agent's authority beyond the room, such as delegating to a child, is refused."""
+    with pytest.raises(ValueError, match=rf"listen\.tools\[1\]\.{tool}: Tool '{tool}' acts with the agent's authority"):
+        Config.validate_with_runtime(
+            _config({"rooms": ["lobby"], "tools": ["react", tool]}),
+            test_runtime_paths(tmp_path),
+        )
+
+
+def test_listen_preset_rejected(tmp_path: Path) -> None:
+    """A preset would offer nothing, as a silent turn keeps only exact tool names, so it is refused."""
+    with pytest.raises(ValueError, match=r"listen\.tools\[1\]\.openclaw_compat: Tool 'openclaw_compat' is a preset"):
+        Config.validate_with_runtime(
+            _config({"rooms": ["lobby"], "tools": ["react", "openclaw_compat"]}),
             test_runtime_paths(tmp_path),
         )
 

@@ -168,6 +168,8 @@ Heard text can therefore carry prompt injection that drives the turn's tools.
 The allowlist and caps contain this:
 
 - A silent turn offers only `listen.tools`, each of which must also be one of the agent's own `tools`, so it never gains a tool, a `worker_scope` check bypass, or a tool limit bypass.
+- Config load refuses in `listen.tools` the tools a contact turn never offers, which act with the agent's authority beyond the room: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, and `dynamic_tools`.
+  A delegated run, for one, would get the agent's full tools rather than the turn's.
 - Approval-gated tools and interactive questions are hidden, and the turn's text is dropped.
   Config load refuses `matrix_message` in `listen.tools`, so a silent turn cannot post through it, but any other listed tool that sends still can.
   These include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`.

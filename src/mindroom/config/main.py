@@ -39,6 +39,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.budgets import BudgetsConfig  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
+from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
@@ -1466,6 +1467,8 @@ class Config(BaseModel):
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
 
         A ``toolkit.function`` entry must also name a function the toolkit declares, as a turn keeps only exact names.
+        A preset is refused, as a turn keeps only exact names, and so is a tool that acts with the agent's authority
+        beyond the room, such as ``delegate``, whose child runs would not be held to this list.
 
         A silent turn narrows the agent's own tools to this list and never adds one, so the default list is checked too:
         a listening agent without ``memory`` or ``react`` must name the tools it listens with.
@@ -1491,6 +1494,15 @@ class Config(BaseModel):
                     msg = (
                         f"{config_path_prefix}.{toolkit}: Tool 'matrix_message' posts to the room, "
                         "which a silent turn never does; use react to acknowledge."
+                    )
+                    raise ToolConfigOverrideError(msg)
+                if self.is_tool_preset(toolkit):
+                    msg = f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' is a preset; list its tools instead."
+                    raise ToolConfigOverrideError(msg)
+                if toolkit in CONTACT_CONTROL_TOOLS:
+                    msg = (
+                        f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' acts with the agent's authority "
+                        "beyond the room, which a silent turn never does."
                     )
                     raise ToolConfigOverrideError(msg)
                 if toolkit not in own_tools:
