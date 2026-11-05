@@ -250,6 +250,11 @@ async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monk
 
     without_shell = await validate([])
     unapproved = await validate(["shell"])
+    workflow.config = _config(
+        tools=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}, "shell"],
+        rules={"run_shell_command": "require_approval"},
+    )
+    gated = await validate(["shell"])
     workflow.config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}, "shell"])
     approved = await validate(["shell"])
 
@@ -257,6 +262,9 @@ async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monk
     assert "tools must include shell or shell.run_shell_command; use standard mode" in without_shell["message"]
     assert unapproved["status"] == "error", unapproved
     assert "participant 'reviewer' tool 'shell' is not pre-approved" in unapproved["message"]
+    assert gated["status"] == "error", gated
+    assert "participant 'reviewer' tool 'shell.run_shell_command' requires approval" in gated["message"]
+    assert "operator tool_approval rule must auto-approve it" in gated["message"]
     assert approved["status"] == "ok", approved
 
 

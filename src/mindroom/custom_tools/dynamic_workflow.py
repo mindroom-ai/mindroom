@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import nio
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
@@ -507,7 +508,12 @@ async def _execute_subagent_participant(
         raise DynamicWorkflowExecutionError(msg)
     # Recheck approvals against the current config each step; only the function ownership is cached.
     allowed = _workflow_allowed_tools(context)
-    if error := _unapproved_participant_tool_error(context, participant_id, persona.tools or (), allowed=allowed):
+    if error := _unapproved_participant_tool_error(
+        context,
+        participant_id,
+        _approval_entries(request),
+        allowed=allowed,
+    ):
         raise DynamicWorkflowExecutionError(error)
     if participant_id not in state.function_owners:
         state.function_owners[participant_id] = await _participant_function_owners(context, persona)
@@ -595,6 +601,12 @@ def _selected_function_owners(
     return {function_name: frozenset(toolkits) for function_name, toolkits in owners.items()}
 
 
+def _approval_entries(request: PersonaRequest) -> tuple[str, ...]:
+    """Return the tools a participant names, plus the shell function a minimal participant runs them through."""
+    tools = cast("SubagentPersona", request.persona).tools or ()
+    return (*tools, f"shell.{SHELL_FUNCTION}") if request.agent_mode == "minimal" else tools
+
+
 def _unapproved_participant_tool_error(
     context: ToolRuntimeContext,
     participant_id: str,
@@ -626,7 +638,11 @@ def _unapproved_participant_tool_error(
             never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
         )
         if tool_may_require_approval(overlay, function):
-            return f"{prefix} requires approval, and workflow participants cannot pause for approval."
+            return (
+                f"{prefix} requires approval, and workflow participants cannot pause for approval; "
+                "an operator tool_approval rule must auto-approve it, or its toolkit must be in the "
+                "dynamic_workflow allowed_tools setting."
+            )
     return None
 
 
@@ -870,7 +886,7 @@ def _validate_workflow_policy_for_context(
             request = _participant_request(context, participant, workflow_id=spec.id)
             persona_tools = cast("SubagentPersona", request.persona).tools or ()
             if error := granted_tool_error(participant.id, persona_tools, granted_tools) or (
-                _unapproved_participant_tool_error(context, participant.id, persona_tools, allowed=allowed)
+                _unapproved_participant_tool_error(context, participant.id, _approval_entries(request), allowed=allowed)
             ):
                 raise DynamicWorkflowError(error)
             requests[participant.id] = request
