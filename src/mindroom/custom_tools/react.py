@@ -14,6 +14,19 @@ def _payload(status: str, **kwargs: object) -> str:
     return custom_tool_payload("react", status, **kwargs)
 
 
+async def _event_error(client: nio.AsyncClient, room_id: str, event_id: str) -> str | None:
+    """Return why ``event_id`` cannot be reacted to in ``room_id``, or None when the room holds it.
+
+    Only a definite not-found says the event is elsewhere; any other failure may pass on a retry.
+    """
+    found = await client.room_get_event(room_id, event_id)
+    if isinstance(found, nio.RoomGetEventResponse):
+        return None
+    if isinstance(found, nio.RoomGetEventError) and found.status_code == "M_NOT_FOUND":
+        return f"Event {event_id} is not in this room."
+    return "Could not verify the event; try again."
+
+
 class ReactTools(Toolkit):
     """React to messages in the current room; unlike matrix_message, it cannot send, edit, or read."""
 
@@ -41,9 +54,8 @@ class ReactTools(Toolkit):
         # Shares matrix_message's per-room budget, so reacting is no way around it.
         if (rate_error := MatrixMessageTools._check_rate_limit(context, room_id)) is not None:
             return _payload("error", room_id=room_id, message=rate_error)
-        found = await context.client.room_get_event(room_id, event_id)
-        if not isinstance(found, nio.RoomGetEventResponse):
-            return _payload("error", room_id=room_id, message=f"Event {event_id} is not in this room.")
+        if (lookup_error := await _event_error(context.client, room_id, event_id)) is not None:
+            return _payload("error", room_id=room_id, message=lookup_error)
         result = await self._operations._message_react(
             context,
             message=emoji,

@@ -54,13 +54,31 @@ async def test_react_sends_annotation(tmp_path: Path) -> None:
 async def test_react_other_room_refused(tmp_path: Path) -> None:
     """An event the current room does not hold is refused and nothing is sent."""
     context = _context(tmp_path)
-    context.client.room_get_event = AsyncMock(return_value=nio.RoomGetEventError("M_NOT_FOUND", status_code="404"))
+    context.client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventError("M_NOT_FOUND", status_code="M_NOT_FOUND"),
+    )
     with tool_runtime_context(context):
         result = await ReactTools().react("$elsewhere", "👍")
 
     assert '"status": "error"' in result
     assert "not in this room" in result
     context.client.room_get_event.assert_awaited_once_with(ROOM_ID, "$elsewhere")
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [nio.RoomGetEventError("M_LIMIT_EXCEEDED", status_code="429"), nio.RoomGetEventError("timeout")],
+)
+async def test_react_unverifiable_event_is_retryable(tmp_path: Path, failure: nio.RoomGetEventError) -> None:
+    """A failed lookup that is not a definite not-found is not reported as another room, so a retry stays sensible."""
+    context = _context(tmp_path)
+    context.client.room_get_event = AsyncMock(return_value=failure)
+    with tool_runtime_context(context):
+        result = await ReactTools().react("$target", "👍")
+
+    assert "try again" in result
+    assert "not in this room" not in result
     context.client.room_send.assert_not_awaited()
 
 
