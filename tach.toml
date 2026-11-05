@@ -3176,6 +3176,7 @@ depends_on = [
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.orchestration.accounts",
     "mindroom.orchestration.computer_runtime",
+    "mindroom.orchestration.plugin_http_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.api.main",
@@ -8121,12 +8122,21 @@ depends_on = [
     "mindroom.matrix_openid",
 ]
 
-# Public: plugin routes import it to require a signed-in Matrix client.
+# Public: plugin routes import it to require a signed-in Matrix client and live room membership.
 [[modules]]
 path = "mindroom.plugin_http"
 depends_on = [
     "mindroom.api.app_state",
 ]
+
+[[modules]]
+path = "mindroom.orchestration.plugin_http_runtime"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.api.main",
+    "mindroom.constants",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.orchestration.server_state"

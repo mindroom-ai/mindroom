@@ -235,6 +235,7 @@ Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens
 It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
 The store keeps at most 8 sessions per user and 256 in all, and past either cap it evicts the oldest session instead of refusing, so one user cannot lock others out.
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
+Routes that act on one room also call `require_room_member`, which reads live joined members through the router bot's client, answering 403 for a non-member and 503 when membership is unavailable (no router client, or the Matrix call failed).
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
 CORS for these paths allows only the origins in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, with credentials off and `Cache-Control: no-store`.
 

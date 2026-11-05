@@ -846,6 +846,8 @@ A plugin route that serves a Matrix web client authenticates its caller with `re
 The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
 Browser origins that may call these routes come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`.
+A route that acts on one room also awaits `require_room_member(request, room_id, user.user_id)`.
+It reads live membership from the router bot's Matrix client, answers 403 unless the user is joined, and answers 503 when membership is unavailable.
 
 ## Plugin skills
 

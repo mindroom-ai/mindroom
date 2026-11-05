@@ -90,6 +90,8 @@ class _MindroomAppState:
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
     client_sessions: ClientSessionStore | None = None
+    # Bound by the orchestrator while the router bot runs; plugin routes read live room membership through it.
+    room_members: Callable[[str], Awaitable[frozenset[str]]] | None = None
     usage_export_runner: UsageExportRunner | None = None
 
     @property

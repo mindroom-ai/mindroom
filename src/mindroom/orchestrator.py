@@ -117,6 +117,7 @@ from .orchestration.config_updates import (
 from .orchestration.config_warnings import warn_about_config_risks
 from .orchestration.entity_fleet import EntityFleet, EntityFleetHooks, EntityStartResults
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
+from .orchestration.plugin_http_runtime import bind_room_members_if_ready, withdraw_room_members
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import RoomSetup
 from .orchestration.runtime import (
@@ -763,6 +764,7 @@ class _MultiAgentOrchestrator:
         """Withdraw capabilities bound to these entities before any of them stops."""
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
+        withdraw_room_members(api_enabled=self.api_enabled)
         if ROUTER_AGENT_NAME in entity_names:
             # Fence room-backed grants before stopping their sole control client.
             self.agent_reply_membership_sync.invalidate(self.config, reason="router_replacement")
@@ -795,6 +797,7 @@ class _MultiAgentOrchestrator:
             return
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+        bind_room_members_if_ready(self.agent_bots, api_enabled=self.api_enabled)
 
     async def _end_entity_replies(self, entity_names: set[str]) -> None:
         """End the journal replies of removed entities; no bot remains to finish them."""
@@ -1323,6 +1326,7 @@ class _MultiAgentOrchestrator:
                 )
                 warn_about_config_risks(new_config, self.runtime_paths)
                 self._computer_runtime.unbind()
+                withdraw_room_members(api_enabled=self.api_enabled)
                 catalog_restarts, deferred_catalog_servers = catalog_refresh_restarts(
                     plan,
                     catalog_changed,
@@ -1442,6 +1446,7 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
+        withdraw_room_members(api_enabled=self.api_enabled)
         # Runners borrow bots' clients, so they end before any bot stops.
         await run_shutdown_step("scheduled_tasks", self.scheduled_tasks.stop())
         try:
