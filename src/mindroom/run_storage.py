@@ -60,10 +60,13 @@ def bind_turn_session(
     ``replays`` says which of the attempt's terminal records are stored as turns (``replays_as_turn``), and
     ``usage_kind`` which helper their usage counts as, if any. A scope without a stored session gets its first
     session, which stays on the turn's scope context, so a later attempt of the same turn replays this one's run, as a
-    reload of the scope would.
+    reload of the scope would. A turn whose usage counts as a helper keeps no run, so it stores in no scope either: a
+    mid-turn fold stays in its own run instead of leaving a summary of what it read in the scope.
     """
     run.scope_context = run.scope.with_session()
-    return replace(scope_run_storage(run.scope_context), replays=replays, usage_kind=usage_kind)
+    storage = scope_run_storage(run.scope_context)
+    scope = storage.scope if usage_kind is None else None
+    return replace(storage, replays=replays, usage_kind=usage_kind, scope=scope)
 
 
 @dataclass

@@ -37,6 +37,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.fakes.summary_model import summary_model
 from tests.identity_helpers import entity_ids
 from tests.test_event_journal_store import admit, edit, text
 
@@ -165,7 +166,8 @@ class _Listening:
         await admit(self.journal, event_id, room_id=ROOM, sender=sender, ts=_ms(seconds), thread_id=thread_id)
 
 
-def _config(tmp_path: Path, listen: dict[str, object] | None = None) -> Config:
+def _config(tmp_path: Path, listen: dict[str, object] | None = None, *, context_window: int | None = None) -> Config:
+    """Return the scribe's config; a ``context_window`` turns on compaction with a ``summary`` model the test supplies."""
     authored: dict[str, Any] = {
         "defaults": {"tools": []},
         "agents": {
@@ -185,6 +187,10 @@ def _config(tmp_path: Path, listen: dict[str, object] | None = None) -> Config:
         },
         "timezone": "UTC",
     }
+    if context_window is not None:
+        authored["models"]["default"]["context_window"] = context_window
+        authored["models"]["summary"] = {"provider": "openai", "id": "summary-model", "context_window": 100_000}
+        authored["defaults"]["compaction"] = {"model": "summary", "reserve_tokens": 500}
     return bind_runtime_paths(Config.model_validate(authored), test_runtime_paths(tmp_path))
 
 
@@ -610,6 +616,48 @@ async def test_silent_turns_store_no_run_and_stand_alone(
     later_request = json.dumps([str(message.content) for message in model.requests[-1].messages])
     assert "Lunch is at noon." in later_request
     assert "launch code" not in later_request
+
+
+async def test_a_silent_turn_that_folds_mid_turn_keeps_no_summary(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent turn too long for its window folds within itself, so no summary of what it heard is stored either."""
+    config = _config(tmp_path, context_window=4000)
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    # The first response reports a request far over the 4,000-token window, so the second request compacts.
+    model = ScriptedModel(
+        [calls(tool_call("react", "call-1", event_id="$a", emoji="👍"), metrics=usage(1_000_000, 1)), answer("Done.")],
+    )
+    summaries = summary_model("SUMMARY")
+    install_model_providers(monkeypatch, {"default": model, "summary": summaries})
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    await run_silent_turn(
+        bot=cast("AgentBot", bot),
+        agent_name="scribe",
+        room_id=ROOM,
+        heard=[_heard_message("$a")],
+        listen=listen,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert any("SUMMARY" in str(message.content) for message in model.requests[-1].messages)
+    storage = create_session_storage("scribe", config, runtime_paths, execution_identity=None)
+    names = storage.names
+    with storage.transaction(write=False) as connection:
+        stored = {
+            table: connection.execute(
+                f"SELECT COUNT(*) FROM {quote_identifier(table)} WHERE session_id = ?",  # noqa: S608
+                (f"{ROOM}:listen",),
+            ).fetchone()[0]
+            for table in (names.log_runs, names.log_summaries)
+        }
+    assert stored == {names.log_runs: 0, names.log_summaries: 0}
 
 
 async def test_a_silent_turn_that_does_nothing_ends_without_a_retry(
