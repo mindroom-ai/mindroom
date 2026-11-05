@@ -103,7 +103,10 @@ def test_listen_matrix_message_rejected(tmp_path: Path) -> None:
         match=r"listen\.tools\[1\]\.matrix_message: Tool 'matrix_message' posts to the room, which a silent turn never does",
     ):
         Config.validate_with_runtime(
-            _config({"rooms": ["lobby"], "tools": ["react", "matrix_message.send_message"]}, ("react", "matrix_message")),
+            _config(
+                {"rooms": ["lobby"], "tools": ["react", "matrix_message.send_message"]},
+                ("react", "matrix_message"),
+            ),
             test_runtime_paths(tmp_path),
         )
 

@@ -4,8 +4,8 @@ Each agent keeps a durable marker per room (``ListeningMarkers``), and each poll
 after it. What the agent wrote, and what senders it may not hear from wrote, is passed over; the rest waits until
 nothing the agent hears has been said for ``quiet_seconds``, or until the oldest of it is ten times that old, then one
 silent turn hears at most ``max_messages`` of it, no more than fits its model's context window, and the marker moves
-past what that turn heard. A turn the hourly cap holds back keeps the
-marker, and the agent's rooms take turns at the cap, least recently run first.
+past what that turn heard. A turn the hourly cap holds back keeps the marker, and the agent's rooms take turns at the
+cap, least recently run first.
 
 No room stalls for good: a turn that keeps failing hears fewer messages until one message alone fails, which is then
 skipped, and a message whose refetch never arrives is skipped after a while. Each skip is logged, and a skipped message
