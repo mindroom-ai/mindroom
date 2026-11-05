@@ -551,7 +551,8 @@ class TestMemoryTools:
         assert result.splitlines() == [
             "Semantic memory search unavailable: embedder permission denied (HTTP 403).",
             "Repair the embedder credential: the Vertex AI embedder authenticates with GOOGLE_APPLICATION_CREDENTIALS "
-            "or Application Default Credentials, which need permission to call Vertex AI in GOOGLE_CLOUD_PROJECT.",
+            "or Application Default Credentials, which need permission to call Vertex AI in its project, and then "
+            "restart MindRoom.",
         ]
 
     @pytest.mark.asyncio

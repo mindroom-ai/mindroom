@@ -147,7 +147,9 @@ def create_configured_embedder(
             # A service account key names its own project; user credentials name none.
             project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths)
             or getattr(credentials, "project_id", None),
-            location=get_secret_from_env("GOOGLE_CLOUD_LOCATION", runtime_paths=runtime_paths),
+            # Gemini embedding models serve at global. A location also keeps google-genai from signing requests with
+            # a Gemini API key from the environment instead of these credentials.
+            location=get_secret_from_env("GOOGLE_CLOUD_LOCATION", runtime_paths=runtime_paths) or "global",
             credentials=credentials,
             dimensions=settings.dimensions,
             query_prefix=settings.query_prefix,

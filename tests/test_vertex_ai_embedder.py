@@ -102,8 +102,13 @@ def _serve_clients(
     requests: list[httpx.Request],
     *,
     build_seconds: float = 0.0,
+    sign_in: bool = True,
 ) -> list[dict[str, object]]:
-    """Point every client the embedder builds at a local server, keeping its own settings; return those settings."""
+    """Point every client the embedder builds at a local server, keeping its own settings; return those settings.
+
+    ``sign_in`` gives each client test credentials, and a project unless it has one; without it, google-genai finds
+    its own.
+    """
     built: list[dict[str, object]] = []
     real_client = genai.Client
     transport = _transport(replies, requests)
@@ -116,11 +121,10 @@ def _serve_clients(
             "httpx_client": httpx.Client(transport=transport),
             "httpx_async_client": httpx.AsyncClient(transport=transport),
         }
-        test_credentials = Credentials(token="test-token")  # noqa: S106 - synthetic SDK credential
-        project = kwargs.get("project") or "test-project"
-        return real_client(
-            **{**kwargs, "project": project, "credentials": test_credentials, "http_options": http_options},
-        )
+        if sign_in:
+            test_credentials = Credentials(token="test-token")  # noqa: S106 - synthetic SDK credential
+            kwargs = {**kwargs, "project": kwargs.get("project") or "test-project", "credentials": test_credentials}
+        return real_client(**{**kwargs, "http_options": http_options})
 
     monkeypatch.setattr(vertex_ai_embedder_module.genai, "Client", client_on_server)
     return built
@@ -288,6 +292,36 @@ def test_configured_vertex_ai_embedder_embeds_in_the_project_its_key_file_names(
 
     assert embedder.embed(["text"], purpose="document") == [[0.5] * 8]
     assert requests[0].url.path.startswith("/v1beta1/projects/key-project/locations/global/")
+
+
+def test_vertex_ai_embedder_signs_in_with_google_credentials_beside_a_gemini_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no project or location set, Application Default Credentials sign the request, not a Gemini API key.
+
+    google-genai would otherwise send a ``GEMINI_API_KEY`` from the environment, kept for Gemini chat models, to Vertex
+    AI's API-key mode.
+    """
+    for variable in (
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_API_KEY",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-gemini-key")
+    adc = Credentials(token="adc-token")  # noqa: S106 - synthetic SDK credential
+    monkeypatch.setattr("google.auth.default", lambda **_: (adc, "adc-project"))
+    runtime_paths = test_runtime_paths(tmp_path)
+    requests: list[httpx.Request] = []
+    _serve_clients(monkeypatch, [[0.5] * 8], requests, sign_in=False)
+    embedder = create_configured_embedder(_vertex_config(runtime_paths), runtime_paths)
+
+    assert embedder.embed(["text"], purpose="query") == [[0.5] * 8]
+    assert requests[0].url.path.startswith("/v1beta1/projects/adc-project/locations/global/")
+    assert requests[0].headers["authorization"] == "Bearer adc-token"
+    assert "x-goog-api-key" not in requests[0].headers
 
 
 def test_vertex_ai_embedder_builds_one_client_for_concurrent_texts(
