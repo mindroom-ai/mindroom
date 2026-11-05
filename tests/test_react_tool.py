@@ -66,6 +66,8 @@ async def test_react_other_room_refused(tmp_path: Path) -> None:
     assert "not in this room" in result
     context.client.room_get_event.assert_awaited_once_with(ROOM_ID, "$elsewhere")
     context.client.room_send.assert_not_awaited()
+    # A refused reaction spent none of the room's shared budget.
+    assert not MatrixMessageTools._recent_actions
 
 
 @pytest.mark.asyncio

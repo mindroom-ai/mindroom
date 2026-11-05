@@ -67,11 +67,12 @@ class ReactTools(Toolkit):
         if (key_error := _key_error(emoji)) is not None:
             return _payload("error", message=key_error)
         room_id = context.room_id
+        # A reaction that cannot be sent spends none of the budget below.
+        if (lookup_error := await _event_error(context.client, room_id, event_id)) is not None:
+            return _payload("error", room_id=room_id, message=lookup_error)
         # Shares matrix_message's per-room budget, so reacting is no way around it.
         if (rate_error := MatrixMessageTools._check_rate_limit(context, room_id)) is not None:
             return _payload("error", room_id=room_id, message=rate_error)
-        if (lookup_error := await _event_error(context.client, room_id, event_id)) is not None:
-            return _payload("error", room_id=room_id, message=lookup_error)
         result = await self._operations._message_react(
             context,
             message=emoji,
