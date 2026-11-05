@@ -415,6 +415,21 @@ async def test_marker_advances_and_nothing_heard_twice(listening: _Listening) ->
     assert [listening.turns.heard(index) for index in range(2)] == [["$a", "$b"], ["$c"]]
 
 
+async def test_a_message_stamped_in_the_future_never_deafens_the_room(listening: _Listening) -> None:
+    """A sender's server sets a message's time, so one stamped an hour ahead waits until then, passing nobody."""
+    await listening.say("$ahead-at-start", 7_200, sender=BOB)
+    await listening.service._poll_once(T0)
+    await listening.say("$ahead", 3_600, sender=BOB)
+    await listening.service._poll_once(T0 + 20)
+    await listening.say("$a", 30)
+    await listening.say("$b", 31)
+
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$a", "$b"]
+    assert listening.marker_event() == "$b"
+
+
 async def test_restart_resumes_from_marker(listening: _Listening) -> None:
     """A restart before the room went quiet still runs the turn once, with nothing lost or heard twice."""
     await listening.service._poll_once(T0)

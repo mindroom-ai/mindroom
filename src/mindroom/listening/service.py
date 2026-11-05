@@ -104,10 +104,10 @@ def _first_marker(newest: ConversationCursor | None, now: float) -> Conversation
     """Return where a room is first heard from: after its newest message, and after anything sent before now.
 
     A message from before listening started that the journal learns of later, such as one a gap repair fetches, is
-    then never heard.
+    then never heard. A newest message stamped after now is passed over, as a room's reads leave it out until then.
     """
     started = ConversationCursor(created_ts=int(now * 1000), logical_event_id="")
-    if newest is None:
+    if newest is None or newest.created_ts > started.created_ts:
         return started
     return max(newest, started, key=lambda cursor: (cursor.created_ts, cursor.logical_event_id))
 
@@ -218,8 +218,9 @@ class ListeningService:
             return
         # What a sync gap skipped is older than what came after it, so it is installed before the marker can pass it.
         await reader.hydrator.repair_room_history(room_id)
-        # The page stops before the first message owing a refetch, and the marker waits for it, for a while.
-        page = await reader.read_room_after(room_id, marker, listen.max_messages)
+        # The page stops before the first message owing a refetch, and the marker waits for it, for a while. A message
+        # stamped after now, which its sender's server sets, waits until then, so it cannot move the marker past others.
+        page = await reader.read_room_after(room_id, marker, listen.max_messages, int(now * 1000))
         waited = self._waited(agent_name, room_id, page.stopped_at, now)
         if page.last_cursor is None and page.stopped_at is not None and waited > _REFETCH_WAIT_SECONDS:
             await self._skip_refetch(agent_name, room_id, page.stopped_at)
@@ -402,7 +403,7 @@ class ListeningService:
             return True
         if heard[-1].timestamp > now_ms - quiet_ms:
             return False
-        return await self._heard_nothing_after(bot, agent_name, room_id, page_end, listen, config, now_ms - quiet_ms)
+        return await self._heard_nothing_after(bot, agent_name, room_id, page_end, listen, config, now_ms, quiet_ms)
 
     async def _heard_nothing_after(
         self,
@@ -412,20 +413,21 @@ class ListeningService:
         after: ConversationCursor,
         listen: ListenConfig,
         config: Config,
-        since_ms: int,
+        now_ms: int,
+        quiet_ms: int,
     ) -> bool:
-        """Return whether the agent heard nothing said after ``after`` and since ``since_ms``, reading a few pages on.
+        """Return whether the agent heard nothing said after ``after`` in the last ``quiet_ms``, reading a few pages on.
 
         A message awaiting its refetch ends what can be read; a room with more than ``_QUIET_PAGES`` pages after
         ``after`` counts as not quiet.
         """
         reader = bot.conversation_reader
         for _ in range(_QUIET_PAGES):
-            page = await reader.read_room_after(room_id, after, listen.max_messages)
+            page = await reader.read_room_after(room_id, after, listen.max_messages, now_ms)
             if page.last_cursor is None:
                 return True
             heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
-            if heard and heard[-1].timestamp > since_ms:
+            if heard and heard[-1].timestamp > now_ms - quiet_ms:
                 return False
             after = page.last_cursor
         return False

@@ -289,13 +289,19 @@ class ConversationReader:
             before=before,
         )
 
-    async def read_room_after(self, room_id: str, after: ConversationCursor | None, limit: int) -> RoomPage:
-        """Return up to ``limit`` visible messages of a whole room after a cursor, oldest first.
+    async def read_room_after(
+        self,
+        room_id: str,
+        after: ConversationCursor | None,
+        limit: int,
+        until_ts: int,
+    ) -> RoomPage:
+        """Return up to ``limit`` visible messages of a whole room after a cursor, oldest first, stamped by ``until_ts``.
 
         Every thread and the room level are read together, without waiting for
         a hydration or a refetch: a message owing one is left out.
         """
-        return await self.store.read_room_after(room_id=room_id, after=after, limit=limit)
+        return await self.store.read_room_after(room_id=room_id, after=after, limit=limit, until_ts=until_ts)
 
     async def latest_room_cursor(self, room_id: str) -> ConversationCursor | None:
         """Return the position of a room's newest visible message, in any thread, or nothing when it has none."""

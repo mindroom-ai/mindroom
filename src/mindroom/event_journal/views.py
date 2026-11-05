@@ -247,9 +247,16 @@ class ConversationReadView(_HydrationMarkerView):
             before=before,
         )
 
-    async def read_room_after(self, *, room_id: str, after: ConversationCursor | None, limit: int) -> RoomPage:
-        """Return one bounded page of a whole room after a cursor, oldest first."""
-        return await self._read(reads.read_room_after, room_id=room_id, after=after, limit=limit)
+    async def read_room_after(
+        self,
+        *,
+        room_id: str,
+        after: ConversationCursor | None,
+        limit: int,
+        until_ts: int | None = None,
+    ) -> RoomPage:
+        """Return one bounded page of a whole room after a cursor, oldest first, stamped no later than ``until_ts``."""
+        return await self._read(reads.read_room_after, room_id=room_id, after=after, limit=limit, until_ts=until_ts)
 
     async def latest_room_cursor(self, *, room_id: str) -> ConversationCursor | None:
         """Return the position of a room's newest visible message, or nothing."""

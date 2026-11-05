@@ -170,10 +170,13 @@ def read_room_after(
     room_id: str,
     after: ConversationCursor | None,
     limit: int,
+    until_ts: int | None = None,
 ) -> RoomPage:
     """Return what a room holds after a cursor, every thread and the room level together, oldest first.
 
     ``after`` is exclusive, and ``None`` starts at the room's first message.
+    ``until_ts`` leaves out messages stamped later, such as one whose sender's
+    clock runs ahead; ``None`` reads up to the room's newest.
     The page is bounded by ``limit`` and by the same content budgets as
     ``read_conversation``, so a caller continues from ``last_cursor``. A thread
     root has no thread relation of its own and is stored at the room level, so
@@ -192,6 +195,9 @@ def read_room_after(
         raise ValueError(msg)
     cursor_clause = "" if after is None else _ROOM_CURSOR_CLAUSE
     cursor_params: tuple[object, ...] = () if after is None else (after.created_ts, after.logical_event_id)
+    if until_ts is not None:
+        cursor_clause += " AND created_ts <= ?"
+        cursor_params = (*cursor_params, until_ts)
     sizes = tuple(
         transaction.fetchall(
             f"""
