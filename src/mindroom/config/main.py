@@ -989,6 +989,8 @@ class Config(BaseModel):
         for name, agent in self.agents.items():
             references += [(f"agents.{name}.rooms", room) for room in agent.rooms]
             references += [(f"agents.{name}.room_thread_modes", room) for room in agent.room_thread_modes]
+            if agent.listen is not None:
+                references += [(f"agents.{name}.listen.rooms", room) for room in agent.listen.rooms]
             references += [
                 (f"agents.{name}.automations.{automation.name}.room", automation.room)
                 for automation in agent.automations or ()
@@ -1458,6 +1460,22 @@ class Config(BaseModel):
                 config_path_prefix=config_path_prefix,
                 tools=tools,
             )
+        self._validate_listen_tools(tools)
+
+    def _validate_listen_tools(self, tools: ToolRegistry) -> None:
+        """Reject an explicit ``listen.tools`` name whose toolkit is not one this config can build.
+
+        The default list is not checked: it names tools shipped with MindRoom, and an agent that never set ``tools``
+        must not fail because of them.
+        """
+        for agent_name, agent in self.agents.items():
+            if agent.listen is None or "tools" not in agent.listen.model_fields_set:
+                continue
+            for index, name in enumerate(agent.listen.tools):
+                toolkit = name.partition(".")[0]
+                if toolkit not in tools.validation_snapshot and not self.is_tool_preset(toolkit):
+                    msg = f"agents.{agent_name}.listen.tools[{index}]: Unknown tool '{name}'."
+                    raise ConfigRuntimeValidationError(msg)
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
         """Return agents and teams that depend on any of the given tools."""
@@ -1642,6 +1660,9 @@ class Config(BaseModel):
                     f"cold_cache needs a cheap_model for agent {agent_name!r}; "
                     "set agents.<name>.cheap_model or defaults.cheap_model"
                 )
+                raise ValueError(msg)
+            if agent.listen is not None and agent.listen.model is not None and agent.listen.model not in self.models:
+                msg = f"Unknown listen model for agent {agent_name!r}: {agent.listen.model!r}"
                 raise ValueError(msg)
             review_model = agent.skill_learning.model
             if review_model is not None and review_model not in self.models:

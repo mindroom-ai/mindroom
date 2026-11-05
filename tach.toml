@@ -7953,6 +7953,11 @@ depends_on = ["mindroom.config.judgment", "mindroom.constants"]
 visibility = []
 
 [[modules]]
+path = "mindroom.config.listening"
+depends_on = ["mindroom.config.schema_hints"]
+visibility = []
+
+[[modules]]
 path = "mindroom.config.participation"
 depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 visibility = []

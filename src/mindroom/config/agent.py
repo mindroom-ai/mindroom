@@ -27,6 +27,7 @@ from mindroom.config.cold_cache import ColdCacheConfig  # noqa: TC001
 from mindroom.config.contacts import ContactsConfig  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_agent_fields
+from mindroom.config.listening import ListenConfig  # noqa: TC001
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
 from mindroom.config.mid_turn import MidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
@@ -285,6 +286,10 @@ class AgentConfig(BaseModel):
     participation: ParticipationConfig | None = Field(
         default=None,
         description="Opt-in adaptive participation in existing multi-human threads across all rooms",
+    )
+    listen: ListenConfig | None = Field(
+        default=None,
+        description="Opt-in listening: hear chosen rooms and act silently, through an allowlist of tools, after a quiet period",
     )
     contacts: ContactsConfig | None = Field(
         default=None,

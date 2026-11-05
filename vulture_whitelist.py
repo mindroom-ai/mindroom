@@ -427,3 +427,4 @@ _.audio_total_tokens  # Token counter read by name in the stored, reported, and 
 _.desktop  # Toolkit function its passthrough_tool mark offers (src/mindroom/custom_tools/desktop.py)
 _.tool_search  # Toolkit function its @tool mark offers (src/mindroom/custom_tools/dynamic_tools.py)
 _.validate_workflow  # Toolkit function its passthrough_tool mark offers (src/mindroom/custom_tools/dynamic_workflow.py)
+_.max_runs_per_hour  # ListenConfig cap on silent turns per hour, read by the listening service (src/mindroom/config/listening.py)

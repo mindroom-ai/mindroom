@@ -1,0 +1,100 @@
+"""The ``listen:`` block of an agent: defaults, bounds, and what config validation rejects."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+from pydantic import ValidationError
+
+from mindroom.config.agent import AgentConfig
+from mindroom.config.listening import ListenConfig
+from mindroom.config.main import Config
+from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+_MODELS = {"default": {"provider": "openai", "id": "gpt-4o"}, "cheap": {"provider": "openai", "id": "gpt-4o-mini"}}
+
+
+def _config(listen: dict[str, object]) -> dict[str, object]:
+    return {
+        "models": _MODELS,
+        "agents": {"scribe": {"display_name": "Scribe", "rooms": ["lobby"], "listen": listen}},
+    }
+
+
+def test_listen_defaults() -> None:
+    """Only rooms is required; the rest take the documented defaults."""
+    listen = ListenConfig(rooms=["lobby"])
+
+    assert listen.quiet_seconds == 60
+    assert listen.max_messages == 200
+    assert listen.max_runs_per_hour == 6
+    assert listen.tools == ["memory", "react"]
+    assert listen.model is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("quiet_seconds", 9),
+        ("max_messages", 0),
+        ("max_messages", 501),
+        ("max_runs_per_hour", 0),
+        ("max_runs_per_hour", 61),
+    ],
+)
+def test_listen_bounds(field: str, value: int) -> None:
+    """Values outside the documented bounds are rejected, and the edges are accepted."""
+    with pytest.raises(ValidationError):
+        ListenConfig(rooms=["lobby"], **{field: value})
+    edges = ListenConfig(rooms=["lobby"], quiet_seconds=10, max_messages=500, max_runs_per_hour=60)
+    assert (edges.quiet_seconds, edges.max_messages, edges.max_runs_per_hour) == (10, 500, 60)
+
+
+def test_listen_unknown_model_rejected() -> None:
+    """A model alias that is not under ``models`` fails validation."""
+    with pytest.raises(ValidationError, match="Unknown listen model for agent 'scribe': 'nope'"):
+        Config.model_validate(_config({"rooms": ["lobby"], "model": "nope"}))
+
+    config = Config.model_validate(_config({"rooms": ["lobby"], "model": "cheap"}))
+    assert config.agents["scribe"].listen is not None
+    assert config.agents["scribe"].listen.model == "cheap"
+
+
+def test_listen_unknown_tool_rejected(tmp_path: Path) -> None:
+    """An explicit tool that is no toolkit fails, as an unknown entry of ``tools:`` does."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    with pytest.raises(ValueError, match=r"listen\.tools\[1\]: Unknown tool 'not_a_tool\.run'"):
+        Config.validate_with_runtime(
+            _config({"rooms": ["lobby"], "tools": ["memory", "not_a_tool.run"]}),
+            runtime_paths,
+        )
+
+    Config.validate_with_runtime(_config({"rooms": ["lobby"], "tools": ["memory"]}), runtime_paths)
+
+
+def test_listen_unknown_room_rejected(tmp_path: Path) -> None:
+    """A listened room resolves as ``room_thread_modes`` rooms do, so an outside alias fails."""
+    with pytest.raises(ValueError, match=r"agents\.scribe\.listen\.rooms -> #elsewhere:example\.org"):
+        Config.validate_with_runtime(_config({"rooms": ["#elsewhere:example.org"]}), test_runtime_paths(tmp_path))
+
+
+def test_listen_rooms_required() -> None:
+    """A listen block with no rooms, or an empty list, is rejected."""
+    with pytest.raises(ValidationError):
+        ListenConfig()  # ty: ignore[missing-argument]
+    with pytest.raises(ValidationError):
+        ListenConfig(rooms=[])
+
+
+def test_agent_without_listen_is_none() -> None:
+    """Listening is opt-in."""
+    assert AgentConfig(display_name="Scribe").listen is None
+
+
+def test_listen_without_tools_passes_runtime_validation(tmp_path: Path) -> None:
+    """Only an explicit ``tools`` list is checked against the registry, so the default never fails validation."""
+    Config.validate_with_runtime(_config({"rooms": ["lobby"]}), test_runtime_paths(tmp_path))
