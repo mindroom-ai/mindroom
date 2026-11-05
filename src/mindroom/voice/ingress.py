@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.turn_policy import TurnPolicy
     from mindroom.turns.facts import IngressFacts
     from mindroom.voice.readiness import VoiceReadiness
 
@@ -47,6 +48,7 @@ class VoiceIngressDeps:
     response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
     readiness: VoiceReadiness
+    turn_policy: TurnPolicy
 
 
 @dataclass
@@ -104,12 +106,14 @@ class VoiceIngress:
         target: MessageTarget,
         envelope: MessageEnvelope,
         reservation: QueuedHumanNoticeReservation | None,
+        unanswered: bool,
     ) -> QueuedHumanNoticeReservation | None:
         """Keep the queued notice while a response still holds the voice's conversation once readiness ends.
 
-        Release it if that conversation went idle while the voice was transcribed, or reserve one if it became busy.
+        Release it if that conversation went idle while the voice was transcribed, or if the room's reply mode leaves
+        the transcript to nobody, or reserve one if it became busy.
         """
-        if not self.deps.response_runner.has_active_response_for_target(target):
+        if unanswered or not self.deps.response_runner.has_active_response_for_target(target):
             if reservation is not None:
                 reservation.release()
             return None
@@ -137,11 +141,13 @@ class VoiceIngress:
                 facts=facts,
                 target=voice_target,
             )
-            queued_notice_reservation = queued_notice_reservation_if_busy(
-                self.deps.response_runner,
-                target=voice_target,
-                envelope=envelope,
-            )
+            # The audio mentions no one, so a room whose reply mode needs a mention waits for the transcript instead.
+            if not self.deps.turn_policy.reply_mode_leaves_unanswered(room, event.source, voice_target, envelope):
+                queued_notice_reservation = queued_notice_reservation_if_busy(
+                    self.deps.response_runner,
+                    target=voice_target,
+                    envelope=envelope,
+                )
             normalized_event = await self.deps.readiness.prepare(
                 room=room,
                 event=event,
@@ -151,10 +157,17 @@ class VoiceIngress:
                 dispatch_timing=dispatch_timing,
             )
             envelope = self.deps.resolver.build_envelope(event=normalized_event, facts=facts, target=voice_target)
+            unanswered = self.deps.turn_policy.reply_mode_leaves_unanswered(
+                room,
+                normalized_event.source,
+                voice_target,
+                envelope,
+            )
             queued_notice_reservation = self._final_queued_notice(
                 target=voice_target,
                 envelope=envelope,
                 reservation=queued_notice_reservation,
+                unanswered=unanswered,
             )
             ready = ReadyPendingEvent(
                 pending_event=PendingEvent(
@@ -186,7 +199,8 @@ class VoiceIngress:
         else:
             # The ready event owns its queued notice from here.
             queued_notice_reservation = None
-            mark_waiting_for_approval(self.deps, room, event.source, voice_target, envelope)
+            if not unanswered:
+                mark_waiting_for_approval(self.deps, room, event.source, voice_target, envelope)
             return ready
         finally:
             if queued_notice_reservation is not None:

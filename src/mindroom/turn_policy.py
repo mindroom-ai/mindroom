@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.authorization import ResponderCandidatePermissions
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
@@ -109,10 +110,14 @@ _ROUTER_ONLY_MENTION_GUIDANCE = (
     "in a thread, you can keep going without an explicit tag. Explicit tags select who answers next; an untagged "
     "single-human thread may also continue an eligible ad-hoc team of participating individual agents. "
     "In multi-human threads, explicitly tag who should answer; eligible existing individual agents may opt into "
-    "adaptive participation, but teams do not form automatically. In a new untagged message, "
-    "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
-    "agent you can tag directly."
+    "adaptive participation, but teams do not form automatically. {new_message} The router is not a conversational "
+    "AI agent you can tag directly."
 )
+# What the guidance says about a new message that mentions no one, by the room's reply mode.
+_NEW_UNTAGGED_MESSAGE_GUIDANCE: dict[RoomReplyMode, str] = {
+    "auto": "In a new untagged message, automatic routing can still choose an agent or team when appropriate.",
+    "mentions": "In this room, a new message gets an answer only when it mentions an agent or team.",
+}
 
 
 @dataclass(frozen=True)
@@ -600,9 +605,11 @@ class TurnPolicy:
         if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
             return ignore
         if mention == "router_only":
+            reply_mode = self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room.room_id)
+            guidance = _ROUTER_ONLY_MENTION_GUIDANCE.format(new_message=_NEW_UNTAGGED_MESSAGE_GUIDANCE[reply_mode])
             return DispatchPlan(
                 kind="respond",
-                response_action=ResponseAction(kind="reject", rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE),
+                response_action=ResponseAction(kind="reject", rejection_message=guidance),
             )
         available_responders = await self.responder_candidates_for_room(room, requester_user_id)
         if context.is_thread and self._thread_defers_to_named_responders(
@@ -636,6 +643,14 @@ class TurnPolicy:
         router_event: DispatchEvent | None = None,
     ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
+        if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
+            if dispatch.context.planning_thread_history_unavailable:
+                # As the router's own skip below does, say when an unread thread, not the message, decided it.
+                self.deps.logger.info("Skipping response: reply mode needs a mention; thread history unavailable")
+            else:
+                self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
+            is_router = self.deps.agent_name == ROUTER_AGENT_NAME
+            return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
         router_plan = await self._plan_router_dispatch(
             room,
             event,
@@ -656,6 +671,64 @@ class TurnPolicy:
         if action.kind == "skip":
             return DispatchPlan(kind="ignore")
         return DispatchPlan(kind="respond", response_action=action)
+
+    def _reply_mode_awaits_mention(
+        self,
+        dispatch: PreparedDispatch,
+        *,
+        has_active_response_for_target: Callable[[MessageTarget], bool],
+    ) -> bool:
+        """Return whether a `mentions` room leaves this person's message, which mentions no one, to nobody.
+
+        In such a room a message that mentions no agent or team is answered only in a thread an agent or team already
+        replied in or is still answering. Scheduled tasks, hooks, external triggers, and every other turn no person
+        wrote follow the room's ordinary rules.
+        """
+        context = dispatch.context
+        if not self._reply_mode_requires_mention(
+            dispatch.target.room_id,
+            dispatch.envelope,
+            mentions_an_agent=bool(context.mentioned_agents),
+        ):
+            return False
+        # A thread whose history could not be read in full proves no reply, so it needs a mention too.
+        if get_agents_in_thread(context.planning_thread_history, self.deps.runtime.config, self.deps.runtime_paths):
+            return False
+        return not self._should_queue_follow_up_in_active_response_thread(
+            context=context,
+            target=dispatch.target,
+            source_envelope=dispatch.envelope,
+            has_active_response_for_target=has_active_response_for_target,
+        )
+
+    def reply_mode_leaves_unanswered(
+        self,
+        room: nio.MatrixRoom,
+        source: dict[str, Any],
+        target: MessageTarget,
+        envelope: MessageEnvelope,
+    ) -> bool:
+        """Return whether a `mentions` room is sure to leave this arriving message to nobody, before any thread is read.
+
+        Only a message outside any thread is sure to be left: no agent took part in it and it is no follow-up. Ingress
+        asks this so such a message neither asks a running response to wrap up nor shows that it waits for an approval.
+        """
+        if target.source_thread_id is not None:
+            return False
+        mentioned_agents, _am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+            source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=bool(mentioned_agents))
+
+    def _reply_mode_requires_mention(self, room_id: str, envelope: MessageEnvelope, *, mentions_an_agent: bool) -> bool:
+        """Return whether this is a person's message that mentions no agent or team in a `mentions` room."""
+        if mentions_an_agent or not envelope.origin.may_answer_interactive_prompt:
+            return False
+        return self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room_id) == "mentions"
 
     def _only_the_contact_answerer(
         self,

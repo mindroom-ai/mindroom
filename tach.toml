@@ -3551,6 +3551,7 @@ depends_on = [
     "mindroom.matrix_identifiers",
     "mindroom.prompt_templates",
     "mindroom.prompts",
+    "mindroom.room_reply_modes",
     "mindroom.room_thread_modes",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
@@ -4025,6 +4026,7 @@ visibility = [
     "mindroom.commands.encryption_commands",
     "mindroom.commands.room_model_commands",
     "mindroom.commands.thread_mode_commands",
+    "mindroom.commands.reply_mode_commands",
     "mindroom.external_triggers.executor",
     "mindroom.hooks.matrix_admin",
     "mindroom.matrix.room_cleanup",
@@ -4553,6 +4555,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.room_thread_modes"
+depends_on = [
+    "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.room_reply_modes"
 depends_on = [
     "mindroom.constants",
 ]
@@ -5147,6 +5155,14 @@ depends_on = [
 visibility = ["mindroom.commands.handler"]
 
 [[modules]]
+path = "mindroom.commands.reply_mode_commands"
+depends_on = [
+    "mindroom.matrix.client_room_admin",
+    "mindroom.room_reply_modes",
+]
+visibility = ["mindroom.commands.handler"]
+
+[[modules]]
 path = "mindroom.commands.auto_approve_commands"
 depends_on = [
     "mindroom.approval.inbound",
@@ -5187,6 +5203,7 @@ depends_on = [
     "mindroom.commands.parsing",
     "mindroom.commands.room_model_commands",
     "mindroom.commands.thread_mode_commands",
+    "mindroom.commands.reply_mode_commands",
     "mindroom.commands.auto_approve_commands",
     "mindroom.constants",
     "mindroom.entity_resolution",

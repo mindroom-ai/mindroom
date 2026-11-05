@@ -728,6 +728,7 @@ class AgentBot:
                     visible_echo=self._visible_voice_echo,
                     logger=self.logger,
                 ),
+                turn_policy=self._turn_policy,
             ),
         )
         self._turn_dispatcher = TurnDispatcher(

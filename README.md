@@ -368,10 +368,10 @@ Plain replies that never reach threaded context still stay plain replies.
 1. **Mentioned agents and teams respond** - Tag them to get their attention
 2. **Single responder continues** - In a thread with one person, the agent or team that answered keeps responding without a tag
 3. **Multiple agents collaborate** - Mention multiple agents when you want an ad-hoc collaboration
-4. **Smart routing** - The router picks the best agent or team for a new thread when you don't tag one
+4. **Smart routing** - The router picks the best agent or team for a new thread when you don't tag one, unless the room's [`reply_mode`](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`
 5. **Group threads stay human-first** - Once two or more people talk in a thread, agents answer only when tagged, so they don't interrupt
 6. **Adaptive participation** - An agent with [`participation`](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) enabled that has already replied in a group thread decides for each untagged message whether it can help, so nobody has to tag it
-7. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, and you can add more agents to a DM for private collaboration
+7. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, unless the room's `reply_mode` is `mentions`, and you can add more agents to a DM for private collaboration
 
 <details>
 <summary><b>Chat commands</b></summary>
@@ -399,6 +399,7 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!model [name|list|reset]` - Show or switch the model used in the current thread
 - `!room_model [name|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
 - `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
+- `!reply_mode [auto|mentions|reset|show]` - Show or switch whether agents need a mention to start a conversation here (set/reset require a room admin)
 - `!auto_approve [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while, or show or end that window
 - `!encrypt [confirm]` - Enable end-to-end encryption for this room (irreversible, room admin only)
 - `!e2ee` - Show encryption diagnostics for this room

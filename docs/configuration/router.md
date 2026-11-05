@@ -45,10 +45,11 @@ When a message mentions no agent or team, MindRoom first finds the responders th
 
 Then:
 
-1. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](threads.md#adaptive-participation).
-2. If exactly one eligible responder remains, it answers directly without an AI routing call.
-3. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-4. The router posts a message mentioning the chosen agent or team (for example "@code could you help with this?"), and that entity answers in the thread.
+1. If the room's [reply mode](threads.md#reply-mode) is `mentions`, nobody answers unless the message is in a thread an agent or team already replied in or is still answering.
+2. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](threads.md#adaptive-participation).
+3. If exactly one eligible responder remains, it answers directly without an AI routing call.
+4. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
+5. The router posts a message mentioning the chosen agent or team (for example "@code could you help with this?"), and that entity answers in the thread.
 
 If routing fails, for example because of a model error or an invalid choice, the router replies "Please try mentioning an agent or team directly with @ or rephrase your request."
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.

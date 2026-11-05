@@ -4600,6 +4600,16 @@
           "default": null,
           "description": "Room-specific Matrix administrator override",
           "title": "Admins"
+        },
+        "reply_mode": {
+          "default": "auto",
+          "description": "'auto' lets the router and the room's only agent or team answer a message that mentions no one; 'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering",
+          "enum": [
+            "auto",
+            "mentions"
+          ],
+          "title": "Reply Mode",
+          "type": "string"
         }
       },
       "title": "RoomConfig",

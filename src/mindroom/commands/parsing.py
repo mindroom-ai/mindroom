@@ -30,6 +30,7 @@ class CommandType(Enum):
     MODEL = "model"  # Per-thread model override command
     ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
+    REPLY_MODE = "reply_mode"  # Room-level reply mode override command
     AUTO_APPROVE = "auto_approve"  # Per-thread window that skips tool approval
     ENCRYPT = "encrypt"  # Room encryption enablement command
     E2EE = "e2ee"  # Encryption diagnostics command
@@ -61,6 +62,10 @@ _COMMAND_DOCS = {
     CommandType.THREAD_MODE: (
         "!thread_mode [room|thread|reset|show]",
         "Show or switch the thread mode used in the current room (room admin only)",
+    ),
+    CommandType.REPLY_MODE: (
+        "!reply_mode [auto|mentions|reset|show]",
+        "Show or switch whether agents need a mention to start a conversation here (set/reset require a room admin)",
     ),
     CommandType.AUTO_APPROVE: (
         "!auto_approve [<minutes>|<hours>h|off]",
@@ -145,12 +150,13 @@ class _CommandParser:
     MODEL_PATTERN = re.compile(r"^!model(?:\s+(.+))?$", re.IGNORECASE)
     ROOM_MODEL_PATTERN = re.compile(r"^!room[_-]?model(?:\s+(.+))?$", re.IGNORECASE)
     THREAD_MODE_PATTERN = re.compile(r"^!thread[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
+    REPLY_MODE_PATTERN = re.compile(r"^!reply[_-]?mode(?:\s+(.+))?$", re.IGNORECASE)
     AUTO_APPROVE_PATTERN = re.compile(r"^!auto[_-]?approve(?:\s+(.+))?$", re.IGNORECASE)
     ENCRYPT_PATTERN = re.compile(r"^!encrypt(?:\s+(.+))?$", re.IGNORECASE)
     E2EE_PATTERN = re.compile(r"^!e2ee$", re.IGNORECASE)
     HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911, PLR0912
+    def parse(self, message: str) -> Command | None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Parse a message for commands.
 
         Args:
@@ -282,6 +288,14 @@ class _CommandParser:
                 raw_text=message,
             )
 
+        match = self.REPLY_MODE_PATTERN.match(message)
+        if match:
+            return Command(
+                type=CommandType.REPLY_MODE,
+                args={"args_text": (match.group(1) or "").strip()},
+                raw_text=message,
+            )
+
         match = self.AUTO_APPROVE_PATTERN.match(message)
         if match:
             return Command(
@@ -310,7 +324,7 @@ class _CommandParser:
         )
 
 
-def get_command_help(topic: str | None = None) -> str:  # noqa: C901, PLR0911
+def get_command_help(topic: str | None = None) -> str:  # noqa: C901, PLR0911, PLR0912
     """Get help text for commands.
 
     Args:
@@ -532,6 +546,22 @@ Usage: `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode 
 How it works:
 - The override applies to future agent replies in the current Matrix room
 - The override is stored in MindRoom runtime state, not config.yaml
+- Only Matrix room admins can set or reset the override"""
+
+    if topic in {"reply_mode", "reply-mode", "replymode"}:
+        return """**Reply Mode Command**
+
+Usage: `!reply_mode [auto|mentions|reset|show]` - Show or switch whether agents need a mention to start a conversation
+
+**Examples:**
+- `!reply_mode` or `!reply_mode show` - Show the reply mode this room uses
+- `!reply_mode mentions` - Answer only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering
+- `!reply_mode auto` - Also let the router or the room's only agent answer messages that mention no one
+- `!reply_mode reset` - Remove the room override and use `rooms.<room>.reply_mode` from config.yaml again
+
+How it works:
+- The override applies to future messages in the current Matrix room
+- The override is stored in MindRoom runtime state, not config.yaml, and takes precedence over config.yaml
 - Only Matrix room admins can set or reset the override"""
 
     if topic in {"auto_approve", "auto-approve", "autoapprove"}:

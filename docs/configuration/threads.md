@@ -4,7 +4,7 @@ icon: lucide/messages-square
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](router.md), [Access Control](../authorization.md), and [Logs & Monitoring](../deployment/operational-log-events.md).
 
 ## Thread Mode Resolution
@@ -36,6 +36,45 @@ Room-mode conversations are not included in [thread exports](../thread-exports.m
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
 
+## Reply Mode
+
+A room's reply mode decides whether a message that mentions no agent or team can start a conversation.
+Set it with `rooms.<key>.reply_mode` (see [Room policy](../rooms.md#room-policy)) or with [`!reply_mode`](#reply_mode).
+
+- `auto` (default): the router or the room's only agent or team answers such a message, as described in [Routing & Responder Selection](router.md#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
+- `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
+  The router still shows the transcript, or the fallback text, of such a voice message ([router echo](../voice.md#voice-message-processing)) unless `voice.visible_router_echo` is `false`.
+
+```yaml
+rooms:
+  lobby:
+    reply_mode: mentions
+```
+
+A message that mentions an agent or team is answered the same way in both modes, and mentions count as described in [Multi-Human Thread Protection](#multi-human-thread-protection).
+Editing a message that got no answer to add a mention does not get one; send a new message that mentions the agent or team. A message still waiting behind a reply in progress is read with its latest edit, so an edit there that adds a mention does count.
+Scheduled tasks, hooks, and external triggers are not affected, and a direct-message room follows its reply mode like any other room.
+With `thread_mode: room`, every message is room-level, so each one needs a mention in a `mentions` room.
+
+### `!reply_mode`
+
+Show or switch the reply mode of the current Matrix room.
+
+```
+!reply_mode
+!reply_mode show
+!reply_mode mentions
+!reply_mode auto
+!reply_mode reset
+```
+
+`!reply_mode` and `!reply_mode show` (also `list` or `status`) show the mode the room uses and whether it is an override.
+`!reply_mode mentions` and `!reply_mode auto` set an override that takes precedence over `rooms.<key>.reply_mode`.
+`!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
+Only Matrix room admins can set or reset the override; others get `Room admin only.`
+The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+The router answers `!reply_mode`, so in a room without the router, such as a direct-message room with one agent, set the mode with a `rooms` entry keyed by the room's `!` room ID instead, for example `rooms: {"!abc123:example.com": {reply_mode: mentions}}`; the router then also joins that room when it can.
+
 ## Threading (MSC3440)
 
 Agents reply in [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md) threads.
@@ -61,7 +100,8 @@ MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is 
 Mentions of users who are not in the room or only invited do not suppress normal responses.
 Mentioning a configured agent that has not joined the room still counts as an explicit mention for the other agents.
 
-A thread too long to read at once, more than 2,000 messages or 16 MiB of stored content, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+A thread MindRoom cannot read in full, because it holds more than 2,000 messages or 16 MiB of stored content or because reading it failed, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+In a `mentions` room such a thread needs a mention even when the room has one possible responder.
 
 ### Bot accounts
 
@@ -171,6 +211,7 @@ Missing credentials, a full limit, a timeout, a provider error, malformed output
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
 A "thanks" or "is this still running?" can therefore cut a long task short.
+A message outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)), sends no wrap-up notice and gets no ⏳ reaction.
 Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
 The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 

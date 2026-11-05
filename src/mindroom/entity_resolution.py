@@ -408,20 +408,20 @@ def router_agents_for_room(
     return router_agents or set(agents)
 
 
-def resolve_room_scoped_model_override(
-    overrides: Mapping[str, str],
+def resolve_room_scoped_value[T](
+    by_room: Mapping[str, T],
     room_id: str | None,
     runtime_paths: RuntimePaths,
-) -> str | None:
-    """Return a model override keyed by Matrix room ID, or by persisted room key or alias."""
-    if room_id is None or not overrides:
+) -> T | None:
+    """Return the value ``by_room`` holds for one room under its Matrix room ID, or its persisted room key or alias."""
+    if room_id is None or not by_room:
         return None
-    if room_id in overrides:
-        return overrides[room_id]
+    if room_id in by_room:
+        return by_room[room_id]
     room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
-    if room_alias and room_alias in overrides:
-        return overrides[room_alias]
+    if room_alias and room_alias in by_room:
+        return by_room[room_alias]
     for room in matrix_state.matrix_state_for_runtime(runtime_paths).rooms.values():
-        if room.room_id == room_id and room.alias in overrides:
-            return overrides[room.alias]
+        if room.room_id == room_id and room.alias in by_room:
+            return by_room[room.alias]
     return None

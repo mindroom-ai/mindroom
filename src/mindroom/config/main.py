@@ -119,6 +119,7 @@ from mindroom.entity_resolution import (
     canonical_room_reference,
     names_room,
     resolve_agent_thread_mode,
+    resolve_room_scoped_value,
     router_agents_for_room,
 )
 from mindroom.file_locks import advisory_file_lock
@@ -138,6 +139,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.room_reply_modes import resolve_room_reply_mode_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
@@ -150,6 +152,7 @@ if TYPE_CHECKING:
     from pydantic_core import ErrorDetails
 
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
@@ -1634,6 +1637,14 @@ class Config(BaseModel):
             return "thread"
         member_modes = {resolve_agent_thread_mode(self.agents[name], room_id, runtime_paths) for name in member_names}
         return next(iter(member_modes)) if len(member_modes) == 1 else "thread"
+
+    def get_room_reply_mode(self, runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode:
+        """Return one room's reply mode: its `!reply_mode` override, else its `rooms` entry, else `auto`."""
+        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id)
+        if runtime_room_override is not None:
+            return runtime_room_override
+        room = resolve_room_scoped_value(self.rooms, room_id, runtime_paths)
+        return "auto" if room is None else room.reply_mode
 
     @model_validator(mode="after")
     def validate_agent_helper_models(self) -> Config:

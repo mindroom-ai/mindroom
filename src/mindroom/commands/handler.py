@@ -22,6 +22,7 @@ from mindroom.commands.encryption_commands import handle_e2ee_command, handle_en
 from mindroom.commands.mode_commands import handle_mode_command
 from mindroom.commands.model_commands import handle_model_command, handle_structured_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
+from mindroom.commands.reply_mode_commands import handle_reply_mode_command
 from mindroom.commands.room_model_commands import handle_room_model_command
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -90,6 +91,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.MODE,
         CommandType.ROOM_MODEL,
         CommandType.THREAD_MODE,
+        CommandType.REPLY_MODE,
         CommandType.AUTO_APPROVE,
         CommandType.ENCRYPT,
     },
@@ -625,6 +627,17 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = await handle_thread_mode_command(
             command.args.get("args_text", ""),
             client=context.client,
+            runtime_paths=context.runtime_paths,
+            room_id=room.room_id,
+            requester_user_id=requester_user_id,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
+        )
+
+    elif command.type == CommandType.REPLY_MODE:
+        response_text = await handle_reply_mode_command(
+            command.args.get("args_text", ""),
+            client=context.client,
+            config=context.config,
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,

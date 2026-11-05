@@ -1088,7 +1088,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Display name** and **Description**
 - **Room model** - optional model override
 - **Agents in room**
-- **More settings** - per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides (see [Rooms](https://docs.mindroom.chat/rooms/))
+- **More settings** - per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides (see [Rooms](https://docs.mindroom.chat/rooms/)), and the room's `reply_mode` (see [Reply Mode](https://docs.mindroom.chat/configuration/threads/#reply-mode))
 
 ### Schedules
 
@@ -2772,10 +2772,11 @@ When a message mentions no agent or team, MindRoom first finds the responders th
 
 Then:
 
-1. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
-2. If exactly one eligible responder remains, it answers directly without an AI routing call.
-3. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
-4. The router posts a message mentioning the chosen agent or team (for example "@code could you help with this?"), and that entity answers in the thread.
+1. If the room's [reply mode](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`, nobody answers unless the message is in a thread an agent or team already replied in or is still answering.
+2. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
+3. If exactly one eligible responder remains, it answers directly without an AI routing call.
+4. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.
+5. The router posts a message mentioning the chosen agent or team (for example "@code could you help with this?"), and that entity answers in the thread.
 
 If routing fails, for example because of a model error or an invalid choice, the router replies "Please try mentioning an agent or team directly with @ or rephrase your request."
 Mentioning an agent or team with `@name` always bypasses routing, but the entity still answers only if it is in the room, listed for that room in its `rooms` when the room is configured, and allowed by its `access`.
@@ -2843,7 +2844,7 @@ The router's other duties are documented on their own pages: [command handling](
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), [Access Control](https://docs.mindroom.chat/authorization/), and [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/).
 
 ## Thread Mode Resolution
@@ -2875,6 +2876,45 @@ Room-mode conversations are not included in [thread exports](https://docs.mindro
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
 
+## Reply Mode
+
+A room's reply mode decides whether a message that mentions no agent or team can start a conversation.
+Set it with `rooms.<key>.reply_mode` (see [Room policy](https://docs.mindroom.chat/rooms/#room-policy)) or with [`!reply_mode`](#reply_mode).
+
+- `auto` (default): the router or the room's only agent or team answers such a message, as described in [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
+- `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
+  The router still shows the transcript, or the fallback text, of such a voice message ([router echo](https://docs.mindroom.chat/voice/#voice-message-processing)) unless `voice.visible_router_echo` is `false`.
+
+```yaml
+rooms:
+  lobby:
+    reply_mode: mentions
+```
+
+A message that mentions an agent or team is answered the same way in both modes, and mentions count as described in [Multi-Human Thread Protection](#multi-human-thread-protection).
+Editing a message that got no answer to add a mention does not get one; send a new message that mentions the agent or team. A message still waiting behind a reply in progress is read with its latest edit, so an edit there that adds a mention does count.
+Scheduled tasks, hooks, and external triggers are not affected, and a direct-message room follows its reply mode like any other room.
+With `thread_mode: room`, every message is room-level, so each one needs a mention in a `mentions` room.
+
+### `!reply_mode`
+
+Show or switch the reply mode of the current Matrix room.
+
+```
+!reply_mode
+!reply_mode show
+!reply_mode mentions
+!reply_mode auto
+!reply_mode reset
+```
+
+`!reply_mode` and `!reply_mode show` (also `list` or `status`) show the mode the room uses and whether it is an override.
+`!reply_mode mentions` and `!reply_mode auto` set an override that takes precedence over `rooms.<key>.reply_mode`.
+`!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
+Only Matrix room admins can set or reset the override; others get `Room admin only.`
+The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+The router answers `!reply_mode`, so in a room without the router, such as a direct-message room with one agent, set the mode with a `rooms` entry keyed by the room's `!` room ID instead, for example `rooms: {"!abc123:example.com": {reply_mode: mentions}}`; the router then also joins that room when it can.
+
 ## Threading (MSC3440)
 
 Agents reply in [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md) threads.
@@ -2900,7 +2940,8 @@ MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is 
 Mentions of users who are not in the room or only invited do not suppress normal responses.
 Mentioning a configured agent that has not joined the room still counts as an explicit mention for the other agents.
 
-A thread too long to read at once, more than 2,000 messages or 16 MiB of stored content, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+A thread MindRoom cannot read in full, because it holds more than 2,000 messages or 16 MiB of stored content or because reading it failed, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+In a `mentions` room such a thread needs a mention even when the room has one possible responder.
 
 ### Bot accounts
 
@@ -3010,6 +3051,7 @@ Missing credentials, a full limit, a timeout, a provider error, malformed output
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
 A "thanks" or "is this still running?" can therefore cut a long task short.
+A message outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)), sends no wrap-up notice and gets no ⏳ reaction.
 Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
 The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
@@ -4969,6 +5011,7 @@ This page lists every command and fully covers `!help`, `!hi`, and `!config`; th
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
 | `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
+| `!reply_mode [auto\|mentions\|reset\|show]` | Show or switch whether agents need a mention to start a conversation in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#reply_mode) |
 | `!auto_approve [<minutes>\|<hours>h\|off]` | Run your tool calls in this thread without approval for a while, or show or end that window | [Tool Approval](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) | [Matrix](https://docs.mindroom.chat/matrix/#encrypt) |
 | `!e2ee` | Show encryption diagnostics for this room | [Matrix](https://docs.mindroom.chat/matrix/#e2ee) |
@@ -5001,7 +5044,7 @@ Any other command sent by an agent for you is refused with `❌ Agents cannot ru
 !help config
 ```
 
-**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reply_mode`, `reply-mode`, `replymode`, `auto_approve`, `auto-approve`, `autoapprove`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
 Any other topic shows the general command list.
 
@@ -5285,6 +5328,7 @@ With `voice.enabled: false`, the router posts the fallback text directly instead
 The echo is display-only: agents answer the original voice message, not the echo.
 The echo appears only when the router is in the room and allowed to reply to the sender.
 Set `voice.visible_router_echo: false` to hide it; this does not change who answers.
+The echo also appears in a room whose [reply mode](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`, even for a voice message nobody answers there.
 
 **Responder already clear.**
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly without a router handoff.
@@ -7194,6 +7238,7 @@ A `#` room alias is accepted only as the alias MindRoom gives a managed room (se
 | `admins` | list of Matrix user IDs | `[]` | Users granted Matrix admin power (level 100) in the room |
 | `rooms.<key>.display_name` | string | the key with underscores as spaces, title-cased | Matrix room name |
 | `rooms.<key>.description` | string | `""` | Room purpose shown in the dashboard |
+| `rooms.<key>.reply_mode` | `auto` or `mentions` | `auto` | Whether a message must mention an agent or team to start a conversation; see [Reply Mode](https://docs.mindroom.chat/configuration/threads/#reply-mode) |
 
 `invite_users` and `admins` accept only concrete Matrix user IDs, no wildcards, plus the pairing owner placeholder.
 A field set under `rooms.<key>` replaces the default, and a list replaces the whole default list instead of merging with it, so an empty list removes the inherited invitations or admins for that room.
