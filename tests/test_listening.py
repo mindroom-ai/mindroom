@@ -929,6 +929,36 @@ async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(
     assert listening.turns.heard() == ["$p", "$z"]
 
 
+async def test_a_message_owing_a_refetch_after_the_turns_messages_keeps_the_room_from_counting_as_quiet(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What lies past a message awaiting its refetch is unknown, so the turn waits for the refetch, which is asked for."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_messages": 1})
+    await listening.service._poll_once(T0)
+    await listening.say("$old", 10)
+    await _owe_refetch(listening, "$p", 50)
+    await listening.say("$fresh", 95)
+    resolve = cast("AsyncMock", listening.bot.conversation_reader.hydrator.resolve_refreshes)
+
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.contexts == []
+    assert [request.logical_event_id for request in resolve.await_args.args[0]] == ["$p"]
+    page = await listening.journal.read_room_after(room_id=ROOM, after=None, limit=10)
+    await listening.journal.install_refetched_revision(
+        page.refresh_pending[0],
+        revision_event_id="$p",
+        revision_ts=_ms(50),
+        revision_sender=ALICE,
+        content=text("first"),
+    )
+    await listening.service._poll_once(T0 + 200)
+
+    assert listening.turns.heard() == ["$old"]
+
+
 async def test_a_refetch_that_never_arrives_skips_its_message_after_ten_minutes(listening: _Listening) -> None:
     """A refetch that never resolves holds the room for 10 minutes, then its message is skipped with a warning."""
     await listening.service._poll_once(T0)

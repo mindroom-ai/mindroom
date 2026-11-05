@@ -460,14 +460,16 @@ class ListeningService:
     ) -> bool:
         """Return whether the agent heard nothing said after ``after`` in the last ``quiet_ms``, reading a few pages on.
 
-        A message awaiting its refetch ends what can be read; a room with more than ``_QUIET_PAGES`` pages after
-        ``after`` counts as not quiet.
+        A message awaiting its refetch ends what can be read, so its refetch is asked for and the room does not count
+        as quiet until it arrives; a room with more than ``_QUIET_PAGES`` pages after ``after`` counts as not quiet.
         """
         reader = bot.conversation_reader
         for _ in range(_QUIET_PAGES):
             page = await reader.read_room_after(room_id, after, listen.max_messages, now_ms)
             if page.last_cursor is None:
-                return True
+                if page.refresh_pending:
+                    await reader.hydrator.resolve_refreshes(page.refresh_pending)
+                return page.stopped_at is None
             heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
             if heard and heard[-1].timestamp > now_ms - quiet_ms:
                 return False
