@@ -336,8 +336,8 @@ The agent joins only calls started on your own MatrixRTC backend, meaning the on
 In other rooms, such as ad-hoc rooms, the power levels must let members send `org.matrix.msc3401.call.member` state events, which Element Call-capable clients set up when they create rooms.
 Calls work in both encrypted and unencrypted rooms.
 
-Synapse supports the full MatrixRTC stack, including automatic cleanup of stale call memberships.
-Tuwunel works with Element Call but does not yet support delayed events ([tuwunel#178](https://github.com/matrix-construct/tuwunel/issues/178)), so memberships of crashed clients linger until they expire.
+Synapse and MindRoom's Tuwunel fork (`mindroom-tuwunel`), which mindroom.chat, hosted MindRoom, and `mindroom-stack` run, support the full MatrixRTC stack, including removing a crashed client's call membership shortly after it stops.
+Upstream Tuwunel works with Element Call but does not yet support delayed events ([tuwunel#178](https://github.com/matrix-construct/tuwunel/issues/178)), so memberships of crashed clients linger until they expire.
 A lingering membership keeps the agent in the call, and counted as active work by `mindroom check-active-responses`, for about a minute after each join, as described in [When an agent joins a call](#when-an-agent-joins-a-call).
 
 ## Limitations
