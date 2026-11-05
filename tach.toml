@@ -61,6 +61,7 @@ depends_on = [
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.sentence_transformers_embedder",
     "mindroom.embeddings.vertex_ai_embedder",
+    "mindroom.constants",
     "mindroom.providers.google_adc",
 ]
 

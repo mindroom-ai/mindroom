@@ -1334,7 +1334,9 @@ def test_vertex_ai_memory_embedder_check_runs_an_embedding_round_trip(
 ) -> None:
     """Vertex AI authenticates with Google Cloud credentials, so the check is one real embedding, not a key lookup."""
     monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: "embedder permission denied (HTTP 403)")
-    config = Config(memory={"embedder": {"provider": "vertex_ai", "config": {"model": "gemini-embedding-2"}}})
+    config = Config(
+        memory={"backend": "file", "embedder": {"provider": "vertex_ai", "config": {"model": "gemini-embedding-2"}}},
+    )
 
     assert _check_memory_embedder(config, _doctor_runtime_paths(tmp_path)) == (0, 1, 0)
     output = " ".join(capsys.readouterr().out.split())

@@ -7,11 +7,12 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.constants import runtime_env_path
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host, get_openai_base_url
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
-from mindroom.providers.google_adc import with_runtime_application_credentials
+from mindroom.providers.google_adc import load_google_application_credentials
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -135,12 +136,14 @@ def create_configured_embedder(
     if settings.provider == "vertex_ai":
         from mindroom.embeddings.vertex_ai_embedder import VertexAIEmbedder  # noqa: PLC0415
 
-        client_params = with_runtime_application_credentials({}, runtime_paths).get("client_params", {})
+        credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
         return VertexAIEmbedder(
             model=settings.model,
+            health_recorder=capture_embedder_health_recorder() if health_recorder is None else health_recorder,
             project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths),
             location=get_secret_from_env("GOOGLE_CLOUD_LOCATION", runtime_paths=runtime_paths),
-            credentials=client_params.get("credentials"),
+            # Without the variable, google-genai uses Application Default Credentials, such as Workload Identity.
+            credentials=load_google_application_credentials(str(credentials_path)) if credentials_path else None,
             dimensions=settings.dimensions,
             query_prefix=settings.query_prefix,
             document_prefix=settings.document_prefix,
