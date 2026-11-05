@@ -862,9 +862,11 @@ async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> di
 !!! warning "Plugin routes share the dashboard's origin"
     MindRoom serves plugin routes from the same origin as its dashboard, so script in a page a plugin route returns would run with the dashboard's signed-in session.
     Never return `text/html`, or any other content a browser would render, such as SVG, built from untrusted input such as Matrix messages, room names, or request parameters.
-    Return JSON. MindRoom answers every response under `/api/plugins/` with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, whatever the route sets, so a browser neither guesses another type nor runs script or loads anything in a page a route returns; that is a backstop, not a licence to return pages.
+    Return JSON.
+    MindRoom answers every response under `/api/plugins/` with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, whatever the route sets, so a browser neither guesses another type nor runs script or loads anything in a page a route returns; that is a backstop, not a licence to return pages.
 
-A routes module that raises as it loads, or has no `router` (`Plugin routes module must define router: APIRouter`), costs the plugin only its routes: MindRoom logs `Plugin routes failed to load; serving none` with the reason, its paths answer 404, and its tools and hooks keep working, after a reload too.
+MindRoom builds each plugin's app from its router as the plugin loads, and a reload builds a new one.
+A routes module that raises as it loads, has no `router` (`Plugin routes module must define router: APIRouter`), or has a router FastAPI refuses to serve (`Plugin router cannot be served: ...`), such as one with a route at `""` rather than `"/"`, costs the plugin only its routes: MindRoom logs `Plugin routes failed to load; serving none` with the reason, its paths answer 404, and its tools and hooks keep working, after a reload too.
 Only `mindroom plugins check` fails on such a routes module; `mindroom config validate` and `mindroom doctor` import it too, but only log it and still pass the config.
 Routes follow plugin reloads, so the next request after a reload runs the new code.
 A request for a plugin that is not loaded or has no routes, or for a path its router does not define, answers 404.
@@ -873,7 +875,7 @@ Only the primary serves plugin routes, and workers never import a routes module,
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
 MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` or `require_room_member` is public.
 
-Each plugin's router runs in a FastAPI app of its own, mounted under `/api/plugins/<name>/`:
+Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
 - The router's `lifespan` and `on_event` startup and shutdown handlers never run.
 - A `GET` route answers `HEAD` with 405, as in any FastAPI app; list both in `@router.api_route(path, methods=["GET", "HEAD"])` if a client needs `HEAD`.
@@ -883,15 +885,17 @@ Each plugin's router runs in a FastAPI app of its own, mounted under `/api/plugi
 A plugin route that serves a Matrix web client authenticates its caller with `require_client_user` from `mindroom.plugin_http`, as a FastAPI dependency: `user: ClientUser = Depends(require_client_user)`.
 `ClientUser.user_id` is the caller's Matrix user ID.
 The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
+Sign-in needs a homeserver that binds OpenID tokens to this deployment, MindRoom's Tuwunel fork with `mindroom_openid_audience` on (see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)); on any other homeserver `POST /api/client-sessions` answers 403, with no setting to allow it, because another backend the user opens could replay their token here.
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
 Browser origins that may call these routes and `POST /api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](https://docs.mindroom.chat/tools/worker-computer/); there is no separate setting for plugin routes.
 Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, besides the two headers above, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
 A route that acts on one room depends on `require_room_member` instead, as in the example above: `user: ClientUser = Depends(require_room_member)`.
-It authenticates the caller as `require_client_user` does and takes the room from the route's `room_id` parameter, and it returns the same `ClientUser` once that user is joined to the room.
+It authenticates the caller as `require_client_user` does and takes the room from the route's `{room_id}` path parameter, and it returns the same `ClientUser` once that user is joined to the room.
+It never takes the room from the query string: as a dependency of a route without `{room_id}` in its path, it answers 422.
 A route that finds its room some other way awaits `require_room_member(request, room_id)` itself.
 Either way the user is always the session's own: no parameter of the request can name another.
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
-It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, while `Room membership lookup failed; try again.` means the Matrix call failed or timed out.
+It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
 ## Plugin skills
 

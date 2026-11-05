@@ -189,7 +189,7 @@ Matrix sync callback
 | `egress_broker/ca.py` | Local broker CA, per-host leaf certificates, the SNI check against the CONNECT host, and the worker trust bundle |
 | `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect, disconnect, and opt-in, the full request log, and the CA download |
 | `api/client_sessions.py` | `POST /api/client-sessions`: exchanges a Matrix OpenID token from a web client for an in-memory, one-hour session token that plugin routes accept |
-| `api/plugin_routes.py` | Serves each published plugin's `routes_module` router under `/api/plugins/<plugin>/`, looked up per request so reloads take effect, in a sub-app that shares the main app's state |
+| `api/plugin_routes.py` | Serves each published plugin's `routes_module` router under `/api/plugins/<plugin>/` from the app built as the plugin loads, looked up per request so reloads take effect |
 | `api/connections_session.py` | Connections portal sign-in: exchanges a Matrix OpenID token from MindRoom Chat for a portal session cookie |
 | `api/connections_contacts.py` | Contacts page routes under `/api/connections/contacts`: the signed-in owner's contacts with their own side's rules and tools, and accepting, declining, editing, and removing them without an approval card |
 | `api/connections_native.py` | Connections portal sign-in from the iOS app: the browser gets a pending cookie, and the app confirms it with its own token before the session starts |
