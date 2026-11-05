@@ -15,12 +15,14 @@ from mindroom.api.app_state import ensure_app_state
 from mindroom.matrix_openid import (
     MatrixOpenIDError,
     MatrixOpenIDToken,
-    homeserver_binds_openid_audience,
+    homeserver_openid_binding,
     verify_matrix_openid,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mindroom.constants import RuntimePaths
 
 _CLIENT_SESSION_TTL_SECONDS = 3600
 _CLIENT_SESSION_CAPACITY = 256
@@ -104,16 +106,29 @@ def _client_session_store(app: FastAPI) -> ClientSessionStore:
     return state.client_sessions
 
 
-@router.post("")
-async def exchange_openid_token(payload: _ExchangeRequest, request: Request) -> dict[str, str | int]:
-    """Exchange a configured-homeserver OpenID token for a client session token."""
-    paths = config_lifecycle.require_api_state(request.app).snapshot.runtime_paths
-    # Without binding, any backend a user opens from the client could replay their token here.
-    if not await homeserver_binds_openid_audience(paths):
-        raise HTTPException(403, "Client sessions need a homeserver that binds OpenID tokens to this deployment.")
+async def _verified_user(token: MatrixOpenIDToken, paths: RuntimePaths, request: Request) -> str:
     try:
-        user_id = await verify_matrix_openid(payload.openid_token, paths, request_origin=str(request.base_url))
+        return await verify_matrix_openid(token, paths, request_origin=str(request.base_url))
     except MatrixOpenIDError as error:
         raise HTTPException(error.status_code, error.detail) from None
+
+
+@router.post("")
+async def exchange_openid_token(payload: _ExchangeRequest, request: Request) -> dict[str, str | int]:
+    """Exchange a configured-homeserver OpenID token for a client session token.
+
+    Without binding, any backend a user opens from the client could replay their token here. `/versions` shows only
+    that binding was on after the first verification, so the token is verified again afterwards, as Connections'
+    dashboard sign-in does: a binding switch between the requests cannot then pass an unbound token in either direction.
+    """
+    paths = config_lifecycle.require_api_state(request.app).snapshot.runtime_paths
+    user_id = await _verified_user(payload.openid_token, paths, request)
+    binding = await homeserver_openid_binding(paths)
+    if binding is None:
+        raise HTTPException(503, "Could not check whether the homeserver binds OpenID tokens.")
+    if not binding:
+        raise HTTPException(403, "Client sessions need a homeserver that binds OpenID tokens to this deployment.")
+    if await _verified_user(payload.openid_token, paths, request) != user_id:
+        raise HTTPException(401, "Matrix OpenID verification failed.")
     session = _client_session_store(request.app).create(user_id)
     return {"session_token": session.token, "user_id": session.user_id, "expires_at": int(session.expires_at)}

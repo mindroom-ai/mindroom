@@ -2,11 +2,10 @@
 
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
-from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
@@ -30,34 +29,57 @@ OPENID_TOKEN = {
 CLIENT_ORIGIN = "https://chat.example.org"
 
 
-class UserinfoPeer:
-    """Fake homeserver answering `/openid/userinfo`."""
+class HomeserverPeer:
+    """Fake homeserver answering `/openid/userinfo` and `/versions`, which says whether it binds tokens.
+
+    The token it knows is bound to this deployment unless ``token_bound`` is off, as for one replayed from another
+    backend: while binding, the homeserver refuses such a token.
+    """
 
     def __init__(self) -> None:
         self.status = 200
+        self.subject = "@alice:example.org"
+        self.binding = True
+        self.token_bound = True
+        self.versions_status = 200
+        # Runs right after `/versions` is answered, to change the homeserver between the exchange's requests.
+        self.after_versions: Callable[[HomeserverPeer], None] | None = None
 
     async def userinfo(self, request: web.Request) -> web.Response:
         """Answer like Synapse: the subject for the right token, 401 otherwise."""
         if self.status != 200 or request.query.get("access_token") != "openid-secret":
             return web.Response(status=401)
-        return web.json_response({"sub": "@alice:example.org"})
+        if self.binding and not self.token_bound:
+            return web.json_response({"errcode": "M_UNKNOWN_TOKEN"}, status=401)
+        return web.json_response({"sub": self.subject})
+
+    async def versions(self, _request: web.Request) -> web.Response:
+        """List binding in `unstable_features` while it is on, like MindRoom's homeserver fork."""
+        if self.versions_status != 200:
+            return web.Response(status=self.versions_status)
+        response = web.json_response(
+            {"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": self.binding}},
+        )
+        if self.after_versions is not None:
+            self.after_versions(self)
+        return response
 
 
 @pytest.fixture
-def peer() -> UserinfoPeer:
+def peer() -> HomeserverPeer:
     """Fake homeserver peer."""
-    return UserinfoPeer()
+    return HomeserverPeer()
 
 
 @pytest.fixture
-def client(tmp_path: Path, peer: UserinfoPeer, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def client(tmp_path: Path, peer: HomeserverPeer) -> Iterator[TestClient]:
     """App with the session router, a throwaway protected route and the real CORS middleware."""
-    monkeypatch.setattr(client_sessions, "homeserver_binds_openid_audience", AsyncMock(return_value=True))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         upstream = web.Application()
         upstream.router.add_get("/_matrix/federation/v1/openid/userinfo", peer.userinfo)
+        upstream.router.add_get("/_matrix/client/versions", peer.versions)
         runner = web.AppRunner(upstream, access_log=None)
         await runner.setup()
         await web.TCPSite(runner, "127.0.0.1", 0).start()
@@ -112,7 +134,7 @@ def test_exchange_returns_session_for_openid_user(client: TestClient) -> None:
     assert abs(body["expires_at"] - (time.time() + 3600)) <= 5
 
 
-def test_exchange_rejects_bad_openid(client: TestClient, peer: UserinfoPeer) -> None:
+def test_exchange_rejects_bad_openid(client: TestClient, peer: HomeserverPeer) -> None:
     """A homeserver that rejects the token gives no session, and the answer does not echo the OpenID token."""
     peer.status = 401
     response = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
@@ -192,16 +214,49 @@ def test_client_origin_paths_stop_at_their_own_segment(client: TestClient) -> No
         assert preflight.headers.get("cache-control") != "no-store", path
 
 
-def test_exchange_refuses_homeserver_that_does_not_bind_tokens(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_exchange_refuses_homeserver_that_does_not_bind_tokens(client: TestClient, peer: HomeserverPeer) -> None:
     """Like Connections, an unbound token is refused with 403 even when the homeserver would accept it."""
-    monkeypatch.setattr(client_sessions, "homeserver_binds_openid_audience", AsyncMock(return_value=False))
+    peer.binding = False
     response = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
     assert response.status_code == 403
     assert "session_token" not in response.text
     assert OPENID_TOKEN["access_token"] not in response.text
+
+
+def test_exchange_answers_503_when_binding_cannot_be_checked(client: TestClient, peer: HomeserverPeer) -> None:
+    """A `/versions` that fails leaves binding unknown: the client may retry, so it is 503 rather than 403."""
+    peer.versions_status = 502
+    response = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
+    assert response.status_code == 503
+    assert "session_token" not in response.text
+
+
+def test_binding_switched_off_during_exchange_gives_no_session(client: TestClient, peer: HomeserverPeer) -> None:
+    """A token replayed from another backend gets no session when binding turns off right after `/versions` answers.
+
+    A probe before a single verification would see binding on and then verify the token after binding went off.
+    """
+    peer.token_bound = False
+
+    def switch_off(homeserver: HomeserverPeer) -> None:
+        homeserver.binding = False
+
+    peer.after_versions = switch_off
+    response = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
+    assert response.status_code == 401
+    assert "session_token" not in response.text
+
+
+def test_exchange_needs_the_same_user_from_both_verifications(client: TestClient, peer: HomeserverPeer) -> None:
+    """A token whose second verification names another user gets no session."""
+
+    def other_user(homeserver: HomeserverPeer) -> None:
+        homeserver.subject = "@mallory:example.org"
+
+    peer.after_versions = other_user
+    response = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
+    assert response.status_code == 401
+    assert "session_token" not in response.text
 
 
 class Clock:

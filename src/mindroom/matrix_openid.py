@@ -116,14 +116,14 @@ async def verify_matrix_openid(
     return subject
 
 
-async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
+async def homeserver_openid_binding(paths: RuntimePaths) -> bool | None:
     """Return whether the configured homeserver binds OpenID tokens to the audience they were requested for.
 
-    While it does, a token that `verify_matrix_openid` accepts was requested for this deployment's origin. Anything
-    other than a small, direct JSON answer listing the feature as `true` counts as no binding, and so does having no
-    audience to send, as with `MINDROOM_PORT=tcp://<ip>:8765` from Kubernetes service links: without an audience, a
-    binding homeserver still accepts unbound tokens, which clients other than current MindRoom Chat request, so a
-    verification then proves nothing about this deployment.
+    While it does, a token that `verify_matrix_openid` accepts was requested for this deployment's origin. A `/versions`
+    answer that is not a small, direct JSON object gives None, as the check failed; one that does not list the feature
+    as `true` gives False, and so does having no audience to send, as with `MINDROOM_PORT=tcp://<ip>:8765` from
+    Kubernetes service links: without an audience, a binding homeserver still accepts unbound tokens, which clients
+    other than current MindRoom Chat request, so a verification then proves nothing about this deployment.
     """
     if openid_audience(paths) is None:
         return False
@@ -131,4 +131,9 @@ async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
         runtime_matrix_homeserver(paths),
         failure_message=_BINDING_CHECK_FAILED,
     )
-    return features is not None and features.get(_BINDING_FEATURE) is True
+    return None if features is None else features.get(_BINDING_FEATURE) is True
+
+
+async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
+    """Return whether the homeserver binds OpenID tokens, counting a failed check as no binding."""
+    return await homeserver_openid_binding(paths) is True

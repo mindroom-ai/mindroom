@@ -232,6 +232,7 @@ Only `capacitor://localhost`, the app's own origin, may call these routes from a
 `POST /api/client-sessions` is public and takes a Matrix OpenID token.
 MindRoom verifies it at the configured homeserver's `/_matrix/federation/v1/openid/userinfo`, and accepts only users of that homeserver.
 Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens to this deployment's audience, because without binding any backend a user opens from the client could replay their token; unlike Connections, no setting waives this.
+It answers 503 when it cannot check whether the homeserver binds tokens, and verifies the token a second time after that check, requiring the same user, so binding switched off between the two requests cannot pass an unbound token.
 It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
 The store keeps at most 8 sessions per user and 256 in all, and past either cap it evicts the oldest session instead of refusing, so one user cannot lock others out.
 A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` is public; plugin code already runs with the primary's full trust.
