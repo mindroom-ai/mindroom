@@ -766,9 +766,9 @@ async def test_hourly_cap_skips_and_keeps_marker(
     await listening.say("$a", 10)
     await listening.service._poll_once(T0 + 100)
     await listening.say("$b", 200)
-    reader = listening.bot.conversation_reader
-    reads = AsyncMock(wraps=reader.read_room_after)
-    monkeypatch.setattr(reader, "read_room_after", reads)
+    # Every read of a room starts with its gap repair.
+    reads = AsyncMock()
+    monkeypatch.setattr(listening.bot.conversation_reader.hydrator, "repair_room_history", reads)
 
     with capture_logs() as logs:
         await listening.service._poll_once(T0 + 300)
