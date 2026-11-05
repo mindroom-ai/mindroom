@@ -246,12 +246,7 @@ def plan_tool_batch(
                 continue
         tool = failing_tools.get(function.name)
         if tool is not None and tool.failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
-            logger.warning(
-                "failing_tool_call_refused",
-                entity=entity,
-                tool_name=function.name,
-                consecutive_failures=tool.failures,
-            )
+            logger.warning("failing_tool_call_refused", entity=entity, tool_name=function.name)
             text = _FAILING_TOOL_ERROR_TEXT.format(
                 name=function.name,
                 failures=tool.failures,

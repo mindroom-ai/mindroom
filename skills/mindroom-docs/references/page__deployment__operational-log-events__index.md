@@ -212,7 +212,6 @@ Logged for each call refused because its tool keeps failing, as [`max_tool_calls
 |-------|---------|
 | `entity` | Agent or team name |
 | `tool_name` | The refused tool |
-| `consecutive_failures` | Model requests since the tool's last success in which it failed |
 
 The refused call's result quotes the tool's last error, and a tool that raises also logs each failure as `tool_call_failed`; one repeated error usually means an integration that is down, an expired grant, or arguments the model keeps resending.
 
@@ -224,7 +223,6 @@ Logged once when the model calls a refused tool again and the turn ends.
 |-------|---------|
 | `entity` | Agent or team name |
 | `tool_name` | The tool the model kept calling |
-| `refusals` | Requests in which the loop refused the tool |
 
 ### `tool_call_failed`
 

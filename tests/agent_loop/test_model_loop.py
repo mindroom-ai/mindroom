@@ -457,17 +457,11 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
     assert [event.text for event in events if isinstance(event, TextDelta)][-1] == f"\n\n{stop}"
     assert record.content == f"Fetching the file.\n\n{stop}"
     assert events[-1] == LoopEnded(paused=False)
-    refused = {"log_level": "warning", "entity": "code", "tool_name": "boom", "consecutive_failures": limit}
+    fields = {"log_level": "warning", "entity": "code", "tool_name": "boom"}
     assert _failing_tool_events(logs) == [
-        {"event": "failing_tool_call_refused", **refused},
-        {"event": "failing_tool_call_refused", **refused},
-        {
-            "event": "failing_tool_ended_run",
-            "log_level": "warning",
-            "entity": "code",
-            "tool_name": "boom",
-            "refusals": 2,
-        },
+        {"event": "failing_tool_call_refused", **fields},
+        {"event": "failing_tool_call_refused", **fields},
+        {"event": "failing_tool_ended_run", **fields},
     ]
 
 

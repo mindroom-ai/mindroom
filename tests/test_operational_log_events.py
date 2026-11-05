@@ -60,8 +60,8 @@ _STABLE_EVENTS = {
     },
     "matrix_sync_stall_diagnostics": {"agent", "no_progress_seconds", "sync_age", "generation", "snapshots"},
     "tool_call_limit_reached": {"entity", "budget", "model_requests"},
-    "failing_tool_call_refused": {"entity", "tool_name", "consecutive_failures"},
-    "failing_tool_ended_run": {"entity", "tool_name", "refusals"},
+    "failing_tool_call_refused": {"entity", "tool_name"},
+    "failing_tool_ended_run": {"entity", "tool_name"},
     "tool_call_failed": {
         "tool_name",
         "agent_name",

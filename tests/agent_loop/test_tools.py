@@ -310,7 +310,6 @@ def test_calls_of_a_tool_that_keeps_failing_are_refused_with_its_last_error_whil
         "log_level": "warning",
         "entity": "code",
         "tool_name": "boom",
-        "consecutive_failures": MAX_CONSECUTIVE_TOOL_FAILURES,
     }
     assert logs == [refused, refused]
 
