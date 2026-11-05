@@ -325,7 +325,7 @@ Matrix sync callback
 | `tool_system/plugins.py` | Plugin generations: loading, publishing, and disposing them, candidate validation in a separate module namespace, and `config_plugins`, one config's tools, hooks, skill roots, and OAuth providers from one published generation |
 | `tool_system/registry.py` | `ToolRegistry`, the tools one config can build (built-ins, its loaded plugins' tools, its MCP servers, and the tools of plugins that failed to load as unavailable), the built-in tools, and the registration scope plugin modules register into |
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
-| `plugin_http.py` | The supported import surface for plugin HTTP routes: `require_client_user` resolves a client session's bearer token to its Matrix user, and `require_room_member` checks live room membership |
+| `plugin_http.py` | The supported import surface for plugin HTTP routes: `require_client_user` resolves a client session's bearer token to its Matrix user, and `require_room_member` resolves it too and checks that user's live room membership |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |

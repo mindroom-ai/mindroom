@@ -851,22 +851,15 @@ MindRoom serves that router under `/api/plugins/<name>/` on its API, where `<nam
 # routes.py
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends
 
-from mindroom.plugin_http import ClientUser, require_client_user, require_room_member
+from mindroom.plugin_http import ClientUser, require_room_member
 
 router = APIRouter()
 
 
 @router.get("/rooms/{room_id}/hello")
-async def hello(
-    room_id: str,
-    request: Request,
-    response: Response,
-    user: Annotated[ClientUser, Depends(require_client_user)],
-) -> dict[str, str]:
-    await require_room_member(request, room_id, user.user_id)
-    response.headers["X-Content-Type-Options"] = "nosniff"
+async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict[str, str]:
     return {"hello": user.user_id}
 ```
 
@@ -882,7 +875,7 @@ A request for a plugin that is not loaded or has no routes, or for a path its ro
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
-MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` is public.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` or `require_room_member` is public.
 
 Each plugin's router runs in a FastAPI app of its own, mounted under `/api/plugins/<name>/`:
 
@@ -897,7 +890,10 @@ The client signs in by posting a Matrix OpenID token to `POST /api/client-sessio
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
 Browser origins that may call these routes and `POST /api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](tools/worker-computer.md); there is no separate setting for plugin routes.
 Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
-A route that acts on one room also awaits `require_room_member(request, room_id, user.user_id)`.
+A route that acts on one room depends on `require_room_member` instead, as in the example above: `user: ClientUser = Depends(require_room_member)`.
+It authenticates the caller as `require_client_user` does and takes the room from the route's `room_id` parameter, and it returns the same `ClientUser` once that user is joined to the room.
+A route that finds its room some other way awaits `require_room_member(request, room_id)` itself.
+Either way the user is always the session's own: no parameter of the request can name another.
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, answers 403 unless the user is joined, and answers 503 when membership is unavailable, such as when no running bot is in the room.
 
 ## Plugin skills

@@ -37,7 +37,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from mindroom.plugin_http import ClientUser, require_client_user, require_room_member
+from mindroom.plugin_http import ClientUser, require_room_member
 
 router = APIRouter()
 
@@ -77,9 +77,19 @@ async def link(request: Request) -> dict:
 
 
 @router.get("/rooms/{room_id}/me")
-async def me(room_id: str, request: Request, user: Annotated[ClientUser, Depends(require_client_user)]) -> dict:
-    await require_room_member(request, room_id, user.user_id)
+async def me(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict:
     return {"user_id": user.user_id}
+
+
+@router.get("/rooms/{room_id}/topic")
+async def topic(room_id: str, request: Request) -> dict:
+    user = await require_room_member(request, room_id)
+    return {"user_id": user.user_id, "room_id": room_id}
+
+
+@router.get("/rooms/{room_id}/secret", dependencies=[Depends(require_room_member)])
+async def secret(room_id: str) -> dict:
+    return {"secret": room_id}
 """
 
 
@@ -295,6 +305,24 @@ def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path
     assert me(ROOM, bearer) == (200, {"user_id": ALICE})
     assert me(ROOM, {})[0] == 401
     assert me("!other:example.org", bearer) == (403, {"detail": "Not a member of this room."})
+    topic = client.get(f"/api/plugins/demo/rooms/{quote(ROOM, safe='')}/topic", headers=bearer)
+    assert (topic.status_code, topic.json()) == (200, {"user_id": ALICE, "room_id": ROOM})
+
+
+def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_path: Path) -> None:
+    """A ``user_id`` in the query string never picks the user: the check is always of the session's own user."""
+    app, client = _published_client(tmp_path)
+    bob = {"Authorization": f"Bearer {_client_session_store(app).create('@bob:example.org').token}"}
+
+    async def room_members(room_id: str) -> frozenset[str]:
+        return frozenset({ALICE}) if room_id == ROOM else frozenset()
+
+    ensure_app_state(app).room_members = room_members
+    room = quote(ROOM, safe="")
+    for path in ("me", "topic", "secret"):
+        url = f"/api/plugins/demo/rooms/{room}/{path}?user_id={quote(ALICE)}"
+        assert client.get(url).status_code == 401, path
+        assert client.get(url, headers=bob).status_code == 403, path
 
 
 def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

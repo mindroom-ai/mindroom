@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from mindroom.api import main
 from mindroom.api.app_state import ensure_app_state
+from mindroom.api.client_sessions import _client_session_store
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
@@ -23,7 +24,7 @@ from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
 from mindroom.orchestrator import _MultiAgentOrchestrator, _run_api_server
-from mindroom.plugin_http import require_room_member
+from mindroom.plugin_http import ClientUser, require_room_member
 from tests.conftest import install_bots
 
 ROOM = "!room:example.org"
@@ -41,8 +42,10 @@ def main_app() -> Iterator[FastAPI]:
         state.room_members = previous
 
 
-def _request(app: FastAPI) -> Request:
-    return Request({"type": "http", "app": app, "headers": []})
+def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
+    """A request signed in with a client session of ``user_id``."""
+    token = _client_session_store(app).create(user_id).token
+    return Request({"type": "http", "app": app, "headers": [(b"authorization", f"Bearer {token}".encode())]})
 
 
 def _client(*user_ids: str, rooms: tuple[str, ...] = (ROOM,)) -> SimpleNamespace:
@@ -67,17 +70,27 @@ def _bound(client: SimpleNamespace) -> FastAPI:
 
 @pytest.mark.asyncio
 async def test_member_passes() -> None:
-    """A joined user passes, and the router client is asked about that room."""
+    """A joined user passes as the session's user, and the router client is asked about that room."""
     client = _client("@alice:example.org", "@bob:example.org")
-    await require_room_member(_request(_bound(client)), ROOM, "@alice:example.org")
+    assert await require_room_member(_request(_bound(client)), ROOM) == ClientUser("@alice:example.org")
     client.joined_members.assert_awaited_once_with(ROOM)
+
+
+@pytest.mark.asyncio
+async def test_no_session_401_before_membership() -> None:
+    """Without a client session the answer is 401, and no bot is asked about the room."""
+    client = _client("@alice:example.org")
+    with pytest.raises(HTTPException) as caught:
+        await require_room_member(Request({"type": "http", "app": _bound(client), "headers": []}), ROOM)
+    assert caught.value.status_code == 401
+    client.joined_members.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_non_member_403() -> None:
     """A user who is not joined gets 403."""
     with pytest.raises(HTTPException) as caught:
-        await require_room_member(_request(_bound(_client("@bob:example.org"))), ROOM, "@alice:example.org")
+        await require_room_member(_request(_bound(_client("@bob:example.org"))), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (403, "Not a member of this room.")
 
 
@@ -85,7 +98,7 @@ async def test_non_member_403() -> None:
 async def test_unbound_503() -> None:
     """Without a bound reader the answer is 503."""
     with pytest.raises(HTTPException) as caught:
-        await require_room_member(_request(FastAPI()), ROOM, "@alice:example.org")
+        await require_room_member(_request(FastAPI()), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
 
 
@@ -95,7 +108,7 @@ async def test_joined_members_error_503() -> None:
     client = _client()
     client.joined_members = AsyncMock(return_value=nio.JoinedMembersError("boom"))
     with pytest.raises(HTTPException) as caught:
-        await require_room_member(_request(_bound(client)), ROOM, "@alice:example.org")
+        await require_room_member(_request(_bound(client)), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
 
 
@@ -105,7 +118,7 @@ async def test_joined_members_raising_503() -> None:
     client = _client()
     client.joined_members = AsyncMock(side_effect=TimeoutError("homeserver timed out"))
     with pytest.raises(HTTPException) as caught:
-        await require_room_member(_request(_bound(client)), ROOM, "@alice:example.org")
+        await require_room_member(_request(_bound(client)), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
 
 
@@ -121,7 +134,7 @@ async def test_joined_members_that_never_answers_503(monkeypatch: pytest.MonkeyP
     client.joined_members = never_answers
     with pytest.raises(HTTPException) as caught:
         async with asyncio.timeout(5):
-            await require_room_member(_request(_bound(client)), ROOM, "@alice:example.org")
+            await require_room_member(_request(_bound(client)), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
 
 
@@ -132,7 +145,7 @@ async def test_router_in_room_is_asked_first() -> None:
     agent = _client("@alice:example.org")
     app = FastAPI()
     bind_room_members(app, {"general": _bot(agent), "router": _bot(router)})  # type: ignore[dict-item]
-    await require_room_member(_request(app), ROOM, "@alice:example.org")
+    await require_room_member(_request(app), ROOM)
     router.joined_members.assert_awaited_once_with(ROOM)
     agent.joined_members.assert_not_awaited()
 
@@ -146,7 +159,7 @@ async def test_agent_bot_in_room_answers_without_the_router() -> None:
     app = FastAPI()
     bots = {"router": _bot(router), "stopped": _bot(stopped, running=False), "assistant": _bot(agent)}
     bind_room_members(app, bots)  # type: ignore[arg-type]
-    await require_room_member(_request(app), ROOM, "@alice:example.org")
+    await require_room_member(_request(app), ROOM)
     agent.joined_members.assert_awaited_once_with(ROOM)
     router.joined_members.assert_not_awaited()
     stopped.joined_members.assert_not_awaited()
@@ -159,9 +172,9 @@ async def test_agent_bot_answers_while_the_router_is_down() -> None:
     app = FastAPI()
     bots = {"router": _bot(_client("@alice:example.org"), running=False), "assistant": _bot(agent)}
     bind_room_members(app, bots)  # type: ignore[arg-type]
-    await require_room_member(_request(app), ROOM, "@alice:example.org")
+    await require_room_member(_request(app), ROOM)
     bots["router"] = _bot(None)
-    await require_room_member(_request(app), ROOM, "@alice:example.org")
+    await require_room_member(_request(app), ROOM)
     assert agent.joined_members.await_count == 2
 
 
@@ -173,7 +186,7 @@ async def test_no_bot_in_room_503() -> None:
     app = FastAPI()
     bind_room_members(app, {"router": _bot(router), "assistant": _bot(agent)})  # type: ignore[dict-item]
     with pytest.raises(HTTPException) as caught:
-        await require_room_member(_request(app), ROOM, "@alice:example.org")
+        await require_room_member(_request(app), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
     router.joined_members.assert_not_awaited()
     agent.joined_members.assert_not_awaited()
@@ -185,13 +198,13 @@ async def test_stopped_bots_503() -> None:
     router = _bot(_client("@alice:example.org"))
     app = FastAPI()
     bind_room_members(app, {"router": router})  # type: ignore[dict-item]
-    await require_room_member(_request(app), ROOM, "@alice:example.org")
+    await require_room_member(_request(app), ROOM)
     router.running = False
     with pytest.raises(HTTPException) as caught:
-        await require_room_member(_request(app), ROOM, "@alice:example.org")
+        await require_room_member(_request(app), ROOM)
     assert caught.value.status_code == 503
     router.running = True
-    await require_room_member(_request(app), ROOM, "@alice:example.org")
+    await require_room_member(_request(app), ROOM)
     assert router.client.joined_members.await_count == 2
 
 
@@ -205,16 +218,16 @@ async def test_restarted_bot_uses_its_new_client() -> None:
     bots = {"router": _bot(_client(rooms=())), "assistant": agent}
     bind_room_members(app, bots)  # type: ignore[arg-type]
     agent.client = new
-    await require_room_member(_request(app), ROOM, "@bob:example.org")
+    await require_room_member(_request(app, "@bob:example.org"), ROOM)
     new.joined_members.assert_awaited_once_with(ROOM)
     old.joined_members.assert_not_awaited()
     replacement = _client("@carol:example.org")
     bots["assistant"] = _bot(replacement)
-    await require_room_member(_request(app), ROOM, "@carol:example.org")
+    await require_room_member(_request(app, "@carol:example.org"), ROOM)
     replacement.joined_members.assert_awaited_once_with(ROOM)
     bots["assistant"].client = None
     with pytest.raises(HTTPException) as caught:
-        await require_room_member(_request(app), ROOM, "@carol:example.org")
+        await require_room_member(_request(app, "@carol:example.org"), ROOM)
     assert caught.value.status_code == 503
 
 
@@ -250,7 +263,7 @@ def _running_bot(client: SimpleNamespace) -> MagicMock:
 async def _membership_status(app: FastAPI) -> int:
     """Return 200 when Alice passes the membership check for ``ROOM``, else the status it answers."""
     try:
-        await require_room_member(_request(app), ROOM, "@alice:example.org")
+        await require_room_member(_request(app), ROOM)
     except HTTPException as error:
         return error.status_code
     return 200

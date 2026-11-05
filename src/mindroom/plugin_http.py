@@ -35,10 +35,16 @@ async def require_client_user(request: Request) -> ClientUser:
     return ClientUser(session.user_id)
 
 
-async def require_room_member(request: Request, room_id: str, user_id: str) -> None:
-    """Answer 503 when live membership is unavailable, or 403 unless ``user_id`` is joined to ``room_id``."""
+async def require_room_member(request: Request, room_id: str) -> ClientUser:
+    """Return the client session's user once they are joined to ``room_id``, answering 401, 403 or 503 otherwise.
+
+    The user is always the session's: as a dependency, FastAPI fills every parameter from the request, so one naming
+    the user would let the caller choose it.
+    """
+    user = await require_client_user(request)
     room_members = ensure_app_state(request.app).room_members
     if room_members is None:
         raise HTTPException(503, "Room membership is unavailable.")
-    if user_id not in await room_members(room_id):
+    if user.user_id not in await room_members(room_id):
         raise HTTPException(403, "Not a member of this room.")
+    return user
