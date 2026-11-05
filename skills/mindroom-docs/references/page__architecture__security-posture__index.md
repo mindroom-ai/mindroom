@@ -155,6 +155,21 @@ Workspace todo templates have the size, render, and listing limits documented in
 Workspace `SKILL.md` and subagent profile frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, `%TAG` directives, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
 Request sizing reads the page count of a PDF a request carries, an attachment or a tool's result, with pypdf in the primary, so a crafted PDF costs the parse time pypdf allows; the dependency floor follows pypdf's denial-of-service fixes.
 
+## Listening agents
+
+A [listening agent](https://docs.mindroom.chat/configuration/agents/#listening) runs model turns that no requester started, driven by room text.
+Everyone who may reach the agent in a listened room can put text in front of the model, and a silent turn has no requester whose budget or access it could be checked against.
+Heard text can therefore carry prompt injection that drives the turn's tools.
+
+The allowlist and caps contain this:
+
+- A silent turn offers only `listen.tools`, each of which must also be one of the agent's own `tools`, so it never gains a tool, a `worker_scope` check bypass, or a tool limit bypass.
+- Approval-gated tools and interactive questions are hidden, and the turn's text is dropped, so it cannot post.
+- It hears only senders allowed to reach the agent in that room, judged on the person a relay speaks for.
+- `max_runs_per_hour` and `max_messages` bound the turns and what each reads.
+
+Keep `listen.tools` narrow: injected text can use any listed tool, so a tool that sends, spends, or deletes defeats the containment.
+
 ## Hosted tenant isolation
 
 Hosted tenants share the `mindroom-instances` namespace, and a tenant can run code in its own primary and sandbox-runner sidecar by design.
