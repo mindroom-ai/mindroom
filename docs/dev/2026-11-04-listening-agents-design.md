@@ -18,6 +18,8 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
    A room owing a sync-gap repair is repaired before it is read, because the messages a gap skipped are older than those after it, and a marker moved past those would never hear them.
 2. The first run for a room starts at "now", so turning listening on never reads history from before it.
 3. A silent turn runs as the agent, with its identity, instructions, and memory, but offers only `listen.tools` and drops its text, so no tool outside the list can act and the turn's own text is never posted.
+   The turn's tool context carries the same list as a function filter, so a tool that builds its own catalog from it, such as a script's grants, stays inside the list, and it refuses `mindroom_output_path`, so heard text cannot pick a file for a tool's result.
+   Config load also refuses the tools a contact turn never offers, such as `delegate`, and presets.
    A listed tool keeps its effects, so a tool that sends can still post; config refuses `matrix_message`, whose purpose is posting, and `react` covers acknowledging.
    Tools that can still post when listed include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and the external messengers.
 4. Every `listen.tools` entry must be among the agent's own `tools`, and config load fails otherwise.
@@ -31,12 +33,15 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
 8. Budgets do not apply, because no requester asked for the turn.
    The caps and an optional cheaper `model` bound the cost.
 9. No room stalls for good, and a skipped message is logged rather than silently lost.
-   A page stops at the first message awaiting a refetch, and the marker waits before it; what came before it is heard, and after 10 minutes without the refetch that one message is skipped.
+   A page stops at the first message awaiting a refetch, and the marker waits before it; what came before it waits too, as what follows is unknown, and is heard once the refetch arrives or after ten quiet windows, and after 10 minutes without the refetch that one message is skipped.
+   A heard reply another agent is still streaming ends the page the same way, so it is heard whole; one still unfinished after ten quiet windows is heard as it stands, so a stream that died cannot hold the room.
+   Each wait on the server for a room, its gap repair, its read, or a refetch, is bounded, so a room the server holds up keeps its marker and holds up no other room.
    A turn hears only the oldest messages that fit half its model's context window, leaving the rest for the agent's instructions, memory, tools, and requests, and the marker moves past only what it heard.
    Three failed turns in a row from one marker halve the next turn's messages, and a single message that still fails three times is skipped, so a poisoned or oversized message cannot hold a room.
    A turn that runs longer than 5 minutes is stopped and counts as failed, because the poll waits on each turn, so one hung turn would stop listening in every room.
 10. A turn waits until nothing the agent hears has been said for `quiet_seconds`, so it hears a conversation once it pauses rather than mid-exchange.
     Only heard messages count, because counting every message let a chatty bot the agent may not hear, or the agent's own posts, hold the turn back forever.
+    Quiet is judged from one page: a page that more messages follow counts as busy, since they may be newer, so a backlog longer than `max_messages` waits for the deadline below rather than being scanned page by page each poll.
     A turn runs anyway once the oldest heard message has waited ten quiet windows, so a room that never pauses is still heard; the cost is a turn in the middle of a very busy conversation.
 11. The hourly cap is per agent, and the agent's rooms take turns at it, least recently run first, so a room that keeps failing cannot spend the whole cap.
 12. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
@@ -61,6 +66,10 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
   Redacted heard messages would linger in the stored runs.
 - Holding a room until a refetch arrives, and retrying a failing turn forever.
   Either stalls the room for good when the refetch never resolves or the turn always fails, such as on a message too large for the model.
+- Reading pages past the turn's own to judge quiet.
+  It rescanned the same backlog every poll and still stopped short of a long one; a page that more follow counts as busy instead.
+- Trying only the oldest message after three failed turns, then skipping it after three more.
+  Under the hourly cap, a poisoned message late in a long backlog would cost a turn for every message before it, where halving costs three failed turns per halving.
 
 ## Risks
 

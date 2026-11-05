@@ -228,8 +228,9 @@ agents:
 The agent hears every message in a listed room that it may hear.
 That uses the same sender authorization its replies use, judged on the person a relay speaks for rather than the relaying account.
 Once nothing the agent hears has been said in the room for `quiet_seconds`, one silent turn runs over at most `max_messages` of what it heard.
-Messages it does not hear, such as its own or those of a sender it may not hear from, never delay that turn.
-In a room that never goes quiet, a turn runs anyway once the oldest message waiting is ten times `quiet_seconds` old.
+Messages it does not hear, such as its own or those of a sender it may not hear from, never delay that turn, unless there are more than `max_messages` of them waiting.
+More than `max_messages` messages waiting, a message awaiting its refetch, or another agent's reply still being written counts as busy, and what came before waits too; a reply still being written is heard once it is finished.
+In a room that never goes quiet, or stays busy, a turn runs anyway once the oldest message waiting is ten times `quiet_seconds` old, and a reply still unfinished by then is heard as it stands.
 A turn also hears no more than fits its model's `context_window`, and the rest waits for the next turn.
 
 The turn's own text is never sent to the room, and approval-gated tools and interactive questions are not offered.
@@ -267,6 +268,7 @@ It suits a silent turn that should acknowledge what it heard without writing in 
 
 - A failed or timed-out silent turn is retried, and so is one cut off by a restart after its tools have acted, so a memory write or reaction may happen twice.
 - A heard message is skipped with a warning when the turns covering it keep failing, after the batch is halved down to that one message, or when it waits more than 10 minutes for a refetch.
+- A backlog longer than `max_messages`, or a message awaiting its refetch, holds the room's turn for up to ten times `quiet_seconds`.
 - A message whose timestamp is already older than the room's place when it arrives, such as one delayed by federation or backdated by a bridge, is not heard; MindRoom reads a room in timestamp order and logs nothing for it.
 - A message stamped later than now, such as one from a server whose clock runs ahead, waits to be heard until that time comes.
 - Heard text can carry prompt injection that drives the listed tools; read [Listening agents](../architecture/security-posture.md#listening-agents) before adding a tool to `listen.tools`.

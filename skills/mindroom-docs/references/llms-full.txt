@@ -1916,8 +1916,9 @@ agents:
 The agent hears every message in a listed room that it may hear.
 That uses the same sender authorization its replies use, judged on the person a relay speaks for rather than the relaying account.
 Once nothing the agent hears has been said in the room for `quiet_seconds`, one silent turn runs over at most `max_messages` of what it heard.
-Messages it does not hear, such as its own or those of a sender it may not hear from, never delay that turn.
-In a room that never goes quiet, a turn runs anyway once the oldest message waiting is ten times `quiet_seconds` old.
+Messages it does not hear, such as its own or those of a sender it may not hear from, never delay that turn, unless there are more than `max_messages` of them waiting.
+More than `max_messages` messages waiting, a message awaiting its refetch, or another agent's reply still being written counts as busy, and what came before waits too; a reply still being written is heard once it is finished.
+In a room that never goes quiet, or stays busy, a turn runs anyway once the oldest message waiting is ten times `quiet_seconds` old, and a reply still unfinished by then is heard as it stands.
 A turn also hears no more than fits its model's `context_window`, and the rest waits for the next turn.
 
 The turn's own text is never sent to the room, and approval-gated tools and interactive questions are not offered.
@@ -1939,7 +1940,8 @@ A listening agent skips contact rooms, where only a reply passes the contact's m
 Everyone in a listened room whom the agent may answer is heard, including people who never addressed it.
 Heard text is not extracted into memory automatically, and a silent turn stores no run in session history, so a heard message that is later redacted does not linger in a stored run.
 What a silent turn writes with its `memory` tool, though, is the agent's shared memory: heard text can resurface in the agent's replies in other rooms and to other users.
-Leave `memory` out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
+A listed tool that writes workspace files, such as `file`, `coding`, `shell`, `python`, or `script`, can write heard text anywhere it may write, `MEMORY.md` included; no call in a silent turn may save its result to a file with `mindroom_output_path`.
+Leave `memory` and tools that write files out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
 
 A silent turn records its usage under the kind `listening` (see [Usage](https://docs.mindroom.chat/usage/)).
 [Budgets](https://docs.mindroom.chat/budgets/) do not apply, because no requester asked for the turn.
@@ -1954,6 +1956,7 @@ It suits a silent turn that should acknowledge what it heard without writing in 
 
 - A failed or timed-out silent turn is retried, and so is one cut off by a restart after its tools have acted, so a memory write or reaction may happen twice.
 - A heard message is skipped with a warning when the turns covering it keep failing, after the batch is halved down to that one message, or when it waits more than 10 minutes for a refetch.
+- A backlog longer than `max_messages`, or a message awaiting its refetch, holds the room's turn for up to ten times `quiet_seconds`.
 - A message whose timestamp is already older than the room's place when it arrives, such as one delayed by federation or backdated by a bridge, is not heard; MindRoom reads a room in timestamp order and logs nothing for it.
 - A message stamped later than now, such as one from a server whose clock runs ahead, waits to be heard until that time comes.
 - Heard text can carry prompt injection that drives the listed tools; read [Listening agents](https://docs.mindroom.chat/architecture/security-posture/#listening-agents) before adding a tool to `listen.tools`.
@@ -3676,7 +3679,8 @@ After storing, `add_memory` lists up to three similar existing memories with the
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 
-A [listening agent](https://docs.mindroom.chat/configuration/agents/#listening) writes memory from a silent turn only through this tool, and only when `memory` is in its `listen.tools`.
+A [listening agent](https://docs.mindroom.chat/configuration/agents/#listening) writes memory from a silent turn through this tool when `memory` is in its `listen.tools`, or through a listed tool that writes workspace files, such as `file`, `coding`, `shell`, `python`, or `script`, which can write `MEMORY.md` directly.
+No call in a silent turn may save its result to a file with `mindroom_output_path`, so a tool that does not write files, such as `react`, cannot.
 A silent turn stores no run, so neither automatic extraction nor the file auto-flush worker reads what the agent heard.
 
 ## UI Configuration
@@ -17006,6 +17010,9 @@ Heard text can therefore carry prompt injection that drives the turn's tools.
 The allowlist and caps contain this:
 
 - A silent turn offers only `listen.tools`, each of which must also be one of the agent's own `tools`, so it never gains a tool, a `worker_scope` check bypass, or a tool limit bypass.
+  Its tool context carries the same list, so a tool that offers others in turn, such as the functions a `script` may call, offers none beyond it.
+- No call in a silent turn may save its result to a workspace file with `mindroom_output_path`, so heard text cannot make a tool that writes no files, such as `react`, overwrite one such as `MEMORY.md`.
+  A listed tool that writes files itself, such as `file`, `coding`, `shell`, `python`, or `script`, still writes wherever it may.
 - Config load refuses in `listen.tools` the tools a contact turn never offers, which act with the agent's authority beyond the room: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, and `dynamic_tools`.
   A delegated run, for one, would get the agent's full tools rather than the turn's.
 - Approval-gated tools and interactive questions are hidden, and the turn's text is dropped.
