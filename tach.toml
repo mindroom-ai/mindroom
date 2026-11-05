@@ -4355,6 +4355,7 @@ visibility = [
     "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
     "mindroom.inbound_turn_normalizer",
+    "mindroom.listening.service",
     "mindroom.matrix.conversation_reads",
     "mindroom.reply_turn.enrichment",
     "mindroom.routing",
@@ -9196,9 +9197,11 @@ visibility = ["mindroom.listening.service"]
 path = "mindroom.listening.service"
 depends_on = [
     "mindroom.constants",
+    "mindroom.contacts.turns",
     "mindroom.event_journal",
     "mindroom.listening.markers",
     "mindroom.listening.turn",
+    "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.state",
 ]

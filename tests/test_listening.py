@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -15,8 +15,11 @@ from structlog.testing import capture_logs
 
 from mindroom.ai import TurnResult
 from mindroom.config.main import Config
-from mindroom.constants import tracking_dir
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, tracking_dir
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.event_journal import ConversationCursor, EventKind
+from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
+from mindroom.listening import service as service_module
 from mindroom.listening import turn as turn_module
 from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.service import ListeningService
@@ -42,6 +45,7 @@ from tests.identity_helpers import entity_ids
 from tests.test_event_journal_store import admit, edit, text
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -78,6 +82,8 @@ class _Bot:
     conversation_reader: ConversationReader
     config: Config
     runtime_paths: RuntimePaths
+    # The bot's real provenance classifier, which reads only the config, the paths, and the bot's own identity.
+    ingress_validator: IngressValidator
     running: bool = True
 
     @property
@@ -114,6 +120,8 @@ class _Turns:
     error: Exception | None = None
     # Whether the error ends the turn with a failure reply instead of raising, as a provider error does.
     error_replies: bool = False
+    # What happens elsewhere while the turn runs, such as a config reload.
+    meanwhile: Callable[[], Awaitable[None]] | None = None
 
     async def __call__(
         self,
@@ -126,6 +134,8 @@ class _Turns:
     ) -> TurnResult:
         del runtime_paths, config, sinks, resume
         self.contexts.append(ctx)
+        if self.meanwhile is not None:
+            await self.meanwhile()
         if self.error is not None and self.error_replies:
             return TurnResult(text=REPLY, failed=HandledAttempt(reply=FailedReply(text=REPLY, error=self.error)))
         if self.error is not None:
@@ -209,7 +219,18 @@ def _bot(config: Config, runtime_paths: RuntimePaths, journal: PrincipalStore) -
     client.room_send.return_value = nio.RoomSendResponse("$reaction", ROOM)
     hydrator = SimpleNamespace(resolve_refreshes=AsyncMock())
     reader = ConversationReader(store=journal, hydrator=cast("Any", hydrator))
-    return _Bot("scribe", scribe, client, reader, config, runtime_paths)
+    ingress = IngressValidator(
+        IngressValidatorDeps(
+            runtime=cast("Any", SimpleNamespace(config=config)),
+            runtime_paths=runtime_paths,
+            agent_name="scribe",
+            matrix_id=scribe,
+            turn_store=MagicMock(),
+            turn_policy=MagicMock(),
+            settle_ignored_sources=AsyncMock(),
+        ),
+    )
+    return _Bot("scribe", scribe, client, reader, config, runtime_paths, ingress)
 
 
 @pytest.fixture
@@ -357,6 +378,95 @@ async def test_own_messages_not_heard(listening: _Listening) -> None:
     assert own not in listening.turns.contexts[0].prompt
 
 
+@pytest.mark.parametrize("source_kind", [TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND])
+async def test_a_relayed_message_is_heard_as_its_original_sender(listening: _Listening, source_kind: str) -> None:
+    """A message the router relays for a person is judged as that person, as a reply judges it, and shown as theirs."""
+    router = entity_ids(listening.config, listening.runtime_paths)["router"].full_id
+    await listening.service._poll_once(T0)
+    for event_id, original_sender, ts in (("$from-alice", ALICE, 10), ("$from-bob", BOB, 11)):
+        await admit(
+            listening.journal,
+            event_id,
+            room_id=ROOM,
+            sender=router,
+            ts=_ms(ts),
+            content={
+                "msgtype": "m.text",
+                "body": f"Relayed for {original_sender}",
+                ORIGINAL_SENDER_KEY: original_sender,
+                SOURCE_KIND_KEY: source_kind,
+            },
+        )
+
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$from-alice"]
+    prompt = listening.turns.contexts[0].prompt
+    assert f'from="{ALICE}"' in prompt
+    assert BOB not in prompt
+
+
+async def test_a_contact_room_is_not_listened_in(listening: _Listening, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A contact room's messages pass its message policy only through replies, so listening leaves the room alone."""
+    monkeypatch.setattr(
+        service_module,
+        "contact_room",
+        lambda _config, _paths, room_id, agent_name: object() if (room_id, agent_name) == (ROOM, "scribe") else None,
+    )
+    await listening.say("$a", 10)
+
+    with capture_logs() as logs:
+        for poll in range(3):
+            await listening.service._poll_once(T0 + 100 * poll)
+
+    assert listening.turns.contexts == []
+    assert listening.marker() is None
+    assert len([log for log in logs if "contact room" in log["event"]]) == 1
+
+
+async def test_a_turn_still_running_when_listening_stops_keeps_no_marker(listening: _Listening) -> None:
+    """A reload that stops listening in a room mid-turn wins, so turning it back on never hears the gap."""
+    await listening.service._poll_once(T0)
+    await listening.say("$a", 10)
+    off = listening.config.model_copy(deep=True)
+    off.agents["scribe"].listen = None
+    listening.turns.meanwhile = lambda: listening.service.sync(off)
+
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$a"]
+    assert listening.marker() is None
+    listening.turns.meanwhile = None
+    await listening.say("$while-off", 200)
+    await listening.service.sync(listening.config)
+    await listening.service.stop()
+    await listening.service._poll_once(T0 + 990)
+    await listening.say("$back-on", 1_000)
+    await listening.service._poll_once(T0 + 2_000)
+
+    assert listening.turns.heard() == ["$back-on"]
+
+
+@pytest.mark.parametrize("stored", ["[]", '{"scribe": []}', '{"scribe": {"!lobby:example.org": {"ts": 1}}}'])
+async def test_a_wrongly_shaped_markers_file_starts_over(listening: _Listening, stored: str) -> None:
+    """Markers of the wrong shape are dropped like unreadable ones: syncing works and the room starts at its newest."""
+    path = tracking_dir(listening.runtime_paths) / "listening_markers.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(stored, encoding="utf-8")
+    service = listening.restarted()
+    await listening.say("$before", 10)
+
+    with capture_logs() as logs:
+        await service.sync(listening.config)
+        await service.stop()
+    await service._poll_once(T0 + 20)
+    await listening.say("$after", 30)
+    await service._poll_once(T0 + 100)
+
+    assert any("unreadable" in log["event"] for log in logs)
+    assert listening.turns.heard() == ["$after"]
+
+
 async def test_only_allowlisted_tools_and_no_send(
     tmp_path: Path,
     journal_store: EventJournalStore,
@@ -485,6 +595,8 @@ async def test_listening_turned_off_and_on_starts_again_at_the_newest_message(li
 
     await listening.service.sync(off)
     await listening.say("$while-off", 500)
+    await listening.service.sync(listening.config)
+    await listening.service.stop()
     await listening.service._poll_once(T0 + 990)
     await listening.say("$back-on", 1_000)
     await listening.service._poll_once(T0 + 2_000)

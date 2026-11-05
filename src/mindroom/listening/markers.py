@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.event_journal import ConversationCursor
@@ -18,6 +18,26 @@ logger = get_logger(__name__)
 
 # Each agent's markers by room ID.
 type _Markers = dict[str, dict[str, ConversationCursor]]
+
+
+def _parsed(stored: object) -> _Markers:
+    """Return the markers a file holds; any other shape than the one ``ListeningMarkers`` writes raises."""
+    if not isinstance(stored, dict):
+        raise TypeError(stored)
+    return {
+        agent: {room_id: _cursor(cursor) for room_id, cursor in rooms.items()}
+        for agent, rooms in cast("dict[str, dict[str, object]]", stored).items()
+    }
+
+
+def _cursor(stored: object) -> ConversationCursor:
+    if not isinstance(stored, dict):
+        raise TypeError(stored)
+    fields = cast("dict[str, object]", stored)
+    created_ts, logical_event_id = fields.get("created_ts"), fields.get("logical_event_id")
+    if type(created_ts) is not int or not isinstance(logical_event_id, str):
+        raise TypeError(stored)
+    return ConversationCursor(created_ts=created_ts, logical_event_id=logical_event_id)
 
 
 @dataclass
@@ -63,17 +83,13 @@ class ListeningMarkers:
 
     def _read(self) -> _Markers:
         try:
-            stored = json.loads(self.path.read_text(encoding="utf-8"))
+            return _parsed(json.loads(self.path.read_text(encoding="utf-8")))
         except FileNotFoundError:
             return {}
-        except ValueError:
+        except (ValueError, TypeError, AttributeError):
             # Starting over never hears a room's earlier messages; it skips what came since the lost markers.
             logger.warning("Listening markers were unreadable; each room is heard from its newest message on")
             return {}
-        return {
-            agent: {room_id: ConversationCursor(**cursor) for room_id, cursor in rooms.items()}
-            for agent, rooms in stored.items()
-        }
 
     def _write(self) -> None:
         markers = self._load()

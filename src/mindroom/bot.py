@@ -903,6 +903,11 @@ class AgentBot:
         return self._tool_runtime_support
 
     @property
+    def ingress_validator(self) -> IngressValidator:
+        """Return the classifier of whom this bot's inbound events speak for, which access judges."""
+        return self._ingress_validator
+
+    @property
     def ingestion_quiesced(self) -> bool:
         """Return whether shutdown or removal latched this generation's Matrix ingestion closed."""
         return self._runtime_view.ingestion_quiesced

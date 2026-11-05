@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import SupervisedLoop
 from mindroom.constants import tracking_dir
+from mindroom.contacts.turns import contact_room
 from mindroom.event_journal import ConversationCursor
 from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.turn import run_silent_turn
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.conversation_reads import projected_visible_messages
 from mindroom.matrix.state import resolve_room_aliases
 
@@ -92,6 +94,11 @@ class ListeningService:
     _waiting: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     # Marker writes run off the event loop; a config sync's cleanup and a poll's move must not interleave.
     _marker_writes: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    # The ``(agent, room_id)`` pairs the last sync listened in; a turn that outlived its room's listening marks nothing.
+    # None until the first sync, which comes before any poll.
+    _listened: frozenset[tuple[str, str]] | None = field(default=None, init=False)
+    # Contact rooms whose skip was reported.
+    _contact_rooms: set[tuple[str, str]] = field(default_factory=set, init=False)
     _loop: SupervisedLoop = field(init=False)
 
     def __post_init__(self) -> None:
@@ -100,12 +107,22 @@ class ListeningService:
         self._loop = SupervisedLoop("listening", self._run)
 
     async def sync(self, config: Config) -> None:
-        """Forget the markers of rooms no agent listens in now, then run the loop while any agent listens."""
-        listeners = _listeners(config, self.runtime_paths)
-        listened = {(listener.agent_name, room_id) for listener in listeners for room_id in listener.room_ids}
-        async with self._marker_writes:
-            await asyncio.to_thread(self._markers.retain, listened)
-        if listeners:
+        """Forget the markers of rooms no agent listens in now, then run the loop while any agent listens.
+
+        It never raises: the runtime syncs its services one after another, so a failure here would skip the rest.
+        """
+        try:
+            listened = frozenset(
+                (listener.agent_name, room_id)
+                for listener in _listeners(config, self.runtime_paths)
+                for room_id in listener.room_ids
+            )
+            async with self._marker_writes:
+                self._listened = listened
+                await asyncio.to_thread(self._markers.retain, listened)
+        except Exception:
+            logger.exception("Listening could not forget the markers of rooms it no longer listens in")
+        if any(agent.listen is not None and agent.private is None for agent in config.agents.values()):
             self.start()
         else:
             await self.stop()
@@ -137,6 +154,8 @@ class ListeningService:
                     continue
                 # One room that cannot be heard, or whose turn fails, must not stop the others.
                 try:
+                    if self._is_contact_room(config, listener.agent_name, room_id):
+                        continue
                     await self._hear(bot, listener, room_id, config, now)
                 except Exception:
                     logger.exception(
@@ -183,6 +202,18 @@ class ListeningService:
         )
         await self._mark(agent_name, room_id, page.last_cursor)
 
+    def _is_contact_room(self, config: Config, agent_name: str, room_id: str) -> bool:
+        """Return whether the room is or was one of the agent's contact rooms, reporting the skip once.
+
+        Only a reply passes the contact's message policy, so listening never acts there.
+        """
+        if contact_room(config, self.runtime_paths, room_id, agent_name) is None:
+            return False
+        if (agent_name, room_id) not in self._contact_rooms:
+            self._contact_rooms.add((agent_name, room_id))
+            logger.info("Listening skips a contact room", agent=agent_name, room_id=room_id)
+        return True
+
     def _heard(
         self,
         bot: AgentBot,
@@ -191,22 +222,31 @@ class ListeningService:
         messages: list[ResolvedVisibleMessage],
         config: Config,
     ) -> list[ResolvedVisibleMessage]:
-        """Return the messages the agent hears: not its own, and only from senders allowed to reach it in the room."""
-        own = bot.matrix_id.full_id
-        return [
-            message
-            for message in messages
-            if message.sender != own
-            and is_sender_allowed_for_agent_reply_in_room(
-                message.sender,
+        """Return the messages the agent hears, each shown as the one who said it.
+
+        Like a reply, a message is judged by whom it speaks for, as ingress classifies it: the person a trusted relay
+        names rather than the relaying account. The agent's own messages and senders not allowed to reach it in the
+        room are left out.
+        """
+        heard: list[ResolvedVisibleMessage] = []
+        for message in messages:
+            if message.sender == bot.matrix_id.full_id:
+                continue
+            facts = bot.ingress_validator.classify_source(message.sender, {"content": message.content}, room_id=room_id)
+            if not is_sender_allowed_for_agent_reply_in_room(
+                facts.run_requester_id,
                 agent_name,
                 config,
                 room_id,
                 self.runtime_paths,
                 self.agent_reply_memberships,
                 require_resolved_membership=True,
-            )
-        ]
+            ):
+                continue
+            # An entity's reply written for someone stays its author's; a relayed message is its original sender's.
+            speaker = facts.physical_sender if facts.acts_for_requester else facts.run_requester_id
+            heard.append(replace_visible_message(message, sender=speaker))
+        return heard
 
     async def _quiet(self, bot: AgentBot, room_id: str, listen: ListenConfig, now: float) -> bool:
         """Return whether nobody, the agent included, has written in the room for ``quiet_seconds``.
@@ -250,4 +290,7 @@ class ListeningService:
 
     async def _mark(self, agent_name: str, room_id: str, cursor: ConversationCursor) -> None:
         async with self._marker_writes:
+            # A sync that stopped listening in the room while its turn ran forgot the marker, and it stays forgotten.
+            if self._listened is not None and (agent_name, room_id) not in self._listened:
+                return
             await asyncio.to_thread(self._markers.set, agent_name, room_id, cursor)
