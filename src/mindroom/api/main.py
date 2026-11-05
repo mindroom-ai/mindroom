@@ -24,6 +24,7 @@ from mindroom.api.auth import authenticate_user, dashboard_cors_origins, verify_
 from mindroom.api.auth import router as auth_router
 from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
 from mindroom.api.budgets import router as budgets_router
+from mindroom.api.client_sessions import router as client_sessions_router
 from mindroom.api.computers import active_computer_worker_keys, withdraw_computer_runtime
 from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
@@ -47,6 +48,7 @@ from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
+from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.provider_setup import router as provider_setup_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
@@ -92,12 +94,36 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
+# Paths a Matrix web client calls from its own origin with a bearer token and no cookies, and the paths under them.
+_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins")
+# The trailing slash keeps a sibling such as /api/pluginsX out.
+_CLIENT_ORIGIN_PREFIXES = tuple(f"{path}/" for path in _CLIENT_ORIGIN_PATHS)
 _IOS_APP_ORIGIN = "capacitor://localhost"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
     config_lifecycle.CONFIG_PENDING_RESTART_HEADER,
 )
+
+
+_NO_STORE = ((b"cache-control", b"no-store"),)
+# Plugin routes share the dashboard's origin, so nothing they answer may be sniffed or rendered there as a page.
+_PLUGIN_RESPONSE_HEADERS = (
+    *_NO_STORE,
+    (b"x-content-type-options", b"nosniff"),
+    (b"content-security-policy", b"sandbox; default-src 'none'"),
+)
+
+
+def _is_client_origin_path(path: str) -> bool:
+    return path in _CLIENT_ORIGIN_PATHS or path.startswith(_CLIENT_ORIGIN_PREFIXES)
+
+
+def _forced_response_headers(path: str) -> tuple[tuple[bytes, bytes], ...]:
+    """Return the headers that replace a route's own of the same name on ``path``'s responses."""
+    if path == "/api/plugins" or path.startswith("/api/plugins/"):
+        return _PLUGIN_RESPONSE_HEADERS
+    return _NO_STORE if _is_client_origin_path(path) else ()
 
 
 @dataclass(frozen=True)
@@ -125,20 +151,24 @@ class _RuntimeDashboardCorsMiddleware:
         self._middleware_by_settings: dict[_DashboardCorsSettings, CORSMiddleware] = {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        middleware = self._middleware_for_current_runtime(scope.get("path", ""))
-        if scope.get("path", "").startswith("/api/computers"):
-
-            async def no_store_send(message: Message) -> None:
-                if message["type"] == "http.response.start":
-                    message["headers"] = [
-                        (key, value) for key, value in message.get("headers", []) if key.lower() != b"cache-control"
-                    ]
-                    message["headers"].append((b"cache-control", b"no-store"))
-                await send(message)
-
-            await middleware(scope, receive, no_store_send)
-        else:
+        # Under a proxy's root path ``path`` starts with it, so classify the path routes match, as Starlette does.
+        path = scope.get("path", "").removeprefix(scope.get("root_path", ""))
+        middleware = self._middleware_for_current_runtime(path)
+        forced = _forced_response_headers(path)
+        if not forced:
             await middleware(scope, receive, send)
+            return
+        forced_names = {name for name, _ in forced}
+
+        async def forcing_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    (key, value) for key, value in message.get("headers", []) if key.lower() not in forced_names
+                ]
+                message["headers"].extend(forced)
+            await send(message)
+
+        await middleware(scope, receive, forcing_send)
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
@@ -148,7 +178,7 @@ class _RuntimeDashboardCorsMiddleware:
         else:
             origins = (
                 allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
-                if path.startswith("/api/computers")
+                if _is_client_origin_path(path)
                 else gateway_cors_origins(paths, path)
             )
             settings = (
@@ -472,6 +502,7 @@ app.include_router(external_triggers_router)
 for integration_router in integration_routers():
     app.include_router(integration_router)  # Each integration authenticates its own requests.
 app.include_router(computers_router)
+app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)
 # Each report admits the user who requested its run, administrator or not.
@@ -638,4 +669,6 @@ async def get_personal_agents(
     ]
 
 
+# Before the frontend catch-all, which would otherwise answer GET and HEAD under /api/plugins.
+mount_plugin_routes(app)  # Each plugin route authenticates its own requests.
 app.include_router(frontend_router)

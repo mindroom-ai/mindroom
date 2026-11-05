@@ -188,6 +188,8 @@ Matrix sync callback
 | `egress_broker/audit.py` | Metadata-only SQLite request log, pruned to 30 days and 100,000 rows |
 | `egress_broker/ca.py` | Local broker CA, per-host leaf certificates, the SNI check against the CONNECT host, and the worker trust bundle |
 | `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect, disconnect, and opt-in, the full request log, and the CA download |
+| `api/client_sessions.py` | `POST /api/client-sessions`: exchanges a Matrix OpenID token from a web client for an in-memory, one-hour session token that plugin routes accept |
+| `api/plugin_routes.py` | Serves each published plugin's `routes_module` router under `/api/plugins/<plugin>/` from the app built as the plugin loads, looked up per request so reloads take effect |
 | `api/connections_session.py` | Connections portal sign-in: exchanges a Matrix OpenID token from MindRoom Chat for a portal session cookie |
 | `api/connections_contacts.py` | Contacts page routes under `/api/connections/contacts`: the signed-in owner's contacts with their own side's rules and tools, and accepting, declining, editing, and removing them without an approval card |
 | `api/connections_native.py` | Connections portal sign-in from the iOS app: the browser gets a pending cookie, and the app confirms it with its own token before the session starts |
@@ -323,6 +325,7 @@ Matrix sync callback
 | `tool_system/plugins.py` | Plugin generations: loading, publishing, and disposing them, candidate validation in a separate module namespace, and `config_plugins`, one config's tools, hooks, skill roots, and OAuth providers from one published generation |
 | `tool_system/registry.py` | `ToolRegistry`, the tools one config can build (built-ins, its loaded plugins' tools, its MCP servers, and the tools of plugins that failed to load as unavailable), the built-in tools, and the registration scope plugin modules register into |
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
+| `plugin_http.py` | The supported import surface for plugin HTTP routes: `require_client_user` resolves a client session's bearer token to its Matrix user, and `require_room_member` resolves it too and checks that user's live room membership |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |

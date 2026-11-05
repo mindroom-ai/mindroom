@@ -16969,6 +16969,26 @@ The `redeem` step answers a page that opens the app's URL, rather than a redirec
 Every step's state is single use and expires after 120 seconds, and a session started this way never opens the dashboard.
 Only `capacitor://localhost`, the app's own origin, may call these routes from a page, without credentials, whatever the dashboard's CORS settings say; the handlers do not check `Origin`, since the app's own bound token is the proof.
 
+## Client sessions for plugin routes
+
+`POST /api/client-sessions` is public and takes a Matrix OpenID token.
+MindRoom verifies it at the configured homeserver's `/_matrix/federation/v1/openid/userinfo`, and accepts only users of that homeserver.
+Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens to this deployment's audience, because without binding any backend a user opens from the client could replay their token; unlike Connections, no setting waives this.
+It answers 503 when it cannot check whether the homeserver binds tokens, and verifies the token a second time after that check, requiring the same user, so binding switched off between the two requests cannot pass an unbound token.
+It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
+The store keeps at most 8 sessions per user, evicting that user's oldest past it, and 10,000 in all, evicting the oldest of anyone's past that, so it never refuses a sign-in and, below 10,000 sessions, one user's sign-ins never sign another user out.
+A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` or `require_room_member` is public; plugin code already runs with the primary's full trust.
+Workers never import a routes module, as long as it is its own file that the plugin's tools and hooks modules do not import.
+Plugin routes share the dashboard's origin, so a route that returned `text/html` or other content a browser renders, built from untrusted input, could run script with the dashboard's signed-in session.
+MindRoom does not filter what plugin routes return, so they must answer with JSON; as a backstop, every response under `/api/plugins/` carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, replacing whatever the route set.
+A plugin route that raises answers 500 without the error's detail.
+Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
+Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
+The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
+CORS for `/api/client-sessions` and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
+Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
+CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
@@ -17427,14 +17447,15 @@ my-plugin/
 ├── mindroom.plugin.json   # Required manifest
 ├── tools.py               # Tool factories (optional)
 ├── oauth.py               # OAuth providers (optional)
+├── routes.py              # HTTP routes (optional)
 ├── hooks.py               # Event hooks and automations (optional)
 └── skills/                # Skill directories (optional)
     └── my-skill/
         └── SKILL.md
 ```
 
-Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, and skills.
-Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit` and the memory helpers stay in the modules their sections name.
+Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, and skills.
+Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
 Other `mindroom` modules can change in any release.
 
 ## Manifest format
@@ -17445,6 +17466,7 @@ Other `mindroom` modules can change in any release.
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
+  "routes_module": "routes.py",
   "skills": ["skills"]
 }
 ```
@@ -17455,6 +17477,7 @@ Other `mindroom` modules can change in any release.
 | `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
+| `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 
 Every declared module file and skill directory must exist.
@@ -18061,6 +18084,65 @@ See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-conne
 
 Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
 MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
+
+## HTTP routes
+
+A plugin serves HTTP routes from the module its manifest names as `routes_module`, which must define a module-level `router`, a FastAPI `APIRouter`.
+MindRoom serves that router under `/api/plugins/<name>/` on its API, where `<name>` is the manifest `name`, so this route answers `GET /api/plugins/my-plugin/rooms/<room_id>/hello`:
+
+```python
+# routes.py
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
+
+from mindroom.plugin_http import ClientUser, require_room_member
+
+router = APIRouter()
+
+
+@router.get("/rooms/{room_id}/hello")
+async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict[str, str]:
+    return {"hello": user.user_id}
+```
+
+!!! warning "Plugin routes share the dashboard's origin"
+    MindRoom serves plugin routes from the same origin as its dashboard, so script in a page a plugin route returns would run with the dashboard's signed-in session.
+    Never return `text/html`, or any other content a browser would render, such as SVG, built from untrusted input such as Matrix messages, room names, or request parameters.
+    Return JSON.
+    MindRoom answers every response under `/api/plugins/` with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, whatever the route sets, so a browser neither guesses another type nor runs script or loads anything in a page a route returns; that is a backstop, not a licence to return pages.
+
+MindRoom builds each plugin's app from its router as the plugin loads, and a reload builds a new one.
+A routes module that raises as it loads, has no `router` (`Plugin routes module must define router: APIRouter`), or has a router FastAPI refuses to serve (`Plugin router cannot be served: ...`), such as one with a route at `""` rather than `"/"`, costs the plugin only its routes: MindRoom logs `Plugin routes failed to load; serving none` with the reason, its paths answer 404, and its tools and hooks keep working, after a reload too.
+Only `mindroom plugins check` fails on such a routes module; `mindroom config validate` and `mindroom doctor` import it too, but only log it and still pass the config.
+Routes follow plugin reloads, so the next request after a reload runs the new code.
+A request for a plugin that is not loaded or has no routes, or for a path its router does not define, answers 404.
+A route that raises answers 500 with no detail of the error, and the other routes keep serving.
+Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
+That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` or `require_room_member` is public.
+
+Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
+
+- The router's `lifespan` and `on_event` startup and shutdown handlers never run.
+- A `GET` route answers `HEAD` with 405, as in any FastAPI app; list both in `@router.api_route(path, methods=["GET", "HEAD"])` if a client needs `HEAD`.
+- The `dependency_overrides` of MindRoom's main app do not reach plugin routes, so a test that overrides a dependency there does not change a plugin route.
+- `request.url_for` finds only the plugin's own route names, and `request.base_url` is the plugin's `/api/plugins/<name>/`.
+
+A plugin route that serves a Matrix web client authenticates its caller with `require_client_user` from `mindroom.plugin_http`, as a FastAPI dependency: `user: ClientUser = Depends(require_client_user)`.
+`ClientUser.user_id` is the caller's Matrix user ID.
+The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
+Sign-in needs a homeserver that binds OpenID tokens to this deployment, MindRoom's Tuwunel fork with `mindroom_openid_audience` on (see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)); on any other homeserver `POST /api/client-sessions` answers 403, with no setting to allow it, because another backend the user opens could replay their token here.
+Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
+Browser origins that may call these routes and `POST /api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](https://docs.mindroom.chat/tools/worker-computer/); there is no separate setting for plugin routes.
+Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, besides the two headers above, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
+A route that acts on one room depends on `require_room_member` instead, as in the example above: `user: ClientUser = Depends(require_room_member)`.
+It authenticates the caller as `require_client_user` does and takes the room from the route's `{room_id}` path parameter, and it returns the same `ClientUser` once that user is joined to the room.
+It never takes the room from the query string: as a dependency of a route without `{room_id}` in its path, it answers 422.
+A route that finds its room some other way awaits `require_room_member(request, room_id)` itself.
+Either way the user is always the session's own: no parameter of the request can name another.
+It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
+It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
 ## Plugin skills
 
@@ -20788,7 +20870,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |
-| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers | `[]` |
+| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers, and to call client sessions and [plugin HTTP routes](https://docs.mindroom.chat/plugins/#http-routes) | `[]` |
 
 The Helm chart sets the Kubernetes backend variables.
 To deploy that backend without Helm, see [Worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings).

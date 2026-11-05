@@ -117,6 +117,7 @@ from .orchestration.config_updates import (
 from .orchestration.config_warnings import warn_about_config_risks
 from .orchestration.entity_fleet import EntityFleet, EntityFleetHooks, EntityStartResults
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
+from .orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
 from .orchestration.plugin_watch import PluginWatchState, watch_plugins_task
 from .orchestration.rooms import RoomSetup
 from .orchestration.runtime import (
@@ -1557,6 +1558,8 @@ async def _run_api_server(
     script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime())
+    # The reader picks a running bot at each call, so restarts and reloads never need to withdraw it.
+    bind_room_members(api_main.app, orchestrator.agent_bots)
     config = uvicorn.Config(
         api_main.app,
         host=host,
@@ -1595,6 +1598,7 @@ async def _run_api_server(
     finally:
         # The script gateway's address first, so no script call reaches a broker the API no longer exposes.
         await script_runtime.unbind_api()
+        unbind_room_members(api_main.app)
         api_main.unbind_embedded_runtime(api_main.app)
         clear_api_server_address()
     shutdown_expected = shutdown_requested.is_set()

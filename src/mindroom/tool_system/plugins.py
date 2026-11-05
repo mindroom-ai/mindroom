@@ -1,8 +1,9 @@
 """Plugin loading: the one plugin generation a process publishes, and each config's view of it.
 
-A process publishes one ``PluginGeneration``: the module instances, tools, hooks, automations, skill directories, and
-OAuth callbacks of the plugins it loaded. An operation captures ``config_plugins(config, runtime_paths)`` once and reads
-every plugin fact it needs from that value, so a publication during the operation never mixes two generations.
+A process publishes one ``PluginGeneration``: the module instances, tools, hooks, automations, skill directories, OAuth
+callbacks, and HTTP routes of the plugins it loaded. An operation captures ``config_plugins(config, runtime_paths)``
+once and reads every plugin fact it needs from that value, so a publication during the operation never mixes two
+generations.
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ from mindroom.tool_system.registry import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from types import ModuleType
+
+    from starlette.types import ASGIApp
 
     from mindroom.automations.registry import CheckFn
     from mindroom.config.main import Config
@@ -81,6 +84,11 @@ class _LoadedPlugin:
     discovered_hooks: tuple[HookCallback, ...]
     discovered_automations: tuple[CheckFn, ...]
     oauth_callback: Callable[..., object] | None
+    # The plugin's router as an app of its own, built by staged loads (the primary's and the CLI checks'); worker loads
+    # never import a routes module.
+    routes_app: ASGIApp | None
+    # Why a staged load serves no routes from the plugin's routes module, which leaves its tools and hooks loaded.
+    routes_error: plugin_imports.PluginValidationError | None
     modules: tuple[ModuleType, ...]
 
 
@@ -393,7 +401,7 @@ def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[Plug
         try:
             _install_canonical_modules({}, {})
             plugin_imports._PLUGIN_CACHE.clear()
-            plugins, skipped = _load_plugins(config, runtime_paths, previous=None)
+            plugins, skipped = _load_plugins(config, runtime_paths, previous=None, routes=True)
             generation = _installed_generation(plugins, skipped)
             _log_loaded_plugins(generation)
             yield generation
@@ -432,13 +440,14 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
 
     Unchanged modules stay as installed and edited ones execute again, on every worker request, ending the tasks of
     the modules they replace. The generation only grows or refreshes, so another request's config keeps the plugins
-    it loaded; a plugin that fails to load leaves it until it loads again.
+    it loaded; a plugin that fails to load leaves it until it loads again. Workers serve no HTTP routes, so routes
+    modules are never imported.
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
     with _PLUGIN_LOCK:
         published = _PUBLISHED
-        plugins, skipped = _load_plugins(config, runtime_paths, previous=published)
+        plugins, skipped = _load_plugins(config, runtime_paths, previous=published, routes=False)
         failed_roots = {plugin.root for plugin in skipped} & set(published.plugins)
         changed = {root: plugin for root, plugin in plugins.items() if published.plugins.get(root) is not plugin}
         if changed or failed_roots:
@@ -596,15 +605,17 @@ def _load_plugins(
     runtime_paths: RuntimePaths,
     *,
     previous: PluginGeneration | None,
+    routes: bool,
 ) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
     """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails.
 
-    A structural error raises with the canonical modules as they were before the load and stops what it executed.
+    Their routes modules are imported only with ``routes``. A structural error raises with the canonical modules as
+    they were before the load and stops what it executed.
     """
     installed_modules = _canonical_plugin_modules()
     installed_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
     try:
-        return _load_each_plugin(config, runtime_paths, previous=previous)
+        return _load_each_plugin(config, runtime_paths, previous=previous, routes=routes)
     except BaseException:
         installed = {id(module) for module in installed_modules.values()}
         _cancel_module_tasks(module for module in _canonical_plugin_modules().values() if id(module) not in installed)
@@ -617,6 +628,7 @@ def _load_each_plugin(
     runtime_paths: RuntimePaths,
     *,
     previous: PluginGeneration | None,
+    routes: bool,
 ) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
     plugins: dict[Path, _LoadedPlugin] = {}
@@ -632,6 +644,7 @@ def _load_each_plugin(
             plugin = _materialize_plugin(
                 plugin_base,
                 previous.plugins.get(plugin_base.root) if previous is not None else None,
+                routes=routes,
             )
         except BaseException as exc:
             _dispose_failed_plugin(package_name, installed_modules, installed_cache)
@@ -668,7 +681,12 @@ def _dispose_failed_plugin(
     plugin_imports._MODULE_IMPORT_CACHE.update(installed_cache)
 
 
-def _materialize_plugin(plugin: plugin_imports._PluginBase, previous: _LoadedPlugin | None) -> _LoadedPlugin:
+def _materialize_plugin(
+    plugin: plugin_imports._PluginBase,
+    previous: _LoadedPlugin | None,
+    *,
+    routes: bool,
+) -> _LoadedPlugin:
     tools_entry = _load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
     # Without its own hooks module, a plugin's hooks live in its tools module.
     hooks_entry = (
@@ -677,8 +695,23 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, previous: _LoadedPlu
         else _load_plugin_module(plugin.name, plugin.root, plugin.hooks_module_path, kind="hooks")
     )
     oauth_entry = _load_plugin_module(plugin.name, plugin.root, plugin.oauth_module_path, kind="oauth")
-    entries = tuple(dict.fromkeys(entry for entry in (tools_entry, hooks_entry, oauth_entry) if entry is not None))
+    routes_entry: plugin_imports._ModuleCacheEntry | None = None
+    routes_app: ASGIApp | None = None
+    routes_error: plugin_imports.PluginValidationError | None = None
+    if routes and plugin.routes_module_path is not None:
+        # A broken routes module costs only the routes: a reload must not take the plugin's tools from agents.
+        try:
+            routes_entry = _load_plugin_module(plugin.name, plugin.root, plugin.routes_module_path, kind="routes")
+            assert routes_entry is not None
+            routes_app = _plugin_routes_app(routes_entry.module)
+        except plugin_imports.PluginValidationError as error:
+            logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
+            routes_error = error
+    entries = tuple(
+        dict.fromkeys(entry for entry in (tools_entry, hooks_entry, oauth_entry, routes_entry) if entry is not None),
+    )
     modules = tuple(entry.module for entry in entries)
+    # Candidate validation never imports a routes module, so ``source`` leaves it out.
     module_paths = (
         (plugin.tools_module_path, tools_entry),
         (plugin.hooks_module_path, hooks_entry),
@@ -703,6 +736,8 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, previous: _LoadedPlu
         discovered_hooks=tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else (),
         discovered_automations=tuple(iter_module_automations(hooks_module)) if hooks_module is not None else (),
         oauth_callback=_oauth_provider_callback(oauth_entry.module) if oauth_entry is not None else None,
+        routes_app=routes_app,
+        routes_error=routes_error,
         modules=modules,
     )
 
@@ -713,6 +748,35 @@ def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
         msg = "OAuth plugin module must define callable register_oauth_providers(settings, runtime_paths)"
         raise plugin_imports.PluginValidationError(msg)
     return callback
+
+
+def _plugin_routes_app(module: ModuleType) -> ASGIApp:
+    """Build the app that serves the module's ``router``, once, so a router FastAPI cannot serve fails as it loads."""
+    # Deferred: workers and slim entry points load plugins too, and only a routes module needs FastAPI.
+    from fastapi import APIRouter, FastAPI  # noqa: PLC0415
+    from fastapi.exceptions import RequestValidationError  # noqa: PLC0415
+
+    from mindroom.api.validation_errors import validation_error_response  # noqa: PLC0415
+
+    router = vars(module).get("router")
+    if not isinstance(router, APIRouter):
+        msg = "Plugin routes module must define router: APIRouter"
+        raise plugin_imports.PluginValidationError(msg)
+    # Errors are answered as the main API answers them, so a rejected body is not echoed back.
+    app = FastAPI(
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
+        exception_handlers={RequestValidationError: validation_error_response},
+    )
+    try:
+        app.include_router(router)
+    except Exception as error:  # FastAPI refuses some routers only here, such as one with a route at "".
+        msg = f"Plugin router cannot be served: {error}"
+        raise plugin_imports.PluginValidationError(msg) from error
+    # The app's error handling without the app itself, which would make itself ``request.app``: plugin routes keep
+    # the main app there, and with it the client sessions and room membership that ``mindroom.plugin_http`` reads.
+    return app.build_middleware_stack()
 
 
 def _log_loaded_plugins(generation: PluginGeneration) -> None:

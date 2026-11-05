@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 async def homeserver_unstable_features(homeserver_url: str, *, failure_message: str) -> dict[str, object] | None:
     """Return the homeserver's ``unstable_features``, empty when it lists none, or None when the check failed.
 
-    Anything other than a small, direct JSON answer is a failure, with ``failure_message`` logged as a warning that says
+    Anything other than a small, direct JSON object is a failure, with ``failure_message`` logged as a warning that says
     why.
     """
     url = homeserver_url.rstrip("/") + "/_matrix/client/versions"
@@ -28,5 +28,8 @@ async def homeserver_unstable_features(homeserver_url: str, *, failure_message: 
     except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError, ValueError, UnicodeError) as exc:
         logger.warning(failure_message, error=type(exc).__name__)
         return None
-    features = payload.get("unstable_features") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        logger.warning(failure_message, error=f"JSON {type(payload).__name__}, not an object")
+        return None
+    features = payload.get("unstable_features")
     return features if isinstance(features, dict) else {}

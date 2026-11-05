@@ -1742,7 +1742,7 @@ visibility = ["mindroom.api.main"]
 [[modules]]
 path = "mindroom.api.validation_errors"
 depends_on = []
-visibility = ["mindroom.api.main", "mindroom.api.sandbox_runner_app"]
+visibility = ["mindroom.api.main", "mindroom.api.sandbox_runner_app", "mindroom.tool_system.plugins"]
 
 [[modules]]
 path = "mindroom.api.frontend"
@@ -2028,6 +2028,7 @@ depends_on = [
     "mindroom.api.agent_cli",
     "mindroom.api.config_reload",
     "mindroom.api.response_activity",
+    "mindroom.api.client_sessions",
     "mindroom.api.computers",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
@@ -2049,6 +2050,7 @@ depends_on = [
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
     "mindroom.api.oauth",
+    "mindroom.api.plugin_routes",
     "mindroom.api.provider_setup",
     "mindroom.api.report_publishing",
     "mindroom.api.request_body_limit",
@@ -3187,6 +3189,7 @@ depends_on = [
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.orchestration.accounts",
     "mindroom.orchestration.computer_runtime",
+    "mindroom.orchestration.plugin_http_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.api.main",
@@ -5731,6 +5734,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.plugins"
 depends_on = [
+    "mindroom.api.validation_errors",
     "mindroom.automations.registry",
     "mindroom.egress_broker",
     "mindroom.hooks",
@@ -8123,6 +8127,37 @@ depends_on = [
     "mindroom.workers.backend_kinds",
     "mindroom.origins",
 ]
+
+[[modules]]
+path = "mindroom.api.client_sessions"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.api.config_lifecycle",
+    "mindroom.matrix_openid",
+]
+
+[[modules]]
+path = "mindroom.api.plugin_routes"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.tool_system.plugins",
+]
+visibility = ["mindroom.api.main"]
+
+# Public: plugin routes import it to require a signed-in Matrix client and live room membership.
+[[modules]]
+path = "mindroom.plugin_http"
+depends_on = [
+    "mindroom.api.app_state",
+]
+
+[[modules]]
+path = "mindroom.orchestration.plugin_http_runtime"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.constants",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.orchestration.server_state"

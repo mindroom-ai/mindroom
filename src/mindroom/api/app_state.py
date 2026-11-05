@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.api.auth import ApiAuthState
+    from mindroom.api.client_sessions import ClientSessionStore
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.config_lifecycle import ApiState
     from mindroom.api.mcp_gateway import GatewayRuntime
@@ -88,6 +89,9 @@ class _MindroomAppState:
     openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
+    client_sessions: ClientSessionStore | None = None
+    # Bound while `mindroom run` serves this app; plugin routes read live room membership through it.
+    room_members: Callable[[str], Awaitable[frozenset[str]]] | None = None
     usage_export_runner: UsageExportRunner | None = None
 
     @property

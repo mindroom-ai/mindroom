@@ -227,6 +227,26 @@ The `redeem` step answers a page that opens the app's URL, rather than a redirec
 Every step's state is single use and expires after 120 seconds, and a session started this way never opens the dashboard.
 Only `capacitor://localhost`, the app's own origin, may call these routes from a page, without credentials, whatever the dashboard's CORS settings say; the handlers do not check `Origin`, since the app's own bound token is the proof.
 
+## Client sessions for plugin routes
+
+`POST /api/client-sessions` is public and takes a Matrix OpenID token.
+MindRoom verifies it at the configured homeserver's `/_matrix/federation/v1/openid/userinfo`, and accepts only users of that homeserver.
+Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens to this deployment's audience, because without binding any backend a user opens from the client could replay their token; unlike Connections, no setting waives this.
+It answers 503 when it cannot check whether the homeserver binds tokens, and verifies the token a second time after that check, requiring the same user, so binding switched off between the two requests cannot pass an unbound token.
+It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
+The store keeps at most 8 sessions per user, evicting that user's oldest past it, and 10,000 in all, evicting the oldest of anyone's past that, so it never refuses a sign-in and, below 10,000 sessions, one user's sign-ins never sign another user out.
+A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` or `require_room_member` is public; plugin code already runs with the primary's full trust.
+Workers never import a routes module, as long as it is its own file that the plugin's tools and hooks modules do not import.
+Plugin routes share the dashboard's origin, so a route that returned `text/html` or other content a browser renders, built from untrusted input, could run script with the dashboard's signed-in session.
+MindRoom does not filter what plugin routes return, so they must answer with JSON; as a backstop, every response under `/api/plugins/` carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, replacing whatever the route set.
+A plugin route that raises answers 500 without the error's detail.
+Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
+Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
+The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
+CORS for `/api/client-sessions` and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
+Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
+CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
