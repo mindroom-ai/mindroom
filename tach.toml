@@ -60,6 +60,8 @@ depends_on = [
     "mindroom.embeddings.ollama_embedder",
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.sentence_transformers_embedder",
+    "mindroom.embeddings.vertex_ai_embedder",
+    "mindroom.providers.google_adc",
 ]
 
 [[modules]]
@@ -70,6 +72,11 @@ depends_on = []
 path = "mindroom.embeddings.ollama_embedder"
 depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors", "mindroom.providers.ollama.settings"]
 visibility = ["mindroom.embeddings.factory"]
+
+[[modules]]
+path = "mindroom.embeddings.vertex_ai_embedder"
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.errors"]
+visibility = ["mindroom.embeddings.embedder_health", "mindroom.embeddings.factory"]
 
 [[modules]]
 path = "mindroom.embeddings.sentence_transformers_embedder"
@@ -84,6 +91,7 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
     "mindroom.embeddings.openai_embedder",
+    "mindroom.embeddings.vertex_ai_embedder",
     "mindroom.config.resolution",
 ]
 
@@ -1242,6 +1250,7 @@ depends_on = []
 path = "mindroom.providers.google_adc"
 depends_on = ["mindroom.constants"]
 visibility = [
+    "mindroom.embeddings.factory",
     "mindroom.knowledge.rerank",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.gemini",

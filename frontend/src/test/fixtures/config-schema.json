@@ -5448,7 +5448,7 @@
       "properties": {
         "provider": {
           "default": "openai",
-          "description": "Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
+          "description": "Embedder provider (openai, ollama, huggingface, sentence_transformers, vertex_ai, etc)",
           "title": "Provider",
           "type": "string"
         },

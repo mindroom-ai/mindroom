@@ -1327,6 +1327,21 @@ def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypat
     assert _check_memory_embedder(_openai_embedder_config(), _doctor_runtime_paths(tmp_path)) == (1, 0, 0)
 
 
+def test_vertex_ai_memory_embedder_check_runs_an_embedding_round_trip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Vertex AI authenticates with Google Cloud credentials, so the check is one real embedding, not a key lookup."""
+    monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: "embedder permission denied (HTTP 403)")
+    config = Config(memory={"embedder": {"provider": "vertex_ai", "config": {"model": "gemini-embedding-2"}}})
+
+    assert _check_memory_embedder(config, _doctor_runtime_paths(tmp_path)) == (0, 1, 0)
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Memory embedder: vertex_ai/gemini-embedding-2 embedding request failed" in output
+    assert "embedder permission denied (HTTP 403)" in output
+
+
 def test_memory_embedder_check_fails_on_auth_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A credential rejection from the shared probe is a hard failure."""
     monkeypatch.setattr(

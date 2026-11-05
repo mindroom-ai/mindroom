@@ -7,9 +7,11 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host, get_openai_base_url
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
+from mindroom.providers.google_adc import with_runtime_application_credentials
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -75,6 +77,15 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
             dimensions=None,
             api_key=get_ollama_api_key(runtime_paths),
         )
+    if provider == "vertex_ai":
+        return _ResolvedEmbedderSettings(
+            provider=provider,
+            model=embedder_config.model,
+            host=None,
+            dimensions=embedder_config.dimensions,
+            query_prefix=embedder_config.query_prefix,
+            document_prefix=embedder_config.document_prefix,
+        )
     return _ResolvedEmbedderSettings(
         provider=provider,
         model=embedder_config.model,
@@ -92,10 +103,10 @@ def create_configured_embedder(
 ) -> Embedder:
     """Create the configured embedding provider used for semantic indexes.
 
-    ``caller_retries`` turns off the OpenAI SDK's own retries for a caller that retries failed requests itself, as a
-    knowledge refresh does, so its classified failures alone decide what is sent again. Other callers keep the SDK's
-    retries, since nothing retries their requests in place: the knowledge graph retries only a whole episode minutes
-    later. The Ollama and local embedders do not retry on their own.
+    ``caller_retries`` turns off the OpenAI and Vertex AI SDKs' own retries for a caller that retries failed requests
+    itself, as a knowledge refresh does, so its classified failures alone decide what is sent again. Other callers keep
+    the SDKs' retries, since nothing retries their requests in place: the knowledge graph retries only a whole episode
+    minutes later. The Ollama and local embedders do not retry on their own.
     """
     settings = resolve_embedder_settings(config, runtime_paths)
 
@@ -121,12 +132,27 @@ def create_configured_embedder(
         assert settings.host is not None
         return OllamaEmbedder(model=settings.model, host=settings.host, api_key=settings.api_key)
 
+    if settings.provider == "vertex_ai":
+        from mindroom.embeddings.vertex_ai_embedder import VertexAIEmbedder  # noqa: PLC0415
+
+        client_params = with_runtime_application_credentials({}, runtime_paths).get("client_params", {})
+        return VertexAIEmbedder(
+            model=settings.model,
+            project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths),
+            location=get_secret_from_env("GOOGLE_CLOUD_LOCATION", runtime_paths=runtime_paths),
+            credentials=client_params.get("credentials"),
+            dimensions=settings.dimensions,
+            query_prefix=settings.query_prefix,
+            document_prefix=settings.document_prefix,
+            single_attempt=caller_retries,
+        )
+
     if settings.provider == "sentence_transformers":
         return create_sentence_transformers_embedder(runtime_paths, settings.model)
 
     msg = (
         f"Unsupported semantic-search embedder provider: {settings.provider}. "
-        "Supported providers: openai, ollama, sentence_transformers"
+        "Supported providers: openai, ollama, sentence_transformers, vertex_ai"
     )
     raise ValueError(msg)
 

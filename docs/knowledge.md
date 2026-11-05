@@ -505,13 +505,14 @@ knowledge_bases:
 ## Embedder Configuration
 
 Semantic knowledge bases use the embedder configured under `memory.embedder`; files-mode bases use none.
-Semantic knowledge and file-memory indexes support the `openai`, `ollama`, and `sentence_transformers` providers, while the Mem0 memory backend also supports `huggingface`.
+Semantic knowledge and file-memory indexes support the `openai`, `ollama`, `sentence_transformers`, and `vertex_ai` providers, while the Mem0 memory backend supports `huggingface` instead of `vertex_ai`.
 
 | Provider | Model example | Notes |
 |----------|---------------|-------|
 | `openai` | `text-embedding-3-small` | Also works with keyless OpenAI-compatible local endpoints |
 | `ollama` | `nomic-embed-text` | Self-hosted |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Runs locally in MindRoom; the optional extra installs on first use |
+| `vertex_ai` | `gemini-embedding-2` | Gemini embeddings on Vertex AI, with Google Cloud credentials (`GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials) in the project and location `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` name |
 
 For multilingual text and code, use `google/embeddinggemma-2` with `sentence_transformers`; its first use downloads about 1.4 GB.
 MindRoom applies the query and document prompts that a `sentence_transformers` model defines, so knowledge and file-memory searches need no manual task prefixes.

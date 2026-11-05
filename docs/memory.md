@@ -74,20 +74,20 @@ The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_I
 ### Embedder
 
 `memory.embedder` sets the embedding model used by Mem0, semantic file-memory search, and [knowledge bases](knowledge.md#embedder-configuration).
-Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_transformers` providers; semantic file memory and knowledge bases support the [narrower set](knowledge.md#embedder-configuration).
+Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_transformers` providers; semantic file memory and knowledge bases support [their own set](knowledge.md#embedder-configuration), which has `vertex_ai` instead of `huggingface`.
 
 | Field | Default | Description |
 |---|---|---|
 | `provider` | `openai` | Embedding provider |
 | `config.model` | `text-embedding-3-small` | Embedding model name |
 | `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `openai`, without it the embedder uses [`OPENAI_BASE_URL`](configuration/index.md#model-providers), else OpenAI's API; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
-| `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
+| `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers and `vertex_ai` |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
-| `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
-| `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
+| `config.query_prefix` | `null` | Text the `openai` and `vertex_ai` providers prepend to search queries |
+| `config.document_prefix` | `null` | Text the `openai` and `vertex_ai` providers prepend to indexed documents and stored memories |
 
-Only the `openai` provider reads `api_key`, `credentials_service`, `query_prefix`, and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
+Only the `openai` provider reads `api_key` and `credentials_service`, only `openai` and `vertex_ai` read `query_prefix` and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
 Config load also rejects `dimensions` for `ollama` and `sentence_transformers`, which always return the model's full-size vectors.
 
 ```yaml

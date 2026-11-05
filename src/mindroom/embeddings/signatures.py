@@ -55,12 +55,12 @@ def effective_mem0_embedder_signature(
 ) -> tuple[str, str, str, str]:
     """Return the Mem0 embedder settings that affect memory collection compatibility.
 
-    Prefixes change every vector the OpenAI-compatible client returns, so they mark the model; without them the
-    signature is unchanged and existing collections keep their names.
+    Prefixes change every vector the OpenAI-compatible and Vertex AI clients return, so they mark the model; without
+    them the signature is unchanged and existing collections keep their names.
     """
     if provider == "openai" and dimensions is None:
         dimensions = OPENAI_EMBEDDING_DIMENSIONS.get(model)
-    if provider == "openai" and (query_prefix or document_prefix):
+    if provider in {"openai", "vertex_ai"} and (query_prefix or document_prefix):
         model = f"{model}#prefixes={json.dumps([query_prefix or '', document_prefix or ''])}"
     return (provider, model, host or "", str(dimensions) if dimensions is not None else "")
 
