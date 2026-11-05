@@ -405,15 +405,17 @@ def shell_tools() -> type[Toolkit]:
             stdout is preserved together with stderr. A command still running after
             ``timeout`` seconds is stopped with the processes it started, and its
             output so far is returned. Without ``timeout``, a call that runs as part
-            of a background job has no time limit, even while you wait for it; that
-            includes every call that accepts ``background_after`` and, with background
-            jobs on, a subagent's calls for its delegated task, whether or not its
-            caller waits for it. Any other command stops after 120 seconds. Set
-            ``timeout`` on a command that might not end on its own, such as a
-            watcher or a test run that can hang. Start a server or anything
-            else meant to keep running with ``nohup cmd > out.log 2>&1 &``, which
-            keeps running after the command ends; in the foreground it would keep the
-            call running until its job is cancelled.
+            of a background job has no time limit; that includes every call that
+            accepts ``background_after`` and, with background jobs on, a subagent's
+            calls for its delegated task, whether or not its caller waits for it. A
+            call that accepts ``background_after`` and leaves it unset returns a job
+            handle after 120 seconds while its command runs on. Any other command
+            stops after 120 seconds. Set ``timeout`` on a command that might not
+            end on its own, such as a watcher or a test run that can hang. Start a
+            server or anything else meant to keep running with
+            ``nohup cmd > out.log 2>&1 &``, which keeps running after the command
+            ends; in the foreground it would keep the call running until its job is
+            cancelled.
 
             With ``mindroom_output_path``, capture the complete supported output
             within the redirect byte limit instead of applying ``tail``; a stopped

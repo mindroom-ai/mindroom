@@ -17,7 +17,8 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.llm.provider import ToolSpec
 from mindroom.llm.runs import RunStatus
 from mindroom.participation import ParticipationGate
-from mindroom.tool_jobs.background_after import BACKGROUND_AFTER_SCHEMA
+from mindroom.shell import execution as shell_execution
+from mindroom.tool_jobs.background_after import background_after_schema
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution import project_definitions, wait_mode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -109,7 +110,7 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
                 await run_job_turn(actor, model)
         offered = {definition.name: definition for definition in model.requests[0].tools}
         schema = offered["application"].parameters
-        assert schema["properties"]["background_after"] == BACKGROUND_AFTER_SCHEMA
+        assert schema["properties"]["background_after"] == background_after_schema(None)
         assert "background_after" not in schema["required"]
         assert "background_after" not in tool.function.parameters["properties"]
         # The job controls keep their own wait_timeout, and gain no background_after.
@@ -141,7 +142,7 @@ async def test_the_participation_decision_offers_the_wait_budget_the_reply_offer
         decision, reply = model.requests
         assert decision.tools == reply.tools
         [schema] = reply.tools
-        assert schema.parameters["properties"]["background_after"] == BACKGROUND_AFTER_SCHEMA
+        assert schema.parameters["properties"]["background_after"] == background_after_schema(None)
     finally:
         await runtime.shutdown()
 
@@ -161,11 +162,11 @@ def test_a_strict_definition_requires_the_wait_budget_and_a_declared_one_stays()
         strict=None,
     )
 
-    projected = project_definitions((strict, declared), {"strict", "declared"})
+    projected = project_definitions((strict, declared), {"strict": None, "declared": None})
 
     assert projected[0].parameters == {
         "type": "object",
-        "properties": {"background_after": BACKGROUND_AFTER_SCHEMA},
+        "properties": {"background_after": background_after_schema(None)},
         "required": ["background_after"],
     }
     assert projected[1] is declared
@@ -219,6 +220,42 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
                 assert sent == arguments
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
                 assert jobs[0].adapter["arguments"] == encode_tool_result(arguments)
+    finally:
+        gate.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{}, {"background_after": None}])
+async def test_a_shell_job_without_a_wait_budget_holds_its_reply_only_as_long_as_a_command_outside_a_job_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+) -> None:
+    """A shell command whose length the model misjudged continues in the background instead of holding the reply."""
+    gate = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        await gate.wait()
+        return args
+
+    monkeypatch.setattr(shell_execution, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.01)
+    context, runtime = await _managed_context(tmp_path)
+    owner = context.execution_identity
+    actor = job_actor(job_tool(run_shell_command, authored_name="shell"))
+    model = ScriptedModel([calls(tool_call("run_shell_command", "call", args="slow", **arguments)), answer("done")])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                record = await asyncio.wait_for(run_job_turn(actor, model), JOB_TEST_TIMEOUT)
+                [schema] = model.requests[0].tools
+                assert schema.parameters["properties"]["background_after"] == background_after_schema(0.01)
+                [tool] = record.tools
+                handle = json.loads(str(tool.result))
+                assert handle["status"] == "running"
+                gate.set()
+                completed = await runtime.wait(handle["job_id"], owner=owner, depth=0)
+                assert completed.job.result == "slow"
     finally:
         gate.set()
         await runtime.shutdown()

@@ -495,7 +495,7 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
     assert not unhandled, f"the harness does not know how to send golden input {sorted(unhandled)}"
     tools = [ToolSpec(**tool) for tool in case_input["tools"]]
     if (tool_jobs := case_input.get("tool_jobs")) is not None:
-        tools = list(project_definitions(tools, frozenset(tool_jobs["managed"])))
+        tools = list(project_definitions(tools, dict.fromkeys(tool_jobs["managed"])))
     native_compaction = None
     if (asked := case_input.get("native_compaction")) is not None:
         assert native is not None, "the golden's route has no native compaction"

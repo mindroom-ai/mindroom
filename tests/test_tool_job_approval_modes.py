@@ -634,6 +634,40 @@ async def test_a_job_that_asks_late_still_gets_the_whole_approval_wait(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_a_work_allowance_leaves_out_the_time_the_job_waits_for_approval(tmp_path: Path) -> None:
+    """A wait bounded by the job's work keeps waiting through its approval, then ends after that much work."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    loop = asyncio.get_running_loop()
+    approved: list[float] = []
+    decided, finish = asyncio.Event(), asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await runtime.set_awaiting_approval("job-1", awaiting=True)
+        await decided.wait()
+        await runtime.set_awaiting_approval("job-1", awaiting=False)
+        approved.append(loop.time())
+        await finish.wait()
+        return BackgroundOutcome("completed", "ok")
+
+    try:
+        _, claim = await runtime.start("job-1", tool_name="t", depth=0, adapter={}, owner=owner, operation=operation)
+        waiting = asyncio.create_task(runtime.wait("job-1", owner=owner, depth=0, claim=claim, work_timeout=0.1))
+        # The approval takes longer than the allowance, which waits on through it.
+        await asyncio.sleep(0.3)
+        assert not waiting.done()
+        decided.set()
+        waited = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
+        assert waited.job.status == "running"
+        assert waited.claim is None
+        assert loop.time() - approved[0] >= 0.05
+    finally:
+        decided.set()
+        finish.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_job_cards_offer_timed_approval_only_for_calls_the_policy_gated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

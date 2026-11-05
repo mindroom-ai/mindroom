@@ -209,6 +209,17 @@ def shell_call_timeout(timeout: float | None) -> float | None:
     return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
 
 
+def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -> float | None:
+    """Return how long a reply waits for a shell command that runs as a job when its call sets no wait, else None.
+
+    The reply waits as long as a command outside a job may run, then the command continues as a job, so a command
+    that runs longer than the model expected never holds the conversation longer than one outside a job would.
+    """
+    if registered_toolkit == "shell" and function_name == SHELL_FUNCTION:
+        return float(_DEFAULT_RUN_TIMEOUT_SECONDS)
+    return None
+
+
 def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
     """Return how long one worker request outside a job may take for this shell call, or 0 when it has no foreground wait.
 

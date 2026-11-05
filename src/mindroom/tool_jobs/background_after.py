@@ -9,15 +9,24 @@ type ToolWaitMode = Literal["native", "inline", "managed"]
 
 # Seconds a managed call may hold its reply before it continues in the background.
 BACKGROUND_AFTER = "background_after"
-# The optional parameter each managed function's definition gains, so the model can choose that budget.
-BACKGROUND_AFTER_SCHEMA = {
-    "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
-    "description": (
-        "Seconds to wait for this call before it continues in the background, without cancelling it. "
-        "Omit or pass null to wait until completion or a newer message you answer; "
-        "zero continues in the background at once and returns a job handle."
-    ),
-}
+
+
+def background_after_schema(default_wait: float | None) -> dict[str, Any]:
+    """Return the optional parameter a managed function's definition gains, so the model can choose that budget.
+
+    ``default_wait`` is how many seconds a call that omits the budget or passes null waits, None for no limit.
+    """
+    waits = "until completion or a newer message you answer"
+    if default_wait is not None:
+        waits = f"until completion, a newer message you answer, or {default_wait:g} seconds"
+    return {
+        "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
+        "description": (
+            "Seconds to wait for this call before it continues in the background, without cancelling it. "
+            f"Omit or pass null to wait {waits}; "
+            "zero continues in the background at once and returns a job handle."
+        ),
+    }
 
 
 def validate_wait_seconds(value: object, *, argument: str) -> float | None:

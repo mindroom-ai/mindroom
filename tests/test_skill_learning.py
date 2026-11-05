@@ -1618,7 +1618,7 @@ async def _answer(
     """
 
     async def offer_wait_budget(state: LoopState) -> SendRequest:
-        state.tools = project_definitions(state.tools, managed)
+        state.tools = project_definitions(state.tools, dict.fromkeys(managed))
         return SendRequest()
 
     agent = AgentSpec(

@@ -19,6 +19,10 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   They bind timed approvals to the same scope as a paused reply's cards, so one grant covers a conversation's gated calls whether they run as jobs or pause the reply.
 - Jobs are the only way long work runs in the background, so the shell stops a command at its `timeout` instead of handing back a handle of its own.
   A job's command has no default limit and any other command has 120 seconds, so a command outside a job always stops by its timeout; Desktop shell keeps its handles because each request crosses the Desktop bridge under its own deadline, and script runs keep the engine to host processes that outlive replies and restarts.
+- A shell call that sets no `background_after` waits as long as a command outside a job may run, 120 seconds, and then continues as its job.
+  A model cannot always tell how long a command runs, and a command that prints nothing until it ends gives a waiting reply nothing to show, so without that limit one misjudged command held its conversation until a person wrote again.
+  Time its job spends awaiting approval does not count, so `approval_wait_timeout` still decides how long a reply waits for a decision.
+  Other tools keep waiting until completion, because their callers usually need the result to answer.
 - A worker `/execute` call streams its progress and a keep-alive every 5 seconds before its result line, so a job's call can run past every request timeout, a silent connection means the runner is gone, and a primary that stops reading stops the call.
   A call that is not a job keeps its limits, which the primary checks as lines arrive; persistent browser actions keep one response, because cancelling one closes the shared browser.
 - A request says whether it runs as a job, and the runner binds that job in its own process and in per-request children, so a tool sees the same ownership wherever it runs; a `mindroom-agent` call inherits it from its command's window.
