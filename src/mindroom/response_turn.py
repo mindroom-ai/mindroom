@@ -356,7 +356,8 @@ class ResponseTurnContext:
     # Set only for contact turns and silent listening turns: the agent's own tools the turn may offer, with no skills
     # or knowledge.
     tool_names: tuple[str, ...] | None = None
-    # Set only for a turn no requester asked for, such as a silent listening turn: the helper its usage counts as.
+    # Set only for a turn no requester asked for, such as a silent listening turn: it is no conversation turn, so it
+    # keeps none of its runs, only their usage, which counts as this helper.
     usage_kind: IndependentUsageKind | None = None
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
@@ -956,8 +957,10 @@ def replays_as_turn(ctx: ResponseTurnContext, record: AnyRunRecord, *, is_empty:
     its resolution reads the same. A team's member run is stored with its team run. A run the turn's participation
     gate has not approved, declined or failed before the decision, answered nothing; a cancelled one is stored, and the
     turn records what it showed. An empty reply outside a quiet turn would teach the model that ending a turn
-    immediately is the expected continuation.
+    immediately is the expected continuation. A turn no requester asked for (``usage_kind``) stores none.
     """
+    if ctx.usage_kind is not None:
+        return False
     if record.parent_run_id is not None:
         return True
     if ctx.participation is not None and not ctx.participation.approved:

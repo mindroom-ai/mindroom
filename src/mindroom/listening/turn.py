@@ -1,8 +1,9 @@
 """One silent turn: a listening agent goes over what it heard in a room, acts only through its allowlist, and posts nothing.
 
 The turn is the agent itself, with its identity, instructions, and memory, but it offers only the tools ``listen.tools``
-names, hides approval-gated tools and interactive questions, and drops its text. Its runs keep a session of their own
-beside the room's conversations, and its usage counts as listening, since nobody asked for it.
+names, hides approval-gated tools and interactive questions, and drops its text. Each turn stands alone: it stores no
+run, so nothing it heard stays in any history, a redacted message included, and only its usage is kept, as listening,
+since nobody asked for it. What it learns lasts only through its tools, such as memory.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from mindroom.config.resolution import entity_timezone
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.response_turn import ResponseTurnContext, TurnSinks
-from mindroom.session_ids import listening_session_id
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
@@ -65,7 +65,8 @@ async def run_silent_turn(
     runtime_paths: RuntimePaths,
 ) -> None:
     """Run one silent turn over ``heard`` in ``room_id``; a turn that fails raises, so its messages are heard again."""
-    session_id = listening_session_id(room_id)
+    # A session of its own beside the room's conversations; it keeps no run, only the turn's usage.
+    session_id = f"{room_id}:listen"
     target = MessageTarget(
         room_id=room_id,
         source_thread_id=None,
@@ -88,6 +89,8 @@ async def run_silent_turn(
         active_model_name=listen.model,
         # No reply owns a call's outcome afterwards, so every call finishes inside the turn.
         inline_tools=True,
+        # Doing nothing is a silent turn's usual answer, so an empty reply ends it without the retry one otherwise gets.
+        allow_no_report_response=True,
         tool_names=tuple(listen.tools),
         usage_kind="listening",
         prompt=_prompt(room_id, heard, entity_timezone(config, agent_name)),

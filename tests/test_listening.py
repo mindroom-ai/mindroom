@@ -17,7 +17,6 @@ from mindroom.ai import TurnResult
 from mindroom.config.main import Config
 from mindroom.constants import tracking_dir
 from mindroom.event_journal import ConversationCursor, EventKind
-from mindroom.history.session_runs import updated_sessions
 from mindroom.listening import turn as turn_module
 from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.service import ListeningService
@@ -573,4 +572,69 @@ async def test_usage_recorded_as_listening(
     assert [snapshot.get("kind") for snapshot in snapshots] == ["listening"]
     assert "user_id" not in snapshots[0]
     assert (snapshots[0]["metrics"]["input_tokens"], snapshots[0]["metrics"]["output_tokens"]) == (120, 7)
-    assert f"{ROOM}:listen" not in {session_id for session_id, _ in updated_sessions(storage, since=0)}
+
+
+async def test_silent_turns_store_no_run_and_stand_alone(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No silent turn is stored, so the next one is not shown what the last one heard, and a redaction leaves nothing."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    model = ScriptedModel(
+        [
+            calls(tool_call("react", "call-1", event_id="$first", emoji="👍")),
+            answer("Reacted."),
+            answer("Nothing to do."),
+        ],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    for event_id, body in (("$first", "The launch code is 1234."), ("$second", "Lunch is at noon.")):
+        await run_silent_turn(
+            bot=cast("AgentBot", bot),
+            agent_name="scribe",
+            room_id=ROOM,
+            heard=[ResolvedVisibleMessage.synthetic(sender=ALICE, body=body, event_id=event_id, timestamp=_ms(10))],
+            listen=listen,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    storage = create_session_storage("scribe", config, runtime_paths, execution_identity=None)
+    assert storage.logged_runs(f"{ROOM}:listen") == []
+    later_request = json.dumps([str(message.content) for message in model.requests[-1].messages])
+    assert "Lunch is at noon." in later_request
+    assert "launch code" not in later_request
+
+
+async def test_a_silent_turn_that_does_nothing_ends_without_a_retry(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty answer is a silent turn's way of doing nothing, so it costs one request and is no failure."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    model = ScriptedModel([answer("")])
+    install_model_providers(monkeypatch, {"default": model})
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    await run_silent_turn(
+        bot=cast("AgentBot", bot),
+        agent_name="scribe",
+        room_id=ROOM,
+        heard=[_heard_message("$a")],
+        listen=listen,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert len(model.requests) == 1
+    bot.client.room_send.assert_not_awaited()
