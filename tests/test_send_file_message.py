@@ -931,6 +931,22 @@ class TestMediaWireContent:
         }
 
     @pytest.mark.asyncio
+    async def test_voice_without_waveform_omits_it(self) -> None:
+        """A voice note whose audio could not be decoded sends its duration without a waveform."""
+        client = _delivering_client(encrypted=False)
+
+        await send_audio_message(
+            client,
+            "!room:localhost",
+            b"audio-bytes",
+            mimetype="audio/ogg",
+            filename="reply.opus",
+            duration_ms=1234,
+        )
+
+        assert _wire_content(client)["org.matrix.msc1767.audio"] == {"duration": 1234}
+
+    @pytest.mark.asyncio
     async def test_encrypted_audio_unthreaded_without_caption_or_duration(self) -> None:
         """Audio without a caption or duration is a plain m.audio event."""
         client = _delivering_client(encrypted=True)

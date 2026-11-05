@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
+import math
 import shutil
 import tempfile
+from array import array
 from asyncio.subprocess import PIPE
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 _MEDIA_COMMAND_TIMEOUT_SECONDS = 30
-_VOICE_WAVEFORM_SAMPLE_COUNT = 30
-_VOICE_WAVEFORM_VALUE = 512
+# MSC3246 asks senders for 30 to 120 waveform entries; the unstable
+# org.matrix.msc1767.audio block that clients read uses levels from 0 to 1024.
+_VOICE_WAVEFORM_BUCKET_COUNT = 100
+_VOICE_WAVEFORM_MAX = 1024
+# The waveform only needs the loudness envelope, so a low decode rate keeps it cheap.
+_VOICE_WAVEFORM_SAMPLE_RATE = 8000
 _VOICE_MIMETYPE = "audio/ogg"
 _OPUS_RESPONSE_FORMAT = "opus"
 
@@ -81,8 +88,45 @@ def _is_opus_ogg(probe_payload: dict[str, Any]) -> bool:
     return has_opus_audio and isinstance(format_name, str) and "ogg" in format_name.split(",")
 
 
-def _voice_waveform() -> list[int]:
-    return [_VOICE_WAVEFORM_VALUE] * _VOICE_WAVEFORM_SAMPLE_COUNT
+def _waveform_levels(samples: array[int]) -> list[int] | None:
+    """Return per-bucket RMS levels of mono PCM samples, scaled so the loudest bucket is the maximum."""
+    if len(samples) < _VOICE_WAVEFORM_BUCKET_COUNT:
+        return None
+    bounds = [len(samples) * index // _VOICE_WAVEFORM_BUCKET_COUNT for index in range(_VOICE_WAVEFORM_BUCKET_COUNT + 1)]
+    levels = [
+        math.sqrt(math.sumprod(bucket, bucket) / len(bucket))
+        for bucket in (samples[start:end] for start, end in itertools.pairwise(bounds))
+    ]
+    loudest = max(levels)
+    if loudest == 0:
+        return [0] * _VOICE_WAVEFORM_BUCKET_COUNT
+    return [round(level / loudest * _VOICE_WAVEFORM_MAX) for level in levels]
+
+
+async def _voice_waveform(ffmpeg: str, audio_path: Path) -> list[int] | None:
+    """Return the Matrix waveform of the audio, or None when ffmpeg cannot decode it."""
+    result = await _run_media_command(
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        str(audio_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(_VOICE_WAVEFORM_SAMPLE_RATE),
+        "-f",
+        "s16le",
+        "-",
+    )
+    if result is None or result[0] != 0:
+        return None
+    samples = array("h")
+    samples.frombytes(result[1])
+    return _waveform_levels(samples)
 
 
 async def _probe_audio(ffprobe: str, audio_path: Path) -> dict[str, Any] | None:
@@ -166,6 +210,7 @@ async def prepare_voice_audio_bytes(audio_bytes: bytes, *, response_format: str)
 
     Opus input passes through unchanged and other formats are transcoded with ffmpeg.
     Without ffmpeg/ffprobe on PATH, opus input is returned without duration or waveform metadata and other formats return None.
+    The waveform is omitted when ffmpeg cannot decode the audio, so receiving clients draw their own.
     Returns None when the audio cannot be probed or transcoded.
     """
     media_tools = _media_tools()
@@ -186,7 +231,7 @@ async def prepare_voice_audio_bytes(audio_bytes: bytes, *, response_format: str)
         if probe_payload is None:
             return None
         duration_ms = _parse_duration_ms(probe_payload)
-        waveform = _voice_waveform() if duration_ms is not None else None
+        waveform = await _voice_waveform(ffmpeg, input_path) if duration_ms is not None else None
         if _is_opus_ogg(probe_payload):
             return PreparedVoiceAudio(
                 audio_bytes=audio_bytes,
