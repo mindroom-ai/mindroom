@@ -16,7 +16,7 @@ from structlog.testing import capture_logs
 
 from mindroom.ai import TurnResult
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, tracking_dir
+from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, tracking_dir
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.event_journal import ConversationCursor, EventKind
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
@@ -63,6 +63,9 @@ ROOM = "!lobby:example.org"
 STUDIO = "!studio:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
+# Bridge bots in ``bot_accounts``: the scribe's access admits the first, not the second.
+SIGNAL_BOT = "@signalbot:example.org"
+TELEGRAM_BOT = "@telegrambot:example.org"
 T0 = 1_760_000_000
 # What the patched model writes: the turn must never post it.
 REPLY = "Everyone, here is what I heard: please read this."
@@ -208,10 +211,12 @@ def _config(tmp_path: Path, listen: dict[str, object] | None = None, *, context_
                 "role": "Keep notes.",
                 "rooms": listen["rooms"],
                 "tools": ["memory", "react", "matrix_message"],
-                "access": {"users": [ALICE]},
+                "access": {"users": [ALICE, SIGNAL_BOT]},
                 "listen": listen,
             },
+            "helper": {"display_name": "Helper", "role": "Help.", "rooms": listen["rooms"]},
         },
+        "bot_accounts": [SIGNAL_BOT, TELEGRAM_BOT],
         "memory": {"backend": "file"},
         "models": {
             "default": {"provider": "openai", "id": "test-model", "extra_kwargs": {"api_key": "test-key"}},
@@ -378,6 +383,25 @@ async def test_a_room_that_never_goes_quiet_is_heard_after_ten_quiet_windows(
     assert listening.turns.heard() == [f"$m{index}" for index in range(21)]
 
 
+async def test_a_backlog_drains_over_successive_turns_until_caught_up(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backlog longer than ``max_messages`` is heard by one full turn after another, each once, until none is left."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_messages": 3})
+    await listening.service._poll_once(T0)
+    event_ids = [f"$m{index}" for index in range(7)]
+    for index, event_id in enumerate(event_ids):
+        await listening.say(event_id, 10 + index)
+
+    for poll in range(5):
+        await listening.service._poll_once(T0 + 100 + poll)
+
+    assert listening.turns.heard_in(ROOM) == [event_ids[:3], event_ids[3:6], event_ids[6:]]
+    assert listening.marker_event() == "$m6"
+
+
 async def test_marker_advances_and_nothing_heard_twice(listening: _Listening) -> None:
     """Each turn hears only what came after the last one."""
     await listening.service._poll_once(T0)
@@ -464,6 +488,93 @@ async def test_a_relayed_message_is_heard_as_its_original_sender(listening: _Lis
     prompt = listening.turns.contexts[0].prompt
     assert f'from="{ALICE}"' in prompt
     assert BOB not in prompt
+
+
+HEARD, UNHEARD = "heard", "unheard"
+INGRESS = ("room message", "thread reply", "media", "edited before a turn", "edited after a turn")
+# Whether the scribe hears each actor's message, by how it arrives. Who is heard is who its replies answer, judged on
+# the requester an agent's reply names; how the message arrives never changes that. A heard message is heard once, as
+# its latest revision, and an edit after the turn that heard it is not heard again.
+# fmt: off
+GRID = {
+    #                                room message thread reply media    edited before edited after
+    "allowed person":               (HEARD,       HEARD,       HEARD,   HEARD,        HEARD),
+    "other person":                 (UNHEARD,     UNHEARD,     UNHEARD, UNHEARD,      UNHEARD),
+    "agent replying for allowed":   (HEARD,       HEARD,       HEARD,   HEARD,        HEARD),
+    "agent replying for other":     (UNHEARD,     UNHEARD,     UNHEARD, UNHEARD,      UNHEARD),
+    "agent on its own":             (UNHEARD,     UNHEARD,     UNHEARD, UNHEARD,      UNHEARD),
+    "allowed bridge bot":           (HEARD,       HEARD,       HEARD,   HEARD,        HEARD),
+    "other bridge bot":             (UNHEARD,     UNHEARD,     UNHEARD, UNHEARD,      UNHEARD),
+    "listening agent itself":       (UNHEARD,     UNHEARD,     UNHEARD, UNHEARD,      UNHEARD),
+}
+# fmt: on
+GRID_CASES = [
+    pytest.param(actor, ingress, outcome, id=f"{actor}-{ingress}".replace(" ", "_"))
+    for actor, outcomes in GRID.items()
+    for ingress, outcome in zip(INGRESS, outcomes, strict=True)
+]
+
+
+def _grid_actor(listening: _Listening, actor: str) -> tuple[str, dict[str, object]]:
+    """Return the account an actor writes from and what its message content carries besides the body."""
+    ids = entity_ids(listening.config, listening.runtime_paths)
+    return {
+        "allowed person": (ALICE, {}),
+        "other person": (BOB, {}),
+        "agent replying for allowed": (ids["helper"].full_id, {ACTING_REQUESTER_KEY: ALICE}),
+        "agent replying for other": (ids["helper"].full_id, {ACTING_REQUESTER_KEY: BOB}),
+        "agent on its own": (ids["helper"].full_id, {}),
+        "allowed bridge bot": (SIGNAL_BOT, {}),
+        "other bridge bot": (TELEGRAM_BOT, {}),
+        "listening agent itself": (ids["scribe"].full_id, {}),
+    }[actor]
+
+
+@pytest.mark.parametrize(("actor", "ingress", "outcome"), GRID_CASES)
+async def test_who_the_agent_hears_by_every_ingress_path(
+    listening: _Listening,
+    actor: str,
+    ingress: str,
+    outcome: str,
+) -> None:
+    """Each actor's message is heard, or not, the same way on every path, as its own author and latest revision."""
+    sender, carried = _grid_actor(listening, actor)
+    await admit(listening.journal, "$root", room_id=ROOM, sender=ALICE, ts=_ms(-10), content=text("Topic"))
+    await listening.service._poll_once(T0)
+    content: dict[str, object] = {**text("The meeting moved to Friday."), **carried}
+    if ingress == "media":
+        content = {"msgtype": "m.image", "body": "agenda.png", "url": "mxc://example.org/agenda", **carried}
+    thread_id = "$root" if ingress == "thread reply" else None
+    await admit(
+        listening.journal,
+        "$said",
+        room_id=ROOM,
+        sender=sender,
+        ts=_ms(10),
+        content=content,
+        thread_id=thread_id,
+    )
+    revision = {**edit("$said", "The meeting moved to Monday."), **carried}
+    revision["m.new_content"] = {**cast("dict[str, object]", revision["m.new_content"]), **carried}
+    if ingress == "edited before a turn":
+        await admit(listening.journal, "$said-edit", room_id=ROOM, sender=sender, ts=_ms(11), content=revision)
+
+    await listening.service._poll_once(T0 + 100)
+    if ingress == "edited after a turn":
+        await admit(listening.journal, "$said-edit", room_id=ROOM, sender=sender, ts=_ms(110), content=revision)
+        await listening.service._poll_once(T0 + 200)
+
+    if outcome == UNHEARD:
+        assert listening.turns.contexts == []
+        return
+    [turn] = listening.turns.contexts
+    assert listening.turns.heard() == ["$said"]
+    assert f'from="{sender}"' in turn.prompt
+    assert ("Monday" in turn.prompt) == (ingress == "edited before a turn")
+    if ingress == "media":
+        assert "agenda.png" in turn.prompt
+    if ingress == "thread reply":
+        assert 'thread_id="$root"' in turn.prompt
 
 
 async def test_a_contact_room_is_not_listened_in(listening: _Listening, monkeypatch: pytest.MonkeyPatch) -> None:
