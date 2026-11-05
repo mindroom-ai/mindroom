@@ -579,6 +579,7 @@ Matrix sync callback
 | `turn_model.py` | The model one turn runs: explicit choice, thread and room overrides, authored model, the team rule, then the budget fallback |
 | `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
 | `room_model_overrides.py` | Durable per-room runtime model defaults backing `!room_model` |
+| `room_reply_modes.py` | Durable per-room reply mode overrides backing `!reply_mode` |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | `SpanRegistry`: cancels exactly the reply span a Stop reaches; the Stop button reaction |

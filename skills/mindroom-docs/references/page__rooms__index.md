@@ -51,6 +51,7 @@ A `#` room alias is accepted only as the alias MindRoom gives a managed room (se
 | `admins` | list of Matrix user IDs | `[]` | Users granted Matrix admin power (level 100) in the room |
 | `rooms.<key>.display_name` | string | the key with underscores as spaces, title-cased | Matrix room name |
 | `rooms.<key>.description` | string | `""` | Room purpose shown in the dashboard |
+| `rooms.<key>.reply_mode` | `auto` or `mentions` | `auto` | Whether a message must mention an agent or team to start a conversation; see [Reply Mode](https://docs.mindroom.chat/configuration/threads/#reply-mode) |
 
 `invite_users` and `admins` accept only concrete Matrix user IDs, no wildcards, plus the pairing owner placeholder.
 A field set under `rooms.<key>` replaces the default, and a list replaces the whole default list instead of merging with it, so an empty list removes the inherited invitations or admins for that room.

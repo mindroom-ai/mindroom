@@ -1,6 +1,6 @@
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), [Access Control](https://docs.mindroom.chat/authorization/), and [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/).
 
 ## Thread Mode Resolution
@@ -32,6 +32,42 @@ Room-mode conversations are not included in [thread exports](https://docs.mindro
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
 
+## Reply Mode
+
+A room's reply mode decides whether a message that mentions no agent or team can start a conversation.
+Set it with `rooms.<key>.reply_mode` (see [Room policy](https://docs.mindroom.chat/rooms/#room-policy)) or with [`!reply_mode`](#reply_mode).
+
+- `auto` (default): the router or the room's only agent or team answers such a message, as described in [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
+- `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in, where the rules below apply as in `auto`.
+
+```yaml
+rooms:
+  lobby:
+    reply_mode: mentions
+```
+
+A message that mentions an agent or team is answered the same way in both modes, and mentions count as described in [Multi-Human Thread Protection](#multi-human-thread-protection).
+Scheduled tasks, hooks, and external triggers are not affected, and a direct-message room follows its reply mode like any other room.
+With `thread_mode: room`, every message is room-level, so each one needs a mention in a `mentions` room.
+
+### `!reply_mode`
+
+Show or switch the reply mode of the current Matrix room.
+
+```
+!reply_mode
+!reply_mode show
+!reply_mode mentions
+!reply_mode auto
+!reply_mode reset
+```
+
+`!reply_mode` and `!reply_mode show` (also `list` or `status`) show the mode the room uses and whether it is an override.
+`!reply_mode mentions` and `!reply_mode auto` set an override that takes precedence over `rooms.<key>.reply_mode`.
+`!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
+Only Matrix room admins can set or reset the override; others get `Room admin only.`
+The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+
 ## Threading (MSC3440)
 
 Agents reply in [MSC3440](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3440-threading-via-relations.md) threads.
@@ -52,6 +88,8 @@ The rules are:
 3. **Threads with one human**: normal auto-response behavior applies, so the agent or team continues the conversation.
 4. **Threads with two or more humans**: explicit targeting is required, except for agents using adaptive participation.
 5. **Mentioning another joined room participant**: if a message tags only joined users who are neither agents, teams, nor configured bot accounts, agents and teams stay silent.
+
+A room in the `mentions` [reply mode](#reply-mode) also needs a mention to start a conversation.
 
 MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is empty from HTML mention pills in `formatted_body`, or otherwise from plain `@name` text in the body, so bridged messages without mention metadata still count.
 Mentions of users who are not in the room or only invited do not suppress normal responses.

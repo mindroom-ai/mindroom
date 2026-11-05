@@ -47,6 +47,7 @@ from mindroom.config.validation import (
     validate_matrix_localpart,
     validate_unique_entries,
 )
+from mindroom.room_reply_modes import RoomReplyMode  # noqa: TC001
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
@@ -635,6 +636,14 @@ class RoomConfig(BaseModel):
     admins: OwnerPlaceholderUserIds | None = Field(
         default=None,
         description="Room-specific Matrix administrator override",
+    )
+    reply_mode: RoomReplyMode = Field(
+        default="auto",
+        description=(
+            "'auto' lets the router and the room's only agent or team answer a message that mentions no one; "
+            "'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or "
+            "team already replied in"
+        ),
     )
 
     @model_serializer(mode="wrap")

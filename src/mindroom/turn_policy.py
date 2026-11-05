@@ -636,6 +636,10 @@ class TurnPolicy:
         router_event: DispatchEvent | None = None,
     ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
+        if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
+            self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
+            is_router = self.deps.agent_name == ROUTER_AGENT_NAME
+            return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
         router_plan = await self._plan_router_dispatch(
             room,
             event,
@@ -656,6 +660,34 @@ class TurnPolicy:
         if action.kind == "skip":
             return DispatchPlan(kind="ignore")
         return DispatchPlan(kind="respond", response_action=action)
+
+    def _reply_mode_awaits_mention(
+        self,
+        dispatch: PreparedDispatch,
+        *,
+        has_active_response_for_target: Callable[[MessageTarget], bool],
+    ) -> bool:
+        """Return whether a `mentions` room leaves this person's message, which mentions no one, to nobody.
+
+        In such a room a message that mentions no agent or team is answered only in a thread an agent or team already
+        replied in or is still answering. Scheduled tasks, hooks, external triggers, and every other turn no person
+        wrote follow the room's ordinary rules.
+        """
+        context = dispatch.context
+        if context.mentioned_agents or not dispatch.envelope.origin.may_answer_interactive_prompt:
+            return False
+        config = self.deps.runtime.config
+        if config.get_room_reply_mode(self.deps.runtime_paths, dispatch.target.room_id) != "mentions":
+            return False
+        # A thread whose history could not be read in full proves no reply, so it needs a mention too.
+        if get_agents_in_thread(context.planning_thread_history, config, self.deps.runtime_paths):
+            return False
+        return not self._should_queue_follow_up_in_active_response_thread(
+            context=context,
+            target=dispatch.target,
+            source_envelope=dispatch.envelope,
+            has_active_response_for_target=has_active_response_for_target,
+        )
 
     def _only_the_contact_answerer(
         self,

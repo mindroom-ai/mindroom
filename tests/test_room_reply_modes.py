@@ -1,0 +1,359 @@
+"""Tests for a room's reply mode: its config field, its `!reply_mode` override, and who answers under each mode."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import nio
+import pytest
+from pydantic import ValidationError
+
+from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
+from mindroom.config.agent import AgentConfig, RoomConfig
+from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.dispatch_source import (
+    EXTERNAL_TRIGGER_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
+)
+from mindroom.matrix.state import MatrixState
+from mindroom.message_target import MessageTarget
+from mindroom.room_reply_modes import (
+    _store_path,
+    clear_room_reply_mode_override,
+    resolve_room_reply_mode_override,
+    set_room_reply_mode_override,
+)
+from tests.authorization_helpers import make_test_command_handler_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_visible_message,
+    message_origin,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+from tests.matrix_state_helpers import save_matrix_state
+from tests.test_turn_policy import _context, _dispatch, _entity_id, _policy_for, _room_with_members, _text_event
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.room_reply_modes import RoomReplyMode
+
+ROOM_ID = "!test:localhost"
+SENDER = "@user:localhost"
+OTHER_HUMAN = "@other:localhost"
+ADMIN = "@admin:localhost"
+THREAD_ID = "$thread:localhost"
+
+
+@dataclass(frozen=True)
+class _CommandEvent:
+    sender: str
+    event_id: str
+    body: str
+    source: dict[str, dict[str, str]]
+
+
+def _config(tmp_path: Path, *, reply_mode: RoomReplyMode | None = None, room_key: str = ROOM_ID) -> Config:
+    rooms = {} if reply_mode is None else {room_key: RoomConfig(reply_mode=reply_mode)}
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "research": AgentConfig(display_name="Research"),
+            },
+            rooms=rooms,
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+
+def _command_context(config: Config) -> CommandHandlerContext:
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"users": {ADMIN: 100}, "users_default": 0},
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id=ROOM_ID,
+    )
+    return make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM_ID, None, "$event"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=AsyncMock(return_value="$reply"),
+    )
+
+
+async def _run_reply_mode_command(context: CommandHandlerContext, sender: str, args_text: str) -> str:
+    """Run `!reply_mode <args_text>` as ``sender`` and return the reply."""
+    body = f"!reply_mode {args_text}".strip()
+    await handle_command(
+        context=context,
+        room=SimpleNamespace(room_id=ROOM_ID),
+        event=_CommandEvent(sender=sender, event_id="$event", body=body, source={"content": {"body": body}}),
+        command=Command(type=CommandType.REPLY_MODE, args={"args_text": args_text}, raw_text=body),
+        requester_user_id=sender,
+    )
+    return context.send_response.await_args.args[0]
+
+
+def test_room_reply_mode_defaults_to_auto_and_rejects_unknown_modes() -> None:
+    """`rooms.<room>.reply_mode` is `auto` unless set to `mentions`, and no other value validates."""
+    assert RoomConfig().reply_mode == "auto"
+    assert RoomConfig(reply_mode="mentions").reply_mode == "mentions"
+    with pytest.raises(ValidationError, match="reply_mode"):
+        RoomConfig(reply_mode="never")
+
+
+def test_room_reply_mode_store_roundtrip_drops_invalid_records(tmp_path: Path) -> None:
+    """The override persists outside config.yaml, and a record with an unknown mode reads as no override."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = _store_path(runtime_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"!other:localhost": {"mode": "never", "set_at": "2026-11-04T00:00:00+00:00"}}),
+        encoding="utf-8",
+    )
+
+    assert resolve_room_reply_mode_override(runtime_paths, "!other:localhost") is None
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) is None
+    set_room_reply_mode_override(runtime_paths, room_id=ROOM_ID, mode="mentions")
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+    assert clear_room_reply_mode_override(runtime_paths, ROOM_ID) is True
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) is None
+    assert clear_room_reply_mode_override(runtime_paths, ROOM_ID) is False
+
+
+def test_room_reply_mode_reads_the_room_entry_by_room_key(tmp_path: Path) -> None:
+    """A `rooms` entry keyed by a managed room's key sets that room's mode, and every other room stays `auto`."""
+    config = _config(tmp_path, reply_mode="mentions", room_key="lobby")
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    state.add_room("lobby", ROOM_ID, "#lobby:localhost", "Lobby")
+    save_matrix_state(state, runtime_paths)
+
+    assert config.get_room_reply_mode(runtime_paths, ROOM_ID) == "mentions"
+    assert config.get_room_reply_mode(runtime_paths, "!other:localhost") == "auto"
+
+
+@pytest.mark.parametrize(("configured", "override"), [("auto", "mentions"), ("mentions", "auto")])
+def test_room_reply_mode_override_beats_config(tmp_path: Path, configured: str, override: str) -> None:
+    """The `!reply_mode` override decides over `rooms.<room>.reply_mode` until it is reset."""
+    config = _config(tmp_path, reply_mode=configured)
+    runtime_paths = runtime_paths_for(config)
+
+    set_room_reply_mode_override(runtime_paths, room_id=ROOM_ID, mode=override)
+    assert config.get_room_reply_mode(runtime_paths, ROOM_ID) == override
+    clear_room_reply_mode_override(runtime_paths, ROOM_ID)
+    assert config.get_room_reply_mode(runtime_paths, ROOM_ID) == configured
+
+
+def test_reply_mode_command_parsing_and_help() -> None:
+    """`!reply_mode` parses with or without a mode in every spelling, and `!help` explains it."""
+    for text, args_text in (("!reply_mode", ""), ("!reply-mode mentions", "mentions"), ("!replymode auto", "auto")):
+        command = command_parser.parse(text)
+        assert command is not None
+        assert command.type == CommandType.REPLY_MODE
+        assert command.args["args_text"] == args_text
+    for topic in ("reply_mode", "reply-mode", "replymode"):
+        assert "**Reply Mode Command**" in get_command_help(topic)
+
+
+@pytest.mark.asyncio
+async def test_reply_mode_command_shows_sets_and_resets_the_override(tmp_path: Path) -> None:
+    """Anyone sees the room's mode; only a room admin sets or resets it, and an unknown mode changes nothing."""
+    context = _command_context(_config(tmp_path, reply_mode="mentions"))
+    runtime_paths = context.runtime_paths
+
+    assert "configured `mentions` reply mode" in await _run_reply_mode_command(context, SENDER, "show")
+    assert await _run_reply_mode_command(context, SENDER, "auto") == "❌ Room admin only."
+    assert (await _run_reply_mode_command(context, ADMIN, "never")).startswith("❌ Unknown reply mode `never`.")
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) is None
+
+    assert "now uses `auto` reply mode" in await _run_reply_mode_command(context, ADMIN, "auto")
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "auto"
+    assert "`auto` reply mode override" in await _run_reply_mode_command(context, SENDER, "")
+    assert await _run_reply_mode_command(context, SENDER, "reset") == "❌ Room admin only."
+
+    assert "override removed" in await _run_reply_mode_command(context, ADMIN, "reset")
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) is None
+
+
+@dataclass(frozen=True)
+class _Turn:
+    """One turn in a room: the agents there, where the turn is, whom it mentions, and what sent it."""
+
+    agents: tuple[str, ...] = ("general",)
+    with_router: bool = True
+    dm: bool = False
+    # Who already wrote in the turn's thread, as entity names or Matrix user IDs; None for a room-level message.
+    thread: tuple[str, ...] | None = None
+    # Whether that thread's history could be read in full.
+    full_history: bool = True
+    mention: str | None = None
+    source_kind: str = MESSAGE_SOURCE_KIND
+    # The bot still answering in the turn's thread, if one is.
+    answering: str | None = None
+
+
+_BOTH = ("general", "research")
+# Who answers each turn under each reply mode: each bot that does not ignore it, and how it answers.
+_WHO_ANSWERS = [
+    pytest.param(_Turn(), {"general": "individual"}, {}, id="untagged-room-message-sole-agent"),
+    pytest.param(_Turn(agents=_BOTH), {ROUTER_AGENT_NAME: "route"}, {}, id="untagged-room-message-two-agents"),
+    pytest.param(_Turn(agents=_BOTH, with_router=False, dm=True), {"general": "team"}, {}, id="untagged-dm-two-agents"),
+    pytest.param(_Turn(thread=(SENDER,)), {"general": "individual"}, {}, id="untagged-thread-of-one-person"),
+    pytest.param(
+        _Turn(agents=_BOTH, mention="general"),
+        {"general": "individual"},
+        {"general": "individual"},
+        id="mentions-general",
+    ),
+    pytest.param(
+        _Turn(agents=_BOTH, mention=ROUTER_AGENT_NAME),
+        {ROUTER_AGENT_NAME: "reject"},
+        {ROUTER_AGENT_NAME: "reject"},
+        id="mentions-only-the-router",
+    ),
+    pytest.param(
+        _Turn(agents=_BOTH, thread=(SENDER, "general")),
+        {"general": "individual"},
+        {"general": "individual"},
+        id="untagged-follow-up-after-general-replied",
+    ),
+    pytest.param(
+        _Turn(thread=(SENDER,), answering="general"),
+        {"general": "individual"},
+        {"general": "individual"},
+        id="untagged-follow-up-while-general-answers",
+    ),
+    pytest.param(_Turn(thread=(SENDER, OTHER_HUMAN, "general")), {}, {}, id="untagged-follow-up-two-people"),
+    pytest.param(
+        _Turn(thread=(SENDER, "general"), full_history=False),
+        {"general": "individual"},
+        {},
+        id="untagged-follow-up-in-an-unreadable-thread",
+    ),
+    pytest.param(
+        _Turn(source_kind=SCHEDULED_SOURCE_KIND),
+        {"general": "individual"},
+        {"general": "individual"},
+        id="untagged-scheduled-task",
+    ),
+    pytest.param(
+        _Turn(source_kind=HOOK_DISPATCH_SOURCE_KIND),
+        {"general": "individual"},
+        {"general": "individual"},
+        id="untagged-hook-dispatch",
+    ),
+    pytest.param(
+        _Turn(source_kind=EXTERNAL_TRIGGER_SOURCE_KIND),
+        {"general": "individual"},
+        {"general": "individual"},
+        id="untagged-external-trigger",
+    ),
+]
+
+
+async def _answers(config: Config, turn: _Turn) -> dict[str, str]:
+    """Plan ``turn`` on every bot in its room and return how each bot that does not ignore it answers."""
+    room = _room_with_members(SENDER, *(_entity_id(config, agent).full_id for agent in turn.agents))
+    mentioned = [] if turn.mention is None else [_entity_id(config, turn.mention)]
+    history = None
+    if turn.thread is not None:
+        history = [
+            make_visible_message(
+                sender=_entity_id(config, sender).full_id if sender in config.agents else sender,
+                body="earlier",
+            )
+            for sender in turn.thread
+        ]
+    bots = (ROUTER_AGENT_NAME, *turn.agents) if turn.with_router else turn.agents
+    answers: dict[str, str] = {}
+    with patch("mindroom.turn_policy.is_dm_room", new=AsyncMock(return_value=turn.dm)):
+        for bot in bots:
+            context = _context(
+                mentioned=mentioned,
+                am_i_mentioned=bot == turn.mention,
+                thread_id=None if turn.thread is None else THREAD_ID,
+                thread_history=history,
+                full_history=turn.full_history,
+            )
+            dispatch = _dispatch(context, agent_name=bot)
+            if turn.source_kind != MESSAGE_SOURCE_KIND:
+                origin = message_origin(
+                    sender_id=_entity_id(config, ROUTER_AGENT_NAME).full_id,
+                    requester_id=SENDER,
+                    sender_entity_name=ROUTER_AGENT_NAME,
+                    source_kind=turn.source_kind,
+                )
+                dispatch = replace(dispatch, envelope=replace(dispatch.envelope, origin=origin))
+            plan = await _policy_for(config, bot).plan_turn(
+                room,
+                _text_event("hello agents"),
+                dispatch,
+                has_active_response_for_target=lambda _target, bot=bot: bot == turn.answering,
+            )
+            if plan.kind == "respond":
+                answers[bot] = plan.response_action.kind
+            elif plan.kind == "route":
+                answers[bot] = "route"
+    return answers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("set_by", ["config", "override"])
+@pytest.mark.parametrize("mode", ["auto", "mentions"])
+@pytest.mark.parametrize(("turn", "auto", "mentions"), _WHO_ANSWERS)
+async def test_reply_mode_decides_who_answers(
+    tmp_path: Path,
+    set_by: str,
+    mode: RoomReplyMode,
+    turn: _Turn,
+    auto: dict[str, str],
+    mentions: dict[str, str],
+) -> None:
+    """In `mentions` mode only a mention starts a conversation; threads with an agent, and automation, work as in `auto`.
+
+    The mode decides the same way when config sets it and when a `!reply_mode` override sets it over the other mode.
+    """
+    if set_by == "config":
+        config = _config(tmp_path, reply_mode=mode)
+    else:
+        config = _config(tmp_path, reply_mode="mentions" if mode == "auto" else "auto")
+        set_room_reply_mode_override(runtime_paths_for(config), room_id=ROOM_ID, mode=mode)
+
+    assert await _answers(config, turn) == (auto if mode == "auto" else mentions)
+
+
+@pytest.mark.asyncio
+async def test_mentions_room_flow_from_a_mention_to_an_admin_switching_back(tmp_path: Path) -> None:
+    """A `mentions` room answers a mention and its thread's follow-ups, until an admin's `auto` brings routing back."""
+    config = _config(tmp_path, reply_mode="mentions")
+    two_agents = _Turn(agents=_BOTH)
+
+    assert await _answers(config, two_agents) == {}
+    assert await _answers(config, replace(two_agents, mention="general")) == {"general": "individual"}
+    followed = replace(two_agents, thread=(SENDER, "general"))
+    assert await _answers(config, followed) == {"general": "individual"}
+    assert await _answers(config, replace(two_agents, thread=(SENDER,))) == {}
+
+    await _run_reply_mode_command(_command_context(config), ADMIN, "auto")
+
+    assert resolve_room_reply_mode_override(runtime_paths_for(config), ROOM_ID) == "auto"
+    assert await _answers(config, two_agents) == {ROUTER_AGENT_NAME: "route"}
+    assert await _answers(config, followed) == {"general": "individual"}
