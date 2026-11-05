@@ -21,6 +21,7 @@ from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.plugin_check import check_plugin
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.plugins import dispose_plugins, prepare_plugins, refresh_plugins
 from tests.conftest import bind_runtime_paths, publish_test_plugins
@@ -93,15 +94,47 @@ async def secret(room_id: str) -> dict:
 """
 
 
-def _write_plugin(tmp_path: Path, routes_source: str | None, *, name: str = "demo") -> None:
-    """Write plugin ``name`` under ``tmp_path/plugins``, with ``routes_source`` as its routes module when given."""
+TOOLS = """
+from agno.tools import Toolkit
+
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
+from mindroom.tool_system.registration import register_tool_with_metadata
+
+
+class DemoTool(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="demo", tools=[])
+
+
+@register_tool_with_metadata(
+    name="demo_routes_tool",
+    display_name="Demo",
+    description="A tool beside the plugin's routes",
+    file_access=ToolFileAccess.NONE,
+    category=ToolCategory.DEVELOPMENT,
+)
+def demo_tools():
+    return DemoTool
+"""
+
+
+def _write_plugin(
+    tmp_path: Path,
+    routes_source: str | None,
+    *,
+    name: str = "demo",
+    tools_source: str | None = None,
+) -> Path:
+    """Write plugin ``name`` under ``tmp_path/plugins`` with the routes and tools modules given; return its root."""
     root = tmp_path / "plugins" / name
     root.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, str] = {"name": name}
-    if routes_source is not None:
-        manifest["routes_module"] = "routes.py"
-        (root / "routes.py").write_text(routes_source, encoding="utf-8")
+    for kind, source in (("routes", routes_source), ("tools", tools_source)):
+        if source is not None:
+            manifest[f"{kind}_module"] = f"{kind}.py"
+            (root / f"{kind}.py").write_text(source, encoding="utf-8")
     (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return root
 
 
 def _config(tmp_path: Path, *names: str) -> tuple[Config, RuntimePaths]:
@@ -210,13 +243,21 @@ def test_raising_route_answers_an_opaque_500_and_the_app_keeps_serving(tmp_path:
     assert client.get("/api/plugins/demo/ping").json() == {"pong": True}
 
 
-def test_routes_module_without_router_fails_validation(tmp_path: Path) -> None:
-    """A routes module without a module-level APIRouter named router fails the plugin's load."""
-    _write_plugin(tmp_path, "ROUTER = None\n")
+def test_routes_module_without_router_costs_only_the_routes(tmp_path: Path) -> None:
+    """A reload whose routes module lacks ``router`` drops only the plugin's routes, and the plugin check fails it."""
+    root = _write_plugin(tmp_path, ROUTES, tools_source=TOOLS)
     config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    client = TestClient(_app(config, runtime_paths))
+    assert client.get("/api/plugins/demo/ping").status_code == 200
 
+    _write_plugin(tmp_path, "ROUTER = None\n", tools_source=TOOLS)
+    [plugin] = publish_test_plugins(config, runtime_paths).loaded_plugins
+
+    assert (set(plugin.tools), plugin.router) == ({"demo_routes_tool"}, None)
+    assert client.get("/api/plugins/demo/ping").status_code == 404
     with pytest.raises(PluginValidationError, match=r"Plugin routes module must define router: APIRouter"):
-        publish_test_plugins(config, runtime_paths)
+        check_plugin(root)
 
 
 def test_reload_serves_new_router(tmp_path: Path) -> None:
@@ -284,7 +325,8 @@ def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
     assert (plugin.name, plugin.router) == ("demo", None)
     generation = prepare_plugins(config, runtime_paths)
     dispose_plugins(generation)
-    assert "routes module imported" in str(generation.skipped[0].error)
+    [plugin] = generation.plugins.values()
+    assert "routes module imported" in str(plugin.routes_error)
 
 
 def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path) -> None:

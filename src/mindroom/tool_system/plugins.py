@@ -86,6 +86,8 @@ class _LoadedPlugin:
     oauth_callback: Callable[..., object] | None
     # Set by staged loads (the primary's and the CLI checks'); worker loads never import a routes module.
     router: APIRouter | None
+    # Why a staged load serves no routes from the plugin's routes module, which leaves its tools and hooks loaded.
+    routes_error: plugin_imports.PluginValidationError | None
     modules: tuple[ModuleType, ...]
 
 
@@ -692,9 +694,18 @@ def _materialize_plugin(
         else _load_plugin_module(plugin.name, plugin.root, plugin.hooks_module_path, kind="hooks")
     )
     oauth_entry = _load_plugin_module(plugin.name, plugin.root, plugin.oauth_module_path, kind="oauth")
-    routes_entry = (
-        _load_plugin_module(plugin.name, plugin.root, plugin.routes_module_path, kind="routes") if routes else None
-    )
+    routes_entry: plugin_imports._ModuleCacheEntry | None = None
+    router: APIRouter | None = None
+    routes_error: plugin_imports.PluginValidationError | None = None
+    if routes and plugin.routes_module_path is not None:
+        # A broken routes module costs only the routes: a reload must not take the plugin's tools from agents.
+        try:
+            routes_entry = _load_plugin_module(plugin.name, plugin.root, plugin.routes_module_path, kind="routes")
+            assert routes_entry is not None
+            router = _plugin_router(routes_entry.module)
+        except plugin_imports.PluginValidationError as error:
+            logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
+            routes_error = error
     entries = tuple(
         dict.fromkeys(entry for entry in (tools_entry, hooks_entry, oauth_entry, routes_entry) if entry is not None),
     )
@@ -724,7 +735,8 @@ def _materialize_plugin(
         discovered_hooks=tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else (),
         discovered_automations=tuple(iter_module_automations(hooks_module)) if hooks_module is not None else (),
         oauth_callback=_oauth_provider_callback(oauth_entry.module) if oauth_entry is not None else None,
-        router=_plugin_router(routes_entry.module) if routes_entry is not None else None,
+        router=router,
+        routes_error=routes_error,
         modules=modules,
     )
 

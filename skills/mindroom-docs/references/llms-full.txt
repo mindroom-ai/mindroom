@@ -18103,8 +18103,8 @@ async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> di
     Never return `text/html`, or any other content a browser would render, such as SVG, built from untrusted input such as Matrix messages, room names, or request parameters.
     Return JSON. MindRoom answers every response under `/api/plugins/` with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, whatever the route sets, so a browser neither guesses another type nor runs script or loads anything in a page a route returns; that is a backstop, not a licence to return pages.
 
-A routes module without `router` fails the plugin's load with `Plugin routes module must define router: APIRouter`, and MindRoom then skips the whole plugin, tools included.
-Only `mindroom plugins check` fails on a routes module that does not load; `mindroom config validate` and `mindroom doctor` import it too, but only log `Failed to load plugin, skipping` and still pass the config.
+A routes module that raises as it loads, or has no `router` (`Plugin routes module must define router: APIRouter`), costs the plugin only its routes: MindRoom logs `Plugin routes failed to load; serving none` with the reason, its paths answer 404, and its tools and hooks keep working, after a reload too.
+Only `mindroom plugins check` fails on such a routes module; `mindroom config validate` and `mindroom doctor` import it too, but only log it and still pass the config.
 Routes follow plugin reloads, so the next request after a reload runs the new code.
 A request for a plugin that is not loaded or has no routes, or for a path its router does not define, answers 404.
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
