@@ -142,6 +142,8 @@ class _Turns:
     error_replies: bool = False
     # The one room whose turns fail with ``error``; None fails them in every room.
     error_room: str | None = None
+    # The one message whose turns fail with ``error``, as one too large for the model does; None fails every turn.
+    poison: str | None = None
     # What happens elsewhere while the turn runs, such as a config reload.
     meanwhile: Callable[[], Awaitable[None]] | None = None
 
@@ -158,7 +160,8 @@ class _Turns:
         self.contexts.append(ctx)
         if self.meanwhile is not None:
             await self.meanwhile()
-        error = self.error if self.error_room in (None, ctx.room_id) else None
+        failing = self.error_room in (None, ctx.room_id) and self.poison in (None, *self.heard())
+        error = self.error if failing else None
         if error is not None and self.error_replies:
             return TurnResult(text=REPLY, failed=HandledAttempt(reply=FailedReply(text=REPLY, error=error)))
         if error is not None:
@@ -1038,7 +1041,7 @@ async def test_a_halved_turn_that_succeeds_moves_the_marker_only_past_what_it_he
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After a halved turn succeeds, the rest is heard by the next turn, at full size again."""
+    """After a halved turn succeeds, the rest is heard by the next turn, and each moves the marker past what it heard."""
     listening = _listening(tmp_path, journal_store, monkeypatch, {"max_runs_per_hour": 60})
     await listening.service._poll_once(T0)
     for index in range(4):
@@ -1057,6 +1060,27 @@ async def test_a_halved_turn_that_succeeds_moves_the_marker_only_past_what_it_he
 
     assert listening.turns.heard() == ["$m2", "$m3"]
     assert listening.marker_event() == "$bob"
+
+
+async def test_turns_keep_the_halved_size_until_they_pass_the_batch_that_failed(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A smaller turn that succeeds leaves the rest of the failed batch at that size, so it is not tried whole again."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_runs_per_hour": 60})
+    await listening.service._poll_once(T0)
+    for index in range(8):
+        await listening.say(f"$m{index}", 10 + index)
+    listening.turns.error = RuntimeError("context length exceeded")
+    listening.turns.poison = "$m3"
+
+    for poll in range(15):
+        await listening.service._poll_once(T0 + 100 + poll)
+
+    assert [len(heard) for heard in listening.turns.heard_in(ROOM)] == [8, 8, 8, 4, 4, 4, 2, 2, 2, 2, 1, 1, 1, 1, 4]
+    assert listening.turns.heard() == ["$m4", "$m5", "$m6", "$m7"]
+    assert listening.marker_event() == "$m7"
 
 
 async def test_a_failing_room_does_not_starve_the_agents_other_rooms(

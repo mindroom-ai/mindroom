@@ -9,7 +9,8 @@ they take turns at the cap, least recently run first. Each room reads the curren
 leaves its turn to the next poll, so a turn always starts under the config of its start.
 
 No room stalls for good: a turn that keeps failing hears fewer messages until one message alone fails, which is then
-skipped, and a message whose refetch never arrives is skipped after a while. Each skip is logged, and a skipped message
+skipped, and turns stay that small until they pass the first batch that failed; a message whose refetch never arrives
+is skipped after a while. Each skip is logged, and a skipped message
 is never heard.
 """
 
@@ -76,6 +77,8 @@ class _Failures:
     count: int = 0
     # None hears as many as fit.
     batch: int | None = None
+    # The last message of the first batch that failed: turns keep to ``batch`` until the marker passes it.
+    until: ConversationCursor | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,10 @@ class _Wait:
 
     logical_event_id: str
     since: float
+
+
+def _position(cursor: ConversationCursor) -> tuple[int, str]:
+    return (cursor.created_ts, cursor.logical_event_id)
 
 
 def _cursor(message: ResolvedVisibleMessage) -> ConversationCursor:
@@ -117,7 +124,7 @@ def _first_marker(newest: ConversationCursor | None, now: float) -> Conversation
     started = ConversationCursor(created_ts=int(now * 1000), logical_event_id="")
     if newest is None or newest.created_ts > started.created_ts:
         return started
-    return max(newest, started, key=lambda cursor: (cursor.created_ts, cursor.logical_event_id))
+    return max(newest, started, key=_position)
 
 
 @dataclass
@@ -322,8 +329,12 @@ class ListeningService:
         except Exception:
             await self._turn_failed(agent_name, room_id, failures, batch)
             raise
+        end = page_end if len(batch) == len(heard) else _cursor(batch[-1])
         self._failures.pop((agent_name, room_id), None)
-        await self._mark(agent_name, room_id, page_end if len(batch) == len(heard) else _cursor(batch[-1]))
+        if failures.batch is not None and failures.until is not None and _position(end) < _position(failures.until):
+            # The rest of the batch that failed is heard at the halved size too, so it is not tried whole again.
+            self._failures[agent_name, room_id] = _Failures(end, batch=failures.batch, until=failures.until)
+        await self._mark(agent_name, room_id, end)
 
     async def _turn_failed(
         self,
@@ -334,6 +345,8 @@ class ListeningService:
     ) -> None:
         """Count a failed turn over ``batch``; the third in a row halves the next batch, or skips a lone message."""
         failures.count += 1
+        if failures.until is None:
+            failures.until = _cursor(batch[-1])
         self._failures[agent_name, room_id] = failures
         if failures.count < _FAILURES_PER_BATCH:
             return
