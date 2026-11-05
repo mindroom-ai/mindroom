@@ -393,8 +393,8 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
     install_bots(
         orchestrator,
         {
-            ROUTER_AGENT_NAME: MagicMock(spec=AgentBot),
-            "code": MagicMock(spec=AgentBot),
+            ROUTER_AGENT_NAME: MagicMock(spec=AgentBot, running=False),
+            "code": MagicMock(spec=AgentBot, running=False),
         },
     )
     plan = build_config_update_plan(
@@ -447,7 +447,10 @@ async def test_handle_mcp_catalog_change_replaces_only_dependent_entities(tmp_pa
     config = _config(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=config)
     orchestrator.running = True
-    install_bots(orchestrator, {name: MagicMock(spec=AgentBot) for name in ("code", "dev_team", "plain")})
+    install_bots(
+        orchestrator,
+        {name: MagicMock(spec=AgentBot, running=False) for name in ("code", "dev_team", "plain")},
+    )
 
     with patch.object(
         orchestrator.fleet,
@@ -499,7 +502,7 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
     runtime_paths = _runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config(tmp_path))
     orchestrator.running = True
-    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
+    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot, running=False)})
     started_bot = MagicMock(spec=AgentBot)
     call_order: list[str] = []
 
@@ -538,7 +541,7 @@ async def test_mcp_restart_rebinds_trigger_delivery_unless_shutdown_withdrew_it(
     runtime_paths = _runtime_paths(tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config(tmp_path))
     orchestrator.running = True
-    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
+    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot, running=False)})
 
     async def setup_rooms(_started_bots: list[object]) -> None:
         if room_setup == "fails":
@@ -902,7 +905,7 @@ async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_pat
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
     orchestrator.running = True
-    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
+    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot, running=False)})
 
     first_restart_entered = asyncio.Event()
     allow_first_restart_to_finish = asyncio.Event()
