@@ -39,6 +39,8 @@ _FAILING_TOOL_ERROR_TEXT = (
     "Tool {name} failed on {failures} attempts in a row in this turn, so this call was not executed. Its last error: "
     "{error}\nDon't call {name} again in this turn. Tell the user what failed instead."
 )
+# The user reads this at the end of a reply whose run the loop ended because the model kept calling a failing tool.
+_FAILING_TOOL_STOP_TEXT = "Stopped: tool {name} failed on {failures} attempts in a row. Its last error: {error}"
 # A tool whose calls ran and failed in this many batches in a row within one turn, with no success of it in between,
 # is not run again in that turn. A model that keeps resending a call the tool rejects, or retrying an integration that
 # is down, otherwise loops until the per-turn call limit, paying for a model request per attempt; a batch counts once,
@@ -181,6 +183,15 @@ def count_tool_failures(failing_tools: dict[str, FailingTool], executions: Itera
             tool.last_error = error
 
 
+def failing_tool_stop_text(name: str, tool: FailingTool) -> str:
+    """Return the line that ends a reply whose run the loop ended because the model kept calling ``name``."""
+    return _FAILING_TOOL_STOP_TEXT.format(name=name, failures=tool.failures, error=_quoted_error(tool))
+
+
+def _quoted_error(tool: FailingTool) -> str:
+    return (tool.last_error or "unknown")[:_MAX_QUOTED_ERROR]
+
+
 def plan_tool_batch(
     tool_calls: Sequence[Mapping[str, Any]],
     functions: Mapping[str, ToolFunction],
@@ -231,8 +242,9 @@ def plan_tool_batch(
                 tool_name=function.name,
                 consecutive_failures=tool.failures,
             )
-            error = (tool.last_error or "unknown")[:_MAX_QUOTED_ERROR]
-            text = _FAILING_TOOL_ERROR_TEXT.format(name=function.name, failures=tool.failures, error=error)
+            text = _FAILING_TOOL_ERROR_TEXT.format(
+                name=function.name, failures=tool.failures, error=_quoted_error(tool)
+            )
             calls.append(_refused(call_id, function.name, text, arguments, counts=True))
             refused_for_failures[function.name] = None
             continue
@@ -444,6 +456,7 @@ __all__ = [
     "count_tool_failures",
     "dispatch_tool_calls",
     "failed_answer",
+    "failing_tool_stop_text",
     "is_media_follow_up",
     "media_follow_up",
     "offered_toolkits",

@@ -204,6 +204,31 @@ Each call to a tool the run does not offer logs a `tool_not_offered` warning, an
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 
+### `failing_tool_call_refused`
+
+Logged for each call the loop refuses because the tool's calls failed in 8 model requests in a row within one turn, with no success of it in between.
+Several failed calls in one request count once; calls the loop answered without running (unknown tools, undecodable arguments, the call limit, denied approvals) and calls a person approved do not count.
+The model gets the tool's last error and is told to stop calling it; the run's other tools keep working.
+
+| Field | Meaning |
+|-------|---------|
+| `entity` | Agent or team name |
+| `tool_name` | The refused tool |
+| `consecutive_failures` | Model requests in a row in which the tool failed |
+
+Check the tool's `tool_call_failed` warnings for the turn: one repeated error usually means an integration that is down, an expired grant, or arguments the model keeps resending.
+
+### `failing_tool_ended_run`
+
+Logged once when the model calls a refused tool again in a later request, after reading the refusal.
+The run ends before its next model request, and the reply ends with a line naming the tool and its last error.
+
+| Field | Meaning |
+|-------|---------|
+| `entity` | Agent or team name |
+| `tool_name` | The tool the model kept calling |
+| `refusals` | Requests in which the loop refused the tool |
+
 ### `tool_call_failed`
 
 Logged each time a tool call raises an error.

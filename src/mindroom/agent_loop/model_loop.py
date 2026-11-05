@@ -23,6 +23,7 @@ from mindroom.agent_loop.tools import (
     count_tool_failures,
     dispatch_tool_calls,
     failed_answer,
+    failing_tool_stop_text,
     media_follow_up,
     plan_tool_batch,
     tool_result_message,
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import RunContext
     from mindroom.agent_loop.tools import PreparedTools, ToolBatch
     from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
-    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolFunction
@@ -59,7 +60,7 @@ logger = get_logger(__name__)
 # requests; one more lets the model answer after its first refused batch.
 _EXTRA_MODEL_REQUESTS = 2
 # A tool refused for failing in this many batches was called again after the model read the refusal telling it to
-# stop, so the loop ends the run before its next request.
+# stop, so the loop ends the run before its next request, unless that batch paused: a resume always gets a request.
 _FAILING_TOOL_REFUSALS_BEFORE_END = 2
 # The per-run request settings of callers that have none; the loop fills ``messages`` and ``tools`` per request.
 EMPTY_REQUEST = ModelRequest(messages=())
@@ -162,16 +163,21 @@ type LoopEvent = TextDelta | ReasoningDelta | ToolStarted | ToolProgress | ToolC
 
 @dataclass
 class _Progress:
-    """What one loop accumulates across its iterations."""
+    """What one loop accumulates across its iterations.
+
+    ``ignored_refusal`` names a tool the last batch refused for failing after an earlier batch already had, which ends
+    the run before the next request.
+    """
 
     text_parts: list[str] = field(default_factory=list)
     calls_so_far: int = 0
     last_request: ModelRequest | None = None
     paused: bool = False
     stopped: bool = False
+    ignored_refusal: str | None = None
 
 
-async def run_model_loop(
+async def run_model_loop(  # noqa: C901
     model: ModelProvider,
     messages: list[Message],
     tools: PreparedTools,
@@ -215,6 +221,9 @@ async def run_model_loop(
         async for event in _answer_resumed(resumed, state, progress, hooks):
             yield event
     while not (progress.stopped or progress.paused):
+        if progress.ignored_refusal is not None:
+            yield _end_for_failing_tool(progress.ignored_refusal, state, progress)
+            break
         if not await _before_request(hooks, state, max_requests=max_requests):
             break
         request = state.request()
@@ -245,18 +254,24 @@ async def run_model_loop(
     yield LoopEnded(paused=progress.paused)
 
 
-def _keeps_calling_a_failing_tool(record: AnyRunRecord) -> bool:
-    """Return whether a tool was refused for failing in enough batches to end the run, logging the first such tool."""
-    for tool_name, tool in record.failing_tools.items():
-        if tool.refusals >= _FAILING_TOOL_REFUSALS_BEFORE_END:
-            logger.warning(
-                "failing_tool_ended_run",
-                entity=_entity(record),
-                tool_name=tool_name,
-                refusals=tool.refusals,
-            )
-            return True
-    return False
+def _ignored_refusal(record: AnyRunRecord, batch: ToolBatch) -> str | None:
+    """Return a tool ``batch`` refused for failing after an earlier batch already had, if any."""
+    for tool_name in batch.refused_for_failures:
+        if record.failing_tools[tool_name].refusals >= _FAILING_TOOL_REFUSALS_BEFORE_END:
+            return tool_name
+    return None
+
+
+def _end_for_failing_tool(tool_name: str, state: LoopState, progress: _Progress) -> TextDelta:
+    """Log the run's end for ``tool_name``, add the line that says why to its content, and return that line's delta."""
+    tool = state.record.failing_tools[tool_name]
+    logger.warning("failing_tool_ended_run", entity=_entity(state.record), tool_name=tool_name, refusals=tool.refusals)
+    text = failing_tool_stop_text(tool_name, tool)
+    # The reply streams the line after the text so far, so it starts a paragraph of its own there, as in the content.
+    delta = TextDelta(f"\n\n{text}" if any(part.strip() for part in progress.text_parts) else text)
+    progress.text_parts.append(text)
+    state.record.content = joined_texts([state.record.carried_content or "", *progress.text_parts])
+    return delta
 
 
 async def _before_request(
@@ -265,12 +280,7 @@ async def _before_request(
     *,
     max_requests: int | None,
 ) -> bool:
-    """Apply the loop's own stops, then the pre-request hooks; return whether to send the request or end the loop.
-
-    The loop stops a run whose model keeps calling a tool it refused for failing, and one past its request cap.
-    """
-    if _keeps_calling_a_failing_tool(state.record):
-        return False
+    """Apply the request cap, then the pre-request hooks; return whether to send the request or end the loop."""
     if max_requests is not None and state.request_index >= max_requests:
         logger.warning(
             "tool_call_limit_reached",
@@ -363,6 +373,7 @@ async def _run_tool_batch(
     progress.stopped = await _answer_batch(state.messages, batch.answers(executed), hooks.after_tool_batch)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
     progress.paused = batch.paused or _waits_for_decision(state.record)
+    progress.ignored_refusal = _ignored_refusal(state.record, batch)
 
 
 async def _answer_resumed(
@@ -378,7 +389,6 @@ async def _answer_resumed(
     a member that paused once more leaves the record waiting, so the loop sends no request.
     """
     results: list[Message] = []
-    approved: list[ToolExecution] = []
     for requirement in decided:
         execution = requirement.tool_execution
         if execution.confirmed is True:
@@ -395,7 +405,6 @@ async def _answer_resumed(
                         yield item
                     else:
                         results.append(item[1])
-            approved.append(execution)
             yield ToolCompleted(execution.call)
         elif execution.confirmed is False:
             execution.is_error = True
@@ -412,7 +421,6 @@ async def _answer_resumed(
         if execution.external_execution_required:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
-    count_tool_failures(state.record.failing_tools, approved)
     progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
     progress.paused = _waits_for_decision(state.record)
 

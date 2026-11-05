@@ -421,7 +421,8 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
     limit = MAX_CONSECUTIVE_TOOL_FAILURES
     model = ScriptedModel(
         [
-            *(calls(tool_call("boom", f"c{index}", reason=f"bad link {index}")) for index in range(1, limit + 3)),
+            calls(tool_call("boom", "c1", reason="bad link 1"), content="Fetching the file."),
+            *(calls(tool_call("boom", f"c{index}", reason=f"bad link {index}")) for index in range(2, limit + 3)),
             answer("never sent"),
         ],
     )
@@ -438,8 +439,12 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
     ]
     assert record.tools is not None
     assert all(tool.is_error for tool in record.tools)
-    # The model called it again after reading the refusal, so the run ends before another request.
+    # The model called it again after reading the refusal, so the run ends before another request, and the reply
+    # says why after the text so far.
+    stop = f"Stopped: tool boom failed on {limit} attempts in a row. Its last error: bad link {limit}"
     assert len(model.requests) == limit + 2
+    assert [event.text for event in events if isinstance(event, TextDelta)][-1] == f"\n\n{stop}"
+    assert record.content == f"Fetching the file.\n\n{stop}"
     assert events[-1] == LoopEnded(paused=False)
     refused = {"log_level": "warning", "entity": "code", "tool_name": "boom", "consecutive_failures": limit}
     assert _failing_tool_events(logs) == [
@@ -624,6 +629,54 @@ async def test_a_resume_keeps_refusing_a_tool_that_was_failing_before_the_pause(
     assert record.failing_tools["boom"].refusals == 1
     assert record.content == "done"
     assert events[-1] == LoopEnded(paused=False)
+
+
+async def test_a_second_refusal_in_a_batch_that_pauses_waits_for_the_resume() -> None:
+    model = ScriptedModel(
+        [calls(tool_call("boom", "refused", reason="again"), tool_call("echo", "gated", text="hi")), answer("x")],
+    )
+    record = _record()
+    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad", refusals=1)}
+
+    with capture_logs() as logs:
+        events, record = await _run(spec(model, toolkit(boom), gated(echo)), _prompt(), record=record)
+
+    assert events[-1] == LoopEnded(paused=True)
+    assert record.failing_tools["boom"].refusals == 2
+    assert not [entry for entry in logs if entry["event"] == "failing_tool_ended_run"]
+
+
+async def test_a_resume_after_a_second_refusal_lets_the_model_read_the_approved_result() -> None:
+    model = ScriptedModel([answer("done")])
+    execution = ToolExecution(tool_call_id="c1", tool_name="echo", tool_args={"text": "approved"})
+    execution.requires_confirmation = True
+    requirement = RunRequirement(execution)
+    requirement.confirm()
+    record = _record()
+    record.tools = [execution]
+    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad", refusals=2)}
+    messages = _prompt()
+
+    events, record = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
+
+    assert record.content == "done"
+    assert events[-1] == LoopEnded(paused=False)
+
+
+async def test_an_approved_call_that_fails_on_resume_does_not_count() -> None:
+    # The paused batch was counted when it paused, and a person decided this call.
+    model = ScriptedModel([answer("done")])
+    execution = ToolExecution(tool_call_id="c1", tool_name="boom", tool_args={"reason": "still broken"})
+    execution.requires_confirmation = True
+    requirement = RunRequirement(execution)
+    requirement.confirm()
+    record = _record()
+    record.tools = [execution]
+    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES - 1, last_error="bad")}
+
+    _, record = await _run(spec(model, gated(boom)), _prompt(), record=record, resumed=[requirement])
+
+    assert record.failing_tools["boom"].failures == MAX_CONSECUTIVE_TOOL_FAILURES - 1
 
 
 async def test_a_resume_answers_after_its_approved_call_whatever_failed_before_the_pause() -> None:
