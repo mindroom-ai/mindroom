@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
+    from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView, RoomPage
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
 logger = get_logger(__name__)
@@ -288,6 +288,14 @@ class ConversationReader:
             limit=limit,
             before=before,
         )
+
+    async def read_room_after(self, room_id: str, after: ConversationCursor | None, limit: int) -> RoomPage:
+        """Return up to ``limit`` visible messages of a whole room after a cursor, oldest first.
+
+        Every thread and the room level are read together, without waiting for
+        a hydration or a refetch: a message owing one is left out.
+        """
+        return await self.store.read_room_after(room_id=room_id, after=after, limit=limit)
 
     async def read_strict(
         self,

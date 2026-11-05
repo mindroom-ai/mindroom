@@ -2091,6 +2091,74 @@ class TestAdmittedThreadId:
         assert await alice.admitted_thread_id(room_id=OTHER_ROOM, event_id="$reply") == (False, None)
 
 
+class TestReadingAWholeRoom:
+    """A room read spans every thread and the room level after a cursor."""
+
+    async def _ids_after(self, store: PrincipalStore, after: ConversationCursor | None, limit: int = 50) -> list[str]:
+        page = await store.read_room_after(room_id=ROOM, after=after, limit=limit)
+        return [m.logical_event_id for m in page.messages]
+
+    async def test_read_room_after_spans_threads_oldest_first(self, alice: PrincipalStore) -> None:
+        """Room-level messages, a thread's root and replies, and other threads come together by time."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$other-thread", ts=1_500, thread_id="$elsewhere")
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+        await admit(alice, "$room-level", ts=3_000)
+
+        page = await alice.read_room_after(room_id=ROOM, after=None, limit=50)
+
+        assert [m.logical_event_id for m in page.messages] == ["$root", "$other-thread", "$reply", "$room-level"]
+        assert page.refresh_pending is False
+        assert page.last_cursor == ConversationCursor(created_ts=3_000, logical_event_id="$room-level")
+
+    async def test_read_room_after_excludes_cursor_and_before(self, alice: PrincipalStore) -> None:
+        """The cursor is exclusive, and a tie on time resolves by event ID."""
+        await admit(alice, "$a", ts=1_000)
+        await admit(alice, "$b", ts=2_000, thread_id="$a")
+        await admit(alice, "$c", ts=2_000)
+        await admit(alice, "$d", ts=3_000)
+
+        after = ConversationCursor(created_ts=2_000, logical_event_id="$b")
+
+        assert await self._ids_after(alice, after) == ["$c", "$d"]
+        assert await self._ids_after(alice, ConversationCursor(created_ts=3_000, logical_event_id="$d")) == []
+
+    async def test_read_room_after_limit(self, alice: PrincipalStore) -> None:
+        """A limited page is the oldest messages, and its last cursor continues the read."""
+        for index in range(5):
+            await admit(alice, f"$m{index}", ts=1_000 + index, thread_id="$t" if index % 2 else None)
+
+        first = await alice.read_room_after(room_id=ROOM, after=None, limit=2)
+        second = await alice.read_room_after(room_id=ROOM, after=first.last_cursor, limit=2)
+
+        assert [m.logical_event_id for m in first.messages] == ["$m0", "$m1"]
+        assert [m.logical_event_id for m in second.messages] == ["$m2", "$m3"]
+        with pytest.raises(ValueError, match="positive limit"):
+            await alice.read_room_after(room_id=ROOM, after=None, limit=0)
+
+    async def test_read_room_after_other_principal_sees_nothing(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Another principal's view, and another room, hold none of these messages."""
+        await admit(alice, "$a", ts=1_000)
+        bob = journal_store.principal("agent@bob")
+
+        assert (await bob.read_room_after(room_id=ROOM, after=None, limit=50)).messages == ()
+        assert await bob.latest_room_cursor(room_id=ROOM) is None
+        assert (await alice.read_room_after(room_id=OTHER_ROOM, after=None, limit=50)).messages == ()
+
+    async def test_latest_room_cursor(self, alice: PrincipalStore) -> None:
+        """The newest message of the room, in any thread, is the cursor."""
+        assert await alice.latest_room_cursor(room_id=ROOM) is None
+        await admit(alice, "$a", ts=1_000)
+        await admit(alice, "$b", ts=2_000, thread_id="$a")
+        await admit(alice, "$c", ts=2_000)
+
+        assert await alice.latest_room_cursor(room_id=ROOM) == ConversationCursor(2_000, "$c")
+
+
 class TestLatestVisibleEvent:
     """The reply target a thread-blind client is pointed at."""
 

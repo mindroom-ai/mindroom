@@ -16,6 +16,7 @@ from .models import (
     ConversationPage,
     HydrationCoverage,
     RefreshRequest,
+    RoomPage,
     VisibleMessage,
 )
 from .projection import decode_content
@@ -159,6 +160,69 @@ def read_conversation(
         refresh_pending=tuple(refresh_pending),
         next_cursor=next_cursor,
     )
+
+
+def read_room_after(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    after: ConversationCursor | None,
+    limit: int,
+) -> RoomPage:
+    """Return what a room holds after a cursor, every thread and the room level together, oldest first.
+
+    ``after`` is exclusive, and ``None`` starts at the room's first message.
+    The page is bounded by ``limit`` and by the same content budgets as
+    ``read_conversation``, so a caller continues from ``last_cursor``. A thread
+    root has no thread relation of its own and is stored at the room level, so
+    it appears once.
+    """
+    if limit <= 0:
+        msg = "A room read requires a positive limit"
+        raise ValueError(msg)
+    cursor_clause = "" if after is None else " AND (created_ts, logical_event_id) > (?, ?)"
+    cursor_params: tuple[object, ...] = () if after is None else (after.created_ts, after.logical_event_id)
+    sizes = tuple(
+        transaction.fetchall(
+            f"""
+            SELECT {_PAGE_SIZE_COLUMNS} FROM visible_messages
+            WHERE principal_id = ? AND room_id = ?{cursor_clause}
+            ORDER BY created_ts, logical_event_id
+            LIMIT ?
+            """,  # noqa: S608 - a fixed column list and a fixed clause, not input
+            (principal_id, room_id, *cursor_params, limit),
+        ),
+    )
+    kept = _rows_within_content_budget(sizes)
+    rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
+    rows = rows[: _rows_within_decoded_budget(rows)]
+    messages = tuple(_visible_message(row) for row in rows if row["content_json"] is not None)
+    return RoomPage(
+        messages=messages,
+        refresh_pending=any(row["content_json"] is None for row in rows),
+        last_cursor=(
+            ConversationCursor(created_ts=messages[-1].created_ts, logical_event_id=messages[-1].logical_event_id)
+            if messages
+            else None
+        ),
+    )
+
+
+def latest_room_cursor(transaction: Transaction, principal_id: str, *, room_id: str) -> ConversationCursor | None:
+    """Return the position of a room's newest visible message, or nothing if it has none."""
+    row = transaction.fetchone(
+        """
+        SELECT created_ts, logical_event_id FROM visible_messages
+        WHERE principal_id = ? AND room_id = ?
+        ORDER BY created_ts DESC, logical_event_id DESC
+        LIMIT 1
+        """,
+        (principal_id, room_id),
+    )
+    if row is None:
+        return None
+    return ConversationCursor(created_ts=int(row["created_ts"]), logical_event_id=row["logical_event_id"])
 
 
 def _page_rows(

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
         PendingPage,
         PermanentDeliveryFailure,
         RefreshRequest,
+        RoomPage,
         SemanticConsumer,
         UnreadableMatrixDelivery,
     )
@@ -245,6 +246,14 @@ class ConversationReadView(_HydrationMarkerView):
             limit=limit,
             before=before,
         )
+
+    async def read_room_after(self, *, room_id: str, after: ConversationCursor | None, limit: int) -> RoomPage:
+        """Return one bounded page of a whole room after a cursor, oldest first."""
+        return await self._read(reads.read_room_after, room_id=room_id, after=after, limit=limit)
+
+    async def latest_room_cursor(self, *, room_id: str) -> ConversationCursor | None:
+        """Return the position of a room's newest visible message, or nothing."""
+        return await self._read(reads.latest_room_cursor, room_id=room_id)
 
     async def latest_visible_event_id(self, *, room_id: str, thread_id: str) -> str | None:
         """Return the newest visible event in one thread, or nothing."""
