@@ -27,6 +27,7 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 10. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
     Every poll repeats them, and the conversation index orders by thread first, so without it each poll sorted the room in a temporary B-tree, which the journal's hot-query rule forbids.
 11. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
+    Its key is at most 8 characters with no whitespace, enough for any emoji sequence, so a reaction cannot carry text to the room.
 
 ## Rejected alternatives
 
@@ -57,5 +58,4 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 
 - `listen.tools: []` validates, though a silent turn without tools only spends tokens.
 - The quiet window counts messages the agent does not hear and its own, and has no maximum wait, so a busy room can postpone a turn.
-- Whether to cap the length of a reaction emoji.
 - The prompt does not yet say that heard text is data rather than instructions.

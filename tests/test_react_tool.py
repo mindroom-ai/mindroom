@@ -94,6 +94,29 @@ async def test_react_blank_emoji_refused(tmp_path: Path, emoji: str) -> None:
     context.client.room_send.assert_not_awaited()
 
 
+@pytest.mark.parametrize("emoji", ["thanks a lot", "123456789", "👍\u200a👍"])
+async def test_react_text_key_refused(tmp_path: Path, emoji: str) -> None:
+    """A key longer than 8 characters or with whitespace inside is refused, so a reaction never carries text."""
+    context = _context(tmp_path)
+    with tool_runtime_context(context):
+        result = await ReactTools().react("$target", emoji)
+
+    assert '"status": "error"' in result
+    assert "at most 8 characters and without spaces" in result
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("emoji", ["👨\u200d👩\u200d👧\u200d👦", "🇳🇱", "👍🏽", "12345678"])
+async def test_react_emoji_sequences_allowed(tmp_path: Path, emoji: str) -> None:
+    """Emoji sequences such as a family, a flag, or a skin tone stay within the limit and are sent."""
+    context = _context(tmp_path)
+    with tool_runtime_context(context):
+        result = await ReactTools().react("$target", emoji)
+
+    assert '"status": "ok"' in result
+    assert context.client.room_send.await_args.kwargs["content"]["m.relates_to"]["key"] == emoji
+
+
 async def test_react_rate_limited(tmp_path: Path) -> None:
     """The room's matrix_message budget (12 per 30 seconds) is shared, so the 13th action is refused."""
     context = _context(tmp_path)

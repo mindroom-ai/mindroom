@@ -22857,7 +22857,7 @@
             },
             "emoji": {
               "type": "string",
-              "description": "The reaction emoji, such as 👍."
+              "description": "The reaction emoji, such as 👍, at most 8 characters and without spaces."
             },
             "mindroom_output_path": {
               "anyOf": [

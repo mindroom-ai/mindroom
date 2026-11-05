@@ -10,6 +10,10 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_contex
 from mindroom.tool_system.authoring import Toolkit
 
 
+# Long enough for any emoji sequence, such as a family or a flag, and too short for a sentence.
+_MAX_KEY_CHARACTERS = 8
+
+
 def _payload(status: str, **kwargs: object) -> str:
     return custom_tool_payload("react", status, **kwargs)
 
@@ -39,7 +43,7 @@ class ReactTools(Toolkit):
 
         Args:
             event_id: Event ID of the message to react to; it must be in the current room.
-            emoji: The reaction emoji, such as 👍.
+            emoji: The reaction emoji, such as 👍, at most 8 characters and without spaces.
 
         """
         if isinstance(context := tool_context_or_error(_payload, "React"), str):
@@ -50,6 +54,12 @@ class ReactTools(Toolkit):
             return _payload("error", message="event_id must be a non-empty string.")
         if not emoji:
             return _payload("error", message="emoji must be a non-empty string.")
+        # A reaction is an acknowledgement, never a way to post text.
+        if len(emoji) > _MAX_KEY_CHARACTERS or any(character.isspace() for character in emoji):
+            return _payload(
+                "error",
+                message=f"emoji must be one emoji, at most {_MAX_KEY_CHARACTERS} characters and without spaces.",
+            )
         room_id = context.room_id
         # Shares matrix_message's per-room budget, so reacting is no way around it.
         if (rate_error := MatrixMessageTools._check_rate_limit(context, room_id)) is not None:
