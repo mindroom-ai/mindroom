@@ -140,6 +140,8 @@ class ListeningService:
     _listened: frozenset[tuple[str, str]] | None = field(default=None, init=False)
     # Contact rooms whose skip was reported.
     _contact_rooms: set[tuple[str, str]] = field(default_factory=set, init=False)
+    # Listened rooms the agent has not joined, whose wait was reported, until it joins.
+    _unjoined: set[tuple[str, str]] = field(default_factory=set, init=False)
     _loop: SupervisedLoop = field(init=False)
 
     def __post_init__(self) -> None:
@@ -192,7 +194,7 @@ class ListeningService:
                 continue
             rooms = sorted(listener.room_ids, key=lambda room_id: self._last_run.get((listener.agent_name, room_id), 0))
             for room_id in rooms:
-                if room_id not in client.rooms:
+                if not self._joined(listener.agent_name, room_id, client.rooms):
                     continue
                 # One room that cannot be heard, or whose turn fails, must not stop the others.
                 try:
@@ -312,6 +314,23 @@ class ListeningService:
             event_id=batch[0].event_id,
         )
         await self._mark(agent_name, room_id, _cursor(batch[0]))
+
+    def _joined(self, agent_name: str, room_id: str, joined_rooms: Mapping[str, object]) -> bool:
+        """Return whether the agent is in the room, reporting once that a listened room waits until it joins.
+
+        Listening does not join rooms; the agent's ``rooms`` and invitations do.
+        """
+        if room_id in joined_rooms:
+            self._unjoined.discard((agent_name, room_id))
+            return True
+        if (agent_name, room_id) not in self._unjoined:
+            self._unjoined.add((agent_name, room_id))
+            logger.info(
+                "Listening waits until the agent joins a listened room; listening does not join rooms",
+                agent=agent_name,
+                room_id=room_id,
+            )
+        return False
 
     def _is_contact_room(self, config: Config, agent_name: str, room_id: str) -> bool:
         """Return whether the room is or was one of the agent's contact rooms, reporting the skip once.

@@ -5,19 +5,23 @@ The behavior itself is in [Agent Configuration](../configuration/agents.md#liste
 
 ## Goal
 
-Let an agent learn from rooms it does not reply in, without ever posting there.
+Let an agent learn from the messages in chosen rooms that are not addressed to it, without its silent turns writing there.
 After a room goes quiet, the agent gets one silent turn over what it heard and acts only through a short list of tools.
+The agent stays a normal agent in those rooms: it still answers when addressed, under the room's usual rules, because listening only adds silent turns and silencing the agent is a separate concern.
 
 ## Decisions
 
 1. A polling service reads each listening agent's own event journal after a durable per-room marker, so one mechanism covers every room and a restart resumes after the last turn that finished.
+   The markers live in `tracking/listening_markers.json`, and the service polls every 10 seconds.
+   Listening does not join rooms: a listened room the agent has not joined waits, logged once, because joining is the job of the agent's `rooms` and its invitations.
    A restart in the middle of a turn runs that turn again, so its tool effects can repeat (see Risks).
    A room owing a sync-gap repair is repaired before it is read, because the messages a gap skipped are older than those after it, and a marker moved past those would never hear them.
 2. The first run for a room starts at "now", so turning listening on never reads history from before it.
-3. A silent turn runs as the agent, with its identity, instructions, and memory, but offers only `listen.tools` and drops its text, so no tool outside the list can act and nothing can be posted.
+3. A silent turn runs as the agent, with its identity, instructions, and memory, but offers only `listen.tools` and drops its text, so no tool outside the list can act and the turn's own text is never posted.
+   A listed tool keeps its effects, so a tool that sends can still post; config refuses `matrix_message`, whose purpose is posting, and `react` covers acknowledging.
 4. Every `listen.tools` entry must be among the agent's own `tools`, and config load fails otherwise.
    The cost is that an agent with `listen:` and the default tools needs `memory` and `react` in `tools:`.
-   The list needs at least one tool, since a turn without one only spends tokens, and `matrix_message` is refused, since its purpose is to post.
+   The list needs at least one tool, since a turn without one only spends tokens.
 5. A silent turn hears only messages the agent's replies would answer, judged on the person a relay speaks for, so listening opens no new door into the agent.
 6. Config load rejects `listen` on a private agent, and contact rooms are skipped.
    A per-requester instance has no single listener identity, and only a reply passes a contact's message policy.
@@ -60,6 +64,8 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 
 - Prompt injection from heard text can drive the listed tools.
   The prompt tells the model that heard text is data, not instructions, but a model can still be persuaded, so the allowlist, the hidden approval-gated tools, the dropped text, and the sender authorization contain it, and operators must keep `listen.tools` narrow.
+- Heard text crosses rooms and users through memory.
+  A silent turn with `memory` can store what people who never addressed the agent said, and the shared memory can surface it in other rooms and to other users; the docs say so, and leaving `memory` out of `listen.tools` prevents it.
 - Cost without budgets.
   `max_runs_per_hour`, `max_messages`, and a cheaper `model` bound it, and usage under `listening` makes it visible.
 - A restart in the middle of a silent turn, after its tools acted, repeats that turn, so a memory write or reaction may happen twice.

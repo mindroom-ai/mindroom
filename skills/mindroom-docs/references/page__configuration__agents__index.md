@@ -188,9 +188,11 @@ A cap too small to hold the headings and markers fails with `max_preload_chars=<
 
 ## Listening
 
-An agent can listen in chosen rooms without replying.
-After a room has been quiet for a while, the agent runs one silent turn over what it heard and acts only through the tools you list.
+A listening agent also hears the messages in chosen rooms that are not addressed to it.
+After a room has been quiet for a while, the agent runs one silent turn over what it heard and acts only through the tools you list, for example to remember something or react to a message.
+It stays a normal agent in those rooms: it still answers when addressed, under the room's usual rules, and listening only adds the silent turns.
 
+The agent must already be in each listened room, for example because the room is in its `rooms`; listening does not join rooms, and MindRoom logs once when a listened room is not joined yet.
 Every entry in `listen.tools` must also be one of the agent's own `tools`, or the config fails to load.
 The default `listen.tools` is `[memory, react]`, so an agent with `listen:` and the default tools needs `memory` and `react` in its `tools:`.
 A silent turn narrows the agent's own tools to this list and never grants one the agent lacks, so `worker_scope` checks, tool limits, and reload restarts apply to it as to every other tool.
@@ -213,7 +215,7 @@ agents:
 | `rooms` | list | *required* | Room keys, Matrix room IDs, or aliases to listen in, at least one. Each must resolve the way `room_thread_modes` keys do |
 | `quiet_seconds` | int, >= 10 | `60` | Seconds without a message the agent hears before the silent turn runs |
 | `max_messages` | int, 1 to 500 | `200` | Most messages one silent turn reads; the rest wait for the next turn |
-| `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour for the agent; further due runs are skipped, logged, and what was heard is kept |
+| `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour for the agent, shared by its listened rooms in turn; further due runs are skipped, logged, and what was heard is kept |
 | `tools` | list | `[memory, react]` | The only tools a silent turn may use, at least one, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools`, and `matrix_message` is refused |
 | `model` | string or null | `null` | Key of an entry under `models:` for silent turns; unset uses the agent's `model` |
 
@@ -224,37 +226,39 @@ That uses the same sender authorization its replies use, judged on the person a 
 Once nothing the agent hears has been said in the room for `quiet_seconds`, one silent turn runs over at most `max_messages` of what it heard.
 Messages it does not hear, such as its own or those of a sender it may not hear from, never delay that turn.
 In a room that never goes quiet, a turn runs anyway once the oldest message waiting is ten times `quiet_seconds` old.
-Its text is never posted, and it acts only through its listen tools.
-Approval-gated tools and interactive questions are not offered.
-No more than `max_runs_per_hour` turns run per hour, shared by the agent's listened rooms in turn; the count starts again after a restart.
-A turn hears no more than fits its model's `context_window`, and the rest waits for the next turn.
+A turn also hears no more than fits its model's `context_window`, and the rest waits for the next turn.
+
+The turn's own text is never sent to the room, and approval-gated tools and interactive questions are not offered.
+It acts only through its listen tools, each with its usual effect, so a listed tool that sends still sends.
+No more than `max_runs_per_hour` turns run per hour; the count starts again after a restart.
 
 The first run for a room starts at "now".
 The agent never reads history from before listening was turned on, and a room it stops listening in forgets its place.
 After a restart, the agent hears what it had not yet heard, including messages sent while MindRoom was down.
-A message whose silent turn keeps failing is eventually skipped with a logged warning, so one bad message never stops listening in a room.
 
 Only shared agents can listen: `listen` on a private agent, which has no single identity to listen as, fails config load.
-A listening agent skips contact rooms, where only a reply passes the contact's message policy, and never hears its own messages.
+A listening agent skips contact rooms, where only a reply passes the contact's message policy.
 
 ### Privacy and cost
 
-A silent turn stores no run in session history, only its usage, under the kind `listening` (see [Usage](https://docs.mindroom.chat/usage/)).
-Each turn stands alone, so a heard message that is later redacted does not linger in a stored run.
-Heard text is not extracted into memory; the agent remembers only what it writes itself with its `memory` tool.
+Everyone in a listened room whom the agent may answer is heard, including people who never addressed it.
+Heard text is not extracted into memory automatically, and a silent turn stores no run in session history, so a heard message that is later redacted does not linger in a stored run.
+What a silent turn writes with its `memory` tool, though, is the agent's shared memory: heard text can resurface in the agent's replies in other rooms and to other users.
+Leave `memory` out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
 
+A silent turn records its usage under the kind `listening` (see [Usage](https://docs.mindroom.chat/usage/)).
 [Budgets](https://docs.mindroom.chat/budgets/) do not apply, because no requester asked for the turn.
 Bound the cost with `model`, a cheaper alias, and with `max_runs_per_hour`.
 
-### Reactions and reply modes
+### Reactions
 
-The [`react`](https://docs.mindroom.chat/tools/matrix-and-attachments/#react) tool adds an emoji to a message in the current room, and cannot send.
-Listening never posts, so it works in any room, whatever the agent's other settings.
+The [`react`](https://docs.mindroom.chat/tools/matrix-and-attachments/#react) tool adds an emoji to a message in the current room, and cannot send messages.
+It suits a silent turn that should acknowledge what it heard without writing in the room.
 
 ### Known limits
 
 - A restart in the middle of a silent turn, after its tools have acted, repeats that turn, so a memory write or reaction may happen twice.
-- Heard text can carry prompt injection that drives the listed tools, so keep `listen.tools` narrow, and give the turn no tool that sends, spends, or deletes.
+- Heard text can carry prompt injection that drives the listed tools; read [Listening agents](https://docs.mindroom.chat/architecture/security-posture/#listening-agents) before adding a tool to `listen.tools`.
 
 ## Naming Rules
 

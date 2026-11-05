@@ -577,6 +577,26 @@ async def test_who_the_agent_hears_by_every_ingress_path(
         assert 'thread_id="$root"' in turn.prompt
 
 
+async def test_a_listened_room_the_agent_has_not_joined_waits_and_is_reported_once(listening: _Listening) -> None:
+    """Listening does not join rooms: an unjoined listened room is reported once and heard from once the agent joins."""
+    joined = listening.bot.client.rooms
+    listening.bot.client.rooms = {}
+
+    with capture_logs() as logs:
+        for poll in range(3):
+            await listening.service._poll_once(T0 + poll)
+
+    assert listening.marker() is None
+    [waiting] = [log for log in logs if "joins" in log["event"]]
+    assert (waiting["log_level"], waiting["room_id"]) == ("info", ROOM)
+    listening.bot.client.rooms = joined
+    await listening.service._poll_once(T0 + 10)
+    await listening.say("$after-join", 20)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$after-join"]
+
+
 async def test_a_contact_room_is_not_listened_in(listening: _Listening, monkeypatch: pytest.MonkeyPatch) -> None:
     """A contact room's messages pass its message policy only through replies, so listening leaves the room alone."""
     monkeypatch.setattr(
