@@ -39,7 +39,15 @@ class _PluginRoutesApp:
             # A websocket gets the same 404 as its handshake's denial response.
             await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
             return
-        await self._sub_app(name, router)({**scope, "root_path": f"{root_path}/{name}"}, receive, send)
+        plugin_root = f"{root_path}/{name}"
+        # Without the main app's ``router`` the sub-app's own takes its place, and ``app_root_path`` is where
+        # ``request.url_for`` and ``request.base_url`` start, so URLs a plugin generates reach its own routes.
+        sub_scope = {key: value for key, value in scope.items() if key != "router"}
+        await self._sub_app(name, router)(
+            {**sub_scope, "root_path": plugin_root, "app_root_path": plugin_root},
+            receive,
+            send,
+        )
 
     def _published_router(self, name: str) -> APIRouter | None:
         snapshot = config_lifecycle.require_api_state(self._app).snapshot

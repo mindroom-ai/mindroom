@@ -889,6 +889,7 @@ Each plugin's router runs in a FastAPI app of its own, mounted under `/api/plugi
 - The router's `lifespan` and `on_event` startup and shutdown handlers never run.
 - A `GET` route answers `HEAD` with 405, as in any FastAPI app; list both in `@router.api_route(path, methods=["GET", "HEAD"])` if a client needs `HEAD`.
 - The `dependency_overrides` of MindRoom's main app do not reach plugin routes, so a test that overrides a dependency there does not change a plugin route.
+- `request.url_for` finds only the plugin's own route names, and `request.base_url` is the plugin's `/api/plugins/<name>/`.
 
 A plugin route that serves a Matrix web client authenticates its caller with `require_client_user` from `mindroom.plugin_http`, as a FastAPI dependency: `user: ClientUser = Depends(require_client_user)`.
 `ClientUser.user_id` is the caller's Matrix user ID.

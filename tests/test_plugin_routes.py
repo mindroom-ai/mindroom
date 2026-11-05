@@ -65,6 +65,16 @@ async def where(request: Request) -> dict:
     return {"url_path": request.url.path, "root_path": request.scope["root_path"]}
 
 
+@router.get("/items/{item_id}", name="plugin_item")
+async def item(item_id: str) -> dict:
+    return {"item": item_id}
+
+
+@router.get("/link")
+async def link(request: Request) -> dict:
+    return {"url": str(request.url_for("plugin_item", item_id="123"))}
+
+
 @router.get("/rooms/{room_id}/me")
 async def me(room_id: str, request: Request, user: Annotated[ClientUser, Depends(require_client_user)]) -> dict:
     await require_room_member(request, room_id, user.user_id)
@@ -210,6 +220,26 @@ def test_reload_serves_new_router(tmp_path: Path) -> None:
     publish_test_plugins(config, runtime_paths)
 
     assert client.get("/api/plugins/demo/ping").json() == {"pong": 2}
+
+
+def test_plugin_route_generates_urls_to_its_own_routes(tmp_path: Path) -> None:
+    """``request.url_for`` in a plugin route finds the plugin's own routes under its mount path, after a reload too.
+
+    Behind a proxy that serves MindRoom under a root path, the URL keeps that path.
+    """
+    _write_plugin(tmp_path, ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    client = TestClient(app)
+    assert client.get("/api/plugins/demo/link").json() == {"url": "http://testserver/api/plugins/demo/items/123"}
+
+    _write_plugin(tmp_path, ROUTES.replace('"/items/{item_id}"', '"/things/{item_id}"'))
+    publish_test_plugins(config, runtime_paths)
+
+    assert client.get("/api/plugins/demo/link").json() == {"url": "http://testserver/api/plugins/demo/things/123"}
+    proxied = TestClient(app, root_path="/mindroom").get("/mindroom/api/plugins/demo/link")
+    assert proxied.json() == {"url": "http://testserver/mindroom/api/plugins/demo/things/123"}
 
 
 def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
