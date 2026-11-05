@@ -148,6 +148,18 @@ def test_listen_tool_outside_agent_tools_rejected(
         Config.validate_with_runtime(_config(listen, tools), test_runtime_paths(tmp_path))
 
 
+def test_listen_misspelled_function_rejected(tmp_path: Path) -> None:
+    """A turn keeps only exact function names, so one the toolkit does not declare fails instead of dropping out."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    with pytest.raises(
+        ValueError,
+        match=r"listen\.tools\[0\]\.memory\.add_memroy: Tool 'memory' has no function 'add_memroy'",
+    ):
+        Config.validate_with_runtime(_config({"rooms": ["lobby"], "tools": ["memory.add_memroy"]}), runtime_paths)
+
+    Config.validate_with_runtime(_config({"rooms": ["lobby"], "tools": ["memory.add_memory"]}), runtime_paths)
+
+
 def test_listen_default_tools_validate(tmp_path: Path) -> None:
     """The default ``memory`` and ``react`` validate for an agent that has both."""
     config = Config.validate_with_runtime(_config({"rooms": ["lobby"]}), test_runtime_paths(tmp_path))

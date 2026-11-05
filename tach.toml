@@ -3551,6 +3551,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
+    "mindroom.delegation.personas",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.

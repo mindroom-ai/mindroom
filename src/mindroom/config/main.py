@@ -1465,10 +1465,13 @@ class Config(BaseModel):
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
 
+        A ``toolkit.function`` entry must also name a function the toolkit declares, as a turn keeps only exact names.
+
         A silent turn narrows the agent's own tools to this list and never adds one, so the default list is checked too:
         a listening agent without ``memory`` or ``react`` must name the tools it listens with.
         """
-        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        # why-lazy: catalog and personas pull runtime tool registry paths and load agents+tools at config import.
+        from mindroom.delegation.personas import declared_function_names, missing_persona_tool  # noqa: PLC0415
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
         for agent_name, agent in self.agents.items():
@@ -1495,6 +1498,9 @@ class Config(BaseModel):
                         f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' is not one of the agent's tools; "
                         f"add it to agents.{agent_name}.tools."
                     )
+                    raise ToolConfigOverrideError(msg)
+                if missing_persona_tool((name,), {toolkit: declared_function_names(toolkit, tools)}):
+                    msg = f"{config_path_prefix}.{name}: Tool '{toolkit}' has no function '{name.partition('.')[2]}'."
                     raise ToolConfigOverrideError(msg)
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
