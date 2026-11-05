@@ -196,17 +196,79 @@ async def test_participant_may_use_any_configured_model(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_unapproved_gated_participant_tool_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A participant cannot pause, so a named tool that is not pre-approved stops the run."""
+async def test_unapproved_participant_tool_is_refused_before_saving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant cannot pause, so validating or creating a workflow refuses a named tool that is not pre-approved."""
     workflow = _Workflow(tmp_path, monkeypatch, _config())
+    spec = _spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}], tools=["calculator"])
 
-    run = await workflow.run(
-        _spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}], tools=["calculator"]),
+    with workflow.context():
+        validated = json.loads(await workflow.tools.validate_workflow(spec))
+    created = await workflow.create(spec)
+
+    for result in (validated, created):
+        assert result["status"] == "error", result
+        assert "participant 'adder' tool 'calculator' is not pre-approved" in result["message"]
+    with workflow.context():
+        assert json.loads(await workflow.tools.list_workflows())["workflows"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_refuses_a_tool_whose_pre_approval_was_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing a pre-approval after a workflow is saved fails its next run before any participant starts."""
+    workflow = _Workflow(
+        tmp_path,
+        monkeypatch,
+        _config(tools=[{"dynamic_workflow": {"allowed_tools": ["calculator"]}}, "calculator"]),
     )
+    created = await workflow.create(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}]))
+    assert created["status"] == "ok", created
+    workflow.config = _config(tools=["dynamic_workflow", "calculator"])
 
-    assert run["status"] == "failed"
-    assert "tool 'calculator' is not pre-approved" in run["error"]
+    with workflow.context():
+        run = json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
+
+    assert run["status"] == "failed", run
+    assert "participant 'adder' tool 'calculator' is not pre-approved" in run["error"]
     assert workflow.model.authored_prompts == []
+
+
+@pytest.mark.asyncio
+async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A minimal participant runs its tools through shell, so validation asks for shell and then for its pre-approval."""
+    workflow = _Workflow(tmp_path, monkeypatch, _config(tools=["dynamic_workflow", "shell"]))
+    reviewer = {"id": "reviewer", "system_prompt": "Review the supplied text.", "mode": "minimal"}
+
+    async def validate(tools: list[str]) -> dict[str, Any]:
+        with workflow.context():
+            return json.loads(await workflow.tools.validate_workflow(_spec([{**reviewer, "tools": tools}])))
+
+    without_shell = await validate([])
+    unapproved = await validate(["shell"])
+    workflow.config = _config(
+        tools=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}, "shell"],
+        rules={"run_shell_command": "require_approval"},
+    )
+    gated = [await validate(["shell"]), await validate(["shell.run_shell_command"])]
+    workflow.config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}, "shell"])
+    approved = await validate(["shell"])
+
+    assert without_shell["status"] == "error", without_shell
+    assert "tools must include shell or shell.run_shell_command; use standard mode" in without_shell["message"]
+    for refused in (unapproved, *gated):
+        assert refused["status"] == "error", refused
+        assert refused["message"] == (
+            "Dynamic Workflow participant 'reviewer' runs in minimal mode through shell.run_shell_command, which "
+            "requires approval, and workflow participants cannot pause for approval; check the operator "
+            "tool_approval rules and the dynamic_workflow allowed_tools setting. "
+            "Leave mode unset for a participant that needs no shell."
+        )
+    assert approved["status"] == "ok", approved
 
 
 @pytest.mark.asyncio
@@ -498,7 +560,7 @@ async def test_later_step_fails_when_its_named_function_becomes_gated(
     run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator.add"]}], steps=2))
 
     assert run["status"] == "failed", run
-    assert "add require approval and cannot suspend" in run["error"]
+    assert "participant 'adder' tool 'calculator.add' requires approval" in run["error"]
     assert workflow.model.offered == [["add"]]
 
 
@@ -526,7 +588,11 @@ async def test_create_checks_grants_against_the_normalized_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A grant with surrounding whitespace grants its tool at create time, as it does when the workflow runs."""
-    workflow = _Workflow(tmp_path, monkeypatch, _config())
+    workflow = _Workflow(
+        tmp_path,
+        monkeypatch,
+        _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file"]),
+    )
 
     created = await workflow.create(
         _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["file"]}], tools=[" file "]),

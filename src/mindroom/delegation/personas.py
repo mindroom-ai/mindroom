@@ -482,7 +482,10 @@ def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
         return
     if persona_allows(tools, "shell", SHELL_FUNCTION):
         return
-    msg = "Cannot delegate: a minimal subagent needs shell among its tools."
+    msg = (
+        "Cannot delegate: a minimal subagent runs its tools through shell, so its tools must include shell or "
+        f"shell.{SHELL_FUNCTION}; use standard mode for a subagent without shell."
+    )
     raise PersonaError(msg)
 
 

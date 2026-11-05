@@ -15035,6 +15035,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `contacts`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    A [`mode: minimal`](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents) participant's `shell` must run without approval, [pre-approved](#allowing-participant-tools) like any participant tool; leave `mode` unset for a participant that needs no tools.
     Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
@@ -15105,7 +15106,8 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Workflow participants cannot pause for human approval, so every toolkit a participant names must be pre-approved, or the run fails when that participant starts.
+Workflow participants cannot pause for human approval, so every toolkit a participant names must be pre-approved.
+`validate_workflow()`, `create_workflow()`, and `update_workflow()` refuse a participant tool that is not pre-approved, and a run fails before any participant starts if a pre-approval was removed after the workflow was saved.
 Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
 Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
 
@@ -15122,7 +15124,7 @@ agents:
 
 Operator-authored [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first and the first match wins.
 A participant may name a single `toolkit.function` that a matching `auto_approve` rule allows even outside `allowed_tools`.
-A matching `require_approval` or script rule makes a function unavailable, and a participant that names such a function directly fails when it starts.
+A matching `require_approval` or script rule makes a function unavailable, and a participant that names such a function directly is refused the same way.
 `allowed_tools`, including `"*"`, never auto-approves `claude_agent`, `config_manager`, or `scheduler`, but an explicit operator `auto_approve` rule can.
 Functions that ask for their own confirmation stay unavailable even under an operator `auto_approve` rule.
 A function name shared by several granted toolkits is auto-approved only when every owning toolkit is eligible.

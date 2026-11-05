@@ -487,6 +487,7 @@ visibility = [
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
     "mindroom.api.agent_cli",
+    "mindroom.custom_tools.dynamic_workflow",
     "mindroom.delegation.personas",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
@@ -1632,6 +1633,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.dynamic_workflow"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
     "mindroom.agents",

@@ -28,11 +28,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools, _WorkflowRun
 from mindroom.dynamic_workflows import service as service_module
-from mindroom.dynamic_workflows.runner import (
-    DynamicWorkflowExecutionError,
-    ParticipantOutput,
-    execute_workflow_spec,
-)
+from mindroom.dynamic_workflows.runner import ParticipantOutput, execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.spec import (
     DynamicWorkflowError,
@@ -2054,16 +2050,25 @@ def test_participant_tools_must_be_pre_approved_or_auto_approved(tmp_path: Path)
         },
     )
     context = replace(context, config=config)
-    reject = dynamic_workflow_module._reject_unapproved_participant_tools
 
-    reject(context, ("mixed", "other.safe"), allowed=frozenset({"mixed"}))
-    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'mixed' is not pre-approved"):
-        reject(context, ("mixed",), allowed=frozenset())
-    with pytest.raises(DynamicWorkflowExecutionError, match="dangerous require approval and cannot suspend"):
-        reject(context, ("mixed.dangerous",), allowed=frozenset({"mixed"}))
-    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'scheduler' always requires approval") as never:
-        reject(context, ("scheduler",), allowed=frozenset({"*"}))
-    assert "allowed_tools" not in str(never.value)
+    def problem(entry: str, allowed: set[str]) -> str | None:
+        return dynamic_workflow_module._tool_approval_problem(context, entry, frozenset(allowed))
+
+    gated = (
+        "requires approval, and workflow participants cannot pause for approval; "
+        "check the operator tool_approval rules and the dynamic_workflow allowed_tools setting."
+    )
+    assert problem("mixed", {"mixed"}) is None
+    assert problem("other.safe", set()) is None
+    assert problem("mixed", set()) == (
+        "is not pre-approved; add it to the dynamic_workflow allowed_tools setting or name its auto-approved functions."
+    )
+    assert problem("mixed.dangerous", {"mixed"}) == gated
+    assert problem("mixed.other", set()) == gated
+    assert (
+        problem("scheduler", {"*"})
+        == "always requires approval; name only its functions an operator rule auto-approves."
+    )
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:
