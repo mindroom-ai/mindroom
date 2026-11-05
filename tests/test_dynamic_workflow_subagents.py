@@ -263,8 +263,11 @@ async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monk
     assert unapproved["status"] == "error", unapproved
     assert "participant 'reviewer' tool 'shell' is not pre-approved" in unapproved["message"]
     assert gated["status"] == "error", gated
-    assert "participant 'reviewer' tool 'shell.run_shell_command' requires approval" in gated["message"]
-    assert "operator tool_approval rule must auto-approve it" in gated["message"]
+    assert (
+        "participant 'reviewer' runs in minimal mode through shell.run_shell_command, which is gated by an operator "
+        "tool_approval rule"
+    ) in gated["message"]
+    assert "Leave mode unset" in gated["message"]
     assert approved["status"] == "ok", approved
 
 

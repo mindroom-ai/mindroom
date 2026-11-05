@@ -2051,20 +2051,17 @@ def test_participant_tools_must_be_pre_approved_or_auto_approved(tmp_path: Path)
     )
     context = replace(context, config=config)
 
-    def error(entries: tuple[str, ...], allowed: set[str]) -> str | None:
-        return dynamic_workflow_module._unapproved_participant_tool_error(
-            context,
-            "p",
-            entries,
-            allowed=frozenset(allowed),
-        )
+    def problem(entry: str, allowed: set[str]) -> str:
+        return str(dynamic_workflow_module._tool_approval_problem(context, entry, frozenset(allowed)))
 
-    assert error(("mixed", "other.safe"), {"mixed"}) is None
-    assert "participant 'p' tool 'mixed' is not pre-approved" in str(error(("mixed",), set()))
-    assert "tool 'mixed.dangerous' requires approval" in str(error(("mixed.dangerous",), {"mixed"}))
-    never = str(error(("scheduler",), {"*"}))
-    assert "tool 'scheduler' always requires approval" in never
-    assert "allowed_tools" not in never
+    assert problem("mixed", {"mixed"}) == problem("other.safe", set()) == "None"
+    assert problem("mixed", set()).startswith("is not pre-approved; add it to the dynamic_workflow allowed_tools")
+    # Operator rules match first, so a pre-approved toolkit cannot unblock a function one gates.
+    assert problem("mixed.dangerous", {"mixed"}).startswith("is gated by an operator tool_approval rule")
+    assert "allowed_tools" in problem("mixed.other", set())
+    assert problem("scheduler", {"*"}).startswith("always requires approval")
+    assert "allowed_tools" not in problem("scheduler", {"*"})
+    assert "only an operator tool_approval rule" in problem("scheduler.add_schedule", {"*"})
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:

@@ -508,12 +508,7 @@ async def _execute_subagent_participant(
         raise DynamicWorkflowExecutionError(msg)
     # Recheck approvals against the current config each step; only the function ownership is cached.
     allowed = _workflow_allowed_tools(context)
-    if error := _unapproved_participant_tool_error(
-        context,
-        participant_id,
-        _approval_entries(request),
-        allowed=allowed,
-    ):
+    if error := _unapproved_participant_tool_error(context, participant_id, request, allowed=allowed):
         raise DynamicWorkflowExecutionError(error)
     if participant_id not in state.function_owners:
         state.function_owners[participant_id] = await _participant_function_owners(context, persona)
@@ -601,49 +596,59 @@ def _selected_function_owners(
     return {function_name: frozenset(toolkits) for function_name, toolkits in owners.items()}
 
 
-def _approval_entries(request: PersonaRequest) -> tuple[str, ...]:
-    """Return the tools a participant names, plus the shell function a minimal participant runs them through."""
-    tools = cast("SubagentPersona", request.persona).tools or ()
-    return (*tools, f"shell.{SHELL_FUNCTION}") if request.agent_mode == "minimal" else tools
-
-
 def _unapproved_participant_tool_error(
     context: ToolRuntimeContext,
     participant_id: str,
-    entries: tuple[str, ...],
+    request: PersonaRequest,
     *,
     allowed: frozenset[str],
 ) -> str | None:
-    """A participant cannot pause, so every tool it names must run without approval.
+    """A participant cannot pause, so every tool it names, and the shell a minimal participant runs through, must run without approval."""
+    for entry in cast("SubagentPersona", request.persona).tools or ():
+        if problem := _tool_approval_problem(context, entry, allowed):
+            return f"Dynamic Workflow participant '{participant_id}' tool '{entry}' {problem}"
+    shell = f"shell.{SHELL_FUNCTION}"
+    if request.agent_mode == "minimal" and (problem := _tool_approval_problem(context, shell, allowed)):
+        return (
+            f"Dynamic Workflow participant '{participant_id}' runs in minimal mode through {shell}, which {problem} "
+            "Leave mode unset for a participant that needs no shell."
+        )
+    return None
+
+
+def _tool_approval_problem(context: ToolRuntimeContext, entry: str, allowed: frozenset[str]) -> str | None:
+    """Say why one participant tool would need approval, and what would let it run without.
 
     A whole toolkit needs a pre-approval through ``allowed_tools``; a single function may instead be
-    auto-approved by an operator rule, and a named function an operator rule still gates is refused.
+    auto-approved by an operator rule. Operator rules match first, so a pre-approval cannot override one that gates.
     """
-    for entry in entries:
-        toolkit, separator, function = entry.partition(".")
-        prefix = f"Dynamic Workflow participant '{participant_id}' tool '{entry}'"
-        if not separator:
-            if toolkit in NEVER_PREAPPROVE_TOOLKITS:
-                return f"{prefix} always requires approval; name only its functions an operator rule auto-approves."
-            if "*" not in allowed and toolkit not in allowed:
-                return (
-                    f"{prefix} is not pre-approved; add it to the dynamic_workflow allowed_tools setting "
-                    "or name its auto-approved functions."
-                )
-            continue
-        overlay = build_automation_approval_config(
-            context.config,
-            function_owners={function: frozenset({toolkit})},
-            preapproved_toolkits=allowed,
-            never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
-        )
-        if tool_may_require_approval(overlay, function):
+    toolkit, separator, function = entry.partition(".")
+    never = toolkit in NEVER_PREAPPROVE_TOOLKITS
+    preapproved = not never and ("*" in allowed or toolkit in allowed)
+    if not separator:
+        if never:
+            return "always requires approval; name only its functions an operator rule auto-approves."
+        if not preapproved:
             return (
-                f"{prefix} requires approval, and workflow participants cannot pause for approval; "
-                "an operator tool_approval rule must auto-approve it, or its toolkit must be in the "
-                "dynamic_workflow allowed_tools setting."
+                "is not pre-approved; add it to the dynamic_workflow allowed_tools setting "
+                "or name its auto-approved functions."
             )
-    return None
+        return None
+    overlay = build_automation_approval_config(
+        context.config,
+        function_owners={function: frozenset({toolkit})},
+        preapproved_toolkits=allowed,
+        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
+    )
+    if not tool_may_require_approval(overlay, function):
+        return None
+    if preapproved:
+        return "is gated by an operator tool_approval rule, and workflow participants cannot pause for approval."
+    if never:
+        unblock = "only an operator tool_approval rule can auto-approve it"
+    else:
+        unblock = "pre-approve its toolkit in the dynamic_workflow allowed_tools setting or auto-approve it with an operator tool_approval rule"
+    return f"requires approval, and workflow participants cannot pause for approval; {unblock}."
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
@@ -886,7 +891,7 @@ def _validate_workflow_policy_for_context(
             request = _participant_request(context, participant, workflow_id=spec.id)
             persona_tools = cast("SubagentPersona", request.persona).tools or ()
             if error := granted_tool_error(participant.id, persona_tools, granted_tools) or (
-                _unapproved_participant_tool_error(context, participant.id, _approval_entries(request), allowed=allowed)
+                _unapproved_participant_tool_error(context, participant.id, request, allowed=allowed)
             ):
                 raise DynamicWorkflowError(error)
             requests[participant.id] = request
