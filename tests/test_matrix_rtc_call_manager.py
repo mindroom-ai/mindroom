@@ -4892,6 +4892,41 @@ async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp
 
 
 @pytest.mark.asyncio
+async def test_nonretryable_terminal_close_reopens_when_the_caller_rejoins(tmp_path: Path) -> None:
+    """A rejoin replaces the membership a closed client left behind, so the agent joins without the call emptying first."""
+    created_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=created_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    abandoned_call = _call_state(manager).logical_call
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_terminated is not None
+
+    bridge.agent_options.on_session_terminated(False)
+    await asyncio.gather(*list(manager._background_tasks))
+    # The left-behind membership refreshed with a later expiry is the same membership.
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(created_ts=created_ts, expires_ms=20_000_000),
+    )
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert _call_state(manager).session is None
+    assert _call_state(manager).logical_call is abandoned_call
+
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=created_ts + 1_000))
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert _call_state(manager).session is not None
+    rejoined_call = _call_state(manager).logical_call
+    assert rejoined_call is not None
+    assert rejoined_call is not abandoned_call
+    assert not rejoined_call.join_blocked
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_terminal_close_during_agent_start_cannot_leave_ghost_session(tmp_path: Path) -> None:
     """A close callback racing with join registration still removes the new session."""
 

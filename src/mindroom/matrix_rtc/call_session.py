@@ -154,6 +154,11 @@ class CallSession:
         )
 
     @property
+    def members(self) -> tuple[CallMember, ...]:
+        """Return the Matrix call roster this session last applied."""
+        return tuple(self._members)
+
+    @property
     def _local_identity(self) -> str:
         """Our LiveKit participant identity (``user_id:device_id``)."""
         client = self.deps.client

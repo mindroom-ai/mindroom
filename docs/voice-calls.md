@@ -249,6 +249,8 @@ With `cascaded` and `live`, the agent tells the caller to use text chat for them
 [Deferred tools](tools/dynamic-tools.md) are available from the start of a call in every backend, with no search or loading step.
 
 The agent leaves the call when the caller leaves, the caller loses access to the agent (for example by leaving a `members_of_rooms` grant room), a second Matrix user joins, the voice session ends, or MindRoom shuts down.
+It also leaves after a minute in which none of the caller's call devices is connected to the LiveKit SFU, which happens when a client closes without removing its call membership, for example on a page reload.
+After that it joins the call again only when the caller rejoins it.
 A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
@@ -336,6 +338,7 @@ Calls work in both encrypted and unencrypted rooms.
 
 Synapse supports the full MatrixRTC stack, including automatic cleanup of stale call memberships.
 Tuwunel works with Element Call but does not yet support delayed events ([tuwunel#178](https://github.com/matrix-construct/tuwunel/issues/178)), so memberships of crashed clients linger until they expire.
+The agent leaves such a call a minute after the caller's media disconnects and logs `call_roster_absent_from_sfu`, so a lingering membership keeps it in the call, and counted as active work by `mindroom check-active-responses`, for about a minute at most.
 
 ## Limitations
 

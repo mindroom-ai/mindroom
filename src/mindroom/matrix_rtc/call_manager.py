@@ -214,6 +214,19 @@ class _LogicalCallState:
     failed_sessions: int = 0
     session_started_ms: int = 0
     reported_failures: set[str] = field(default_factory=set)
+    #: Memberships of the roster a non-retryable session end blocked; only a membership outside them rejoins.
+    blocked_memberships: frozenset[tuple[str, str, int]] | None = None
+
+
+def _membership_identities(members: list[CallMember] | tuple[CallMember, ...]) -> frozenset[tuple[str, str, int]]:
+    """Identify each call membership; a client refresh keeps its identity and a rejoin replaces it."""
+    return frozenset((member.user_id, member.device_id, member.created_ts) for member in members)
+
+
+def _rejoined_since_block(logical_call: _LogicalCallState, members: list[CallMember]) -> bool:
+    """Return whether the roster has a membership published after a non-retryable session end."""
+    blocked = logical_call.blocked_memberships
+    return blocked is not None and not _membership_identities(members) <= blocked
 
 
 @dataclass(frozen=True)
@@ -758,7 +771,11 @@ class CallManager:
             return
         logical_call = room_call.logical_call
         requester_id = members[0].user_id
-        if logical_call is None or logical_call.requester_id != requester_id:
+        if (
+            logical_call is None
+            or logical_call.requester_id != requester_id
+            or _rejoined_since_block(logical_call, members)
+        ):
             room_call.clear_logical_call()
             logical_call = room_call.start_logical_call(requester_id)
         session = room_call.session
@@ -1308,6 +1325,10 @@ class CallManager:
             if logical_call is not None:
                 logical_call.join_blocked = True
                 stable = self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS
+                if not retryable:
+                    # The memberships stay in room state when the caller's client left without
+                    # removing them, so they cannot reopen the call; the caller's rejoin replaces them.
+                    logical_call.blocked_memberships = _membership_identities(session.members)
             await _stop_session(session, event="call_failed_session_stop_failed")
             if room_call.session is session:
                 room_call.session = None
