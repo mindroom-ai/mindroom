@@ -10,6 +10,7 @@ from typing import Annotated
 import pytest
 from aiohttp import web
 from fastapi import Depends, FastAPI
+from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
 
 from mindroom.api import client_sessions, config_lifecycle
@@ -108,6 +109,10 @@ def client(tmp_path: Path, peer: HomeserverPeer) -> Iterator[TestClient]:
     @app.get("/api/plugins/x/whoami")
     async def whoami(user: Annotated[ClientUser, Depends(require_client_user)]) -> dict[str, str]:
         return {"user_id": user.user_id}
+
+    @app.get("/api/plugins/x/page")
+    async def page() -> HTMLResponse:
+        return HTMLResponse("<script>steal()</script>", headers={"Content-Security-Policy": "default-src *"})
 
     app.add_middleware(
         _RuntimeDashboardCorsMiddleware,
@@ -220,8 +225,19 @@ def test_client_paths_keep_their_policy_under_a_proxy_root_path(client: TestClie
         assert response.headers["access-control-allow-origin"] == CLIENT_ORIGIN, response.request.url
         assert "access-control-allow-credentials" not in response.headers, response.request.url
     assert responses[1].json() == {"user_id": "@alice:example.org"}
+    assert responses[1].headers["x-content-type-options"] == "nosniff"
     denied = proxied.options("/mindroom/api/plugins/x/whoami", headers={**preflight, "Origin": "https://evil.example"})
     assert "access-control-allow-origin" not in denied.headers
+
+
+def test_plugin_answers_never_sniff_nor_render(client: TestClient) -> None:
+    """Plugin answers, even HTML a route sends with its own policy, are nosniff and sandboxed with nothing allowed."""
+    for response in (client.get("/api/plugins/x/page"), client.get("/api/plugins/x/whoami")):
+        assert response.headers["x-content-type-options"] == "nosniff", response.request.url
+        assert response.headers["content-security-policy"] == "sandbox; default-src 'none'", response.request.url
+        assert response.headers.get_list("content-security-policy") == ["sandbox; default-src 'none'"]
+    session = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
+    assert "content-security-policy" not in session.headers
 
 
 def test_client_origin_paths_stop_at_their_own_segment(client: TestClient) -> None:

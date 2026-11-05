@@ -862,7 +862,7 @@ async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> di
 !!! warning "Plugin routes share the dashboard's origin"
     MindRoom serves plugin routes from the same origin as its dashboard, so script in a page a plugin route returns would run with the dashboard's signed-in session.
     Never return `text/html`, or any other content a browser would render, such as SVG, built from untrusted input such as Matrix messages, room names, or request parameters.
-    Return JSON with `X-Content-Type-Options: nosniff`, so the browser never guesses another type; MindRoom does not add that header for you.
+    Return JSON. MindRoom answers every response under `/api/plugins/` with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, whatever the route sets, so a browser neither guesses another type nor runs script or loads anything in a page a route returns; that is a backstop, not a licence to return pages.
 
 A routes module without `router` fails the plugin's load with `Plugin routes module must define router: APIRouter`, and MindRoom then skips the whole plugin, tools included.
 Only `mindroom plugins check` fails on a routes module that does not load; `mindroom config validate` and `mindroom doctor` import it too, but only log `Failed to load plugin, skipping` and still pass the config.
@@ -885,7 +885,7 @@ A plugin route that serves a Matrix web client authenticates its caller with `re
 The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
 Browser origins that may call these routes and `POST /api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](https://docs.mindroom.chat/tools/worker-computer/); there is no separate setting for plugin routes.
-Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
+Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, besides the two headers above, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
 A route that acts on one room depends on `require_room_member` instead, as in the example above: `user: ClientUser = Depends(require_room_member)`.
 It authenticates the caller as `require_client_user` does and takes the room from the route's `room_id` parameter, and it returns the same `ClientUser` once that user is joined to the room.
 A route that finds its room some other way awaits `require_room_member(request, room_id)` itself.

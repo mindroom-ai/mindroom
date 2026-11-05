@@ -107,8 +107,24 @@ _DASHBOARD_CORS_EXPOSE_HEADERS = (
 )
 
 
+_NO_STORE = ((b"cache-control", b"no-store"),)
+# Plugin routes share the dashboard's origin, so nothing they answer may be sniffed or rendered there as a page.
+_PLUGIN_RESPONSE_HEADERS = (
+    *_NO_STORE,
+    (b"x-content-type-options", b"nosniff"),
+    (b"content-security-policy", b"sandbox; default-src 'none'"),
+)
+
+
 def _is_client_origin_path(path: str) -> bool:
     return path in _CLIENT_ORIGIN_PATHS or path.startswith(_CLIENT_ORIGIN_PREFIXES)
+
+
+def _forced_response_headers(path: str) -> tuple[tuple[bytes, bytes], ...]:
+    """Return the headers that replace a route's own of the same name on ``path``'s responses."""
+    if path == "/api/plugins" or path.startswith("/api/plugins/"):
+        return _PLUGIN_RESPONSE_HEADERS
+    return _NO_STORE if _is_client_origin_path(path) else ()
 
 
 @dataclass(frozen=True)
@@ -139,19 +155,21 @@ class _RuntimeDashboardCorsMiddleware:
         # Under a proxy's root path ``path`` starts with it, so classify the path routes match, as Starlette does.
         path = get_route_path(scope) if "path" in scope else ""
         middleware = self._middleware_for_current_runtime(path)
-        if _is_client_origin_path(path):
-
-            async def no_store_send(message: Message) -> None:
-                if message["type"] == "http.response.start":
-                    message["headers"] = [
-                        (key, value) for key, value in message.get("headers", []) if key.lower() != b"cache-control"
-                    ]
-                    message["headers"].append((b"cache-control", b"no-store"))
-                await send(message)
-
-            await middleware(scope, receive, no_store_send)
-        else:
+        forced = _forced_response_headers(path)
+        if not forced:
             await middleware(scope, receive, send)
+            return
+        forced_names = {name for name, _ in forced}
+
+        async def forcing_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    (key, value) for key, value in message.get("headers", []) if key.lower() not in forced_names
+                ]
+                message["headers"].extend(forced)
+            await send(message)
+
+        await middleware(scope, receive, forcing_send)
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
