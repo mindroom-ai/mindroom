@@ -129,7 +129,8 @@ _CREATE_WORKFLOW_DESCRIPTION = (
     "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
     "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
     "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
-    "and only the skills it names from your own. "
+    "and only the skills it names from your own. Mode 'minimal' runs a participant's tools through shell, so a "
+    "minimal participant must name shell or shell.run_shell_command; leave mode unset for one that needs no tools. "
     "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
     "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
     "without tools."
@@ -506,7 +507,8 @@ async def _execute_subagent_participant(
         raise DynamicWorkflowExecutionError(msg)
     # Recheck approvals against the current config each step; only the function ownership is cached.
     allowed = _workflow_allowed_tools(context)
-    _reject_unapproved_participant_tools(context, persona.tools or (), allowed=allowed)
+    if error := _unapproved_participant_tool_error(context, participant_id, persona.tools or (), allowed=allowed):
+        raise DynamicWorkflowExecutionError(error)
     if participant_id not in state.function_owners:
         state.function_owners[participant_id] = await _participant_function_owners(context, persona)
     approval_config = _participant_run_config(
@@ -593,32 +595,29 @@ def _selected_function_owners(
     return {function_name: frozenset(toolkits) for function_name, toolkits in owners.items()}
 
 
-def _reject_unapproved_participant_tools(
+def _unapproved_participant_tool_error(
     context: ToolRuntimeContext,
+    participant_id: str,
     entries: tuple[str, ...],
     *,
     allowed: frozenset[str],
-) -> None:
+) -> str | None:
     """A participant cannot pause, so every tool it names must run without approval.
 
     A whole toolkit needs a pre-approval through ``allowed_tools``; a single function may instead be
-    auto-approved by an operator rule, and a named function an operator rule still gates fails the run.
+    auto-approved by an operator rule, and a named function an operator rule still gates is refused.
     """
     for entry in entries:
         toolkit, separator, function = entry.partition(".")
+        prefix = f"Dynamic Workflow participant '{participant_id}' tool '{entry}'"
         if not separator:
             if toolkit in NEVER_PREAPPROVE_TOOLKITS:
-                msg = (
-                    f"Dynamic Workflow participant tool '{entry}' always requires approval; "
-                    "name only its functions an operator rule auto-approves."
-                )
-                raise DynamicWorkflowExecutionError(msg)
+                return f"{prefix} always requires approval; name only its functions an operator rule auto-approves."
             if "*" not in allowed and toolkit not in allowed:
-                msg = (
-                    f"Dynamic Workflow participant tool '{entry}' is not pre-approved; add it to the "
-                    "dynamic_workflow allowed_tools setting or name its auto-approved functions."
+                return (
+                    f"{prefix} is not pre-approved; add it to the dynamic_workflow allowed_tools setting "
+                    "or name its auto-approved functions."
                 )
-                raise DynamicWorkflowExecutionError(msg)
             continue
         overlay = build_automation_approval_config(
             context.config,
@@ -627,8 +626,8 @@ def _reject_unapproved_participant_tools(
             never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
         )
         if tool_may_require_approval(overlay, function):
-            msg = f"Dynamic Workflow participant functions {function} require approval and cannot suspend for approval."
-            raise DynamicWorkflowExecutionError(msg)
+            return f"{prefix} requires approval, and workflow participants cannot pause for approval."
+    return None
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
@@ -847,9 +846,10 @@ def _validate_workflow_policy_for_context(
     context: ToolRuntimeContext,
     spec: WorkflowSpec,
 ) -> dict[str, PersonaRequest]:
-    """Check a spec's participants against the caller's current policy.
+    """Check a spec's participants against the caller's current policy, including tool pre-approvals.
 
-    Returns each subagent participant's validated request, which a run freezes when it starts.
+    Returns each subagent participant's validated request, which a run freezes when it starts;
+    each step rechecks pre-approvals, so a policy change during the run still applies.
     """
     context = replace(context, config=context.current_config, config_provider=None)
     granted_tools = set(spec.permissions.tools)
@@ -861,6 +861,7 @@ def _validate_workflow_policy_for_context(
         context,
         _workflow_permission_model_refs(context, spec.permissions.models or []),
     )
+    allowed = _workflow_allowed_tools(context) if subagents else frozenset()
     requests: dict[str, PersonaRequest] = {}
     for participant in spec.participants:
         if isinstance(participant, RoomAgentParticipant):
@@ -868,7 +869,9 @@ def _validate_workflow_policy_for_context(
         else:
             request = _participant_request(context, participant, workflow_id=spec.id)
             persona_tools = cast("SubagentPersona", request.persona).tools or ()
-            if error := granted_tool_error(participant.id, persona_tools, granted_tools):
+            if error := granted_tool_error(participant.id, persona_tools, granted_tools) or (
+                _unapproved_participant_tool_error(context, participant.id, persona_tools, allowed=allowed)
+            ):
                 raise DynamicWorkflowError(error)
             requests[participant.id] = request
             model_name = cast("str", request.model)

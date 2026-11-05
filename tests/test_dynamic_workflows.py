@@ -28,11 +28,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools, _WorkflowRun
 from mindroom.dynamic_workflows import service as service_module
-from mindroom.dynamic_workflows.runner import (
-    DynamicWorkflowExecutionError,
-    ParticipantOutput,
-    execute_workflow_spec,
-)
+from mindroom.dynamic_workflows.runner import ParticipantOutput, execute_workflow_spec
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.spec import (
     DynamicWorkflowError,
@@ -2054,16 +2050,21 @@ def test_participant_tools_must_be_pre_approved_or_auto_approved(tmp_path: Path)
         },
     )
     context = replace(context, config=config)
-    reject = dynamic_workflow_module._reject_unapproved_participant_tools
 
-    reject(context, ("mixed", "other.safe"), allowed=frozenset({"mixed"}))
-    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'mixed' is not pre-approved"):
-        reject(context, ("mixed",), allowed=frozenset())
-    with pytest.raises(DynamicWorkflowExecutionError, match="dangerous require approval and cannot suspend"):
-        reject(context, ("mixed.dangerous",), allowed=frozenset({"mixed"}))
-    with pytest.raises(DynamicWorkflowExecutionError, match="tool 'scheduler' always requires approval") as never:
-        reject(context, ("scheduler",), allowed=frozenset({"*"}))
-    assert "allowed_tools" not in str(never.value)
+    def error(entries: tuple[str, ...], allowed: set[str]) -> str | None:
+        return dynamic_workflow_module._unapproved_participant_tool_error(
+            context,
+            "p",
+            entries,
+            allowed=frozenset(allowed),
+        )
+
+    assert error(("mixed", "other.safe"), {"mixed"}) is None
+    assert "participant 'p' tool 'mixed' is not pre-approved" in str(error(("mixed",), set()))
+    assert "tool 'mixed.dangerous' requires approval" in str(error(("mixed.dangerous",), {"mixed"}))
+    never = str(error(("scheduler",), {"*"}))
+    assert "tool 'scheduler' always requires approval" in never
+    assert "allowed_tools" not in never
 
 
 def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> None:
