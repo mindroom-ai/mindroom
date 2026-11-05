@@ -1,4 +1,4 @@
-"""One silent turn: a listening agent goes over what it heard in a room, acts only through its allowlist, and posts nothing.
+"""One silent turn: a listening agent goes over what it heard in a room, acts only through its allowlist, and says nothing.
 
 The turn is the agent itself, with its identity, instructions, and memory, but it offers only the tools ``listen.tools``
 names, hides approval-gated tools and interactive questions, and drops its text. Each turn stands alone: it stores no
@@ -77,7 +77,8 @@ def _oldest_that_fit(
     kept = 0
     for message in heard:
         budget -= count(counter, _heard_tag(message, timezone))
-        # The oldest message is always kept: one Matrix event is far smaller than any model's window.
+        # The oldest message is always kept, so a turn always hears something; one too large for the model fails its
+        # turns until the service skips it.
         if budget < 0 and kept:
             break
         kept += 1
