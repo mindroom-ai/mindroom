@@ -12,7 +12,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from fastapi import FastAPI
 
@@ -23,19 +23,27 @@ logger = get_logger(__name__)
 _UNAVAILABLE = "Room membership is unavailable."
 
 
-def _bind_room_members(
-    app: FastAPI,
-    router_client: nio.AsyncClient,
-    *,
-    live_client: Callable[[], nio.AsyncClient | None] | None = None,
-) -> None:
-    """Publish a reader of a room's joined users, answered by the router bot's client.
+def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClient | None:
+    """Return the router's live client if it runs and is joined to the room, else any running bot's that is."""
+    router = bots.get(ROUTER_AGENT_NAME)
+    others = (bot for name, bot in bots.items() if name != ROUTER_AGENT_NAME)
+    for bot in (router, *others):
+        if bot is None or not bot.running:
+            continue
+        client = bot.client
+        if client is not None and room_id in client.rooms:
+            return client
+    return None
 
-    ``live_client`` returns the client to use right now, or None when it is gone; it defaults to ``router_client``.
+
+def _bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
+    """Publish a reader of a room's joined users, answered by a running bot in that room, the router first.
+
+    ``bots`` is read at each call, so a bot that stopped, left the room, or restarted with a new client counts as it is now.
     """
 
     async def room_members(room_id: str) -> frozenset[str]:
-        client = router_client if live_client is None else live_client()
+        client = _client_in_room(bots, room_id)
         if client is None:
             raise HTTPException(503, _UNAVAILABLE)
         try:
@@ -52,20 +60,18 @@ def _bind_room_members(
 
 
 def bind_room_members_if_ready(bots: Mapping[str, AgentBot], *, api_enabled: bool) -> None:
-    """Bind on the API app while the router bot runs with a client; unbind otherwise."""
+    """Bind on the API app while any bot runs with a client; unbind otherwise.
+
+    ``bots`` must be the orchestrator's live mapping: the reader picks the bot to ask at each call.
+    """
     if not api_enabled:
         return
     from mindroom.api import main  # noqa: PLC0415
 
-    router_bot = bots.get(ROUTER_AGENT_NAME)
-    if router_bot is None or router_bot.client is None or not router_bot.running:
+    if not any(bot.running and bot.client is not None for bot in bots.values()):
         _unbind_room_members(main.app)
         return
-    _bind_room_members(
-        main.app,
-        router_bot.client,
-        live_client=lambda: router_bot.client if router_bot.running else None,
-    )
+    _bind_room_members(main.app, bots)
 
 
 def withdraw_room_members(*, api_enabled: bool) -> None:
@@ -78,5 +84,5 @@ def withdraw_room_members(*, api_enabled: bool) -> None:
 
 
 def _unbind_room_members(app: FastAPI) -> None:
-    """Withdraw the reader before the router bot's client goes away."""
+    """Withdraw the reader before the bots' clients go away."""
     ensure_app_state(app).room_members = None

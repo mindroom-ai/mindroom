@@ -892,7 +892,7 @@ The client signs in by posting a Matrix OpenID token to `POST /api/client-sessio
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
 Browser origins that may call these routes and `POST /api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](https://docs.mindroom.chat/tools/worker-computer/); there is no separate setting for plugin routes.
 A route that acts on one room also awaits `require_room_member(request, room_id, user.user_id)`.
-It reads live membership from the router bot's Matrix client, answers 403 unless the user is joined, and answers 503 when membership is unavailable.
+It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, answers 403 unless the user is joined, and answers 503 when membership is unavailable, such as when no running bot is in the room.
 
 ## Plugin skills
 

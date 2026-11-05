@@ -244,7 +244,7 @@ Plugin routes share the dashboard's origin, so a route that returned `text/html`
 MindRoom does not filter what plugin routes return: they must answer with JSON and `X-Content-Type-Options: nosniff`.
 A plugin route that raises answers 500 without the error's detail.
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
-Routes that act on one room also call `require_room_member`, which reads live joined members through the router bot's client, answering 403 for a non-member and 503 when membership is unavailable (no running router client, or the Matrix call answered with an error or raised).
+Routes that act on one room also call `require_room_member`, which reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, or the Matrix call answered with an error or raised).
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
 CORS for `/api/client-sessions` and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
 These paths allow only those origins, with credentials off, and every response carries `Cache-Control: no-store`.
