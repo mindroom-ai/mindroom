@@ -254,20 +254,20 @@ async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monk
         tools=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}, "shell"],
         rules={"run_shell_command": "require_approval"},
     )
-    gated = await validate(["shell"])
+    gated = [await validate(["shell"]), await validate(["shell.run_shell_command"])]
     workflow.config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}, "shell"])
     approved = await validate(["shell"])
 
     assert without_shell["status"] == "error", without_shell
     assert "tools must include shell or shell.run_shell_command; use standard mode" in without_shell["message"]
-    assert unapproved["status"] == "error", unapproved
-    assert "participant 'reviewer' tool 'shell' is not pre-approved" in unapproved["message"]
-    assert gated["status"] == "error", gated
-    assert (
-        "participant 'reviewer' runs in minimal mode through shell.run_shell_command, which is gated by an operator "
-        "tool_approval rule"
-    ) in gated["message"]
-    assert "Leave mode unset" in gated["message"]
+    for refused in (unapproved, *gated):
+        assert refused["status"] == "error", refused
+        assert refused["message"] == (
+            "Dynamic Workflow participant 'reviewer' runs in minimal mode through shell.run_shell_command, which "
+            "requires approval, and workflow participants cannot pause for approval; check the operator "
+            "tool_approval rules and the dynamic_workflow allowed_tools setting. "
+            "Leave mode unset for a participant that needs no shell."
+        )
     assert approved["status"] == "ok", approved
 
 

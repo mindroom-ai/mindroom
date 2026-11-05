@@ -603,32 +603,30 @@ def _unapproved_participant_tool_error(
     *,
     allowed: frozenset[str],
 ) -> str | None:
-    """A participant cannot pause, so every tool it names, and the shell a minimal participant runs through, must run without approval."""
-    for entry in cast("SubagentPersona", request.persona).tools or ():
-        if problem := _tool_approval_problem(context, entry, allowed):
-            return f"Dynamic Workflow participant '{participant_id}' tool '{entry}' {problem}"
+    """A participant cannot pause, so the shell a minimal participant runs through, and every tool it names, must run without approval."""
     shell = f"shell.{SHELL_FUNCTION}"
     if request.agent_mode == "minimal" and (problem := _tool_approval_problem(context, shell, allowed)):
         return (
             f"Dynamic Workflow participant '{participant_id}' runs in minimal mode through {shell}, which {problem} "
             "Leave mode unset for a participant that needs no shell."
         )
+    for entry in cast("SubagentPersona", request.persona).tools or ():
+        if problem := _tool_approval_problem(context, entry, allowed):
+            return f"Dynamic Workflow participant '{participant_id}' tool '{entry}' {problem}"
     return None
 
 
 def _tool_approval_problem(context: ToolRuntimeContext, entry: str, allowed: frozenset[str]) -> str | None:
-    """Say why one participant tool would need approval, and what would let it run without.
+    """Say why one participant tool would need approval.
 
     A whole toolkit needs a pre-approval through ``allowed_tools``; a single function may instead be
-    auto-approved by an operator rule. Operator rules match first, so a pre-approval cannot override one that gates.
+    auto-approved by an operator rule, which also matches before any pre-approval.
     """
     toolkit, separator, function = entry.partition(".")
-    never = toolkit in NEVER_PREAPPROVE_TOOLKITS
-    preapproved = not never and ("*" in allowed or toolkit in allowed)
     if not separator:
-        if never:
+        if toolkit in NEVER_PREAPPROVE_TOOLKITS:
             return "always requires approval; name only its functions an operator rule auto-approves."
-        if not preapproved:
+        if "*" not in allowed and toolkit not in allowed:
             return (
                 "is not pre-approved; add it to the dynamic_workflow allowed_tools setting "
                 "or name its auto-approved functions."
@@ -642,13 +640,10 @@ def _tool_approval_problem(context: ToolRuntimeContext, entry: str, allowed: fro
     )
     if not tool_may_require_approval(overlay, function):
         return None
-    if preapproved:
-        return "is gated by an operator tool_approval rule, and workflow participants cannot pause for approval."
-    if never:
-        unblock = "only an operator tool_approval rule can auto-approve it"
-    else:
-        unblock = "pre-approve its toolkit in the dynamic_workflow allowed_tools setting or auto-approve it with an operator tool_approval rule"
-    return f"requires approval, and workflow participants cannot pause for approval; {unblock}."
+    return (
+        "requires approval, and workflow participants cannot pause for approval; "
+        "check the operator tool_approval rules and the dynamic_workflow allowed_tools setting."
+    )
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
