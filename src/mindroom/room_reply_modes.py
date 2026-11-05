@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
+from mindroom.config.agent import RoomReplyMode
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import (
     OverrideRecord,
@@ -17,8 +18,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-# `auto` lets the router and a room's only responder answer a message that mentions no one; `mentions` does not.
-RoomReplyMode = Literal["auto", "mentions"]
 ROOM_REPLY_MODES: tuple[RoomReplyMode, ...] = get_args(RoomReplyMode)
 
 _ROOM_REPLY_MODES_FILENAME = "room_reply_modes.json"

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, cast
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.room_reply_modes import (
     ROOM_REPLY_MODES,
-    RoomReplyMode,
     clear_room_reply_mode_override,
     resolve_room_reply_mode_override,
     set_room_reply_mode_override,
@@ -16,6 +15,7 @@ from mindroom.room_reply_modes import (
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -25,7 +25,8 @@ _USAGE = "Usage: `!reply_mode [auto|mentions|reset|show]`"
 _MODE_EFFECTS: dict[RoomReplyMode, str] = {
     "auto": "The router or the room's only agent or team may answer a message that mentions no one.",
     "mentions": (
-        "Agents and teams answer messages that mention them, and follow-ups in threads they already replied in."
+        "Agents and teams answer messages that mention them, and follow-ups in threads they already replied in "
+        "or are still answering."
     ),
 }
 

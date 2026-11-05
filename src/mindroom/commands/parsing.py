@@ -555,7 +555,7 @@ Usage: `!reply_mode [auto|mentions|reset|show]` - Show or switch whether agents 
 
 **Examples:**
 - `!reply_mode` or `!reply_mode show` - Show the reply mode this room uses
-- `!reply_mode mentions` - Answer only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in
+- `!reply_mode mentions` - Answer only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering
 - `!reply_mode auto` - Also let the router or the room's only agent answer messages that mention no one
 - `!reply_mode reset` - Remove the room override and use `rooms.<room>.reply_mode` from config.yaml again
 

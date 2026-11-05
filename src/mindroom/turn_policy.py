@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.authorization import ResponderCandidatePermissions
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
@@ -58,7 +59,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
-    from mindroom.room_reply_modes import RoomReplyMode
 
 
 @dataclass(frozen=True)
@@ -644,7 +644,7 @@ class TurnPolicy:
     ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
         if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
-            self.deps.logger.info("Skipping response: room reply mode requires a mention to start a conversation")
+            self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
             is_router = self.deps.agent_name == ROUTER_AGENT_NAME
             return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
         router_plan = await self._plan_router_dispatch(

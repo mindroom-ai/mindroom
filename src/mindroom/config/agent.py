@@ -47,10 +47,11 @@ from mindroom.config.validation import (
     validate_matrix_localpart,
     validate_unique_entries,
 )
-from mindroom.room_reply_modes import RoomReplyMode  # noqa: TC001
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
+# `auto` lets the router and a room's only responder answer a message that mentions no one; `mentions` does not.
+RoomReplyMode = Literal["auto", "mentions"]
 # Everything the primary writes beside a private workspace in its private state root;
 # tests/test_private_root_reservations.py enumerates the writers. Workers mount only
 # the private workspace, so it must never be, or contain, one of these.
@@ -642,7 +643,7 @@ class RoomConfig(BaseModel):
         description=(
             "'auto' lets the router and the room's only agent or team answer a message that mentions no one; "
             "'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or "
-            "team already replied in"
+            "team already replied in or is still answering"
         ),
     )
 

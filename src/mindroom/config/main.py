@@ -152,8 +152,8 @@ if TYPE_CHECKING:
     from pydantic_core import ErrorDetails
 
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
-    from mindroom.room_reply_modes import RoomReplyMode
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
