@@ -60,6 +60,8 @@ _STABLE_EVENTS = {
     },
     "matrix_sync_stall_diagnostics": {"agent", "no_progress_seconds", "sync_age", "generation", "snapshots"},
     "tool_call_limit_reached": {"entity", "budget", "model_requests"},
+    "failing_tool_call_refused": {"entity", "tool_name"},
+    "failing_tool_ended_run": {"entity", "tool_name"},
     "tool_call_failed": {
         "tool_name",
         "agent_name",
@@ -125,6 +127,8 @@ _STABLE_EVENT_LEVELS = {
     "event_loop_scheduler_lag_summary": "info",
     "matrix_sync_stall_diagnostics": "warning",
     "tool_call_limit_reached": "warning",
+    "failing_tool_call_refused": "warning",
+    "failing_tool_ended_run": "warning",
     "tool_call_failed": "warning",
     "provider_request_retried": "warning",
     "agent_error": "error",

@@ -568,6 +568,7 @@
             "agent_name": "researcher",
             "task": "Summarize the travel policy."
           },
+          "tool_call_error": false,
           "tool_call_id": "call_child",
           "tool_name": "run_subagent"
         }
@@ -1045,6 +1046,7 @@
             "agent_name": "researcher",
             "task": "Summarize the travel policy."
           },
+          "tool_call_error": false,
           "tool_call_id": "call_child",
           "tool_name": "run_subagent"
         },
@@ -1074,6 +1076,7 @@
             "profile": "critic",
             "task": "Name the biggest risk in the travel policy."
           },
+          "tool_call_error": false,
           "tool_call_id": "call_persona",
           "tool_name": "run_subagent"
         }

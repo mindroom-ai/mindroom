@@ -204,6 +204,26 @@ Each call to a tool the run does not offer logs a `tool_not_offered` warning, an
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 
+### `failing_tool_call_refused`
+
+Logged for each call refused because its tool keeps failing, as [`max_tool_calls_per_turn`](https://docs.mindroom.chat/configuration/agents/#configuration-options) describes.
+
+| Field | Meaning |
+|-------|---------|
+| `entity` | Agent or team name |
+| `tool_name` | The refused tool |
+
+The refused call's result quotes the tool's last error, and a tool that raises also logs each failure as `tool_call_failed`; one repeated error usually means an integration that is down, an expired grant, or arguments the model keeps resending.
+
+### `failing_tool_ended_run`
+
+Logged once when the model calls a refused tool again and the turn ends.
+
+| Field | Meaning |
+|-------|---------|
+| `entity` | Agent or team name |
+| `tool_name` | The tool the model kept calling |
+
 ### `tool_call_failed`
 
 Logged each time a tool call raises an error.

@@ -19,17 +19,21 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import (
     _PROGRESS_FLUSH_SECONDS,
+    MAX_CONSECUTIVE_TOOL_FAILURES,
     MEDIA_FOLLOW_UP_TEXT,
     PreparedTools,
     RefusedCall,
     ToolBatch,
+    count_tool_failures,
     dispatch_tool_calls,
+    failing_tool_stop_text,
     media_follow_up,
     offered_toolkits,
     plan_tool_batch,
     toolkit_instructions,
 )
 from mindroom.llm.events import ToolProgress
+from mindroom.llm.runs import FailingTool, RunRecord, ToolExecution
 from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
@@ -141,6 +145,7 @@ def test_unknown_and_undecodable_calls_are_refused_in_call_order_and_bypass_the_
         calls_so_far=0,
         max_tool_calls_per_turn=1,
         entity="code",
+        failing_tools={},
     )
 
     # Each answer is a failed call, which Claude and Gemini read as a failure.
@@ -174,6 +179,7 @@ def test_unknown_and_undecodable_calls_are_logged_without_their_arguments() -> N
             calls_so_far=0,
             max_tool_calls_per_turn=None,
             entity="code",
+            failing_tools={},
         )
 
     warning = {"log_level": "warning", "entity": "code"}
@@ -196,6 +202,7 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
         calls_so_far=1,
         max_tool_calls_per_turn=2,
         entity="code",
+        failing_tools={},
     )
 
     assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
@@ -219,6 +226,110 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
     ]
 
 
+def test_tool_failures_count_once_per_batch_until_the_tool_succeeds() -> None:
+    failing: dict[str, FailingTool] = {}
+
+    count_tool_failures(
+        failing,
+        [
+            ToolExecution(tool_call_id="1", tool_name="a", is_error=True, result="first"),
+            ToolExecution(tool_call_id="2", tool_name="a", is_error=True, result="second"),
+            ToolExecution(tool_call_id="3", tool_name="b", is_error=True, result="b failed"),
+            ToolExecution(tool_call_id="4", tool_name="b", is_error=False, result="ok"),
+            ToolExecution(tool_call_id="5", tool_name="c", requires_confirmation=True),  # Paused: changes nothing.
+        ],
+    )
+    count_tool_failures(failing, [ToolExecution(tool_call_id="6", tool_name="a", is_error=True, result="third")])
+
+    # Two failures of one batch count once; a success in the batch outweighs a failure of the same tool.
+    assert failing == {"a": FailingTool(failures=2, last_error="third")}
+
+    count_tool_failures(failing, [ToolExecution(tool_call_id="7", tool_name="a", is_error=False, result="ok")])
+
+    assert failing == {}
+
+
+def test_a_failing_tool_keeps_its_last_error_redacted_and_cut_for_the_room_to_read() -> None:
+    url = "https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1&tempauth=v1.secret"
+    failing: dict[str, FailingTool] = {}
+
+    count_tool_failures(
+        failing,
+        [ToolExecution(tool_call_id="1", tool_name="download", is_error=True, result=f"403 for {url} {'x' * 1000}")],
+    )
+
+    # The refusal and the line that ends the reply quote the kept error, so neither carries the credential.
+    error = failing["download"].last_error
+    assert error is not None
+    assert error.startswith("403 for https://contoso-my.sharepoint.com/")
+    assert "tempauth=***redacted***" in error
+    assert "v1.secret" not in failing_tool_stop_text("download", failing["download"])
+    assert len(error) <= 500
+
+
+def test_failing_tools_round_trip_through_the_stored_record() -> None:
+    record = RunRecord(run_id="run-1", agent_id="code")
+    record.failing_tools = {"boom": FailingTool(failures=8, last_error="broken", refusals=1)}
+
+    assert RunRecord.from_dict(record.to_dict()).failing_tools == record.failing_tools
+    assert "failing_tools" not in RunRecord(run_id="run-2").to_dict()
+
+
+def test_calls_of_a_tool_that_keeps_failing_are_refused_with_its_last_error_while_others_run() -> None:
+    functions = spec(ScriptedModel([]), toolkit(add, boom)).functions
+    failing = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="broken link")}
+
+    with capture_logs() as logs:
+        batch = plan_tool_batch(
+            [
+                tool_call("boom", "c1", reason="again"),
+                tool_call("add", "c2", a=1, b=2),
+                tool_call("boom", "c3", reason="once more"),
+            ],
+            functions,
+            calls_so_far=0,
+            max_tool_calls_per_turn=None,
+            entity="code",
+            failing_tools=failing,
+        )
+
+    refusal = (
+        f"Tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests of this turn with no success in between, so "
+        "this call was not executed. Its last error: broken link\nDon't call boom again in this turn. Tell the user "
+        "what failed instead."
+    )
+    assert [call.execution.tool_call_id for call in batch.planned] == ["c2"]
+    assert [(m.tool_call_id, m.tool_name, m.content, m.tool_call_error) for m in _refused_answers(batch)] == [
+        ("c1", "boom", refusal, True),
+        ("c3", "boom", refusal, True),
+    ]
+    # Several refusals of one tool in a batch name it once.
+    assert batch.refused_for_failures == ("boom",)
+    refused = {
+        "event": "failing_tool_call_refused",
+        "log_level": "warning",
+        "entity": "code",
+        "tool_name": "boom",
+    }
+    assert logs == [refused, refused]
+
+
+def test_a_tool_one_failure_short_of_the_streak_limit_still_runs() -> None:
+    functions = spec(ScriptedModel([]), toolkit(boom)).functions
+
+    batch = plan_tool_batch(
+        [tool_call("boom", "c1", reason="again")],
+        functions,
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+        entity="code",
+        failing_tools={"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES - 1, last_error="broken")},
+    )
+
+    assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
+    assert batch.refused_for_failures == ()
+
+
 def test_empty_list_arguments_plan_as_no_arguments() -> None:
     functions = spec(ScriptedModel([]), toolkit(echo)).functions
 
@@ -228,6 +339,7 @@ def test_empty_list_arguments_plan_as_no_arguments() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     assert batch.planned[0].execution.tool_args is None
@@ -243,6 +355,7 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     plain, confirmation, external_call = (call.execution for call in batch.planned)
@@ -270,7 +383,14 @@ async def _dispatch(calls: Sequence[PlannedCall], *, middleware: Sequence[ToolMi
 
 
 def _planned(functions: dict, *calls: object) -> list[PlannedCall]:
-    return plan_tool_batch(list(calls), functions, calls_so_far=0, max_tool_calls_per_turn=None, entity="code").planned
+    return plan_tool_batch(
+        list(calls),
+        functions,
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+        entity="code",
+        failing_tools={},
+    ).planned
 
 
 @pytest.mark.asyncio
@@ -561,6 +681,7 @@ async def test_dispatch_runs_calls_concurrently_and_the_batch_answers_them_in_ca
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     results = await _dispatch(batch.planned)
@@ -607,6 +728,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     dispatch = asyncio.create_task(_dispatch(batch.planned))
     for _ in range(5):
@@ -632,6 +754,7 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     dispatch = asyncio.create_task(_dispatch(batch.planned))
     for _ in range(5):
@@ -659,6 +782,7 @@ async def test_each_call_is_recorded_and_yielded_as_it_finishes_and_closing_unwi
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     linger, quick_call = batch.planned
     dispatch = dispatch_tool_calls(batch.planned, run=context(), middleware=())
@@ -691,6 +815,7 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     # The sync calls run on worker threads and may finish in any order; the batch answers them in call order.
@@ -717,6 +842,7 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     results = await _dispatch(batch.planned, middleware=[middleware])
@@ -748,6 +874,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     # The sync calls may finish in any order; the batch answers them, and so orders their media, in call order.
     results = batch.answers(await _dispatch(batch.planned))
