@@ -98,6 +98,7 @@ _DECODED_BYTES_PER_SEPARATOR = 56
 # could go on proving that a seek is possible while this drifted back to a
 # spelling that does not use one.
 _CONVERSATION_CURSOR_CLAUSE = " AND (created_ts, logical_event_id) < (?, ?)"
+_ROOM_CURSOR_CLAUSE = " AND (created_ts, logical_event_id) > (?, ?)"
 
 
 def read_conversation(
@@ -189,7 +190,7 @@ def read_room_after(
     if limit <= 0:
         msg = "A room read requires a positive limit"
         raise ValueError(msg)
-    cursor_clause = "" if after is None else " AND (created_ts, logical_event_id) > (?, ?)"
+    cursor_clause = "" if after is None else _ROOM_CURSOR_CLAUSE
     cursor_params: tuple[object, ...] = () if after is None else (after.created_ts, after.logical_event_id)
     sizes = tuple(
         transaction.fetchall(

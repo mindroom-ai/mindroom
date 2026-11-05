@@ -24,8 +24,8 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
    The caps and an optional cheaper `model` bound the cost.
 9. A page of heard messages stops at the first message awaiting a refetch, and the marker stays before it.
    Never losing a heard message beats progress, so a stuck refetch stalls that room, with a warning after 10 polls.
-10. No new journal index for these reads.
-    They are bounded and only listened rooms are polled; add the index if polls in very large rooms prove slow.
+10. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
+    Every poll repeats them, and the conversation index orders by thread first, so without it each poll sorted the room in a temporary B-tree, which the journal's hot-query rule forbids.
 11. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
 
 ## Rejected alternatives

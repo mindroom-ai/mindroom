@@ -69,7 +69,7 @@ from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
 from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
-from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
+from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE, _ROOM_CURSOR_CLAUSE
 from mindroom.event_journal.replies import ApprovalEnded
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
@@ -9577,6 +9577,14 @@ class TestHotQueriesAreIndexCovered:
         "projection page after a cursor": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=?"  # noqa: S608 - the production clause, not input
             f"{_CONVERSATION_CURSOR_CLAUSE} ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        ),
+        "room page after a cursor": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=?"  # noqa: S608 - the production clause, not input
+            f"{_ROOM_CURSOR_CLAUSE} ORDER BY created_ts, logical_event_id LIMIT 50"
+        ),
+        "room's newest message": (
+            "SELECT created_ts, logical_event_id FROM visible_messages WHERE principal_id=? AND room_id=? "
+            "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 1"
         ),
         "projection page content": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND logical_event_id IN (?, ?, ?)"

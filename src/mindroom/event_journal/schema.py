@@ -726,6 +726,13 @@ _INDEXES = (
     ON visible_messages (principal_id, room_id, thread_id, created_ts, logical_event_id)
     """,
     """
+    -- A listening agent reads a whole room after its marker, every thread
+    -- together, on every poll; `visible_messages_page` puts the thread before
+    -- the timestamp, so ordering a room from it means a temporary sort.
+    CREATE INDEX IF NOT EXISTS visible_messages_room
+    ON visible_messages (principal_id, room_id, created_ts, logical_event_id)
+    """,
+    """
     CREATE INDEX IF NOT EXISTS visible_messages_revision
     ON visible_messages (principal_id, room_id, revision_event_id)
     """,
