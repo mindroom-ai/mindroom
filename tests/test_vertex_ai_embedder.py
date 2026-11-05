@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import httpx
@@ -88,6 +91,8 @@ def _serve_clients(
     monkeypatch: pytest.MonkeyPatch,
     replies: list[_Reply],
     requests: list[httpx.Request],
+    *,
+    build_seconds: float = 0.0,
 ) -> list[dict[str, object]]:
     """Point every client the embedder builds at a local server, keeping its own settings; return those settings."""
     built: list[dict[str, object]] = []
@@ -96,6 +101,7 @@ def _serve_clients(
 
     def client_on_server(**kwargs: object) -> genai.Client:
         built.append(kwargs)
+        time.sleep(build_seconds)
         http_options = {
             **kwargs.get("http_options", {}),  # type: ignore[dict-item]
             "httpx_client": httpx.Client(transport=transport),
@@ -237,25 +243,55 @@ def test_configured_vertex_ai_embedder_uses_the_runtime_project_and_location(
     assert requests[0].url.path.startswith("/v1beta1/projects/env-project/locations/us-west1/")
 
 
+def test_vertex_ai_embedder_builds_one_client_for_concurrent_texts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A knowledge refresh embeds several files at once on worker threads, and they share one client.
+
+    A client each thread built would replace the others, and google-genai closes a replaced client's connection while
+    its request is still in flight.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    built = _serve_clients(monkeypatch, [[0.5] * 8], [], build_seconds=0.05)
+    embedder = create_configured_embedder(_vertex_config(runtime_paths), runtime_paths, caller_retries=True)
+
+    with ThreadPoolExecutor(8) as threads:
+        vectors = list(threads.map(lambda index: embedder.embed([f"file {index}"], purpose="document"), range(8)))
+
+    assert vectors == [[[0.5] * 8]] * 8
+    assert len(built) == 1
+
+
 @pytest.mark.parametrize(("caller_retries", "sent"), [(False, 2), (True, 1)])
 def test_vertex_ai_embedder_retries_a_brief_outage_unless_its_caller_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     caller_retries: bool,
     sent: int,
 ) -> None:
-    """A search's request outlives a brief outage, while a knowledge refresh, which retries itself, sends one."""
+    """A search's request outlives a brief outage, while a knowledge refresh, which retries itself, sends one.
+
+    No log line of the retry carries the provider's response text.
+    """
+    monkeypatch.setattr(vertex_ai_embedder_module, "_RETRY_BASE_SECONDS", 0.0)
     runtime_paths = test_runtime_paths(tmp_path)
     requests: list[httpx.Request] = []
-    _serve_clients(monkeypatch, [httpx.Response(503, json={"error": {"code": 503}}), [0.5] * 8], requests)
+    outage = httpx.Response(503, json={"error": {"code": 503, "message": "secret-bearing text"}})
+    built = _serve_clients(monkeypatch, [outage, [0.5] * 8], requests)
     embedder = create_configured_embedder(_vertex_config(runtime_paths), runtime_paths, caller_retries=caller_retries)
 
-    if caller_retries:
-        with pytest.raises(EmbedderRequestError, match=r"HTTP 503"):
-            embedder.embed(["text"], purpose="query")
-    else:
-        assert embedder.embed(["text"], purpose="query") == [[0.5] * 8]
+    with caplog.at_level(logging.DEBUG):
+        if caller_retries:
+            with pytest.raises(EmbedderRequestError, match=r"HTTP 503"):
+                asyncio.run(embedder.aembed(["text"], purpose="query"))
+        else:
+            assert embedder.embed(["text"], purpose="query") == [[0.5] * 8]
     assert len(requests) == sent
+    assert "secret-bearing" not in caplog.text
+    # Requests are bounded even outside health probes.
+    assert built[0]["http_options"]["timeout"] == 60_000  # type: ignore[index]
 
 
 def test_probe_bounds_the_vertex_ai_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,23 +314,44 @@ def test_vertex_ai_embedder_config_accepts_only_the_fields_it_reads(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("memory_backend", "agent_memory_backend"),
-    [(None, None), ("mem0", None), ("file", "mem0")],
-    ids=["default_backend", "mem0_backend", "agent_mem0_backend"],
+    ("memory_backend", "agent_memory_backends"),
+    [(None, [None]), ("mem0", [None]), ("file", ["mem0"]), ("file", [None, "none"])],
+    ids=["default_backend", "mem0_backend", "agent_mem0_backend", "team_of_file_and_none"],
 )
 def test_vertex_ai_embedder_config_rejects_mem0_memory(
     memory_backend: str | None,
-    agent_memory_backend: str | None,
+    agent_memory_backends: list[str | None],
 ) -> None:
-    """Mem0 cannot embed with vertex_ai, so a config whose memory would use Mem0 fails at load instead of at runtime."""
-    agent: dict[str, str] = {"display_name": "Helper", "role": "Helps"}
-    if agent_memory_backend is not None:
-        agent["memory_backend"] = agent_memory_backend
+    """Mem0 cannot embed with vertex_ai, so a config whose memory would use Mem0 fails at load instead of at runtime.
+
+    A team whose members mix file and no memory remembers with Mem0, so agents that mix them are rejected too.
+    """
+    agents: dict[str, dict[str, str]] = {}
+    for index, agent_memory_backend in enumerate(agent_memory_backends):
+        agent = {"display_name": f"Helper {index}", "role": "Helps"}
+        if agent_memory_backend is not None:
+            agent["memory_backend"] = agent_memory_backend
+        agents[f"helper_{index}"] = agent
     memory: dict[str, object] = {"embedder": {"provider": "vertex_ai", "config": {"model": "gemini-embedding-2"}}}
     if memory_backend is not None:
         memory["backend"] = memory_backend
     with pytest.raises(ValidationError, match=r"the vertex_ai embedder does not serve the mem0 memory backend"):
-        Config.model_validate({"models": {}, "agents": {"helper": agent}, "memory": memory})
+        Config.model_validate({"models": {}, "agents": agents, "memory": memory})
+
+
+def test_vertex_ai_embedder_config_accepts_agents_that_all_use_file_memory() -> None:
+    """Agents whose memory is all file-backed, or all of it off with ``none``, never reach Mem0."""
+    for backend in ("file", "none"):
+        Config.model_validate(
+            {
+                "models": {},
+                "agents": {"a": {"display_name": "A", "role": "r"}, "b": {"display_name": "B", "role": "r"}},
+                "memory": {
+                    "backend": backend,
+                    "embedder": {"provider": "vertex_ai", "config": {"model": "gemini-embedding-2"}},
+                },
+            },
+        )
 
 
 def test_vertex_ai_prefixes_name_new_vectors() -> None:

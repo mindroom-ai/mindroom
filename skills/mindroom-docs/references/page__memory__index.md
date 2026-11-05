@@ -71,7 +71,7 @@ The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_I
 
 `memory.embedder` sets the embedding model used by Mem0, semantic file-memory search, and [knowledge bases](https://docs.mindroom.chat/knowledge/#embedder-configuration).
 Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_transformers` providers; semantic file memory and knowledge bases support [their own set](https://docs.mindroom.chat/knowledge/#embedder-configuration), which has `vertex_ai` instead of `huggingface`.
-Config load rejects `vertex_ai` while `memory.backend` or any agent's `memory_backend` is `mem0`, so set them to `file` or `none` with it.
+Config load rejects `vertex_ai` while any memory would use Mem0, so with it set `memory.backend` and every agent's `memory_backend` to `file`, or all of them to `none`; a team whose members mix `file` and `none` uses Mem0.
 
 | Field | Default | Description |
 |---|---|---|

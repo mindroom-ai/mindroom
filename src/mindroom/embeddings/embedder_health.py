@@ -127,9 +127,9 @@ def _bound_probe_client_timeout(embedder: Embedder, provider: str) -> None:
     """Cap the probe's SDK client so a stalled endpoint fails fast.
 
     The installed OpenAI SDK defaults allow a 600-second read timeout plus
-    retries, and the Vertex AI embedder asks google-genai for five attempts,
-    which would hang `mindroom doctor` and pin probe threads for minutes;
-    runtime searches and memory keep the SDK defaults, and only a knowledge
+    retries, and the Vertex AI embedder a 60-second one plus retries, which
+    would hang `mindroom doctor` and pin probe threads for minutes; runtime
+    searches and memory keep those defaults, and only a knowledge
     refresh, which retries itself, turns its retries off. google-genai loads
     only for a Vertex AI embedder.
     """

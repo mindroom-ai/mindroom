@@ -104,10 +104,10 @@ def create_configured_embedder(
 ) -> Embedder:
     """Create the configured embedding provider used for semantic indexes.
 
-    ``caller_retries`` turns off the OpenAI and Vertex AI SDKs' own retries for a caller that retries failed requests
-    itself, as a knowledge refresh does, so its classified failures alone decide what is sent again. Other callers keep
-    the SDKs' retries, since nothing retries their requests in place: the knowledge graph retries only a whole episode
-    minutes later. The Ollama and local embedders do not retry on their own.
+    ``caller_retries`` turns off the OpenAI and Vertex AI embedders' own retries for a caller that retries failed
+    requests itself, as a knowledge refresh does, so its classified failures alone decide what is sent again. Other
+    callers keep those retries, since nothing retries their requests in place: the knowledge graph retries only a whole
+    episode minutes later. The Ollama and local embedders do not retry on their own.
     """
     settings = resolve_embedder_settings(config, runtime_paths)
 

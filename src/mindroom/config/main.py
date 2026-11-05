@@ -513,10 +513,12 @@ class Config(BaseModel):
         if self.memory.embedder.provider != "vertex_ai":
             return self
         agents = [*self.agents.values(), *(template.agent for template in self.personal_agents.values())]
-        if self.memory.backend == "mem0" or any(agent.memory_backend == "mem0" for agent in agents):
+        backends = {agent.memory_backend or self.memory.backend for agent in agents}
+        # A team whose members mix file and no memory remembers with Mem0 (``caller_memory_backend``).
+        if self.memory.backend == "mem0" or "mem0" in backends or backends >= {"file", "none"}:
             msg = (
-                "the vertex_ai embedder does not serve the mem0 memory backend; "
-                "set memory.backend, and any agent's memory_backend, to file or none"
+                "the vertex_ai embedder does not serve the mem0 memory backend; set memory.backend and every "
+                "agent's memory_backend to file, or all of them to none"
             )
             raise ValueError(msg)
         return self

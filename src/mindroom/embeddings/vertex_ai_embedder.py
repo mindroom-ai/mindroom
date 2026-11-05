@@ -7,6 +7,9 @@ each request's outcome in the process-wide embedder health.
 
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +29,11 @@ if TYPE_CHECKING:
     from mindroom.llm.errors import ProviderError
 
 _PROVIDER = "vertex_ai"
+#: Attempts per text outside a caller that retries itself, as many as the OpenAI SDK's default.
+_ATTEMPTS = 3
+#: Wait before the first retry, doubled for each later one, unless the provider asks for its own.
+_RETRY_BASE_SECONDS = 0.5
+_MAX_RETRY_SECONDS = 10.0
 
 
 def _request_error(error: Exception) -> EmbedderRequestError:
@@ -52,12 +60,14 @@ class VertexAIEmbedder:
     dimensions: int | None = None
     query_prefix: str | None = None
     document_prefix: str | None = None
-    #: One attempt per request, for a caller that retries failed requests itself; others get google-genai's
-    #: retries of throttling, server errors, and timeouts, which it sends only when asked.
+    #: One attempt per text, for a caller that retries failed requests itself. Other callers get retries of
+    #: throttling, outages, and timeouts here, not google-genai's, whose retry log line carries the response text.
     single_attempt: bool = False
-    #: Seconds a request may take; health probes set it so a stalled endpoint fails fast.
-    timeout: float | None = None
+    #: Seconds one request may take; google-genai sets none, and health probes shorten it so a stalled endpoint
+    #: fails fast.
+    timeout: float = 60.0
     client: genai.Client | None = field(default=None, repr=False)
+    _client_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def sends_batches(self) -> bool:
@@ -65,20 +75,24 @@ class VertexAIEmbedder:
         return False
 
     def _sdk_client(self) -> genai.Client:
-        if self.client is None:
-            http_options: dict[str, Any] = {"retry_options": {"attempts": 1} if self.single_attempt else {}}
-            if self.timeout is not None:
-                http_options["timeout"] = int(self.timeout * 1000)
+        """Return the one client, built on first use.
+
+        A knowledge refresh embeds files on several threads at once. Each building its own client would replace the
+        others, and google-genai closes a replaced client's connection while its request is still in flight.
+        """
+        with self._client_lock:
+            if self.client is not None:
+                return self.client
             params: dict[str, Any] = {
                 "vertexai": True,
                 "project": self.project,
                 "location": self.location,
-                "http_options": http_options,
+                "http_options": {"timeout": int(self.timeout * 1000), "retry_options": {"attempts": 1}},
             }
             if self.credentials is not None:
                 params["credentials"] = self.credentials
-            self.client = genai.Client(**params)
-        return self.client
+            self.client = client = genai.Client(**params)
+            return client
 
     def _request(self, text: str, purpose: EmbeddingPurpose) -> dict[str, Any]:
         prefix = self.query_prefix if purpose == "query" else self.document_prefix
@@ -89,6 +103,39 @@ class VertexAIEmbedder:
         self.health_recorder.record(str(error))
         return error
 
+    def _retry_delay(self, error: EmbedderRequestError, attempt: int) -> float | None:
+        """Return the seconds to wait before another attempt, or None when ``error`` ends the request."""
+        if self.single_attempt or not error.retryable or attempt >= _ATTEMPTS:
+            return None
+        delay = error.retry_after_seconds
+        return min(_RETRY_BASE_SECONDS * 2 ** (attempt - 1) if delay is None else delay, _MAX_RETRY_SECONDS)
+
+    def _embed_one(self, text: str, purpose: EmbeddingPurpose) -> list[float]:
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                response = self._sdk_client().models.embed_content(**self._request(text, purpose))
+            except Exception as exc:
+                error = _request_error(exc)
+                if (delay := self._retry_delay(error, attempt)) is None:
+                    raise self._failed(error) from None
+                time.sleep(delay)
+            else:
+                return self._vector(response)
+        raise AssertionError  # pragma: no cover - the last attempt returns or raises
+
+    async def _aembed_one(self, text: str, purpose: EmbeddingPurpose) -> list[float]:
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                response = await self._sdk_client().aio.models.embed_content(**self._request(text, purpose))
+            except Exception as exc:
+                error = _request_error(exc)
+                if (delay := self._retry_delay(error, attempt)) is None:
+                    raise self._failed(error) from None
+                await asyncio.sleep(delay)
+            else:
+                return self._vector(response)
+        raise AssertionError  # pragma: no cover - the last attempt returns or raises
+
     def _vector(self, response: EmbedContentResponse) -> list[float]:
         """Return the single vector of a one-text response, recording the request healthy."""
         if not response.embeddings or not response.embeddings[0].values:
@@ -98,22 +145,8 @@ class VertexAIEmbedder:
 
     def embed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
         """Return one vector per text; raise a classified error on failure."""
-        vectors: list[list[float]] = []
-        for text in texts:
-            try:
-                response = self._sdk_client().models.embed_content(**self._request(text, purpose))
-            except Exception as exc:
-                raise self._failed(_request_error(exc)) from None
-            vectors.append(self._vector(response))
-        return vectors
+        return [self._embed_one(text, purpose) for text in texts]
 
     async def aembed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
         """Return one vector per text asynchronously; raise a classified error on failure."""
-        vectors: list[list[float]] = []
-        for text in texts:
-            try:
-                response = await self._sdk_client().aio.models.embed_content(**self._request(text, purpose))
-            except Exception as exc:
-                raise self._failed(_request_error(exc)) from None
-            vectors.append(self._vector(response))
-        return vectors
+        return [await self._aembed_one(text, purpose) for text in texts]
