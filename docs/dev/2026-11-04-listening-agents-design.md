@@ -28,10 +28,13 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
    A page stops at the first message awaiting a refetch, and the marker waits before it; what came before it is heard, and after 10 minutes without the refetch that one message is skipped.
    A turn hears only the oldest messages that fit half its model's context window, leaving the rest for the agent's instructions, memory, tools, and requests, and the marker moves past only what it heard.
    Three failed turns in a row from one marker halve the next turn's messages, and a single message that still fails three times is skipped, so a poisoned or oversized message cannot hold a room.
-10. The hourly cap is per agent, and the agent's rooms take turns at it, least recently run first, so a room that keeps failing cannot spend the whole cap.
-11. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
+10. A turn waits until nothing the agent hears has been said for `quiet_seconds`, so it hears a conversation once it pauses rather than mid-exchange.
+    Only heard messages count, because counting every message let a chatty bot the agent may not hear, or the agent's own posts, hold the turn back forever.
+    A turn runs anyway once the oldest heard message has waited ten quiet windows, so a room that never pauses is still heard; the cost is a turn in the middle of a very busy conversation.
+11. The hourly cap is per agent, and the agent's rooms take turns at it, least recently run first, so a room that keeps failing cannot spend the whole cap.
+12. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
     Every poll repeats them, and the conversation index orders by thread first, so without it each poll sorted the room in a temporary B-tree, which the journal's hot-query rule forbids.
-12. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
+13. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
     Its key is at most 8 characters with no whitespace, enough for any emoji sequence, so a reaction cannot carry text to the room.
 
 ## Rejected alternatives
@@ -63,5 +66,4 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 ## Open questions
 
 - `listen.tools: []` validates, though a silent turn without tools only spends tokens.
-- The quiet window counts messages the agent does not hear and its own, and has no maximum wait, so a busy room can postpone a turn.
 - The prompt does not yet say that heard text is data rather than instructions.

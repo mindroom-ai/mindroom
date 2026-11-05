@@ -1,9 +1,10 @@
 """The listening service: each listening agent hears its rooms and runs one silent turn once a room goes quiet.
 
 Each agent keeps a durable marker per room (``ListeningMarkers``), and each poll reads the agent's own event journal
-after it. What the agent wrote, and what senders it may not hear from wrote, is passed over; the rest waits until the
-room has been quiet for ``quiet_seconds``, then one silent turn hears at most ``max_messages`` of it, no more than fits
-its model's context window, and the marker moves past what that turn heard. A turn the hourly cap holds back keeps the
+after it. What the agent wrote, and what senders it may not hear from wrote, is passed over; the rest waits until
+nothing the agent hears has been said for ``quiet_seconds``, or until the oldest of it is ten times that old, then one
+silent turn hears at most ``max_messages`` of it, no more than fits its model's context window, and the marker moves
+past what that turn heard. A turn the hourly cap holds back keeps the
 marker, and the agent's rooms take turns at the cap, least recently run first.
 
 No room stalls for good: a turn that keeps failing hears fewer messages until one message alone fails, which is then
@@ -49,6 +50,10 @@ _HOUR_SECONDS = 3600
 _REFETCH_WAIT_SECONDS = 600
 # Failed turns in a row over the same messages before the next one hears half as many, or, at one message, skips it.
 _FAILURES_PER_BATCH = 3
+# How many quiet windows the oldest heard message waits before a turn runs anyway, so a room that never pauses is heard.
+_MAX_WAIT_QUIET_WINDOWS = 10
+# Pages read past a turn's own to find what the agent heard last; a room with more after them counts as busy.
+_QUIET_PAGES = 5
 
 
 @dataclass(frozen=True)
@@ -220,13 +225,14 @@ class ListeningService:
             return
         try:
             heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
+            if not heard:
+                await self._mark(agent_name, room_id, page.last_cursor)
+                return
+            due = await self._due(bot, agent_name, room_id, heard, page.last_cursor, listen, config, now)
         except ReplyMembershipPendingError:
             logger.info("Listening waits for room membership to resolve", agent=agent_name, room_id=room_id)
             return
-        if not heard:
-            await self._mark(agent_name, room_id, page.last_cursor)
-            return
-        if not await self._quiet(bot, room_id, listen, now) or not self._start_run(agent_name, room_id, listen, now):
+        if not due or not self._start_run(agent_name, room_id, listen, now):
             return
         await self._run_turn(bot, listener, room_id, config, marker, heard, page.last_cursor)
 
@@ -349,14 +355,57 @@ class ListeningService:
             heard.append(replace_visible_message(message, sender=speaker))
         return heard
 
-    async def _quiet(self, bot: AgentBot, room_id: str, listen: ListenConfig, now: float) -> bool:
-        """Return whether nobody, the agent included, has written in the room for ``quiet_seconds``.
+    async def _due(
+        self,
+        bot: AgentBot,
+        agent_name: str,
+        room_id: str,
+        heard: Sequence[ResolvedVisibleMessage],
+        page_end: ConversationCursor,
+        listen: ListenConfig,
+        config: Config,
+        now: float,
+    ) -> bool:
+        """Return whether a silent turn over ``heard`` is due at ``now``.
 
-        The room's newest message decides, not the newest one read, so a busy room with more than ``max_messages``
-        waiting still waits.
+        It is once nothing the agent hears has been said in the room for ``quiet_seconds``, so what it does not hear,
+        such as a chatty bot or its own messages, never holds a turn back. The room's newest heard message decides, not
+        the newest one on the page, so a conversation longer than ``max_messages`` still waits. A turn is due anyway
+        once the oldest heard message has waited ``_MAX_WAIT_QUIET_WINDOWS`` quiet windows.
         """
-        newest = await bot.conversation_reader.latest_room_cursor(room_id)
-        return newest is None or newest.created_ts <= (now - listen.quiet_seconds) * 1000
+        quiet_ms = listen.quiet_seconds * 1000
+        now_ms = int(now * 1000)
+        if heard[0].timestamp <= now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms:
+            return True
+        if heard[-1].timestamp > now_ms - quiet_ms:
+            return False
+        return await self._heard_nothing_after(bot, agent_name, room_id, page_end, listen, config, now_ms - quiet_ms)
+
+    async def _heard_nothing_after(
+        self,
+        bot: AgentBot,
+        agent_name: str,
+        room_id: str,
+        after: ConversationCursor,
+        listen: ListenConfig,
+        config: Config,
+        since_ms: int,
+    ) -> bool:
+        """Return whether the agent heard nothing said after ``after`` and since ``since_ms``, reading a few pages on.
+
+        A message awaiting its refetch ends what can be read; a room with more than ``_QUIET_PAGES`` pages after
+        ``after`` counts as not quiet.
+        """
+        reader = bot.conversation_reader
+        for _ in range(_QUIET_PAGES):
+            page = await reader.read_room_after(room_id, after, listen.max_messages)
+            if page.last_cursor is None:
+                return True
+            heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
+            if heard and heard[-1].timestamp > since_ms:
+                return False
+            after = page.last_cursor
+        return False
 
     def _start_run(self, agent_name: str, room_id: str, listen: ListenConfig, now: float) -> bool:
         """Count one silent turn starting at ``now``, or report the hourly cap once and return False.

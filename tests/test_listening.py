@@ -341,6 +341,42 @@ async def test_busy_room_waits_then_one_turn_capped_at_max_messages(
     assert listening.marker() == ConversationCursor(created_ts=_ms(50), logical_event_id="$m2")
 
 
+async def test_a_chatty_bot_it_does_not_hear_never_holds_a_turn_back(listening: _Listening) -> None:
+    """Only messages the agent hears count for quiet, so a bot it may not hear, chatting on, does not delay its turn."""
+    await listening.service._poll_once(T0)
+    await listening.say("$alice", 10)
+    for second in range(15, 75, 5):
+        await listening.say(f"$bot-{second}", second, sender=BOB)
+        await listening.say(f"$own-{second}", second + 1, sender=listening.bot.matrix_id.full_id)
+
+    await listening.service._poll_once(T0 + 60)
+    assert listening.turns.contexts == []
+    await listening.service._poll_once(T0 + 71)
+
+    assert listening.turns.heard() == ["$alice"]
+    assert listening.marker_event() == "$own-70"
+
+
+async def test_a_room_that_never_goes_quiet_is_heard_after_ten_quiet_windows(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conversation that never pauses still gets a turn once its oldest heard message has waited 10 quiet windows."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"quiet_seconds": 10})
+    await listening.service._poll_once(T0)
+    turn_polls = []
+    for index, second in enumerate(range(10, 200, 5)):
+        await listening.say(f"$m{index}", second)
+        before = len(listening.turns.contexts)
+        await listening.service._poll_once(T0 + second + 1)
+        if len(listening.turns.contexts) > before:
+            turn_polls.append(second + 1)
+
+    assert turn_polls == [111]
+    assert listening.turns.heard() == [f"$m{index}" for index in range(21)]
+
+
 async def test_marker_advances_and_nothing_heard_twice(listening: _Listening) -> None:
     """Each turn hears only what came after the last one."""
     await listening.service._poll_once(T0)

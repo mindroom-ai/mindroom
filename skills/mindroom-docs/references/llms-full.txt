@@ -1903,7 +1903,7 @@ agents:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `rooms` | list | *required* | Room keys, Matrix room IDs, or aliases to listen in, at least one. Each must resolve the way `room_thread_modes` keys do |
-| `quiet_seconds` | int, >= 10 | `60` | Seconds a room must stay quiet before the silent turn runs |
+| `quiet_seconds` | int, >= 10 | `60` | Seconds without a message the agent hears before the silent turn runs |
 | `max_messages` | int, 1 to 500 | `200` | Most messages one silent turn reads; the rest wait for the next turn |
 | `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour for the agent; further due runs are skipped, logged, and what was heard is kept |
 | `tools` | list | `[memory, react]` | The only tools a silent turn may use, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools` |
@@ -1913,7 +1913,9 @@ agents:
 
 The agent hears every message in a listed room that it may hear.
 That uses the same sender authorization its replies use, judged on the person a relay speaks for rather than the relaying account.
-After the room has been quiet for `quiet_seconds`, one silent turn runs over at most `max_messages` of what it heard.
+Once nothing the agent hears has been said in the room for `quiet_seconds`, one silent turn runs over at most `max_messages` of what it heard.
+Messages it does not hear, such as its own or those of a sender it may not hear from, never delay that turn.
+In a room that never goes quiet, a turn runs anyway once the oldest message waiting is ten times `quiet_seconds` old.
 Its text is never posted, and it acts only through its listen tools.
 Approval-gated tools and interactive questions are not offered.
 No more than `max_runs_per_hour` turns run per hour, shared by the agent's listened rooms in turn; the count starts again after a restart.
