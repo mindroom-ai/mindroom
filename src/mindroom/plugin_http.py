@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Annotated
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Path, Request
 
 from mindroom.api.app_state import ensure_app_state
 
@@ -35,11 +36,12 @@ async def require_client_user(request: Request) -> ClientUser:
     return ClientUser(session.user_id)
 
 
-async def require_room_member(request: Request, room_id: str) -> ClientUser:
+async def require_room_member(request: Request, room_id: Annotated[str, Path()]) -> ClientUser:
     """Return the client session's user once they are joined to ``room_id``, answering 401, 403 or 503 otherwise.
 
     The user is always the session's: as a dependency, FastAPI fills every parameter from the request, so one naming
-    the user would let the caller choose it.
+    the user would let the caller choose it. For the same reason ``room_id`` comes only from the route's path: a route
+    without a ``{room_id}`` answers 422 rather than check a room the query string names.
     """
     user = await require_client_user(request)
     room_members = ensure_app_state(request.app).room_members

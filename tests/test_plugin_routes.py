@@ -90,6 +90,11 @@ async def topic(room_id: str, request: Request) -> dict:
 @router.get("/rooms/{room_id}/secret", dependencies=[Depends(require_room_member)])
 async def secret(room_id: str) -> dict:
     return {"secret": room_id}
+
+
+@router.get("/me")
+async def me_without_room(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict:
+    return {"user_id": user.user_id}
 """
 
 # FastAPI refuses a route at "" only as a router is included in an app, which MindRoom does as the plugin loads.
@@ -346,9 +351,10 @@ def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path
 
 
 def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_path: Path) -> None:
-    """A ``user_id`` in the query string never picks the user: the check is always of the session's own user."""
+    """The query string never picks the user nor the room: the user is the session's own, the room the path's."""
     app, client = _published_client(tmp_path)
-    bob = {"Authorization": f"Bearer {_client_session_store(app).create('@bob:example.org').token}"}
+    store = _client_session_store(app)
+    bob = {"Authorization": f"Bearer {store.create('@bob:example.org').token}"}
 
     async def room_members(room_id: str) -> frozenset[str]:
         return frozenset({ALICE}) if room_id == ROOM else frozenset()
@@ -359,6 +365,9 @@ def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_pat
         url = f"/api/plugins/demo/rooms/{room}/{path}?user_id={quote(ALICE)}"
         assert client.get(url).status_code == 401, path
         assert client.get(url, headers=bob).status_code == 403, path
+    # A route without ``{room_id}`` never checks a room the query string names, even one the caller is in.
+    alice = {"Authorization": f"Bearer {store.create(ALICE).token}"}
+    assert client.get(f"/api/plugins/demo/me?room_id={quote(ROOM)}", headers=alice).status_code == 422
 
 
 def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
