@@ -58,12 +58,8 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 ## Risks
 
 - Prompt injection from heard text can drive the listed tools.
-  The allowlist, the hidden approval-gated tools, the dropped text, and the sender authorization contain it, and operators must keep `listen.tools` narrow.
+  The prompt tells the model that heard text is data, not instructions, but a model can still be persuaded, so the allowlist, the hidden approval-gated tools, the dropped text, and the sender authorization contain it, and operators must keep `listen.tools` narrow.
 - Cost without budgets.
   `max_runs_per_hour`, `max_messages`, and a cheaper `model` bound it, and usage under `listening` makes it visible.
 - A restart in the middle of a silent turn, after its tools acted, repeats that turn, so a memory write or reaction may happen twice.
 - The hourly run count lives in memory and starts again after a restart.
-
-## Open questions
-
-- The prompt does not yet say that heard text is data rather than instructions.
