@@ -34,7 +34,11 @@ class _PluginRoutesApp:
         # Starlette's Mount keeps the full path in ``path`` and moves the matched prefix into ``root_path``.
         root_path = scope.get("root_path", "")
         name = scope["path"].removeprefix(root_path).removeprefix("/").partition("/")[0]
-        router = self._published_router(name) if name else None
+        routers = self._published_routers()
+        # A plugin no longer published lets go of its sub-app, and with it its routes module.
+        for stale in self._sub_apps.keys() - routers.keys():
+            del self._sub_apps[stale]
+        router = routers.get(name)
         if router is None:
             # A websocket gets the same 404 as its handshake's denial response.
             await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
@@ -49,14 +53,12 @@ class _PluginRoutesApp:
             send,
         )
 
-    def _published_router(self, name: str) -> APIRouter | None:
+    def _published_routers(self) -> dict[str, APIRouter]:
         snapshot = config_lifecycle.require_api_state(self._app).snapshot
         if snapshot.runtime_config is None:
-            return None
-        for plugin in config_plugins(snapshot.runtime_config, snapshot.runtime_paths).loaded_plugins:
-            if plugin.name == name:
-                return plugin.router
-        return None
+            return {}
+        plugins = config_plugins(snapshot.runtime_config, snapshot.runtime_paths).loaded_plugins
+        return {plugin.name: plugin.router for plugin in plugins if plugin.router is not None}
 
     def _sub_app(self, name: str, router: APIRouter) -> FastAPI:
         cached = self._sub_apps.get(name)

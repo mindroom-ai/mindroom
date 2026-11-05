@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.routing import Mount
 from starlette.testclient import WebSocketDenialResponse
 
 from mindroom.api import config_lifecycle, main
@@ -240,6 +241,27 @@ def test_plugin_route_generates_urls_to_its_own_routes(tmp_path: Path) -> None:
     assert client.get("/api/plugins/demo/link").json() == {"url": "http://testserver/api/plugins/demo/things/123"}
     proxied = TestClient(app, root_path="/mindroom").get("/mindroom/api/plugins/demo/link")
     assert proxied.json() == {"url": "http://testserver/mindroom/api/plugins/demo/things/123"}
+
+
+def test_disabled_plugin_drops_its_cached_sub_app(tmp_path: Path) -> None:
+    """Once a plugin is no longer published, the next request lets go of its sub-app, and with it the routes module."""
+    _write_plugin(tmp_path, ROUTES)
+    _write_plugin(tmp_path, ROUTES, name="other")
+    config, runtime_paths = _config(tmp_path, "demo", "other")
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    [plugin_routes] = [route.app for route in app.routes if isinstance(route, Mount) and route.path == "/api/plugins"]
+    client = TestClient(app)
+    assert client.get("/api/plugins/other/ping").status_code == 200
+    assert client.get("/api/plugins/demo/ping").status_code == 200
+    assert set(plugin_routes._sub_apps) == {"demo", "other"}
+
+    config, runtime_paths = _config(tmp_path, "demo")
+    publish_test_plugins(config, runtime_paths)
+    ensure_app_state(app).api_state = _api_state(config, runtime_paths)
+
+    assert client.get("/api/plugins/other/ping").status_code == 404
+    assert set(plugin_routes._sub_apps) <= {"demo"}
 
 
 def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
