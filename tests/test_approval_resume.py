@@ -161,8 +161,8 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
     expected = as_stored(
         resumed(
             run.paused,
-            decided=replace(waiting, result=handed_over, external_execution_required=False),
-            added=[result(call, handed_over, is_error=None), request.messages[-1]],
+            decided=replace(waiting, result=handed_over, external_execution_required=False, is_error=False),
+            added=[result(call, handed_over), request.messages[-1]],
             answered=_answered(case.code),
         ),
     )
@@ -269,7 +269,7 @@ async def test_a_resume_sends_each_model_its_stored_request_then_its_decided_res
                 ("user", None, receipt(call_id="call-helper-multiply-approved"), None),
             ],
             "code-model": [
-                ("tool", "call-delegate-approved", handed_over, None),
+                ("tool", "call-delegate-approved", handed_over, False),
                 ("user", None, receipt(call_id=f"{child.delegation_id}:call-helper-multiply-approved"), None),
             ],
         }

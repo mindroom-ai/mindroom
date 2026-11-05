@@ -608,8 +608,7 @@ def _resolve_delegation_requirement(
     The answer stays on the parent's call, so a later entry never advances the call again; the parent's continuation
     hands every answer to the loop's own decision check.
     """
-    if failed:
-        requirement.tool_execution.is_error = True
+    requirement.tool_execution.is_error = failed
     requirement.set_external_execution_result(result)
     emit_call(ToolCompleted(requirement.tool_execution.call))
     return result

@@ -36,15 +36,17 @@ logger = get_logger(__name__)
 # third for a result that carries media.
 _LIMIT_ERROR_TEXT = "Tool call limit reached. Tool call {name} not executed. Don't try to execute it again."
 _FAILING_TOOL_ERROR_TEXT = (
-    "Tool {name} failed in {failures} requests in a row in this turn, so this call was not executed. Its last error: "
-    "{error}\nDon't call {name} again in this turn. Tell the user what failed instead."
+    "Tool {name} failed in {failures} requests of this turn with no success in between, so this call was not executed. "
+    "Its last error: {error}\nDon't call {name} again in this turn. Tell the user what failed instead."
 )
 # The user reads this at the end of a reply whose run the loop ended because the model kept calling a failing tool.
-_FAILING_TOOL_STOP_TEXT = "Stopped: tool {name} failed in {failures} requests in a row. Its last error: {error}"
-# A tool whose calls ran and failed in this many batches in a row within one turn, with no success of it in between,
-# is not run again in that turn. A model that keeps resending a call the tool rejects, or retrying an integration that
-# is down, otherwise loops until the per-turn call limit, paying for a model request per attempt; a batch counts once,
-# however many of its calls failed, since it cost one request.
+_FAILING_TOOL_STOP_TEXT = (
+    "Stopped: tool {name} failed in {failures} requests with no success in between. Its last error: {error}"
+)
+# A tool whose calls ran and failed in this many batches of one turn, with no success of it in between, is not run
+# again in that turn; batches that did not call it leave its count alone. A model that keeps resending a call the tool
+# rejects, or retrying an integration that is down, otherwise loops until the per-turn call limit, paying for a model
+# request per attempt; a batch counts once, however many of its calls failed, since it cost one request.
 MAX_CONSECUTIVE_TOOL_FAILURES = 8
 # The refusal quotes this much of the tool's last error, enough to say what failed.
 _MAX_QUOTED_ERROR = 500
@@ -199,18 +201,17 @@ def plan_tool_batch(
     calls_so_far: int,
     max_tool_calls_per_turn: int | None,
     entity: str | None,
-    failing_tools: Mapping[str, FailingTool] | None = None,
+    failing_tools: Mapping[str, FailingTool],
 ) -> ToolBatch:
     """Resolve an assistant message's tool calls in order, apply the limits, and classify the admitted ones.
 
     A call naming no offered function, or whose arguments cannot be decoded, is refused with an error answer, logged
     for ``entity`` without its arguments, and never counts toward the limit. Of the rest, each call past
     ``max_tool_calls_per_turn`` is refused with a limit error instead of running, and each call of a tool that failed
-    in ``MAX_CONSECUTIVE_TOOL_FAILURES`` batches in a row by ``failing_tools`` is refused with the tool's last error,
+    in ``MAX_CONSECUTIVE_TOOL_FAILURES`` batches since its last success by ``failing_tools`` is refused with the tool's last error,
     logged, and named in the batch's ``refused_for_failures``. An admitted call whose function's gate pauses its run is
     planned paused, with the flags its stored execution carries.
     """
-    failing = failing_tools or {}
     refused_for_failures: dict[str, None] = {}
     calls: list[PlannedCall | RefusedCall] = []
     count = calls_so_far
@@ -234,7 +235,7 @@ def plan_tool_batch(
                 limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
                 calls.append(_refused(call_id, function.name, limit_text, arguments, counts=True))
                 continue
-        tool = failing.get(function.name)
+        tool = failing_tools.get(function.name)
         if tool is not None and tool.failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
             logger.warning(
                 "failing_tool_call_refused",

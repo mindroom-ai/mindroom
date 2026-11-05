@@ -53,7 +53,7 @@ def _called(call: dict[str, Any]) -> tuple[str, str, Any]:
 def result(call: dict[str, Any], content: str, *, is_error: bool | None = False) -> Message:
     """Return the tool message answering ``call``, a tool call as ``tests.fakes.scripted_model.tool_call`` gives it.
 
-    ``is_error`` is None for an externally executed call's result, which records no outcome of its own.
+    ``is_error`` is None for an external result handed to a resume without an outcome; a delegation records its own.
     """
     call_id, name, arguments = _called(call)
     return Message(

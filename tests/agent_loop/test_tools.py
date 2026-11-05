@@ -144,6 +144,7 @@ def test_unknown_and_undecodable_calls_are_refused_in_call_order_and_bypass_the_
         calls_so_far=0,
         max_tool_calls_per_turn=1,
         entity="code",
+        failing_tools={},
     )
 
     # Each answer is a failed call, which Claude and Gemini read as a failure.
@@ -177,6 +178,7 @@ def test_unknown_and_undecodable_calls_are_logged_without_their_arguments() -> N
             calls_so_far=0,
             max_tool_calls_per_turn=None,
             entity="code",
+            failing_tools={},
         )
 
     warning = {"log_level": "warning", "entity": "code"}
@@ -199,6 +201,7 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
         calls_so_far=1,
         max_tool_calls_per_turn=2,
         entity="code",
+        failing_tools={},
     )
 
     assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
@@ -272,8 +275,9 @@ def test_calls_of_a_tool_that_keeps_failing_are_refused_with_its_last_error_whil
         )
 
     refusal = (
-        f"Tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests in a row in this turn, so this call was not "
-        "executed. Its last error: broken link\nDon't call boom again in this turn. Tell the user what failed instead."
+        f"Tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests of this turn with no success in between, so "
+        "this call was not executed. Its last error: broken link\nDon't call boom again in this turn. Tell the user "
+        "what failed instead."
     )
     assert [call.execution.tool_call_id for call in batch.planned] == ["c2"]
     assert [(m.tool_call_id, m.tool_name, m.content, m.tool_call_error) for m in _refused_answers(batch)] == [
@@ -319,6 +323,7 @@ def test_empty_list_arguments_plan_as_no_arguments() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     assert batch.planned[0].execution.tool_args is None
@@ -334,6 +339,7 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     plain, confirmation, external_call = (call.execution for call in batch.planned)
@@ -361,7 +367,14 @@ async def _dispatch(calls: Sequence[PlannedCall], *, middleware: Sequence[ToolMi
 
 
 def _planned(functions: dict, *calls: object) -> list[PlannedCall]:
-    return plan_tool_batch(list(calls), functions, calls_so_far=0, max_tool_calls_per_turn=None, entity="code").planned
+    return plan_tool_batch(
+        list(calls),
+        functions,
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+        entity="code",
+        failing_tools={},
+    ).planned
 
 
 @pytest.mark.asyncio
@@ -652,6 +665,7 @@ async def test_dispatch_runs_calls_concurrently_and_the_batch_answers_them_in_ca
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     results = await _dispatch(batch.planned)
@@ -698,6 +712,7 @@ async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_b
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     dispatch = asyncio.create_task(_dispatch(batch.planned))
     for _ in range(5):
@@ -723,6 +738,7 @@ async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     dispatch = asyncio.create_task(_dispatch(batch.planned))
     for _ in range(5):
@@ -750,6 +766,7 @@ async def test_each_call_is_recorded_and_yielded_as_it_finishes_and_closing_unwi
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     linger, quick_call = batch.planned
     dispatch = dispatch_tool_calls(batch.planned, run=context(), middleware=())
@@ -782,6 +799,7 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     # The sync calls run on worker threads and may finish in any order; the batch answers them in call order.
@@ -808,6 +826,7 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
 
     results = await _dispatch(batch.planned, middleware=[middleware])
@@ -839,6 +858,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         calls_so_far=0,
         max_tool_calls_per_turn=None,
         entity="code",
+        failing_tools={},
     )
     # The sync calls may finish in any order; the batch answers them, and so orders their media, in call order.
     results = batch.answers(await _dispatch(batch.planned))

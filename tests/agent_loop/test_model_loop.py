@@ -408,8 +408,9 @@ def flaky(ok: bool) -> str:
 
 def _failing_tool_refusal(error: str) -> str:
     return (
-        f"Tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests in a row in this turn, so this call was not "
-        f"executed. Its last error: {error}\nDon't call boom again in this turn. Tell the user what failed instead."
+        f"Tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests of this turn with no success in between, so "
+        f"this call was not executed. Its last error: {error}\nDon't call boom again in this turn. Tell the user what "
+        "failed instead."
     )
 
 
@@ -441,7 +442,7 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
     assert all(tool.is_error for tool in record.tools)
     # The model called it again after reading the refusal, so the run ends before another request, and the reply
     # says why after the text so far.
-    stop = f"Stopped: tool boom failed in {limit} requests in a row. Its last error: bad link {limit}"
+    stop = f"Stopped: tool boom failed in {limit} requests with no success in between. Its last error: bad link {limit}"
     assert len(model.requests) == limit + 2
     assert [event.text for event in events if isinstance(event, TextDelta)][-1] == f"\n\n{stop}"
     assert record.content == f"Fetching the file.\n\n{stop}"
@@ -663,45 +664,32 @@ async def test_a_resume_after_a_second_refusal_lets_the_model_read_the_approved_
     assert events[-1] == LoopEnded(paused=False)
 
 
-async def test_an_approved_call_that_fails_on_resume_does_not_count() -> None:
-    # The paused batch was counted when it paused, and a person decided this call.
+async def test_the_calls_a_resume_answers_count_toward_their_tools_failures() -> None:
+    # The paused batch counted none of them, and a delegation's result resumes its parent without anyone deciding.
     model = ScriptedModel([answer("done")])
-    execution = ToolExecution(tool_call_id="c1", tool_name="boom", tool_args={"reason": "still broken"})
-    execution.requires_confirmation = True
-    requirement = RunRequirement(execution)
-    requirement.confirm()
+    approved = ToolExecution(tool_call_id="c1", tool_name="boom", tool_args={"reason": "still broken"})
+    approved.requires_confirmation = True
+    failed = ToolExecution(tool_call_id="d1", tool_name="delegate_task", tool_args={}, is_error=True)
+    failed.external_execution_required = True
+    succeeded = ToolExecution(tool_call_id="d2", tool_name="ask_agent", tool_args={}, is_error=False)
+    succeeded.external_execution_required = True
+    requirements = [RunRequirement(approved), RunRequirement(failed), RunRequirement(succeeded)]
+    requirements[0].confirm()
+    requirements[1].set_external_execution_result("the child failed")
+    requirements[2].set_external_execution_result("the child answered")
     record = _record()
-    record.tools = [execution]
-    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES - 1, last_error="bad")}
+    record.tools = [approved, failed, succeeded]
+    record.failing_tools = {
+        "boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES - 1, last_error="bad"),
+        "ask_agent": FailingTool(failures=3, last_error="earlier"),
+    }
 
-    _, record = await _run(spec(model, gated(boom)), _prompt(), record=record, resumed=[requirement])
+    _, record = await _run(spec(model, gated(boom)), _prompt(), record=record, resumed=requirements)
 
-    assert record.failing_tools["boom"].failures == MAX_CONSECUTIVE_TOOL_FAILURES - 1
-
-
-async def test_a_resume_answers_after_its_approved_call_whatever_failed_before_the_pause() -> None:
-    model = ScriptedModel([answer("done")])
-    execution = ToolExecution(tool_call_id="c1", tool_name="echo", tool_args={"text": "approved"})
-    execution.requires_confirmation = True
-    requirement = RunRequirement(execution)
-    requirement.confirm()
-    record = _record()
-    record.tools = [
-        *(
-            ToolExecution(tool_call_id=f"f{index}", tool_name="echo", is_error=True, result="failed")
-            for index in range(MAX_CONSECUTIVE_TOOL_FAILURES + 2)
-        ),
-        execution,
-    ]
-    messages = _prompt()
-
-    with capture_logs() as logs:
-        events, record = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
-
-    assert [message.content for message in messages if message.role == "tool"] == ["approved"]
-    assert record.content == "done"
-    assert events[-1] == LoopEnded(paused=False)
-    assert not _failing_tool_events(logs)
+    assert record.failing_tools == {
+        "boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="still broken"),
+        "delegate_task": FailingTool(failures=1, last_error="the child failed"),
+    }
 
 
 async def test_a_batch_that_stops_the_run_skips_the_batch_hooks() -> None:

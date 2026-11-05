@@ -236,7 +236,7 @@ class RunRequirement:
 class FailingTool:
     """A tool whose calls that ran kept failing in one run, which the agent loop stops running past a limit.
 
-    ``failures`` counts the tool's batches in a row in which a call of it ran and failed and none succeeded, and
+    ``failures`` counts the tool's batches since its last success in which a call of it ran and failed, and
     ``last_error`` is the latest such call's error text; ``refusals`` counts the batches since in which the loop refused
     the tool instead of running it.
     """

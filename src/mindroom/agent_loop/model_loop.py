@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import RunContext
     from mindroom.agent_loop.tools import PreparedTools, ToolBatch
     from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolFunction
@@ -269,9 +269,14 @@ def _end_for_failing_tool(tool_name: str, state: LoopState, progress: _Progress)
     text = failing_tool_stop_text(tool_name, tool)
     # The reply streams the line after the text so far, so it starts a paragraph of its own there, as in the content.
     delta = TextDelta(f"\n\n{text}" if any(part.strip() for part in progress.text_parts) else text)
+    _add_text(text, state, progress)
+    return delta
+
+
+def _add_text(text: str, state: LoopState, progress: _Progress) -> None:
+    """Add ``text`` to the run's content: the text a resumed run carried from its pause and the loop's texts so far."""
     progress.text_parts.append(text)
     state.record.content = joined_texts([state.record.carried_content or "", *progress.text_parts])
-    return delta
 
 
 async def _before_request(
@@ -303,9 +308,8 @@ def _accept_turn(
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
-    The provider stamped the message with the model that answered it. The run's content is the text a resumed run
-    carried from its pause and its requests' texts, joined a blank line apart (``joined_texts``). A request that
-    answers without content, as the adapters report a turn without text, leaves the content as it was.
+    The provider stamped the message with the model that answered it. A request that answers without content, as the
+    adapters report a turn without text, leaves the content as it was.
     """
     metrics = state.record.metrics
     assert metrics is not None
@@ -313,8 +317,7 @@ def _accept_turn(
     _count_request(metrics, message.metrics, identity)
     state.request_index += 1
     if message.content is not None:
-        progress.text_parts.append(message.get_content_string())
-        state.record.content = joined_texts([state.record.carried_content or "", *progress.text_parts])
+        _add_text(message.get_content_string(), state, progress)
 
 
 async def _run_tool_batch(
@@ -385,10 +388,13 @@ async def _answer_resumed(
     """Answer the requirements a resume decided, in order, as the rest of the batch the run paused in.
 
     Approved calls run from their stored arguments and announce themselves as tool events; denied calls answer with
-    their note; external results answer as they are. The run then stops, pauses, or continues as after any batch:
-    a member that paused once more leaves the record waiting, so the loop sends no request.
+    their note; external results answer as they are. The approved calls and external results count toward their
+    tools' failures as a batch's calls that ran do; the paused batch counted none of them, since a gate pauses every
+    call of its function. The run then stops, pauses, or continues as after any batch: a member that paused once more
+    leaves the record waiting, so the loop sends no request.
     """
     results: list[Message] = []
+    answered: list[ToolExecution] = []
     for requirement in decided:
         execution = requirement.tool_execution
         if execution.confirmed is True:
@@ -406,6 +412,7 @@ async def _answer_resumed(
                     else:
                         results.append(item[1])
             yield ToolCompleted(execution.call)
+            answered.append(execution)
         elif execution.confirmed is False:
             execution.is_error = True
             execution.requires_confirmation = False
@@ -421,6 +428,8 @@ async def _answer_resumed(
         if execution.external_execution_required:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
+            answered.append(execution)
+    count_tool_failures(state.record.failing_tools, answered)
     progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
     progress.paused = _waits_for_decision(state.record)
 

@@ -210,15 +210,15 @@ Skill reviews also log this record under the reviewed agent's name, with a fixed
 
 ### `failing_tool_call_refused`
 
-Logged for each call the loop refuses because the tool's calls failed in 8 model requests in a row within one turn, with no success of it in between.
-Several failed calls in one request count once; calls the loop answered without running (unknown tools, undecodable arguments, the call limit, denied approvals) and calls a person approved do not count.
+Logged for each call the loop refuses because the tool's calls failed in 8 model requests of one turn, with no success of it in between.
+Several failed calls in one request count once; calls the loop answered without running (unknown tools, undecodable arguments, the call limit, denied approvals) do not count.
 The model gets the tool's last error and is told to stop calling it; the run's other tools keep working.
 
 | Field | Meaning |
 |-------|---------|
 | `entity` | Agent or team name |
 | `tool_name` | The refused tool |
-| `consecutive_failures` | Model requests in a row in which the tool failed |
+| `consecutive_failures` | Model requests since the tool's last success in which it failed |
 
 Check the tool's `tool_call_failed` warnings for the turn: one repeated error usually means an integration that is down, an expired grant, or arguments the model keeps resending.
 
