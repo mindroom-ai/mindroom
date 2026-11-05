@@ -494,7 +494,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](../tools/worker-computer.md) persistent browser and display | `false` |
-| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers | `[]` |
+| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers, and to call client sessions and [plugin HTTP routes](../plugins.md#http-routes) | `[]` |
 
 The Helm chart sets the Kubernetes backend variables.
 To deploy that backend without Helm, see [Worker settings](kubernetes.md#worker-settings).

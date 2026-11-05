@@ -94,14 +94,20 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
-# Paths a Matrix web client calls from its own origin with a bearer token and no cookies.
+# Paths a Matrix web client calls from its own origin with a bearer token and no cookies, and the paths under them.
 _CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins")
+# The trailing slash keeps a sibling such as /api/pluginsX out.
+_CLIENT_ORIGIN_PREFIXES = tuple(f"{path}/" for path in _CLIENT_ORIGIN_PATHS)
 _IOS_APP_ORIGIN = "capacitor://localhost"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
     config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
     config_lifecycle.CONFIG_PENDING_RESTART_HEADER,
 )
+
+
+def _is_client_origin_path(path: str) -> bool:
+    return path in _CLIENT_ORIGIN_PATHS or path.startswith(_CLIENT_ORIGIN_PREFIXES)
 
 
 @dataclass(frozen=True)
@@ -130,7 +136,7 @@ class _RuntimeDashboardCorsMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         middleware = self._middleware_for_current_runtime(scope.get("path", ""))
-        if scope.get("path", "").startswith(_CLIENT_ORIGIN_PATHS):
+        if _is_client_origin_path(scope.get("path", "")):
 
             async def no_store_send(message: Message) -> None:
                 if message["type"] == "http.response.start":
@@ -152,7 +158,7 @@ class _RuntimeDashboardCorsMiddleware:
         else:
             origins = (
                 allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
-                if path.startswith(_CLIENT_ORIGIN_PATHS)
+                if _is_client_origin_path(path)
                 else gateway_cors_origins(paths, path)
             )
             settings = (

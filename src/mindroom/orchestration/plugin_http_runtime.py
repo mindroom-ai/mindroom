@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from mindroom.bot import AgentBot
+
+logger = get_logger(__name__)
 
 _UNAVAILABLE = "Room membership is unavailable."
 
@@ -35,7 +38,12 @@ def _bind_room_members(
         client = router_client if live_client is None else live_client()
         if client is None:
             raise HTTPException(503, _UNAVAILABLE)
-        response = await client.joined_members(room_id)
+        try:
+            response = await client.joined_members(room_id)
+        except Exception as error:
+            # A failed lookup leaves membership unknown, which must never let the caller through.
+            logger.warning("Room membership lookup failed", room_id=room_id, error_type=type(error).__name__)
+            raise HTTPException(503, _UNAVAILABLE) from None
         if not isinstance(response, nio.JoinedMembersResponse):
             raise HTTPException(503, _UNAVAILABLE)
         return frozenset(member.user_id for member in response.members)

@@ -113,11 +113,12 @@ def test_exchange_returns_session_for_openid_user(client: TestClient) -> None:
 
 
 def test_exchange_rejects_bad_openid(client: TestClient, peer: UserinfoPeer) -> None:
-    """A homeserver that rejects the token gives no session."""
+    """A homeserver that rejects the token gives no session, and the answer does not echo the OpenID token."""
     peer.status = 401
     response = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
     assert response.status_code == 401
     assert "session_token" not in response.text
+    assert OPENID_TOKEN["access_token"] not in response.text
 
 
 def test_require_client_user_accepts_bearer(client: TestClient) -> None:
@@ -136,12 +137,16 @@ def test_require_client_user_401_without_or_with_unknown_token(client: TestClien
 
 
 def test_expired_session_is_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A session past its one-hour life is a 401."""
+    """A session that works until its one-hour life is over is a 401 after it."""
     token = exchange(client)["session_token"]
+    headers = {"Authorization": f"Bearer {token}"}
     store = client.app.state.mindroom_app_state.client_sessions
+    almost = time.time() + 3590
+    monkeypatch.setattr(store, "clock", lambda: almost)
+    assert client.get("/api/plugins/x/whoami", headers=headers).status_code == 200
     later = time.time() + 3601
     monkeypatch.setattr(store, "clock", lambda: later)
-    response = client.get("/api/plugins/x/whoami", headers={"Authorization": f"Bearer {token}"})
+    response = client.get("/api/plugins/x/whoami", headers=headers)
     assert response.status_code == 401
 
 
@@ -156,6 +161,37 @@ def test_cors_allows_client_origin_on_plugin_paths(client: TestClient) -> None:
         assert "access-control-allow-origin" not in denied.headers
 
 
+def test_client_paths_are_never_cached_nor_credentialed(client: TestClient) -> None:
+    """Session and plugin answers carry no-store and never allow credentials, preflight or not."""
+    token = exchange(client)["session_token"]
+    origin = {"Origin": CLIENT_ORIGIN}
+    preflight = {"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization"}
+    responses = [
+        client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN}, headers=origin),
+        client.get("/api/plugins/x/whoami", headers={**origin, "Authorization": f"Bearer {token}"}),
+        client.get("/api/plugins/x/whoami", headers=origin),
+        client.options("/api/client-sessions", headers={**origin, **preflight}),
+        client.options("/api/plugins/x/whoami", headers={**origin, **preflight}),
+    ]
+    for response in responses:
+        assert response.headers["cache-control"] == "no-store", response.request.url
+        assert response.headers["access-control-allow-origin"] == CLIENT_ORIGIN, response.request.url
+        assert "access-control-allow-credentials" not in response.headers, response.request.url
+
+
+def test_client_origin_paths_stop_at_their_own_segment(client: TestClient) -> None:
+    """A sibling path that only starts with a client path's letters gets the dashboard's policy, not the client's."""
+    headers = {
+        "Origin": CLIENT_ORIGIN,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization",
+    }
+    for path in ("/api/pluginsX/y", "/api/client-sessionsX", "/api/computersX"):
+        preflight = client.options(path, headers=headers)
+        assert "access-control-allow-origin" not in preflight.headers, path
+        assert preflight.headers.get("cache-control") != "no-store", path
+
+
 def test_exchange_refuses_homeserver_that_does_not_bind_tokens(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -165,6 +201,7 @@ def test_exchange_refuses_homeserver_that_does_not_bind_tokens(
     response = client.post("/api/client-sessions", json={"openid_token": OPENID_TOKEN})
     assert response.status_code == 403
     assert "session_token" not in response.text
+    assert OPENID_TOKEN["access_token"] not in response.text
 
 
 class Clock:
@@ -178,8 +215,15 @@ class Clock:
         return self.now
 
 
+def test_session_repr_leaves_out_its_token() -> None:
+    """A logged or printed session never shows its bearer token."""
+    session = ClientSessionStore().create("@alice:example.org")
+    assert session.token not in repr(session)
+    assert "@alice:example.org" in repr(session)
+
+
 def test_per_user_cap_evicts_that_users_oldest_session() -> None:
-    """A ninth session for one user drops their first and leaves other users alone."""
+    """A session past the per-user cap drops that user's first and leaves other users alone."""
     store = ClientSessionStore(per_user_capacity=2)
     bob = store.create("@bob:example.org")
     first = store.create("@alice:example.org")

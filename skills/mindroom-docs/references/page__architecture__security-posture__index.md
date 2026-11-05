@@ -234,11 +234,16 @@ MindRoom verifies it at the configured homeserver's `/_matrix/federation/v1/open
 Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens to this deployment's audience, because without binding any backend a user opens from the client could replay their token; unlike Connections, no setting waives this.
 It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
 The store keeps at most 8 sessions per user and 256 in all, and past either cap it evicts the oldest session instead of refusing, so one user cannot lock others out.
-A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` is public; plugin code already runs with the primary's full trust, and workers never import a routes module.
+A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` is public; plugin code already runs with the primary's full trust.
+Workers never import a routes module, as long as it is its own file that the plugin's tools and hooks modules do not import.
+Plugin routes share the dashboard's origin, so a route that returned `text/html` or other content a browser renders, built from untrusted input, could run script with the dashboard's signed-in session.
+MindRoom does not filter what plugin routes return: they must answer with JSON and `X-Content-Type-Options: nosniff`.
+A plugin route that raises answers 500 without the error's detail.
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
-Routes that act on one room also call `require_room_member`, which reads live joined members through the router bot's client, answering 403 for a non-member and 503 when membership is unavailable (no router client, or the Matrix call failed).
+Routes that act on one room also call `require_room_member`, which reads live joined members through the router bot's client, answering 403 for a non-member and 503 when membership is unavailable (no running router client, or the Matrix call answered with an error or raised).
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
-CORS for these paths allows only the origins in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, with credentials off and `Cache-Control: no-store`.
+CORS for `/api/client-sessions` and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
+These paths allow only those origins, with credentials off, and every response carries `Cache-Control: no-store`.
 
 ## Known gaps
 

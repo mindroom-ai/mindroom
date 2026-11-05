@@ -851,7 +851,7 @@ MindRoom serves that router under `/api/plugins/<name>/` on its API, where `<nam
 # routes.py
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 
 from mindroom.plugin_http import ClientUser, require_client_user, require_room_member
 
@@ -862,24 +862,39 @@ router = APIRouter()
 async def hello(
     room_id: str,
     request: Request,
+    response: Response,
     user: Annotated[ClientUser, Depends(require_client_user)],
 ) -> dict[str, str]:
     await require_room_member(request, room_id, user.user_id)
+    response.headers["X-Content-Type-Options"] = "nosniff"
     return {"hello": user.user_id}
 ```
+
+!!! warning "Plugin routes share the dashboard's origin"
+    MindRoom serves plugin routes from the same origin as its dashboard, so script in a page a plugin route returns would run with the dashboard's signed-in session.
+    Never return `text/html`, or any other content a browser would render, such as SVG, built from untrusted input such as Matrix messages, room names, or request parameters.
+    Return JSON with `X-Content-Type-Options: nosniff`, so the browser never guesses another type; MindRoom does not add that header for you.
 
 A routes module without `router` fails the plugin's load with `Plugin routes module must define router: APIRouter`, and MindRoom then skips the whole plugin, tools included.
 Only `mindroom plugins check` fails on a routes module that does not load; `mindroom config validate` and `mindroom doctor` import it too, but only log `Failed to load plugin, skipping` and still pass the config.
 Routes follow plugin reloads, so the next request after a reload runs the new code.
-A request for a plugin that is not loaded or has no routes answers 404.
-Workers never import a routes module, so it may import packages that workers lack.
+A request for a plugin that is not loaded or has no routes, or for a path its router does not define, answers 404.
+A route that raises answers 500 with no detail of the error, and the other routes keep serving.
+Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
+That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
 MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` is public.
+
+Each plugin's router runs in a FastAPI app of its own, mounted under `/api/plugins/<name>/`:
+
+- The router's `lifespan` and `on_event` startup and shutdown handlers never run.
+- A `GET` route answers `HEAD` with 405, as in any FastAPI app; list both in `@router.api_route(path, methods=["GET", "HEAD"])` if a client needs `HEAD`.
+- The `dependency_overrides` of MindRoom's main app do not reach plugin routes, so a test that overrides a dependency there does not change a plugin route.
 
 A plugin route that serves a Matrix web client authenticates its caller with `require_client_user` from `mindroom.plugin_http`, as a FastAPI dependency: `user: ClientUser = Depends(require_client_user)`.
 `ClientUser.user_id` is the caller's Matrix user ID.
 The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
-Browser origins that may call these routes come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`.
+Browser origins that may call these routes and `POST /api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](tools/worker-computer.md); there is no separate setting for plugin routes.
 A route that acts on one room also awaits `require_room_member(request, room_id, user.user_id)`.
 It reads live membership from the router bot's Matrix client, answers 403 unless the user is joined, and answers 503 when membership is unavailable.
 

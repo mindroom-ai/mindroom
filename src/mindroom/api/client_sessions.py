@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/client-sessions")
 class _ClientSession:
     """One signed-in Matrix user's bearer token and its Unix-seconds expiry."""
 
-    token: str
+    token: str = field(repr=False)
     user_id: str
     expires_at: float
 

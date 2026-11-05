@@ -1,5 +1,6 @@
 """Plugin routes can require live room membership, read through the router bot's client."""
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,6 +18,17 @@ from mindroom.orchestration.plugin_http_runtime import (
 from mindroom.plugin_http import require_room_member
 
 ROOM = "!room:example.org"
+
+
+@pytest.fixture
+def main_app() -> Iterator[FastAPI]:
+    """The global API app, with whatever room-members reader it had put back afterwards, even after a failure."""
+    state = ensure_app_state(main.app)
+    previous = state.room_members
+    try:
+        yield main.app
+    finally:
+        state.room_members = previous
 
 
 def _request(app: FastAPI) -> Request:
@@ -68,9 +80,20 @@ async def test_joined_members_error_503() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stopped_router_503() -> None:
+async def test_joined_members_raising_503() -> None:
+    """A Matrix call that raises is 503 like an error response, never a pass and never a bare 500."""
+    app = FastAPI()
+    client = SimpleNamespace(joined_members=AsyncMock(side_effect=TimeoutError("homeserver timed out")))
+    _bind_room_members(app, client)  # type: ignore[arg-type]
+    with pytest.raises(HTTPException) as caught:
+        await require_room_member(_request(app), ROOM, "@alice:example.org")
+    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
+
+
+@pytest.mark.asyncio
+async def test_stopped_router_503(main_app: FastAPI) -> None:
     """A router bot that stopped after binding is not asked."""
-    app = main.app
+    app = main_app
     client = _router_client("@alice:example.org")
     router = SimpleNamespace(client=client, running=True)
     bind_room_members_if_ready({"router": router}, api_enabled=True)  # type: ignore[arg-type]
@@ -81,13 +104,12 @@ async def test_stopped_router_503() -> None:
     assert caught.value.status_code == 503
     bind_room_members_if_ready({"router": router}, api_enabled=True)  # type: ignore[arg-type]
     assert ensure_app_state(app).room_members is None
-    _unbind_room_members(app)
 
 
 @pytest.mark.asyncio
-async def test_restarted_router_uses_its_new_client() -> None:
+async def test_restarted_router_uses_its_new_client(main_app: FastAPI) -> None:
     """A router bot that got a new client in place is read through that client, not the old one."""
-    app = main.app
+    app = main_app
     old = _router_client("@alice:example.org")
     new = _router_client("@bob:example.org")
     router = SimpleNamespace(client=old, running=True)
@@ -100,7 +122,6 @@ async def test_restarted_router_uses_its_new_client() -> None:
     with pytest.raises(HTTPException) as caught:
         await require_room_member(_request(app), ROOM, "@bob:example.org")
     assert caught.value.status_code == 503
-    _unbind_room_members(app)
 
 
 def test_bind_then_unbind_clears() -> None:

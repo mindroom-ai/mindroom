@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import pytest
-from fastapi import FastAPI, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketDenialResponse
 
 from mindroom.api import config_lifecycle, main
 from mindroom.api.app_state import ensure_app_state
@@ -52,6 +53,11 @@ async def ping() -> dict:
 @router.post("/echo")
 async def echo(body: Echo) -> dict:
     return {"echo": body.text}
+
+
+@router.get("/boom")
+async def boom() -> dict:
+    raise RuntimeError("plugin secret in a traceback")
 
 
 @router.get("/where")
@@ -154,19 +160,33 @@ def test_plugin_route_sees_its_mount_path(tmp_path: Path) -> None:
 
 
 def test_unknown_plugin_404(tmp_path: Path) -> None:
-    """A plugin that is not loaded, or that has no routes, answers 404, to a websocket too."""
+    """A plugin that is not loaded, that has no routes, or a path its router lacks answers 404, to a websocket too."""
     _write_plugin(tmp_path, ROUTES)
     _write_plugin(tmp_path, None, name="plain")
     config, runtime_paths = _config(tmp_path, "demo", "plain")
     publish_test_plugins(config, runtime_paths)
     client = TestClient(_app(config, runtime_paths))
 
-    for path in ("/api/plugins/nope/ping", "/api/plugins/plain/ping", "/api/plugins/"):
+    for path in ("/api/plugins/nope/ping", "/api/plugins/plain/ping", "/api/plugins/", "/api/plugins/demo/nope"):
         response = client.get(path)
         assert response.status_code == 404, path
         assert response.json() == {"detail": "Not Found"}, path
-    with pytest.raises(WebSocketDisconnect), client.websocket_connect("/api/plugins/nope/ws"):
+    with pytest.raises(WebSocketDenialResponse) as denied, client.websocket_connect("/api/plugins/nope/ws"):
         pass
+    assert denied.value.status_code == 404
+    assert denied.value.json() == {"detail": "Not Found"}
+
+
+def test_raising_route_answers_an_opaque_500_and_the_app_keeps_serving(tmp_path: Path) -> None:
+    """A plugin route that raises gives a 500 that names nothing of the error, and the next request is served."""
+    app, _ = _published_client(tmp_path)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/api/plugins/demo/boom")
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert client.get("/api/plugins/demo/ping").json() == {"pong": True}
 
 
 def test_routes_module_without_router_fails_validation(tmp_path: Path) -> None:
