@@ -2038,6 +2038,7 @@ depends_on = [
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
     "mindroom.api.oauth",
+    "mindroom.api.plugin_routes",
     "mindroom.api.provider_setup",
     "mindroom.api.report_publishing",
     "mindroom.api.request_body_limit",
@@ -8121,6 +8122,14 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.matrix_openid",
 ]
+
+[[modules]]
+path = "mindroom.api.plugin_routes"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.tool_system.plugins",
+]
+visibility = ["mindroom.api.main"]
 
 # Public: plugin routes import it to require a signed-in Matrix client and live room membership.
 [[modules]]

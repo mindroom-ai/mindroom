@@ -48,6 +48,7 @@ from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
+from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.provider_setup import router as provider_setup_router
 from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
@@ -642,4 +643,6 @@ async def get_personal_agents(
     ]
 
 
+# Before the frontend catch-all, which would otherwise answer GET and HEAD under /api/plugins.
+mount_plugin_routes(app)  # Each plugin route authenticates its own requests.
 app.include_router(frontend_router)

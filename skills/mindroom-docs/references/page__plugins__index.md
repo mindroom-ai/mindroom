@@ -200,14 +200,15 @@ my-plugin/
 ├── mindroom.plugin.json   # Required manifest
 ├── tools.py               # Tool factories (optional)
 ├── oauth.py               # OAuth providers (optional)
+├── routes.py              # HTTP routes (optional)
 ├── hooks.py               # Event hooks and automations (optional)
 └── skills/                # Skill directories (optional)
     └── my-skill/
         └── SKILL.md
 ```
 
-Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, and skills.
-Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit` and the memory helpers stay in the modules their sections name.
+Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, and skills.
+Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
 Other `mindroom` modules can change in any release.
 
 ## Manifest format
@@ -218,6 +219,7 @@ Other `mindroom` modules can change in any release.
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
+  "routes_module": "routes.py",
   "skills": ["skills"]
 }
 ```
@@ -228,6 +230,7 @@ Other `mindroom` modules can change in any release.
 | `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
+| `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 
 Every declared module file and skill directory must exist.
@@ -835,7 +838,38 @@ See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-conne
 Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
 MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
-## HTTP routes for a Matrix web client
+## HTTP routes
+
+A plugin serves HTTP routes from the module its manifest names as `routes_module`, which must define a module-level `router`, a FastAPI `APIRouter`.
+MindRoom serves that router under `/api/plugins/<name>/` on its API, where `<name>` is the manifest `name`, so this route answers `GET /api/plugins/my-plugin/rooms/<room_id>/hello`:
+
+```python
+# routes.py
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+
+from mindroom.plugin_http import ClientUser, require_client_user, require_room_member
+
+router = APIRouter()
+
+
+@router.get("/rooms/{room_id}/hello")
+async def hello(
+    room_id: str,
+    request: Request,
+    user: Annotated[ClientUser, Depends(require_client_user)],
+) -> dict[str, str]:
+    await require_room_member(request, room_id, user.user_id)
+    return {"hello": user.user_id}
+```
+
+A routes module without `router` fails the plugin's load with `Plugin routes module must define router: APIRouter`, and MindRoom then skips the whole plugin, tools included.
+Only `mindroom plugins check` fails on a routes module that does not load; `mindroom config validate` and `mindroom doctor` import it too, but only log `Failed to load plugin, skipping` and still pass the config.
+Routes follow plugin reloads, so the next request after a reload runs the new code.
+A request for a plugin that is not loaded or has no routes answers 404.
+Workers never import a routes module, so it may import packages that workers lack.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` is public.
 
 A plugin route that serves a Matrix web client authenticates its caller with `require_client_user` from `mindroom.plugin_http`, as a FastAPI dependency: `user: ClientUser = Depends(require_client_user)`.
 `ClientUser.user_id` is the caller's Matrix user ID.

@@ -43,6 +43,7 @@ class _PluginManifest:
     tools_module: str | None
     hooks_module: str | None
     oauth_module: str | None
+    routes_module: str | None
     skills: list[str]
 
 
@@ -56,6 +57,7 @@ class _PluginBase:
     tools_module_path: Path | None
     hooks_module_path: Path | None
     oauth_module_path: Path | None
+    routes_module_path: Path | None
     skill_dirs: list[Path]
 
 
@@ -270,6 +272,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     tools_module_path = _resolve_module_path(root, manifest.tools_module, kind="tools")
     hooks_module_path = _resolve_module_path(root, manifest.hooks_module, kind="hooks")
     oauth_module_path = _resolve_module_path(root, manifest.oauth_module, kind="oauth")
+    routes_module_path = _resolve_module_path(root, manifest.routes_module, kind="routes")
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
     return _PluginBase(
@@ -279,6 +282,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         tools_module_path=tools_module_path,
         hooks_module_path=hooks_module_path,
         oauth_module_path=oauth_module_path,
+        routes_module_path=routes_module_path,
         skill_dirs=skill_dirs,
     )
 
@@ -311,6 +315,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     tools_module = _manifest_module(data, "tools_module", path)
     hooks_module = _manifest_module(data, "hooks_module", path)
     oauth_module = _manifest_module(data, "oauth_module", path)
+    routes_module = _manifest_module(data, "routes_module", path)
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
@@ -325,6 +330,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         tools_module=tools_module,
         hooks_module=hooks_module,
         oauth_module=oauth_module,
+        routes_module=routes_module,
         skills=raw_skills,
     )
 
