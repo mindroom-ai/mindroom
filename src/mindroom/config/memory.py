@@ -21,7 +21,11 @@ MemoryBackend = Literal["mem0", "file", "none"]
 _MemorySearchMode = Literal["keyword", "semantic"]
 
 # The memory.embedder.config fields each provider other than openai, which reads them all, may set.
-_EMBEDDER_FIELDS_BY_PROVIDER = {"ollama": frozenset({"model", "host"}), "sentence_transformers": frozenset({"model"})}
+_EMBEDDER_FIELDS_BY_PROVIDER = {
+    "ollama": frozenset({"model", "host"}),
+    "sentence_transformers": frozenset({"model"}),
+    "vertex_ai": frozenset({"model", "dimensions", "query_prefix", "document_prefix"}),
+}
 # Nothing reads dimensions for a huggingface or other Mem0-only embedder, but its Mem0 collection name includes it,
 # so rejecting it would cut such a deployment off from its stored memories.
 _MEM0_ONLY_EMBEDDER_FIELDS = frozenset({"model", "dimensions"})
@@ -83,7 +87,7 @@ class _MemoryEmbedderConfig(BaseModel):
 
     provider: str = Field(
         default="openai",
-        description="Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
+        description="Embedder provider (openai, ollama, huggingface, sentence_transformers, vertex_ai, etc)",
     )
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 

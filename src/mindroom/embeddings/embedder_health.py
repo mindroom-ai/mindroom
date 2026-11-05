@@ -1,7 +1,7 @@
 """Process-wide semantic embedder availability and active-client revision.
 
-The OpenAI-compatible embedder records a failure here before raising and
-records healthy on every validated response, so recovery is self-clearing the
+The OpenAI-compatible and Vertex AI embedders record a failure here before
+raising and record healthy on every validated response, so recovery is self-clearing the
 moment a real embedding request succeeds. Probes cover the paths passive
 recording cannot see: startup, config reload, and subprocess knowledge
 refreshes that never touch the main-process embedder.
@@ -100,8 +100,8 @@ def handle_embedder_credential_change(config: Config, runtime_paths: RuntimePath
 
 
 def embedder_in_use(config: Config) -> bool:
-    """Return whether the active config can send keyed embedder requests."""
-    return config.memory.embedder.provider == "openai" and semantic_embedder_configured(config)
+    """Return whether the active config can send embedder requests whose credentials can be rejected."""
+    return config.memory.embedder.provider in {"openai", "vertex_ai"} and semantic_embedder_configured(config)
 
 
 def semantic_embedder_configured(config: Config) -> bool:
@@ -123,19 +123,27 @@ def _memory_backend_uses_embedder(backend: str, search_mode: str) -> bool:
 _PROBE_TIMEOUT_SECONDS = 10.0
 
 
-def _bound_probe_client_timeout(embedder: Embedder) -> None:
+def _bound_probe_client_timeout(embedder: Embedder, provider: str) -> None:
     """Cap the probe's SDK client so a stalled endpoint fails fast.
 
     The installed OpenAI SDK defaults allow a 600-second read timeout plus
-    retries, which would hang `mindroom doctor` and pin probe threads for
-    minutes; runtime searches and memory keep the SDK defaults, and only a
-    knowledge refresh, which retries itself, turns its retries off.
+    retries, and the Vertex AI embedder a 60-second one plus retries, which
+    would hang `mindroom doctor` and pin probe threads for minutes; runtime
+    searches and memory keep those defaults, and only a knowledge
+    refresh, which retries itself, turns the OpenAI embedder's retries off.
+    google-genai loads only for a Vertex AI embedder.
     """
     from mindroom.embeddings.openai_embedder import OpenAIEmbedder  # noqa: PLC0415
 
     if isinstance(embedder, OpenAIEmbedder):
         embedder.timeout = _PROBE_TIMEOUT_SECONDS
         embedder.max_retries = 0
+    elif provider == "vertex_ai":
+        from mindroom.embeddings.vertex_ai_embedder import VertexAIEmbedder  # noqa: PLC0415
+
+        if isinstance(embedder, VertexAIEmbedder):
+            embedder.timeout = _PROBE_TIMEOUT_SECONDS
+            embedder.single_attempt = True
 
 
 def probe_embedder(
@@ -150,7 +158,7 @@ def probe_embedder(
 
     try:
         embedder = create_configured_embedder(config, runtime_paths, health_recorder=health_recorder)
-        _bound_probe_client_timeout(embedder)
+        _bound_probe_client_timeout(embedder, config.memory.embedder.provider)
         vector = embedder.embed([_PROBE_TEXT], purpose="query")[0]
     except Exception as exc:
         return describe_embedder_error(exc)

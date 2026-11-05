@@ -54,6 +54,12 @@ def _embedder_credential_advice(config: Config) -> str:
             "Repair the embedder credential: the Ollama embedder sends only OLLAMA_API_KEY, "
             "so set it in the environment of the MindRoom process and restart MindRoom."
         )
+    if config.memory.embedder.provider == "vertex_ai":
+        return (
+            "Repair the embedder credential: the Vertex AI embedder authenticates with GOOGLE_APPLICATION_CREDENTIALS "
+            "or Application Default Credentials, which need permission to call Vertex AI in its project, and then "
+            "restart MindRoom."
+        )
     credentials_service = config.memory.embedder.config.credentials_service
     if credentials_service is not None:
         return (

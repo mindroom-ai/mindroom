@@ -750,10 +750,11 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"Memory embedder: sentence_transformers/{emb.config.model} could not validate",
         )
 
-    if emb.provider == "openai":
+    if emb.provider in {"openai", "vertex_ai"}:
         # One real embedding round-trip through the shared probe, which builds
-        # the configured embedder and resolves the key via get_embedder_api_key
-        # (explicit config key > 'embedder' credential > openai fallback).
+        # the configured embedder: openai resolves the key via get_embedder_api_key
+        # (explicit config key > 'embedder' credential > openai fallback), and
+        # vertex_ai authenticates with Google Cloud credentials.
         error = probe_embedder(config, runtime_paths)
         host_suffix = f" ({emb.config.host})" if emb.config.host else ""
         valid: bool | None = True if error is None else None if error == EMBEDDER_UNREACHABLE_DETAIL else False
@@ -763,9 +764,9 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         return _print_validation(
             valid,
             detail,
-            f"Memory embedder: openai/{emb.config.model} embedding round-trip succeeded{host_suffix}",
-            f"Memory embedder: openai/{emb.config.model} embedding request failed{host_suffix}",
-            f"Memory embedder: openai/{emb.config.model} could not reach embeddings endpoint{host_suffix}",
+            f"Memory embedder: {emb.provider}/{emb.config.model} embedding round-trip succeeded{host_suffix}",
+            f"Memory embedder: {emb.provider}/{emb.config.model} embedding request failed{host_suffix}",
+            f"Memory embedder: {emb.provider}/{emb.config.model} could not reach embeddings endpoint{host_suffix}",
         )
 
     env_key = env_key_for_provider(emb.provider)

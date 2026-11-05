@@ -508,6 +508,22 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_vertex_ai_embedder_memory(self) -> Config:
+        """Reject the vertex_ai embedder where memory uses Mem0, whose own embedder clients cannot call it."""
+        if self.memory.embedder.provider != "vertex_ai":
+            return self
+        agents = [*self.agents.values(), *(template.agent for template in self.personal_agents.values())]
+        backends = {agent.memory_backend or self.memory.backend for agent in agents}
+        # A team whose members mix file and no memory remembers with Mem0 (``caller_memory_backend``).
+        if self.memory.backend == "mem0" or "mem0" in backends or backends >= {"file", "none"}:
+            msg = (
+                "the vertex_ai embedder does not serve the mem0 memory backend; set memory.backend and every "
+                "agent's memory_backend to file, or all of them to none"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_personal_rooms(self) -> Config:
         """Require a real target and onboarding rooms observed by the router."""
         if self.personal_rooms is not None:

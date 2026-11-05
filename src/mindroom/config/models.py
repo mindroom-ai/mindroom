@@ -692,20 +692,20 @@ class EmbedderConfig(BaseModel):
     dimensions: int | None = Field(
         default=None,
         ge=1,
-        description="Optional embedding dimension override for OpenAI-compatible providers",
+        description="Optional embedding dimension override for OpenAI-compatible providers and vertex_ai",
     )
     query_prefix: str | None = Field(
         default=None,
         description=(
-            "Text prepended to search queries for OpenAI-compatible providers, for models that expect a query "
-            "prompt (EmbeddingGemma 2: 'task: search result | query: ')"
+            "Text prepended to search queries for OpenAI-compatible providers and vertex_ai, for models that expect a "
+            "query prompt (EmbeddingGemma 2: 'task: search result | query: ')"
         ),
     )
     document_prefix: str | None = Field(
         default=None,
         description=(
-            "Text prepended to indexed documents for OpenAI-compatible providers, for models that expect a document "
-            "prompt (EmbeddingGemma 2: 'title: none | text: ')"
+            "Text prepended to indexed documents for OpenAI-compatible providers and vertex_ai, for models that expect "
+            "a document prompt (EmbeddingGemma 2: 'title: none | text: ')"
         ),
     )
 

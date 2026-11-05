@@ -7,9 +7,12 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.constants import runtime_env_path
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host, get_openai_base_url
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
+from mindroom.providers.google_adc import load_google_application_credentials
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -75,6 +78,15 @@ def resolve_embedder_settings(config: Config, runtime_paths: RuntimePaths) -> _R
             dimensions=None,
             api_key=get_ollama_api_key(runtime_paths),
         )
+    if provider == "vertex_ai":
+        return _ResolvedEmbedderSettings(
+            provider=provider,
+            model=embedder_config.model,
+            host=None,
+            dimensions=embedder_config.dimensions,
+            query_prefix=embedder_config.query_prefix,
+            document_prefix=embedder_config.document_prefix,
+        )
     return _ResolvedEmbedderSettings(
         provider=provider,
         model=embedder_config.model,
@@ -92,10 +104,11 @@ def create_configured_embedder(
 ) -> Embedder:
     """Create the configured embedding provider used for semantic indexes.
 
-    ``caller_retries`` turns off the OpenAI SDK's own retries for a caller that retries failed requests itself, as a
-    knowledge refresh does, so its classified failures alone decide what is sent again. Other callers keep the SDK's
+    ``caller_retries`` turns off the OpenAI embedder's own retries for a caller that retries failed requests itself, as
+    a knowledge refresh does, so its classified failures alone decide what is sent again. Other callers keep those
     retries, since nothing retries their requests in place: the knowledge graph retries only a whole episode minutes
-    later. The Ollama and local embedders do not retry on their own.
+    later. The Vertex AI embedder keeps its retries for every caller: it sends one request per text, and a refresh
+    retries a whole file. The Ollama and local embedders do not retry on their own.
     """
     settings = resolve_embedder_settings(config, runtime_paths)
 
@@ -121,12 +134,34 @@ def create_configured_embedder(
         assert settings.host is not None
         return OllamaEmbedder(model=settings.model, host=settings.host, api_key=settings.api_key)
 
+    if settings.provider == "vertex_ai":
+        from mindroom.embeddings.vertex_ai_embedder import VertexAIEmbedder  # noqa: PLC0415
+
+        credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        # Without the variable, google-genai finds Application Default Credentials, such as Workload Identity, and
+        # their project itself.
+        credentials = load_google_application_credentials(str(credentials_path)) if credentials_path else None
+        return VertexAIEmbedder(
+            model=settings.model,
+            health_recorder=capture_embedder_health_recorder() if health_recorder is None else health_recorder,
+            # A service account key names its own project; user credentials name none.
+            project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths)
+            or getattr(credentials, "project_id", None),
+            # Gemini embedding models serve at global. A location also keeps google-genai from signing requests with
+            # a Gemini API key from the environment instead of these credentials.
+            location=get_secret_from_env("GOOGLE_CLOUD_LOCATION", runtime_paths=runtime_paths) or "global",
+            credentials=credentials,
+            dimensions=settings.dimensions,
+            query_prefix=settings.query_prefix,
+            document_prefix=settings.document_prefix,
+        )
+
     if settings.provider == "sentence_transformers":
         return create_sentence_transformers_embedder(runtime_paths, settings.model)
 
     msg = (
         f"Unsupported semantic-search embedder provider: {settings.provider}. "
-        "Supported providers: openai, ollama, sentence_transformers"
+        "Supported providers: openai, ollama, sentence_transformers, vertex_ai"
     )
     raise ValueError(msg)
 

@@ -3293,20 +3293,21 @@ The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_I
 ### Embedder
 
 `memory.embedder` sets the embedding model used by Mem0, semantic file-memory search, and [knowledge bases](https://docs.mindroom.chat/knowledge/#embedder-configuration).
-Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_transformers` providers; semantic file memory and knowledge bases support the [narrower set](https://docs.mindroom.chat/knowledge/#embedder-configuration).
+Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_transformers` providers; semantic file memory and knowledge bases support [their own set](https://docs.mindroom.chat/knowledge/#embedder-configuration), which has `vertex_ai` instead of `huggingface`.
+Config load rejects `vertex_ai` while any memory would use Mem0, so with it set `memory.backend` and every agent's `memory_backend` to `file`, or all of them to `none`; a team whose members mix `file` and `none` uses Mem0.
 
 | Field | Default | Description |
 |---|---|---|
 | `provider` | `openai` | Embedding provider |
 | `config.model` | `text-embedding-3-small` | Embedding model name |
 | `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `openai`, without it the embedder uses [`OPENAI_BASE_URL`](https://docs.mindroom.chat/configuration/#model-providers), else OpenAI's API; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
-| `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
+| `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers and `vertex_ai` |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
-| `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
-| `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
+| `config.query_prefix` | `null` | Text the `openai` and `vertex_ai` providers prepend to search queries |
+| `config.document_prefix` | `null` | Text the `openai` and `vertex_ai` providers prepend to indexed documents and stored memories |
 
-Only the `openai` provider reads `api_key`, `credentials_service`, `query_prefix`, and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
+Only the `openai` provider reads `api_key` and `credentials_service`, only `openai` and `vertex_ai` read `query_prefix` and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
 Config load also rejects `dimensions` for `ollama` and `sentence_transformers`, which always return the model's full-size vectors.
 
 ```yaml
@@ -4104,13 +4105,14 @@ knowledge_bases:
 ## Embedder Configuration
 
 Semantic knowledge bases use the embedder configured under `memory.embedder`; files-mode bases use none.
-Semantic knowledge and file-memory indexes support the `openai`, `ollama`, and `sentence_transformers` providers, while the Mem0 memory backend also supports `huggingface`.
+Semantic knowledge and file-memory indexes support the `openai`, `ollama`, `sentence_transformers`, and `vertex_ai` providers, while the Mem0 memory backend supports `huggingface` instead of `vertex_ai`.
 
 | Provider | Model example | Notes |
 |----------|---------------|-------|
 | `openai` | `text-embedding-3-small` | Also works with keyless OpenAI-compatible local endpoints |
 | `ollama` | `nomic-embed-text` | Self-hosted |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Runs locally in MindRoom; the optional extra installs on first use |
+| `vertex_ai` | `gemini-embedding-2` | Gemini embeddings on Vertex AI, with Google Cloud credentials (`GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials), in the location `GOOGLE_CLOUD_LOCATION` names (default `global`) and in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name |
 
 For multilingual text and code, use `google/embeddinggemma-2` with `sentence_transformers`; its first use downloads about 1.4 GB.
 MindRoom applies the query and document prompts that a `sentence_transformers` model defines, so knowledge and file-memory searches need no manual task prefixes.

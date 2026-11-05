@@ -522,6 +522,40 @@ class TestMemoryTools:
         ]
 
     @pytest.mark.asyncio
+    async def test_credential_advice_for_a_vertex_ai_rejection_names_google_cloud_credentials(
+        self,
+        config: Config,
+    ) -> None:
+        """A Vertex AI embedder authenticates with Google Cloud credentials, so its advice names no API key."""
+        runtime_paths = runtime_paths_for(config)
+        config = Config.model_validate(
+            {
+                **config.model_dump(),
+                "memory": {
+                    **config.memory.model_dump(),
+                    "backend": "file",
+                    "embedder": {"provider": "vertex_ai", "config": {"model": "gemini-embedding-2"}},
+                },
+            },
+        )
+        tools = MemoryTools(agent_name="test_agent", config=config, runtime_paths=runtime_paths)
+        outcome = MemorySearchOutcome(results=[], degraded_reason="embedder permission denied (HTTP 403)")
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        assert result.splitlines() == [
+            "Semantic memory search unavailable: embedder permission denied (HTTP 403).",
+            "Repair the embedder credential: the Vertex AI embedder authenticates with GOOGLE_APPLICATION_CREDENTIALS "
+            "or Application Default Credentials, which need permission to call Vertex AI in its project, and then "
+            "restart MindRoom.",
+        ]
+
+    @pytest.mark.asyncio
     async def test_search_memories_error(self, tools: MemoryTools) -> None:
         """Test that search_memories handles errors gracefully."""
         with patch(
