@@ -1808,6 +1808,48 @@ def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresol
     )
 
 
+def test_load_config_tolerates_unresolved_listen_tool_like_a_tools_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listen tool a failed plugin could explain warns and loads, as an unknown ``tools:`` entry does."""
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_dynamic_named_broken_tool_plugin(plugin_root)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        (
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-6-astra\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  assistant:\n"
+            "    display_name: Assistant\n"
+            "    role: test\n"
+            "    rooms: [lobby]\n"
+            "    listen:\n"
+            "      rooms: [lobby]\n"
+            "      tools: [memory, dynamic_plugin_tool.run]\n"
+            "plugins:\n"
+            "  - ./plugins/broken\n"
+        ),
+        encoding="utf-8",
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
+
+    load_config(_runtime_paths(config_path), tolerate_plugin_load_errors=True)
+
+    assert any(
+        call.kwargs.get("config_path") == "agents.assistant.listen.tools[1]"
+        and call.kwargs["tool_name"] == "dynamic_plugin_tool"
+        for call in mock_logger.warning.call_args_list
+    )
+
+
 def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -67,7 +67,7 @@ def test_listen_unknown_model_rejected() -> None:
 def test_listen_unknown_tool_rejected(tmp_path: Path) -> None:
     """An explicit tool that is no toolkit fails, as an unknown entry of ``tools:`` does."""
     runtime_paths = test_runtime_paths(tmp_path)
-    with pytest.raises(ValueError, match=r"listen\.tools\[1\]: Unknown tool 'not_a_tool\.run'"):
+    with pytest.raises(ValueError, match=r"listen\.tools\[1\]\.not_a_tool: Unknown tool 'not_a_tool'"):
         Config.validate_with_runtime(
             _config({"rooms": ["lobby"], "tools": ["memory", "not_a_tool.run"]}),
             runtime_paths,

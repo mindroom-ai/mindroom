@@ -1472,10 +1472,11 @@ class Config(BaseModel):
             if agent.listen is None or "tools" not in agent.listen.model_fields_set:
                 continue
             for index, name in enumerate(agent.listen.tools):
-                toolkit = name.partition(".")[0]
-                if toolkit not in tools.validation_snapshot and not self.is_tool_preset(toolkit):
-                    msg = f"agents.{agent_name}.listen.tools[{index}]: Unknown tool '{name}'."
-                    raise ConfigRuntimeValidationError(msg)
+                self._validate_authored_tool_entry(
+                    ToolConfigEntry(name=name.partition(".")[0]),
+                    config_path_prefix=f"agents.{agent_name}.listen.tools[{index}]",
+                    tools=tools,
+                )
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
         """Return agents and teams that depend on any of the given tools."""
