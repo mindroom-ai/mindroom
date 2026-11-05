@@ -938,7 +938,8 @@ async def test_a_refetch_that_never_arrives_skips_its_message_after_ten_minutes(
 
     with capture_logs() as logs:
         await listening.service._poll_once(T0 + 100)
-        await listening.service._poll_once(T0 + 700)
+        # Each room reads the clock as its poll reaches it, a moment after the poll's start, so this stays clear of 600.
+        await listening.service._poll_once(T0 + 699)
         assert listening.marker() == before
         await listening.service._poll_once(T0 + 701)
 
