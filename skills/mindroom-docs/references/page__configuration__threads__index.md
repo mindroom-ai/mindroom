@@ -96,7 +96,7 @@ MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is 
 Mentions of users who are not in the room or only invited do not suppress normal responses.
 Mentioning a configured agent that has not joined the room still counts as an explicit mention for the other agents.
 
-A thread too long to read at once, more than 2,000 messages or 16 MiB of stored content, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+A thread MindRoom cannot read in full, because it holds more than 2,000 messages or 16 MiB of stored content or because reading it failed, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
 In a `mentions` room such a thread needs a mention even when the room has one possible responder.
 
 ### Bot accounts

@@ -18,6 +18,7 @@ from mindroom.commands.parsing import Command, CommandType, command_parser, get_
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
@@ -27,6 +28,7 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import current_entity_id
 from mindroom.llm.media import Audio
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner
@@ -498,6 +500,32 @@ async def _follow_up_in_room_mode(bot: AgentBot, room: nio.MatrixRoom, paths: Ru
     await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$follow-up", "and one more thing"))
 
 
+async def _follow_up_in_general_thread(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+    """Send an untagged follow-up in a thread general already replied in, whose history reads in full."""
+    history = thread_history_result(
+        [
+            make_visible_message(sender=SENDER, body="hello", event_id=THREAD_ID),
+            make_visible_message(
+                sender=current_entity_id("general", paths).full_id,
+                body="Hi there",
+                event_id="$general-reply",
+                thread_id=THREAD_ID,
+            ),
+        ],
+        is_full_history=True,
+    )
+    in_thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": THREAD_ID}}
+    with (
+        patch.object(ConversationResolver, "dispatch_thread_snapshot", new=AsyncMock(return_value=history)),
+        patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=history)),
+    ):
+        await bot._turn_ingress.handle_text_event(
+            room,
+            _text_message(paths, "$follow-up", "and one more thing", **in_thread),
+        )
+        await drain_coalescing(bot)
+
+
 _PATHS: dict[str, Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]]] = {
     "untagged text": _send_text,
     "untagged upload": _send_upload,
@@ -505,6 +533,7 @@ _PATHS: dict[str, Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[N
     "upload whose caption mentions general": _send_upload_with_caption,
     "edit that adds a mention to an untagged message": _edit_a_mention_in,
     "untagged follow-up in a room-mode room": _follow_up_in_room_mode,
+    "untagged follow-up in a thread general replied in": _follow_up_in_general_thread,
 }
 # fmt: off
 _WHO_ACTS = {
@@ -517,6 +546,7 @@ _WHO_ACTS = {
     "edit that adds a mention to an untagged message": (_GENERAL_ONCE,    {},                 {_RELAY: 1},                   {}),
     # Every message is room-level in room mode, so the follow-up is a new message that needs its own mention.
     "untagged follow-up in a room-mode room":          ({"general": 2},   _GENERAL_ONCE,      {"general": 1, _RELAY: 1},     _GENERAL_ONCE),
+    "untagged follow-up in a thread general replied in": (_GENERAL_ONCE,  _GENERAL_ONCE,      _GENERAL_ONCE,                 _GENERAL_ONCE),
 }
 # fmt: on
 _INGRESS_CASES = [

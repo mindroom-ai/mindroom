@@ -644,7 +644,11 @@ class TurnPolicy:
     ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
         if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
-            self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
+            if dispatch.context.planning_thread_history_unavailable:
+                # As the router's own skip below does, say when an unread thread, not the message, decided it.
+                self.deps.logger.info("Skipping response: reply mode needs a mention; thread history unavailable")
+            else:
+                self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
             is_router = self.deps.agent_name == ROUTER_AGENT_NAME
             return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
         router_plan = await self._plan_router_dispatch(

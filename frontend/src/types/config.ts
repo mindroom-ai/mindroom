@@ -318,6 +318,7 @@ export interface RoomConfig {
   encrypted?: boolean;
   invite_users?: string[];
   admins?: string[];
+  reply_mode?: "auto" | "mentions";
 }
 
 export interface RoomDefaultsConfig {
