@@ -81,6 +81,7 @@ from mindroom.matrix_rtc.events import (
     build_key_to_device_content,
     build_membership_content,
     membership_state_key,
+    parse_membership_event,
 )
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.frame_keys import _SharedWith
@@ -4888,6 +4889,73 @@ async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert _call_state(manager).session is not None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_terminal_close_reopens_when_the_caller_rejoins(tmp_path: Path) -> None:
+    """A rejoin replaces the membership a closed client left behind, so the agent joins without the call emptying first."""
+    created_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=created_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    abandoned_call = _call_state(manager).logical_call
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_terminated is not None
+
+    bridge.agent_options.on_session_terminated(False)
+    await asyncio.gather(*list(manager._background_tasks))
+    # The left-behind membership refreshed with a later expiry is the same membership.
+    client.room_get_state.return_value = _state_response(
+        _remote_member_event(created_ts=created_ts, expires_ms=20_000_000),
+    )
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert _call_state(manager).session is None
+    assert _call_state(manager).logical_call is abandoned_call
+
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=created_ts + 1_000))
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert _call_state(manager).session is not None
+    rejoined_call = _call_state(manager).logical_call
+    assert rejoined_call is not None
+    assert rejoined_call is not abandoned_call
+    assert not rejoined_call.join_blocked
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_rejoin_reaching_an_ended_session_before_its_cleanup_starts_a_fresh_call(tmp_path: Path) -> None:
+    """Cleanup that waited for the room lock blocks only the memberships the ended session had, then reconciles."""
+    created_ts = int(time.time() * 1000)
+    rejoin = _remote_member_event(created_ts=created_ts + 1_000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=created_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    ended_session = _call_state(manager).session
+    abandoned_call = _call_state(manager).logical_call
+    assert ended_session is not None
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_terminated is not None
+    rejoined_member = parse_membership_event(rejoin)
+    assert rejoined_member is not None
+
+    bridge.agent_options.on_session_terminated(False)
+    # A reconcile that held the room lock applies the rejoin to the ended session before its cleanup runs.
+    await ended_session.on_members_changed([rejoined_member])
+    client.room_get_state.return_value = _state_response(rejoin)
+    await asyncio.gather(*list(manager._background_tasks))
+    while tasks := tuple(manager._reconcile_tasks.values()):
+        await asyncio.gather(*tasks)
+
+    assert _call_state(manager).session is not None
+    assert _call_state(manager).session is not ended_session
+    assert _call_state(manager).logical_call is not abandoned_call
     await manager.shutdown()
 
 

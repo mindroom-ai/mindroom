@@ -307,6 +307,215 @@ async def test_bridge_reports_only_caller_audio_that_stays_undecryptable(monkeyp
     await bridge.aclose()
 
 
+_ALICE = "@alice:example.org:ALICEDEV"
+
+
+class _PresenceRoom:
+    """An SFU room whose remote participants a test connects and disconnects."""
+
+    def __init__(self, *identities: str) -> None:
+        self.local_participant = MagicMock()
+        self.remote_participants = {identity: self._participant(identity) for identity in identities}
+        self.handlers: dict[str, list[Callable[[object], None]]] = {}
+        self.disconnect = AsyncMock()
+        self.connected = True
+
+    def isconnected(self) -> bool:
+        """Report whether the agent's own SFU connection is up."""
+        return self.connected
+
+    @staticmethod
+    def _participant(identity: str) -> SimpleNamespace:
+        return SimpleNamespace(identity=identity, track_publications={})
+
+    def on(self, event: str, callback: Callable[[object], None]) -> None:
+        """Register a room event handler."""
+        self.handlers.setdefault(event, []).append(callback)
+
+    def off(self, event: str, callback: Callable[[object], None]) -> None:
+        """Remove a room event handler."""
+        self.handlers[event].remove(callback)
+
+    def connect_participant(self, identity: str) -> None:
+        """Add a remote participant and emit ``participant_connected``."""
+        participant = self._participant(identity)
+        self.remote_participants[identity] = participant
+        for callback in self.handlers.get("participant_connected", []):
+            callback(participant)
+
+    def disconnect_participant(self, identity: str) -> None:
+        """Remove a remote participant and emit ``participant_disconnected``."""
+        participant = self.remote_participants.pop(identity)
+        for callback in self.handlers.get("participant_disconnected", []):
+            callback(participant)
+
+
+async def _start_presence_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    room: _PresenceRoom,
+    *,
+    absent_timeout_s: float = 0,
+) -> tuple[RealtimeVoiceBridge, list[bool]]:
+    """Start a realtime bridge on ``room`` with Alice in the roster, by default with no absence grace."""
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._CALLER_ABSENT_TIMEOUT_S", absent_timeout_s)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            """Start without media."""
+            return
+
+        def on(self, _event: str, _callback: object) -> None:
+            """Ignore session events."""
+            return
+
+        async def aclose(self) -> None:
+            """Close without media."""
+            return
+
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: FakeSession())
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = room
+    bridge.set_participant_identities(frozenset({_ALICE}))
+    terminations: list[bool] = []
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_terminated=terminations.append,
+        ),
+    )
+    return bridge, terminations
+
+
+async def _settle() -> None:
+    """Let timers due now and the callbacks they schedule run."""
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_bridge_ends_call_whose_caller_never_reaches_the_sfu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A membership left behind by a closed client cannot keep the agent waiting in an empty SFU room."""
+    room = _PresenceRoom()
+    with capture_logs() as logs:
+        bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+        await _settle()
+
+    assert terminations == [False]
+    absent = [log for log in logs if log["event"] == "call_roster_absent_from_sfu"]
+    assert [log["roster"] for log in absent] == [[_ALICE]]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_call_while_a_roster_device_is_in_the_sfu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a caller who stays away ends the call; a reconnect or another roster device keeps it."""
+    room = _PresenceRoom(_ALICE, "@mallory:example.org:EVILDEV")
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+    await _settle()
+    assert terminations == []
+
+    # Reconnecting before the grace passes keeps the call.
+    room.disconnect_participant(_ALICE)
+    room.connect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
+
+    # The caller's second device keeps the call while the first one is away.
+    bridge.set_participant_identities(frozenset({_ALICE, "@alice:example.org:ALICESECOND"}))
+    room.connect_participant("@alice:example.org:ALICESECOND")
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
+
+    # A participant outside the roster does not count as the caller.
+    room.disconnect_participant("@alice:example.org:ALICESECOND")
+    await _settle()
+    assert terminations == [False]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_reports_an_empty_room_after_its_own_sfu_loss_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller may still be in the call when the agent's own SFU connection is what emptied the room."""
+    room = _PresenceRoom(_ALICE)
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+
+    room.connected = False
+    room.disconnect_participant(_ALICE)
+    await _settle()
+
+    assert terminations == [True]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_absence_watch_follows_roster_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller who moves the call to a device that never connects media is absent."""
+    room = _PresenceRoom(_ALICE)
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+
+    bridge.set_participant_identities(frozenset({"@alice:example.org:ALICESECOND"}))
+    await _settle()
+
+    assert terminations == [False]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_roster_update_restarts_the_absence_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A membership the caller just published, even from a device already in the roster, gets the full grace."""
+    room = _PresenceRoom()
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room, absent_timeout_s=60)
+    first_grace = bridge._caller_absent_timer
+    assert first_grace is not None
+
+    bridge.set_participant_identities(frozenset({_ALICE}))
+
+    renewed_grace = bridge._caller_absent_timer
+    assert first_grace.cancelled()
+    assert renewed_grace is not None
+    assert renewed_grace.when() >= first_grace.when()
+    await bridge.aclose()
+    assert renewed_grace.cancelled()
+    assert terminations == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_close_cancels_the_absence_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaving the call cannot report the session as terminated afterwards."""
+    room = _PresenceRoom()
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+
+    await bridge.aclose()
+    await _settle()
+
+    assert terminations == []
+    assert room.handlers["participant_connected"] == []
+    assert room.handlers["participant_disconnected"] == []
+    room.connect_participant(_ALICE)
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
+
+
 def _llm_usage(inputs: int, outputs: int = 10, **counters: int) -> LLMModelUsage:
     return LLMModelUsage(
         provider="openai",
