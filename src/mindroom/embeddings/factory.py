@@ -104,10 +104,11 @@ def create_configured_embedder(
 ) -> Embedder:
     """Create the configured embedding provider used for semantic indexes.
 
-    ``caller_retries`` turns off the OpenAI and Vertex AI embedders' own retries for a caller that retries failed
-    requests itself, as a knowledge refresh does, so its classified failures alone decide what is sent again. Other
-    callers keep those retries, since nothing retries their requests in place: the knowledge graph retries only a whole
-    episode minutes later. The Ollama and local embedders do not retry on their own.
+    ``caller_retries`` turns off the OpenAI embedder's own retries for a caller that retries failed requests itself, as
+    a knowledge refresh does, so its classified failures alone decide what is sent again. Other callers keep those
+    retries, since nothing retries their requests in place: the knowledge graph retries only a whole episode minutes
+    later. The Vertex AI embedder keeps its retries for every caller: it sends one request per text, and a refresh
+    retries a whole file. The Ollama and local embedders do not retry on their own.
     """
     settings = resolve_embedder_settings(config, runtime_paths)
 
@@ -137,17 +138,20 @@ def create_configured_embedder(
         from mindroom.embeddings.vertex_ai_embedder import VertexAIEmbedder  # noqa: PLC0415
 
         credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        # Without the variable, google-genai finds Application Default Credentials, such as Workload Identity, and
+        # their project itself.
+        credentials = load_google_application_credentials(str(credentials_path)) if credentials_path else None
         return VertexAIEmbedder(
             model=settings.model,
             health_recorder=capture_embedder_health_recorder() if health_recorder is None else health_recorder,
-            project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths),
+            # A service account key names its own project; user credentials name none.
+            project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths)
+            or getattr(credentials, "project_id", None),
             location=get_secret_from_env("GOOGLE_CLOUD_LOCATION", runtime_paths=runtime_paths),
-            # Without the variable, google-genai uses Application Default Credentials, such as Workload Identity.
-            credentials=load_google_application_credentials(str(credentials_path)) if credentials_path else None,
+            credentials=credentials,
             dimensions=settings.dimensions,
             query_prefix=settings.query_prefix,
             document_prefix=settings.document_prefix,
-            single_attempt=caller_retries,
         )
 
     if settings.provider == "sentence_transformers":

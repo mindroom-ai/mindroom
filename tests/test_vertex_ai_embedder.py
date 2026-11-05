@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
 from google.oauth2.credentials import Credentials
@@ -51,6 +53,12 @@ def _reset_embedder_health() -> Iterator[None]:
     capture_embedder_health_recorder().record(None)
     yield
     capture_embedder_health_recorder().record(None)
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send a retried request again at once, unless Vertex AI names a wait."""
+    monkeypatch.setattr(vertex_ai_embedder_module, "_RETRY_BASE_SECONDS", 0.0)
 
 
 def _transport(replies: list[_Reply], requests: list[httpx.Request]) -> httpx.MockTransport:
@@ -243,6 +251,44 @@ def test_configured_vertex_ai_embedder_uses_the_runtime_project_and_location(
     assert requests[0].url.path.startswith("/v1beta1/projects/env-project/locations/us-west1/")
 
 
+def test_configured_vertex_ai_embedder_embeds_in_the_project_its_key_file_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``GOOGLE_CLOUD_PROJECT``, Vertex AI embeds in the project of the service account key file."""
+    for variable in ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GOOGLE_APPLICATION_CREDENTIALS"):
+        monkeypatch.delenv(variable, raising=False)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    key_file = tmp_path / "key.json"
+    key_file.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "key-project",
+                "private_key": private_key.decode(),
+                "client_email": "embedder@key-project.iam.gserviceaccount.com",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"GOOGLE_APPLICATION_CREDENTIALS={key_file}\nGOOGLE_CLOUD_LOCATION=global\n",
+        encoding="utf-8",
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    requests: list[httpx.Request] = []
+    _serve_clients(monkeypatch, [[0.5] * 8], requests)
+    embedder = create_configured_embedder(_vertex_config(runtime_paths), runtime_paths)
+
+    assert embedder.embed(["text"], purpose="document") == [[0.5] * 8]
+    assert requests[0].url.path.startswith("/v1beta1/projects/key-project/locations/global/")
+
+
 def test_vertex_ai_embedder_builds_one_client_for_concurrent_texts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -263,19 +309,18 @@ def test_vertex_ai_embedder_builds_one_client_for_concurrent_texts(
     assert len(built) == 1
 
 
-@pytest.mark.parametrize(("caller_retries", "sent"), [(False, 2), (True, 1)])
-def test_vertex_ai_embedder_retries_a_brief_outage_unless_its_caller_retries(
+@pytest.mark.parametrize("caller_retries", [False, True])
+def test_vertex_ai_embedder_retries_each_text_through_a_brief_outage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     caller_retries: bool,
-    sent: int,
 ) -> None:
-    """A search's request outlives a brief outage, while a knowledge refresh, which retries itself, sends one.
+    """Each text's request outlives a brief outage, for a search and for a knowledge refresh alike.
 
-    No log line of the retry carries the provider's response text.
+    A refresh retries a whole file, and a file sends one request per text, so a refresh relying on its own retries would
+    send every text of a large file again. No log line of the retry carries the provider's response text.
     """
-    monkeypatch.setattr(vertex_ai_embedder_module, "_RETRY_BASE_SECONDS", 0.0)
     runtime_paths = test_runtime_paths(tmp_path)
     requests: list[httpx.Request] = []
     outage = httpx.Response(503, json={"error": {"code": 503, "message": "secret-bearing text"}})
@@ -283,15 +328,22 @@ def test_vertex_ai_embedder_retries_a_brief_outage_unless_its_caller_retries(
     embedder = create_configured_embedder(_vertex_config(runtime_paths), runtime_paths, caller_retries=caller_retries)
 
     with caplog.at_level(logging.DEBUG):
-        if caller_retries:
-            with pytest.raises(EmbedderRequestError, match=r"HTTP 503"):
-                asyncio.run(embedder.aembed(["text"], purpose="query"))
-        else:
-            assert embedder.embed(["text"], purpose="query") == [[0.5] * 8]
-    assert len(requests) == sent
+        assert asyncio.run(embedder.aembed(["text"], purpose="document")) == [[0.5] * 8]
+    assert len(requests) == 2
     assert "secret-bearing" not in caplog.text
     # Requests are bounded even outside health probes.
     assert built[0]["http_options"]["timeout"] == 60_000  # type: ignore[index]
+
+
+def test_vertex_ai_embedder_waits_as_long_as_vertex_ai_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A throttled request is sent again after the ``Retry-After`` wait Vertex AI names."""
+    waits: list[float] = []
+    monkeypatch.setattr(vertex_ai_embedder_module.time, "sleep", waits.append)
+    throttled = httpx.Response(429, headers={"Retry-After": "3"}, json={"error": {"code": 429}})
+    embedder = _embedder([throttled, [0.5] * 8], [])
+
+    assert embedder.embed(["text"], purpose="query") == [[0.5] * 8]
+    assert waits == [3.0]
 
 
 def test_probe_bounds_the_vertex_ai_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

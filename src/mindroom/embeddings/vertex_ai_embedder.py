@@ -17,7 +17,7 @@ from google import genai
 from google.genai.errors import APIError
 
 from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, embedder_request_error
-from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.errors import classify_provider_error, provider_failure, retry_after_seconds
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -40,7 +40,13 @@ def _request_error(error: Exception) -> EmbedderRequestError:
     """Return the classified error of one failed request; an unrecognized one is final."""
     failure: ProviderError | None = provider_failure(error, provider=_PROVIDER)
     if failure is None and isinstance(error, APIError):
-        failure = classify_provider_error(str(error), provider=_PROVIDER, status_code=error.code)
+        headers = getattr(error.response, "headers", None)
+        failure = classify_provider_error(
+            str(error),
+            provider=_PROVIDER,
+            status_code=error.code,
+            retry_after_seconds=None if headers is None else retry_after_seconds(headers),
+        )
     return embedder_request_error(error, failure)
 
 
@@ -60,8 +66,8 @@ class VertexAIEmbedder:
     dimensions: int | None = None
     query_prefix: str | None = None
     document_prefix: str | None = None
-    #: One attempt per text, for a caller that retries failed requests itself. Other callers get retries of
-    #: throttling, outages, and timeouts here, not google-genai's, whose retry log line carries the response text.
+    #: One attempt per text, for a health probe that must fail fast. Other callers get retries of throttling, outages,
+    #: and timeouts here, not google-genai's, whose retry log line carries the response text.
     single_attempt: bool = False
     #: Seconds one request may take; google-genai sets none, and health probes shorten it so a stalled endpoint
     #: fails fast.
