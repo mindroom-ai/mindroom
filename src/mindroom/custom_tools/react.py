@@ -9,7 +9,7 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.tool_system.authoring import Toolkit
 
-# Long enough for any emoji sequence, such as a family or a flag, and too short for a sentence.
+# A cap of 8 characters keeps a reaction from carrying text; a few long emoji sequences, such as a couple with skin tones, are refused.
 _MAX_KEY_CHARACTERS = 8
 
 

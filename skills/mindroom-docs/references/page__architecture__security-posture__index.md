@@ -165,7 +165,8 @@ The allowlist and caps contain this:
 
 - A silent turn offers only `listen.tools`, each of which must also be one of the agent's own `tools`, so it never gains a tool, a `worker_scope` check bypass, or a tool limit bypass.
 - Approval-gated tools and interactive questions are hidden, and the turn's text is dropped.
-  Config load refuses `matrix_message` in `listen.tools`, so a silent turn cannot post through it, but any other listed tool that sends, such as `matrix_api`, still can.
+  Config load refuses `matrix_message` in `listen.tools`, so a silent turn cannot post through it, but any other listed tool that sends still can.
+  These include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`.
 - The prompt marks heard text as data rather than instructions, which lowers but does not remove the risk.
 - It hears only senders allowed to reach the agent in that room, judged on the person a relay speaks for.
 - `max_runs_per_hour` and `max_messages` bound the turns and what each reads.

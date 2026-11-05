@@ -234,11 +234,13 @@ A turn also hears no more than fits its model's `context_window`, and the rest w
 
 The turn's own text is never sent to the room, and approval-gated tools and interactive questions are not offered.
 It acts only through its listen tools, each with its usual effect, so a listed tool that sends still sends.
+Tools that can post if you list them include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`; `matrix_message` is refused.
 No more than `max_runs_per_hour` turns run per hour; the count starts again after a restart.
 
 The first run for a room starts at "now".
 The agent never reads history from before listening was turned on, and a room it stops listening in forgets its place.
-After a restart, the agent hears what it had not yet heard, including messages sent while MindRoom was down.
+After a restart, MindRoom repairs the gaps it can, so the agent hears most of what it had not yet heard.
+Some messages from a long outage may not be heard.
 
 Only shared agents can listen: `listen` on a private agent, which has no single identity to listen as, fails config load.
 A listening agent skips contact rooms, where only a reply passes the contact's message policy.
@@ -261,7 +263,8 @@ It suits a silent turn that should acknowledge what it heard without writing in 
 
 ### Known limits
 
-- A restart in the middle of a silent turn, after its tools have acted, repeats that turn, so a memory write or reaction may happen twice.
+- A failed or timed-out silent turn is retried, and so is one cut off by a restart after its tools have acted, so a memory write or reaction may happen twice.
+- A heard message is skipped with a warning when the turns covering it keep failing, after the batch is halved down to that one message, or when it waits more than 10 minutes for a refetch.
 - Heard text can carry prompt injection that drives the listed tools; read [Listening agents](../architecture/security-posture.md#listening-agents) before adding a tool to `listen.tools`.
 
 ## Naming Rules

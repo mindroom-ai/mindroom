@@ -19,6 +19,7 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
 2. The first run for a room starts at "now", so turning listening on never reads history from before it.
 3. A silent turn runs as the agent, with its identity, instructions, and memory, but offers only `listen.tools` and drops its text, so no tool outside the list can act and the turn's own text is never posted.
    A listed tool keeps its effects, so a tool that sends can still post; config refuses `matrix_message`, whose purpose is posting, and `react` covers acknowledging.
+   Tools that can still post when listed include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and the external messengers.
 4. Every `listen.tools` entry must be among the agent's own `tools`, and config load fails otherwise.
    The cost is that an agent with `listen:` and the default tools needs `memory` and `react` in `tools:`.
    The list needs at least one tool, since a turn without one only spends tokens.
@@ -41,7 +42,8 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
 12. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
     Every poll repeats them, and the conversation index orders by thread first, so without it each poll sorted the room in a temporary B-tree, which the journal's hot-query rule forbids.
 13. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
-    Its key is at most 8 characters with no whitespace, enough for any emoji sequence, so a reaction cannot carry text to the room.
+    Its key is at most 8 characters with no whitespace, so a reaction cannot carry text to the room.
+    Some emoji sequences, such as a couple with skin tones (10 code points), are longer and are refused.
 
 ## Rejected alternatives
 
