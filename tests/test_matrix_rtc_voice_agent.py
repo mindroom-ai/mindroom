@@ -321,6 +321,7 @@ class _PresenceRoom:
         self.connected = True
 
     def isconnected(self) -> bool:
+        """Report whether the agent's own SFU connection is up."""
         return self.connected
 
     @staticmethod
@@ -328,15 +329,22 @@ class _PresenceRoom:
         return SimpleNamespace(identity=identity, track_publications={})
 
     def on(self, event: str, callback: Callable[[object], None]) -> None:
+        """Register a room event handler."""
         self.handlers.setdefault(event, []).append(callback)
 
+    def off(self, event: str, callback: Callable[[object], None]) -> None:
+        """Remove a room event handler."""
+        self.handlers[event].remove(callback)
+
     def connect_participant(self, identity: str) -> None:
+        """Add a remote participant and emit ``participant_connected``."""
         participant = self._participant(identity)
         self.remote_participants[identity] = participant
         for callback in self.handlers.get("participant_connected", []):
             callback(participant)
 
     def disconnect_participant(self, identity: str) -> None:
+        """Remove a remote participant and emit ``participant_disconnected``."""
         participant = self.remote_participants.pop(identity)
         for callback in self.handlers.get("participant_disconnected", []):
             callback(participant)
@@ -345,21 +353,26 @@ class _PresenceRoom:
 async def _start_presence_bridge(
     monkeypatch: pytest.MonkeyPatch,
     room: _PresenceRoom,
+    *,
+    absent_timeout_s: float = 0,
 ) -> tuple[RealtimeVoiceBridge, list[bool]]:
-    """Start a realtime bridge on ``room`` with Alice in the roster and no absence grace."""
-    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._CALLER_ABSENT_TIMEOUT_S", 0)
+    """Start a realtime bridge on ``room`` with Alice in the roster, by default with no absence grace."""
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._CALLER_ABSENT_TIMEOUT_S", absent_timeout_s)
 
     class FakeSession:
         def __init__(self) -> None:
             self.input = SimpleNamespace(audio=None)
 
         async def start(self, _agent: object, **_kwargs: object) -> None:
+            """Start without media."""
             return
 
         def on(self, _event: str, _callback: object) -> None:
+            """Ignore session events."""
             return
 
         async def aclose(self) -> None:
+            """Close without media."""
             return
 
     fake_audio_input = MagicMock()
@@ -390,6 +403,7 @@ async def _start_presence_bridge(
 
 
 async def _settle() -> None:
+    """Let timers due now and the callbacks they schedule run."""
     for _ in range(3):
         await asyncio.sleep(0)
 
@@ -466,6 +480,38 @@ async def test_bridge_absence_watch_follows_roster_changes(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_bridge_roster_update_restarts_the_absence_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A membership the caller just published, even from a device already in the roster, gets the full grace."""
+    room = _PresenceRoom()
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room, absent_timeout_s=60)
+    first_grace = bridge._caller_absent_timer
+    assert first_grace is not None
+
+    bridge.set_participant_identities(frozenset({_ALICE}))
+
+    renewed_grace = bridge._caller_absent_timer
+    assert first_grace.cancelled()
+    assert renewed_grace is not None
+    assert renewed_grace.when() >= first_grace.when()
+    await bridge.aclose()
+    assert renewed_grace.cancelled()
+    assert terminations == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_absence_timer_rechecks_the_room_when_it_fires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller the room already lists when the grace ends keeps the call, even before its event arrives."""
+    room = _PresenceRoom()
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+
+    room.remote_participants[_ALICE] = SimpleNamespace(identity=_ALICE, track_publications={})
+    await _settle()
+
+    assert terminations == []
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
 async def test_bridge_close_cancels_the_absence_watch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Leaving the call cannot report the session as terminated afterwards."""
     room = _PresenceRoom()
@@ -475,6 +521,8 @@ async def test_bridge_close_cancels_the_absence_watch(monkeypatch: pytest.Monkey
     await _settle()
 
     assert terminations == []
+    assert room.handlers["participant_connected"] == []
+    assert room.handlers["participant_disconnected"] == []
     room.connect_participant(_ALICE)
     room.disconnect_participant(_ALICE)
     await _settle()

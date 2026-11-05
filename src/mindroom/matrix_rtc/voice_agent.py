@@ -454,6 +454,7 @@ class RealtimeVoiceBridge:
         self._participant_identities: frozenset[str] = frozenset()
         self._inbound_key_timers: dict[str, asyncio.Task[None]] = {}
         self._on_callers_absent: Callable[[], None] | None = None
+        self._caller_presence_listener: Callable[[rtc.RemoteParticipant], None] | None = None
         self._caller_absent_timer: asyncio.TimerHandle | None = None
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
@@ -465,7 +466,7 @@ class RealtimeVoiceBridge:
         if self._audio_input is not None:
             self._audio_input.set_participant_identities(participant_identities)
         self._apply_output_permissions()
-        self._watch_caller_presence()
+        self._watch_caller_presence(restart=True)
 
     async def connect(self, grant: SfuGrant) -> None:
         """Connect to the SFU, enabling frame encryption when required."""
@@ -619,35 +620,49 @@ class RealtimeVoiceBridge:
             self._watch_caller_presence()
 
         self._on_callers_absent = on_absent
+        self._caller_presence_listener = on_participant_change
         room.on("participant_connected", on_participant_change)
         room.on("participant_disconnected", on_participant_change)
         self._watch_caller_presence()
 
-    def _watch_caller_presence(self) -> None:
-        """Run the absence timer only while no roster participant is connected to the SFU room."""
-        if self._on_callers_absent is None or self._room is None:
-            return
-        present = any(
+    def _roster_in_sfu(self) -> bool:
+        """Return whether any device in the Matrix call roster is connected to the SFU room."""
+        return self._room is not None and any(
             participant.identity in self._participant_identities
             for participant in self._room.remote_participants.values()
         )
-        if present:
-            if self._caller_absent_timer is not None:
-                self._caller_absent_timer.cancel()
-                self._caller_absent_timer = None
-        elif self._caller_absent_timer is None:
+
+    def _watch_caller_presence(self, *, restart: bool = False) -> None:
+        """Run the absence timer only while no roster participant is connected to the SFU room.
+
+        ``restart`` gives the roster a fresh grace: a Matrix roster update may carry a
+        membership the caller just published, even for a device already in the roster.
+        """
+        if self._on_callers_absent is None:
+            return
+        present = self._roster_in_sfu()
+        if (present or restart) and self._caller_absent_timer is not None:
+            self._caller_absent_timer.cancel()
+            self._caller_absent_timer = None
+        if not present and self._caller_absent_timer is None:
             self._caller_absent_timer = asyncio.get_running_loop().call_later(
                 _CALLER_ABSENT_TIMEOUT_S,
                 self._end_absent_call,
             )
 
     def _end_absent_call(self) -> None:
+        """Report the roster absent, unless a roster device connected without an event this watch saw."""
         self._caller_absent_timer = None
-        if self._on_callers_absent is not None:
+        if self._on_callers_absent is not None and not self._roster_in_sfu():
             self._on_callers_absent()
 
     def _stop_caller_presence_watch(self) -> None:
+        """Cancel the absence timer and stop following SFU participants."""
         self._on_callers_absent = None
+        listener, self._caller_presence_listener = self._caller_presence_listener, None
+        if listener is not None and self._room is not None:
+            self._room.off("participant_connected", listener)
+            self._room.off("participant_disconnected", listener)
         if self._caller_absent_timer is not None:
             self._caller_absent_timer.cancel()
             self._caller_absent_timer = None

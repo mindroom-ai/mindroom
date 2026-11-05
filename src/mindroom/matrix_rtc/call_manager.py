@@ -93,7 +93,7 @@ from mindroom.token_counting.families import load_o200k, openai_model_counter
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Iterable, Mapping
     from collections.abc import Set as AbstractSet
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -218,12 +218,16 @@ class _LogicalCallState:
     blocked_memberships: frozenset[tuple[str, str, int]] | None = None
 
 
-def _membership_identities(members: list[CallMember] | tuple[CallMember, ...]) -> frozenset[tuple[str, str, int]]:
-    """Identify each call membership; a client refresh keeps its identity and a rejoin replaces it."""
+def _membership_identities(members: Iterable[CallMember]) -> frozenset[tuple[str, str, int]]:
+    """Identify each call membership; a client refresh keeps its identity and a rejoin replaces it.
+
+    A join carries no ``created_ts`` and is timestamped by the server; refreshes repeat
+    that timestamp as ``created_ts``, so both parse to the same creation time.
+    """
     return frozenset((member.user_id, member.device_id, member.created_ts) for member in members)
 
 
-def _rejoined_since_block(logical_call: _LogicalCallState, members: list[CallMember]) -> bool:
+def _rejoined_since_block(logical_call: _LogicalCallState, members: Iterable[CallMember]) -> bool:
     """Return whether the roster has a membership published after a non-retryable session end."""
     blocked = logical_call.blocked_memberships
     return blocked is not None and not _membership_identities(members) <= blocked
@@ -1253,8 +1257,23 @@ class CallManager:
         """Schedule cleanup after an unexpected terminal voice-session close."""
         if self._shutting_down:
             return
-        task = asyncio.create_task(self._handle_session_termination(room, bridge, retryable=retryable))
+        # Read the roster now: cleanup waits for the room lock, and a reconcile holding it may add the caller's rejoin.
+        ended_memberships = self._session_memberships(room.room_id, bridge)
+        task = asyncio.create_task(
+            self._handle_session_termination(room, bridge, retryable=retryable, ended_memberships=ended_memberships),
+        )
         self._track_background_task(task, event="call_session_termination_failed", room_id=room.room_id)
+
+    def _session_memberships(self, room_id: str, bridge: VoiceBridgeLike) -> frozenset[tuple[str, str, int]]:
+        """Return the membership identities of the active or starting session that drives ``bridge``."""
+        room_call = self._rooms.get(room_id)
+        if room_call is None:
+            return frozenset()
+        starting_session = room_call.starting_call.session if room_call.starting_call is not None else None
+        for session in (room_call.session, starting_session):
+            if session is not None and session.deps.bridge is bridge:
+                return _membership_identities(session.members)
+        return frozenset()
 
     def _schedule_call_failure_notice(self, room_id: str, logical_call: _LogicalCallState, message: str) -> None:
         """Publish an asynchronous diagnostic without blocking SDK callbacks."""
@@ -1312,6 +1331,7 @@ class CallManager:
         bridge: VoiceBridgeLike,
         *,
         retryable: bool,
+        ended_memberships: frozenset[tuple[str, str, int]] = frozenset(),
     ) -> None:
         lock = self._locks.setdefault(room.room_id, asyncio.Lock())
         async with lock:
@@ -1328,10 +1348,13 @@ class CallManager:
                 if not retryable:
                     # The memberships stay in room state when the caller's client left without
                     # removing them, so they cannot reopen the call; the caller's rejoin replaces them.
-                    logical_call.blocked_memberships = _membership_identities(session.members)
+                    logical_call.blocked_memberships = ended_memberships or _membership_identities(session.members)
             await _stop_session(session, event="call_failed_session_stop_failed")
             if room_call.session is session:
                 room_call.session = None
+            if not retryable and logical_call is not None and _rejoined_since_block(logical_call, session.members):
+                # The caller's rejoin reached the ended session first, so no later event may reconcile it.
+                self._request_reconcile(room_call.room)
             if retryable and not self._shutting_down:
                 if logical_call is not None:
                     logical_call.join_blocked = False
