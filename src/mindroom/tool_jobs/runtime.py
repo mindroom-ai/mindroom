@@ -304,6 +304,22 @@ def _approval_deadline(
     return now + approval_timeout if current is None else current
 
 
+@dataclass
+class _WorkAllowance:
+    """The seconds of a job's work a wait still waits for; time the job spends awaiting approval does not count."""
+
+    left: float
+    since: float
+    paused: bool = False
+
+    def deadline(self, job: BackgroundJob, now: float) -> float | None:
+        """Spend the work since the last look; return when the allowance ends, None while the job awaits approval."""
+        if not self.paused:
+            self.left -= now - self.since
+        self.since, self.paused = now, job.status == "awaiting_approval"
+        return None if self.paused else now + self.left
+
+
 async def _changed_or_released(
     changed: asyncio.Event,
     message: asyncio.Future[None] | None,
@@ -680,15 +696,19 @@ class ToolJobRuntime:
         timeout: float | None = None,  # noqa: ASYNC109
         claim: JobClaim | None = None,
         approval_timeout: float | None = None,
+        work_timeout: float | None = None,
     ) -> _JobWait:
         """Wait without cancelling execution, keeping or taking the outcome's claim unless another waiter has.
 
         ``approval_timeout`` bounds how long the wait lasts once the job awaits approval, from when this wait sees it
-        ask, however long the job ran before; ``timeout`` bounds it all.
+        ask, however long the job ran before; ``work_timeout`` bounds the time the job spends not awaiting approval
+        during this wait; ``timeout`` bounds it all.
         """
         timeout = validate_wait_seconds(timeout, argument="wait_timeout")
-        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+        started = asyncio.get_running_loop().time()
+        deadline = None if timeout is None else started + timeout
         approval_deadline: float | None = None
+        work = None if work_timeout is None else _WorkAllowance(work_timeout, started)
         retained = False
         async with self._lock:
             entry, readable = self._waited_entry(job_id, owner, depth)
@@ -719,7 +739,8 @@ class ToolJobRuntime:
                         return _JobWait(snapshot, claim)
                     now = asyncio.get_running_loop().time()
                     approval_deadline = _approval_deadline(entry.job, approval_timeout, approval_deadline, now)
-                    ends = [end for end in (deadline, approval_deadline) if end is not None]
+                    work_deadline = None if work is None else work.deadline(entry.job, now)
+                    ends = [end for end in (deadline, approval_deadline, work_deadline) if end is not None]
                     remaining = min(ends) - now if ends else None
                     if released or (remaining is not None and remaining <= 0):
                         return _JobWait(await self._snapshot(entry))

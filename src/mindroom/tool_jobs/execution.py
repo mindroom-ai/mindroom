@@ -25,13 +25,14 @@ from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.types import session_state_snapshot
+from mindroom.shell.execution import shell_job_wait_seconds
 from mindroom.tool_jobs.approvals import ask_tool_call_approval
 from mindroom.tool_jobs.authorization import toolkit_authority
 from mindroom.tool_jobs.background_after import (
     BACKGROUND_AFTER,
-    BACKGROUND_AFTER_SCHEMA,
     ToolWaitMode,
     application_arguments,
+    background_after_schema,
     read_background_after,
 )
 from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, session_state_delta
@@ -60,7 +61,7 @@ from mindroom.tool_system.tool_function import ToolGate, ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
@@ -177,23 +178,30 @@ def _job_scope() -> _JobScope | None:
     return _JobScope(context, runtime, resources)
 
 
-def project_definitions(definitions: Sequence[ToolSpec], managed: Collection[str]) -> tuple[ToolSpec, ...]:
+def project_definitions(
+    definitions: Sequence[ToolSpec],
+    managed: Mapping[str, float | None],
+) -> tuple[ToolSpec, ...]:
     """Add the optional ``background_after`` parameter to the definition of each function named in ``managed``.
 
+    ``managed`` maps each such function to how long a call of it that sets no budget waits, None for no limit.
     A function that declares its own ``background_after`` keeps its authored schema; the collision fails only that
     call's execution. A strict definition requires the parameter, since a strict schema requires every property.
     """
     return tuple(
-        _with_background_after(definition)
+        _with_background_after(definition, managed[definition.name])
         if definition.name in managed and not _declares_background_after(definition.parameters)
         else definition
         for definition in definitions
     )
 
 
-def _with_background_after(definition: ToolSpec) -> ToolSpec:
+def _with_background_after(definition: ToolSpec, default_wait: float | None) -> ToolSpec:
     parameters = deepcopy(dict(definition.parameters))
-    parameters["properties"] = {**parameters.get("properties", {}), BACKGROUND_AFTER: deepcopy(BACKGROUND_AFTER_SCHEMA)}
+    parameters["properties"] = {
+        **parameters.get("properties", {}),
+        BACKGROUND_AFTER: background_after_schema(default_wait),
+    }
     if definition.strict:
         required = list(parameters.get("required", []))
         if BACKGROUND_AFTER not in required:
@@ -220,12 +228,17 @@ def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tup
     scope = _job_scope()
     if scope is None:
         return tuple(definitions)
-    managed = [
-        name
+    managed = {
+        name: _default_wait(tool.function)
         for name, tool in actor.tools.items()
         if wait_mode(tool, depth=actor.depth, context=scope.context) == "managed"
-    ]
+    }
     return project_definitions(definitions, managed)
+
+
+def _default_wait(function: ToolFunction) -> float | None:
+    """Return how long a managed call of ``function`` that sets no budget waits, None until completion."""
+    return shell_job_wait_seconds(function.registered_toolkit, function.name)
 
 
 def with_job_admission(actor: JobActor | None, inner: Sequence[ToolMiddleware]) -> tuple[ToolMiddleware, ...]:
@@ -456,6 +469,8 @@ async def _run_managed_call(
             # The reply waits this long for a human decision its job, or a subagent's child, awaits, then goes on
             # while the job waits for it.
             approval_timeout=current_approval_wait_timeout(),
+            # Without a budget of its own, a call waits its function's default for its work, approvals aside.
+            work_timeout=_default_wait(function) if background_after is None else None,
         )
         if waited.claim is None:
             value, error = format_job_handle(waited.job), None
