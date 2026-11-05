@@ -109,7 +109,7 @@ async def test_joined_members_error_503() -> None:
     client.joined_members = AsyncMock(return_value=nio.JoinedMembersError("boom"))
     with pytest.raises(HTTPException) as caught:
         await require_room_member(_request(_bound(client)), ROOM)
-    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
+    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership lookup failed; try again.")
 
 
 @pytest.mark.asyncio
@@ -119,7 +119,7 @@ async def test_joined_members_raising_503() -> None:
     client.joined_members = AsyncMock(side_effect=TimeoutError("homeserver timed out"))
     with pytest.raises(HTTPException) as caught:
         await require_room_member(_request(_bound(client)), ROOM)
-    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
+    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership lookup failed; try again.")
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_joined_members_that_never_answers_503(monkeypatch: pytest.MonkeyP
     with pytest.raises(HTTPException) as caught:
         async with asyncio.timeout(5):
             await require_room_member(_request(_bound(client)), ROOM)
-    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
+    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership lookup failed; try again.")
 
 
 @pytest.mark.asyncio
@@ -187,7 +187,7 @@ async def test_no_bot_in_room_503() -> None:
     bind_room_members(app, {"router": _bot(router), "assistant": _bot(agent)})  # type: ignore[dict-item]
     with pytest.raises(HTTPException) as caught:
         await require_room_member(_request(app), ROOM)
-    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
+    assert (caught.value.status_code, caught.value.detail) == (503, "No running MindRoom bot is in this room.")
     router.joined_members.assert_not_awaited()
     agent.joined_members.assert_not_awaited()
 

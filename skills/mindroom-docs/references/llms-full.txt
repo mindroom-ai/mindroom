@@ -18129,7 +18129,8 @@ A route that acts on one room depends on `require_room_member` instead, as in th
 It authenticates the caller as `require_client_user` does and takes the room from the route's `room_id` parameter, and it returns the same `ClientUser` once that user is joined to the room.
 A route that finds its room some other way awaits `require_room_member(request, room_id)` itself.
 Either way the user is always the session's own: no parameter of the request can name another.
-It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, answers 403 unless the user is joined, and answers 503 when membership is unavailable, such as when no running bot is in the room.
+It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
+It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, while `Room membership lookup failed; try again.` means the Matrix call failed or timed out.
 
 ## Plugin skills
 

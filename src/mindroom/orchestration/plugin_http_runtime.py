@@ -21,7 +21,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_UNAVAILABLE = "Room membership is unavailable."
+# A client can tell the condition that lasts until a bot joins the room from a failure worth retrying.
+_NO_BOT_IN_ROOM = "No running MindRoom bot is in this room."
+_LOOKUP_FAILED = "Room membership lookup failed; try again."
 # As long as the computers API waits for the same membership check.
 _LOOKUP_TIMEOUT_SECONDS = 20
 
@@ -49,16 +51,16 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     async def room_members(room_id: str) -> frozenset[str]:
         client = _client_in_room(bots, room_id)
         if client is None:
-            raise HTTPException(503, _UNAVAILABLE)
+            raise HTTPException(503, _NO_BOT_IN_ROOM)
         try:
             async with asyncio.timeout(_LOOKUP_TIMEOUT_SECONDS):
                 response = await client.joined_members(room_id)
         except Exception as error:
             # A failed or timed-out lookup leaves membership unknown, which must never let the caller through.
             logger.warning("Room membership lookup failed", room_id=room_id, error_type=type(error).__name__)
-            raise HTTPException(503, _UNAVAILABLE) from None
+            raise HTTPException(503, _LOOKUP_FAILED) from None
         if not isinstance(response, nio.JoinedMembersResponse):
-            raise HTTPException(503, _UNAVAILABLE)
+            raise HTTPException(503, _LOOKUP_FAILED)
         return frozenset(member.user_id for member in response.members)
 
     ensure_app_state(app).room_members = room_members
