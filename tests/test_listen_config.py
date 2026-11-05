@@ -98,3 +98,13 @@ def test_agent_without_listen_is_none() -> None:
 def test_listen_without_tools_passes_runtime_validation(tmp_path: Path) -> None:
     """Only an explicit ``tools`` list is checked against the registry, so the default never fails validation."""
     Config.validate_with_runtime(_config({"rooms": ["lobby"]}), test_runtime_paths(tmp_path))
+
+
+def test_listen_default_tools_validate(tmp_path: Path) -> None:
+    """The default ``memory`` and ``react`` are both toolkits now, so a listen block validates when named in full."""
+    config = Config.validate_with_runtime(
+        _config({"rooms": ["lobby"], "tools": ["memory", "react"]}),
+        test_runtime_paths(tmp_path),
+    )
+    assert config.agents["scribe"].listen is not None
+    assert config.agents["scribe"].listen.tools == ListenConfig(rooms=["lobby"]).tools

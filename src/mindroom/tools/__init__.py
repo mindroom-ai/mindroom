@@ -127,6 +127,7 @@ from mindroom.tools.pandas import pandas_tools
 from mindroom.tools.postgres import postgres_tools
 from mindroom.tools.pubmed import pubmed_tools
 from mindroom.tools.python import python_tools
+from mindroom.tools.react import react_tools
 from mindroom.tools.reasoning import reasoning_tools
 from mindroom.tools.reddit import reddit_tools
 from mindroom.tools.redshift import redshift_tools

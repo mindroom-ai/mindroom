@@ -13,6 +13,7 @@ This page also covers automatic thread summaries.
 - [`thread_move`] - Move a thread from the current room into another room.
 - [`thread_summary`] - Set or replace a thread's summary.
 - [`stop_reply`] - Stop the reply another agent or team is writing in the current conversation.
+- [`react`] - Add an emoji reaction to a message in the current room, and do nothing else.
 - [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the current thread's model override.
 - [`matrix_api`] - Low-level Matrix event, state, redaction, and search calls with explicit IDs.
 - [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register attachment IDs for later tool calls.
@@ -210,6 +211,24 @@ agents:
 
 ```python
 stop_agent_reply("researcher")
+```
+
+## [`react`]
+
+`react(event_id, emoji)` adds an emoji reaction to a message in the current room.
+Unlike `matrix_message`, it cannot send, edit, or read messages, so it suits an agent that may only acknowledge, such as a [listening agent](https://docs.mindroom.chat/configuration/agents/#listening).
+It returns an error without reacting when the emoji is blank or the event is not in the current room.
+It shares `matrix_message`'s rate limit for the room (12 actions per 30 seconds), so using both is no way around it.
+
+```yaml
+agents:
+  scribe:
+    tools:
+      - react
+```
+
+```python
+react("$event_id", "👍")
 ```
 
 ## [`matrix_api`]
