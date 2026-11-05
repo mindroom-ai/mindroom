@@ -454,7 +454,8 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
     assert len(model.requests) == limit + 2
     # No request reads what a batch hook would add after the batch that ends the run, so none runs there.
     assert batches == [f"c{index}" for index in range(1, limit + 2)]
-    assert [event.text for event in events if isinstance(event, TextDelta)][-1] == f"\n\n{stop}"
+    # The refused call's tool events come right before the line, and the reply separates text after a tool event.
+    assert [event.text for event in events if isinstance(event, TextDelta)][-1] == stop
     assert record.content == f"Fetching the file.\n\n{stop}"
     assert events[-1] == LoopEnded(paused=False)
     fields = {"log_level": "warning", "entity": "code", "tool_name": "boom"}
@@ -534,6 +535,7 @@ async def test_calls_the_loop_refused_without_running_leave_the_streak_alone() -
 
     answers = {message.tool_call_id: message.content for message in messages if message.role == "tool"}
     assert answers["runs"] == "the tool itself failed"
+    assert record.failing_tools == {"boom": FailingTool(failures=1, last_error="the tool itself failed")}
     assert record.content == "done"
     assert events[-1] == LoopEnded(paused=False)
     assert not _failing_tool_events(logs)
@@ -557,6 +559,29 @@ async def test_calls_past_the_call_limit_leave_the_streak_alone() -> None:
     assert record.content == "Stopping here."
     assert events[-1] == LoopEnded(paused=False)
     assert not _failing_tool_events(logs)
+
+
+async def test_a_call_refused_for_failing_uses_up_the_call_limit() -> None:
+    model = ScriptedModel(
+        [
+            calls(tool_call("boom", "refused", reason="again")),
+            calls(tool_call("add", "past-the-limit", a=1, b=1)),
+            answer("Stopping here."),
+        ],
+    )
+    record = _record()
+    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad link")}
+    messages = _prompt()
+
+    events, record = await _run(spec(model, toolkit(boom, add), max_tool_calls_per_turn=1), messages, record=record)
+
+    # The refusal answered a call the model made, so it takes the turn's only call and the next batch gets none.
+    assert [message.content for message in messages if message.role == "tool"] == [
+        _failing_tool_refusal("bad link"),
+        "Tool call limit reached. Tool call add not executed. Don't try to execute it again.",
+    ]
+    assert record.content == "Stopping here."
+    assert events[-1] == LoopEnded(paused=False)
 
 
 async def test_a_success_resets_the_failure_streak_of_its_tool() -> None:

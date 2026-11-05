@@ -249,10 +249,8 @@ def _end_for_failing_tool(tool_name: str, state: LoopState, progress: _Progress)
     tool = state.record.failing_tools[tool_name]
     logger.warning("failing_tool_ended_run", entity=_entity(state.record), tool_name=tool_name)
     text = failing_tool_stop_text(tool_name, tool)
-    # The reply streams the line after the text so far, so it starts a paragraph of its own there, as in the content.
-    delta = TextDelta(f"\n\n{text}" if any(part.strip() for part in progress.text_parts) else text)
     _add_text(text, state, progress)
-    return delta
+    return TextDelta(text)
 
 
 def _add_text(text: str, state: LoopState, progress: _Progress) -> None:
