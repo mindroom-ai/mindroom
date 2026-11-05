@@ -69,7 +69,7 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
 - Reading pages past the turn's own to judge quiet.
   It rescanned the same backlog every poll and still stopped short of a long one; a page that more follow counts as busy instead.
 - Trying only the oldest message after three failed turns, then skipping it after three more.
-  Under the hourly cap, a poisoned message late in a long backlog would cost a turn for every message before it, where halving costs three failed turns per halving.
+  Every message before a poisoned one would cost three failed turns and one that succeeds, under the hourly cap, where halving costs three failed turns per halving.
 
 ## Risks
 

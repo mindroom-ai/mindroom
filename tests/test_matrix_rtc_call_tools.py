@@ -124,11 +124,13 @@ def _config() -> Config:
 
 
 def _context() -> SimpleNamespace:
-    # The wrapper only stores and re-binds the context; a stand-in suffices.
+    # The wrapper only stores and re-binds the context, and a call reads whether it may save its result to a file; a
+    # stand-in suffices.
     return SimpleNamespace(
         room_id="!room:example.org",
         hooks=HookBindings(registry=object()),  # type: ignore[arg-type]
         orchestrator=None,
+        tool_output_paths=True,
     )
 
 
