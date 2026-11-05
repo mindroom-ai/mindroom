@@ -11,7 +11,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
-from starlette.routing import Mount
 from starlette.testclient import WebSocketDenialResponse
 
 from mindroom.api import config_lifecycle, main
@@ -91,6 +90,14 @@ async def topic(room_id: str, request: Request) -> dict:
 @router.get("/rooms/{room_id}/secret", dependencies=[Depends(require_room_member)])
 async def secret(room_id: str) -> dict:
     return {"secret": room_id}
+"""
+
+# FastAPI refuses a route at "" only as a router is included in an app, which MindRoom does as the plugin loads.
+EMPTY_PATH_ROUTES = f"""{ROUTES}
+
+@router.get("")
+async def root() -> dict:
+    return {{"root": True}}
 """
 
 
@@ -243,20 +250,28 @@ def test_raising_route_answers_an_opaque_500_and_the_app_keeps_serving(tmp_path:
     assert client.get("/api/plugins/demo/ping").json() == {"pong": True}
 
 
-def test_routes_module_without_router_costs_only_the_routes(tmp_path: Path) -> None:
-    """A reload whose routes module lacks ``router`` drops only the plugin's routes, and the plugin check fails it."""
+@pytest.mark.parametrize(
+    ("routes_source", "error"),
+    [
+        ("ROUTER = None\n", r"Plugin routes module must define router: APIRouter"),
+        (EMPTY_PATH_ROUTES, r"Plugin router cannot be served: Prefix and path cannot be both empty"),
+    ],
+    ids=["no-router", "empty-path"],
+)
+def test_unservable_routes_module_costs_only_the_routes(tmp_path: Path, routes_source: str, error: str) -> None:
+    """A router that can't be served costs a reload only the plugin's routes, and the plugin check fails it."""
     root = _write_plugin(tmp_path, ROUTES, tools_source=TOOLS)
     config, runtime_paths = _config(tmp_path)
     publish_test_plugins(config, runtime_paths)
     client = TestClient(_app(config, runtime_paths))
     assert client.get("/api/plugins/demo/ping").status_code == 200
 
-    _write_plugin(tmp_path, "ROUTER = None\n", tools_source=TOOLS)
+    _write_plugin(tmp_path, routes_source, tools_source=TOOLS)
     [plugin] = publish_test_plugins(config, runtime_paths).loaded_plugins
 
-    assert (set(plugin.tools), plugin.router) == ({"demo_routes_tool"}, None)
+    assert (set(plugin.tools), plugin.routes_app) == ({"demo_routes_tool"}, None)
     assert client.get("/api/plugins/demo/ping").status_code == 404
-    with pytest.raises(PluginValidationError, match=r"Plugin routes module must define router: APIRouter"):
+    with pytest.raises(PluginValidationError, match=error):
         check_plugin(root)
 
 
@@ -294,27 +309,6 @@ def test_plugin_route_generates_urls_to_its_own_routes(tmp_path: Path) -> None:
     assert proxied.json() == {"url": "http://testserver/mindroom/api/plugins/demo/things/123"}
 
 
-def test_disabled_plugin_drops_its_cached_sub_app(tmp_path: Path) -> None:
-    """Once a plugin is no longer published, the next request lets go of its sub-app, and with it the routes module."""
-    _write_plugin(tmp_path, ROUTES)
-    _write_plugin(tmp_path, ROUTES, name="other")
-    config, runtime_paths = _config(tmp_path, "demo", "other")
-    publish_test_plugins(config, runtime_paths)
-    app = _app(config, runtime_paths)
-    [plugin_routes] = [route.app for route in app.routes if isinstance(route, Mount) and route.path == "/api/plugins"]
-    client = TestClient(app)
-    assert client.get("/api/plugins/other/ping").status_code == 200
-    assert client.get("/api/plugins/demo/ping").status_code == 200
-    assert set(plugin_routes._sub_apps) == {"demo", "other"}
-
-    config, runtime_paths = _config(tmp_path, "demo")
-    publish_test_plugins(config, runtime_paths)
-    ensure_app_state(app).api_state = _api_state(config, runtime_paths)
-
-    assert client.get("/api/plugins/other/ping").status_code == 404
-    assert set(plugin_routes._sub_apps) <= {"demo"}
-
-
 def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
     """A worker's load never imports the routes module, which the primary's load does."""
     _write_plugin(tmp_path, "raise RuntimeError('routes module imported')\n")
@@ -322,7 +316,7 @@ def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
 
     [plugin] = refresh_plugins(config, runtime_paths).loaded_plugins
 
-    assert (plugin.name, plugin.router) == ("demo", None)
+    assert (plugin.name, plugin.routes_app) == ("demo", None)
     generation = prepare_plugins(config, runtime_paths)
     dispose_plugins(generation)
     [plugin] = generation.plugins.values()
@@ -368,13 +362,20 @@ def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_pat
 
 
 def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """On the real API app, a plugin's GET route wins over the frontend's catch-all."""
+    """On the real API app, a plugin's GET route wins over the frontend's catch-all.
+
+    A route that raises answers its opaque 500 from inside the main app's middleware, so it keeps the forced headers.
+    """
     _write_plugin(tmp_path, ROUTES)
     config, runtime_paths = _config(tmp_path)
     publish_test_plugins(config, runtime_paths)
     monkeypatch.setattr(ensure_app_state(main.app), "api_state", _api_state(config, runtime_paths))
+    client = TestClient(main.app, raise_server_exceptions=False)
 
-    response = TestClient(main.app).get("/api/plugins/demo/ping")
+    response = client.get("/api/plugins/demo/ping")
 
     assert response.status_code == 200
     assert response.json() == {"pong": True}
+    boom = client.get("/api/plugins/demo/boom")
+    assert (boom.status_code, boom.text) == (500, "Internal Server Error")
+    assert (boom.headers["cache-control"], boom.headers["x-content-type-options"]) == ("no-store", "nosniff")

@@ -1,7 +1,7 @@
 """Plugin loading: the one plugin generation a process publishes, and each config's view of it.
 
 A process publishes one ``PluginGeneration``: the module instances, tools, hooks, automations, skill directories, OAuth
-callbacks, and HTTP routers of the plugins it loaded. An operation captures ``config_plugins(config, runtime_paths)``
+callbacks, and HTTP routes of the plugins it loaded. An operation captures ``config_plugins(config, runtime_paths)``
 once and reads every plugin fact it needs from that value, so a publication during the operation never mixes two
 generations.
 """
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from types import ModuleType
 
-    from fastapi import APIRouter
+    from starlette.types import ASGIApp
 
     from mindroom.automations.registry import CheckFn
     from mindroom.config.main import Config
@@ -84,8 +84,9 @@ class _LoadedPlugin:
     discovered_hooks: tuple[HookCallback, ...]
     discovered_automations: tuple[CheckFn, ...]
     oauth_callback: Callable[..., object] | None
-    # Set by staged loads (the primary's and the CLI checks'); worker loads never import a routes module.
-    router: APIRouter | None
+    # The plugin's router as an app of its own, built by staged loads (the primary's and the CLI checks'); worker loads
+    # never import a routes module.
+    routes_app: ASGIApp | None
     # Why a staged load serves no routes from the plugin's routes module, which leaves its tools and hooks loaded.
     routes_error: plugin_imports.PluginValidationError | None
     modules: tuple[ModuleType, ...]
@@ -695,14 +696,14 @@ def _materialize_plugin(
     )
     oauth_entry = _load_plugin_module(plugin.name, plugin.root, plugin.oauth_module_path, kind="oauth")
     routes_entry: plugin_imports._ModuleCacheEntry | None = None
-    router: APIRouter | None = None
+    routes_app: ASGIApp | None = None
     routes_error: plugin_imports.PluginValidationError | None = None
     if routes and plugin.routes_module_path is not None:
         # A broken routes module costs only the routes: a reload must not take the plugin's tools from agents.
         try:
             routes_entry = _load_plugin_module(plugin.name, plugin.root, plugin.routes_module_path, kind="routes")
             assert routes_entry is not None
-            router = _plugin_router(routes_entry.module)
+            routes_app = _plugin_routes_app(routes_entry.module)
         except plugin_imports.PluginValidationError as error:
             logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
             routes_error = error
@@ -735,7 +736,7 @@ def _materialize_plugin(
         discovered_hooks=tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else (),
         discovered_automations=tuple(iter_module_automations(hooks_module)) if hooks_module is not None else (),
         oauth_callback=_oauth_provider_callback(oauth_entry.module) if oauth_entry is not None else None,
-        router=router,
+        routes_app=routes_app,
         routes_error=routes_error,
         modules=modules,
     )
@@ -749,15 +750,33 @@ def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
     return callback
 
 
-def _plugin_router(module: ModuleType) -> APIRouter:
+def _plugin_routes_app(module: ModuleType) -> ASGIApp:
+    """Build the app that serves the module's ``router``, once, so a router FastAPI cannot serve fails as it loads."""
     # Deferred: workers and slim entry points load plugins too, and only a routes module needs FastAPI.
-    from fastapi import APIRouter  # noqa: PLC0415
+    from fastapi import APIRouter, FastAPI  # noqa: PLC0415
+    from fastapi.exceptions import RequestValidationError  # noqa: PLC0415
+
+    from mindroom.api.validation_errors import validation_error_response  # noqa: PLC0415
 
     router = vars(module).get("router")
     if not isinstance(router, APIRouter):
         msg = "Plugin routes module must define router: APIRouter"
         raise plugin_imports.PluginValidationError(msg)
-    return router
+    # Errors are answered as the main API answers them, so a rejected body is not echoed back.
+    app = FastAPI(
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
+        exception_handlers={RequestValidationError: validation_error_response},
+    )
+    try:
+        app.include_router(router)
+    except Exception as error:  # FastAPI refuses some routers only here, such as one with a route at "".
+        msg = f"Plugin router cannot be served: {error}"
+        raise plugin_imports.PluginValidationError(msg) from error
+    # The app's error handling without the app itself, which would make itself ``request.app``: plugin routes keep
+    # the main app there, and with it the client sessions and room membership that ``mindroom.plugin_http`` reads.
+    return app.build_middleware_stack()
 
 
 def _log_loaded_plugins(generation: PluginGeneration) -> None:
