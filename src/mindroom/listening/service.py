@@ -2,9 +2,13 @@
 
 Each agent keeps a durable marker per room (``ListeningMarkers``), and each poll reads the agent's own event journal
 after it. What the agent wrote, and what senders it may not hear from wrote, is passed over; the rest waits until the
-room has been quiet for ``quiet_seconds``, then one silent turn hears at most ``max_messages`` of it and the marker moves
-past what was read. A turn that fails, a turn the hourly cap holds back, and a message owing a refetch all keep the
-marker, so nothing is heard twice or lost.
+room has been quiet for ``quiet_seconds``, then one silent turn hears at most ``max_messages`` of it, no more than fits
+its model's context window, and the marker moves past what that turn heard. A turn the hourly cap holds back keeps the
+marker, and the agent's rooms take turns at the cap, least recently run first.
+
+No room stalls for good: a turn that keeps failing hears fewer messages until one message alone fails, which is then
+skipped, and a message whose refetch never arrives is skipped after a while. Each skip is logged, and a skipped message
+is never heard.
 """
 
 from __future__ import annotations
@@ -20,14 +24,14 @@ from mindroom.constants import tracking_dir
 from mindroom.contacts.turns import contact_room
 from mindroom.event_journal import ConversationCursor
 from mindroom.listening.markers import ListeningMarkers
-from mindroom.listening.turn import run_silent_turn
+from mindroom.listening.turn import heard_within_window, run_silent_turn
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.conversation_reads import projected_visible_messages
 from mindroom.matrix.state import resolve_room_aliases
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -41,8 +45,10 @@ logger = get_logger(__name__)
 _MARKERS_FILENAME = "listening_markers.json"
 _POLL_SECONDS = 10
 _HOUR_SECONDS = 3600
-# Polls a room may wait on a refetch before the wait is reported; it keeps waiting, since skipping would lose a message.
-_STUCK_POLLS = 10
+# How long a room waits on a message's refetch before it skips that message, unheard, rather than stall.
+_REFETCH_WAIT_SECONDS = 600
+# Failed turns in a row over the same messages before the next one hears half as many, or, at one message, skips it.
+_FAILURES_PER_BATCH = 3
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,29 @@ class _Listener:
     agent_name: str
     listen: ListenConfig
     room_ids: tuple[str, ...]
+
+
+@dataclass
+class _Failures:
+    """A room's silent turns that failed in a row from one marker, and how many heard messages the next one gets."""
+
+    marker: ConversationCursor
+    count: int = 0
+    # None hears as many as fit.
+    batch: int | None = None
+
+
+@dataclass(frozen=True)
+class _Wait:
+    """The message a room's reads stop at until its refetch arrives, and since when."""
+
+    logical_event_id: str
+    since: float
+
+
+def _cursor(message: ResolvedVisibleMessage) -> ConversationCursor:
+    """Return the position of a heard message, which a marker standing on it has heard up to."""
+    return ConversationCursor(created_ts=message.timestamp, logical_event_id=message.event_id)
 
 
 def _listeners(config: Config, runtime_paths: RuntimePaths) -> list[_Listener]:
@@ -90,8 +119,12 @@ class ListeningService:
     _runs: dict[str, list[float]] = field(default_factory=dict, init=False)
     # Rooms whose cap was reported, until a turn runs there again.
     _capped: set[tuple[str, str]] = field(default_factory=set, init=False)
-    # Rooms waiting on a refetch, by the number of polls they have waited.
-    _waiting: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
+    # When each room's last silent turn started; under the cap, the least recently run room goes first.
+    _last_run: dict[tuple[str, str], float] = field(default_factory=dict, init=False)
+    # Rooms whose turns failed in a row from their current marker.
+    _failures: dict[tuple[str, str], _Failures] = field(default_factory=dict, init=False)
+    # Rooms whose reads stop at a message awaiting its refetch.
+    _waiting: dict[tuple[str, str], _Wait] = field(default_factory=dict, init=False)
     # Marker writes run off the event loop; a config sync's cleanup and a poll's move must not interleave.
     _marker_writes: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     # The ``(agent, room_id)`` pairs the last sync listened in; a turn that outlived its room's listening marks nothing.
@@ -149,7 +182,8 @@ class ListeningService:
             client = bot.client if bot is not None and bot.running else None
             if bot is None or client is None:
                 continue
-            for room_id in listener.room_ids:
+            rooms = sorted(listener.room_ids, key=lambda room_id: self._last_run.get((listener.agent_name, room_id), 0))
+            for room_id in rooms:
                 if room_id not in client.rooms:
                     continue
                 # One room that cannot be heard, or whose turn fails, must not stop the others.
@@ -174,13 +208,14 @@ class ListeningService:
             return
         # What a sync gap skipped is older than what came after it, so it is installed before the marker can pass it.
         await reader.hydrator.repair_room_history(room_id)
+        # The page stops before the first message owing a refetch, and the marker waits for it, for a while.
         page = await reader.read_room_after(room_id, marker, listen.max_messages)
-        if page.refresh_pending:
-            # The page stops before the first message owing a refetch; the marker waits for it.
-            self._note_waiting(agent_name, room_id)
-            await reader.hydrator.resolve_refreshes(page.refresh_pending)
+        waited = self._waited(agent_name, room_id, page.stopped_at, now)
+        if page.last_cursor is None and page.stopped_at is not None and waited > _REFETCH_WAIT_SECONDS:
+            await self._skip_refetch(agent_name, room_id, page.stopped_at)
             return
-        self._waiting.pop((agent_name, room_id), None)
+        if page.refresh_pending:
+            await reader.hydrator.resolve_refreshes(page.refresh_pending)
         if page.last_cursor is None:
             return
         try:
@@ -193,16 +228,80 @@ class ListeningService:
             return
         if not await self._quiet(bot, room_id, listen, now) or not self._start_run(agent_name, room_id, listen, now):
             return
-        await run_silent_turn(
-            bot=bot,
-            agent_name=agent_name,
+        await self._run_turn(bot, listener, room_id, config, marker, heard, page.last_cursor)
+
+    async def _run_turn(
+        self,
+        bot: AgentBot,
+        listener: _Listener,
+        room_id: str,
+        config: Config,
+        marker: ConversationCursor,
+        heard: Sequence[ResolvedVisibleMessage],
+        page_end: ConversationCursor,
+    ) -> None:
+        """Run one silent turn over the oldest of ``heard`` it can take, and move the marker past those.
+
+        A turn that fails raises and keeps the marker, so the same messages are heard again.
+        """
+        agent_name = listener.agent_name
+        failures = self._failures.get((agent_name, room_id))
+        if failures is None or failures.marker != marker:
+            failures = _Failures(marker)
+        batch = heard if failures.batch is None else heard[: failures.batch]
+        try:
+            batch = await heard_within_window(
+                agent_name=agent_name,
+                room_id=room_id,
+                heard=batch,
+                listen=listener.listen,
+                config=config,
+                runtime_paths=self.runtime_paths,
+            )
+            await run_silent_turn(
+                bot=bot,
+                agent_name=agent_name,
+                room_id=room_id,
+                heard=batch,
+                listen=listener.listen,
+                config=config,
+                runtime_paths=self.runtime_paths,
+            )
+        except Exception:
+            await self._turn_failed(agent_name, room_id, failures, batch)
+            raise
+        self._failures.pop((agent_name, room_id), None)
+        await self._mark(agent_name, room_id, page_end if len(batch) == len(heard) else _cursor(batch[-1]))
+
+    async def _turn_failed(
+        self,
+        agent_name: str,
+        room_id: str,
+        failures: _Failures,
+        batch: Sequence[ResolvedVisibleMessage],
+    ) -> None:
+        """Count a failed turn over ``batch``; the third in a row halves the next batch, or skips a lone message."""
+        failures.count += 1
+        self._failures[agent_name, room_id] = failures
+        if failures.count < _FAILURES_PER_BATCH:
+            return
+        if len(batch) > 1:
+            failures.count, failures.batch = 0, len(batch) // 2
+            logger.warning(
+                "Listening's silent turn failed 3 times in a row; the next one hears half as many messages",
+                agent=agent_name,
+                room_id=room_id,
+                messages=failures.batch,
+            )
+            return
+        del self._failures[agent_name, room_id]
+        logger.warning(
+            "Listening skipped a message whose silent turn failed 3 times in a row; it is never heard",
+            agent=agent_name,
             room_id=room_id,
-            heard=heard,
-            listen=listen,
-            config=config,
-            runtime_paths=self.runtime_paths,
+            event_id=batch[0].event_id,
         )
-        await self._mark(agent_name, room_id, page.last_cursor)
+        await self._mark(agent_name, room_id, _cursor(batch[0]))
 
     def _is_contact_room(self, config: Config, agent_name: str, room_id: str) -> bool:
         """Return whether the room is or was one of the agent's contact rooms, reporting the skip once.
@@ -277,18 +376,30 @@ class ListeningService:
                 )
             return False
         self._capped.discard((agent_name, room_id))
+        self._last_run[agent_name, room_id] = now
         runs.append(now)
         return True
 
-    def _note_waiting(self, agent_name: str, room_id: str) -> None:
-        key = (agent_name, room_id)
-        polls = self._waiting[key] = self._waiting.get(key, 0) + 1
-        if polls == _STUCK_POLLS:
-            logger.warning(
-                "Listening has waited on a message's refetch for 10 polls; the room is heard once it arrives",
-                agent=agent_name,
-                room_id=room_id,
-            )
+    def _waited(self, agent_name: str, room_id: str, stopped_at: ConversationCursor | None, now: float) -> float:
+        """Return for how many seconds the room's reads have stopped at the same message awaiting its refetch."""
+        if stopped_at is None:
+            self._waiting.pop((agent_name, room_id), None)
+            return 0
+        wait = self._waiting.get((agent_name, room_id))
+        if wait is None or wait.logical_event_id != stopped_at.logical_event_id:
+            wait = self._waiting[agent_name, room_id] = _Wait(stopped_at.logical_event_id, now)
+        return now - wait.since
+
+    async def _skip_refetch(self, agent_name: str, room_id: str, stopped_at: ConversationCursor) -> None:
+        """Move the marker past the message the room's reads stop at, whose refetch never arrived."""
+        self._waiting.pop((agent_name, room_id), None)
+        logger.warning(
+            "Listening skipped a message whose refetch did not arrive in 10 minutes; it is never heard",
+            agent=agent_name,
+            room_id=room_id,
+            event_id=stopped_at.logical_event_id,
+        )
+        await self._mark(agent_name, room_id, stopped_at)
 
     async def _mark(self, agent_name: str, room_id: str, cursor: ConversationCursor) -> None:
         async with self._marker_writes:

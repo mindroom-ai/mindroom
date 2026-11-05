@@ -9187,9 +9187,11 @@ depends_on = [
     "mindroom.ai",
     "mindroom.config.resolution",
     "mindroom.prompt_message_tags",
+    "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.timestamp_formatting",
     "mindroom.tool_system.runtime_context",
+    "mindroom.turn_model",
 ]
 visibility = ["mindroom.listening.service"]
 

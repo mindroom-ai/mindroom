@@ -217,6 +217,14 @@ def read_room_after(
             if messages
             else None
         ),
+        stopped_at=(
+            ConversationCursor(
+                created_ts=int(rows[first_pending]["created_ts"]),
+                logical_event_id=rows[first_pending]["logical_event_id"],
+            )
+            if first_pending < len(rows)
+            else None
+        ),
     )
 
 

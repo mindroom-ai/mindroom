@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 ROOM = "!lobby:example.org"
+STUDIO = "!studio:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
 T0 = 1_760_000_000
@@ -132,6 +133,8 @@ class _Turns:
     error: Exception | None = None
     # Whether the error ends the turn with a failure reply instead of raising, as a provider error does.
     error_replies: bool = False
+    # The one room whose turns fail with ``error``; None fails them in every room.
+    error_room: str | None = None
     # What happens elsewhere while the turn runs, such as a config reload.
     meanwhile: Callable[[], Awaitable[None]] | None = None
 
@@ -148,15 +151,20 @@ class _Turns:
         self.contexts.append(ctx)
         if self.meanwhile is not None:
             await self.meanwhile()
-        if self.error is not None and self.error_replies:
-            return TurnResult(text=REPLY, failed=HandledAttempt(reply=FailedReply(text=REPLY, error=self.error)))
-        if self.error is not None:
-            raise self.error
+        error = self.error if self.error_room in (None, ctx.room_id) else None
+        if error is not None and self.error_replies:
+            return TurnResult(text=REPLY, failed=HandledAttempt(reply=FailedReply(text=REPLY, error=error)))
+        if error is not None:
+            raise error
         return TurnResult(text=REPLY)
 
     def heard(self, index: int = -1) -> list[str]:
         """Return the event IDs one turn's prompt lists, oldest first."""
         return re.findall(r'event_id="([^"]+)"', self.contexts[index].prompt)
+
+    def heard_in(self, room_id: str) -> list[list[str]]:
+        """Return the event IDs each turn in one room heard, turn by turn."""
+        return [self.heard(index) for index, ctx in enumerate(self.contexts) if ctx.room_id == room_id]
 
 
 @dataclass
@@ -190,16 +198,17 @@ class _Listening:
 
 def _config(tmp_path: Path, listen: dict[str, object] | None = None, *, context_window: int | None = None) -> Config:
     """Return the scribe's config; a ``context_window`` turns on compaction with a ``summary`` model the test supplies."""
+    listen = {"rooms": [ROOM], **(listen or {})}
     authored: dict[str, Any] = {
         "defaults": {"tools": []},
         "agents": {
             "scribe": {
                 "display_name": "Scribe",
                 "role": "Keep notes.",
-                "rooms": [ROOM],
+                "rooms": listen["rooms"],
                 "tools": ["memory", "react", "matrix_message"],
                 "access": {"users": [ALICE]},
-                "listen": {"rooms": [ROOM], **(listen or {})},
+                "listen": listen,
             },
         },
         "memory": {"backend": "file"},
@@ -256,8 +265,10 @@ def _listening(
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
     listen: dict[str, object] | None = None,
+    *,
+    context_window: int | None = None,
 ) -> _Listening:
-    config = _config(tmp_path, listen)
+    config = _config(tmp_path, listen, context_window=context_window)
     runtime_paths = test_runtime_paths(tmp_path)
     journal = journal_store.principal("agent@scribe")
     bot = _bot(config, runtime_paths, journal)
@@ -558,33 +569,43 @@ async def test_turn_error_keeps_marker(listening: _Listening, error_replies: boo
     assert listening.marker_event() == "$a"
 
 
-async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(listening: _Listening) -> None:
-    """A message whose visible revision must be refetched is asked for, never skipped, and the wait is reported."""
-    await listening.service._poll_once(T0)
-    await listening.say("$a", 10)
-    await admit(listening.journal, "$p", room_id=ROOM, sender=ALICE, ts=_ms(20), content=text("first"))
-    await admit(listening.journal, "$p-edit", room_id=ROOM, sender=ALICE, ts=_ms(21), content=edit("$p", "secret"))
+async def _owe_refetch(listening: _Listening, event_id: str, seconds: float) -> None:
+    """Admit a message whose visible revision was then redacted, so it owes a refetch."""
+    await admit(listening.journal, event_id, room_id=ROOM, sender=ALICE, ts=_ms(seconds), content=text("first"))
     await admit(
         listening.journal,
-        "$p-redaction",
+        f"{event_id}-edit",
         room_id=ROOM,
         sender=ALICE,
-        ts=_ms(22),
-        redacts="$p-edit",
+        ts=_ms(seconds + 1),
+        content=edit(event_id, "secret"),
+    )
+    await admit(
+        listening.journal,
+        f"{event_id}-redaction",
+        room_id=ROOM,
+        sender=ALICE,
+        ts=_ms(seconds + 2),
+        redacts=f"{event_id}-edit",
         kind=EventKind.REDACTION,
     )
-    before = listening.marker()
+
+
+async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(listening: _Listening) -> None:
+    """A message whose visible revision must be refetched is asked for and waited on; what came before it is heard."""
+    await listening.service._poll_once(T0)
+    await listening.say("$a", 10)
+    await _owe_refetch(listening, "$p", 20)
+    await listening.say("$z", 30)
     resolve = cast("AsyncMock", listening.bot.conversation_reader.hydrator.resolve_refreshes)
 
-    with capture_logs() as logs:
-        for poll in range(10):
-            await listening.service._poll_once(T0 + 100 + poll)
+    for poll in range(10):
+        await listening.service._poll_once(T0 + 100 + poll)
 
-    assert listening.turns.contexts == []
-    assert listening.marker() == before
+    assert listening.turns.heard_in(ROOM) == [["$a"]]
+    assert listening.marker_event() == "$a"
     assert resolve.await_count == 10
     assert [request.logical_event_id for request in resolve.await_args.args[0]] == ["$p"]
-    assert len([log for log in logs if "refetch" in log["event"]]) == 1
 
     page = await listening.journal.read_room_after(room_id=ROOM, after=None, limit=10)
     await listening.journal.install_refetched_revision(
@@ -596,7 +617,133 @@ async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(
     )
     await listening.service._poll_once(T0 + 200)
 
-    assert listening.turns.heard() == ["$a", "$p"]
+    assert listening.turns.heard() == ["$p", "$z"]
+
+
+async def test_a_refetch_that_never_arrives_skips_its_message_after_ten_minutes(listening: _Listening) -> None:
+    """A refetch that never resolves holds the room for 10 minutes, then its message is skipped with a warning."""
+    await listening.service._poll_once(T0)
+    await _owe_refetch(listening, "$p", 20)
+    await listening.say("$z", 30)
+    before = listening.marker()
+
+    with capture_logs() as logs:
+        await listening.service._poll_once(T0 + 100)
+        await listening.service._poll_once(T0 + 700)
+        assert listening.marker() == before
+        await listening.service._poll_once(T0 + 701)
+
+    assert listening.turns.contexts == []
+    assert listening.marker_event() == "$p"
+    [skip] = [log for log in logs if "refetch" in log["event"]]
+    assert (skip["log_level"], skip["event_id"]) == ("warning", "$p")
+    await listening.service._poll_once(T0 + 800)
+
+    assert listening.turns.heard() == ["$z"]
+
+
+async def test_a_turn_that_keeps_failing_hears_half_as_much_then_skips_one_message(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three failures in a row halve the next turn's messages; a lone message that still fails is skipped, logged."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_runs_per_hour": 60})
+    await listening.service._poll_once(T0)
+    for index in range(4):
+        await listening.say(f"$m{index}", 10 + index)
+    listening.turns.error = RuntimeError("context length exceeded")
+
+    with capture_logs() as logs:
+        for poll in range(9):
+            await listening.service._poll_once(T0 + 100 + poll)
+
+    assert [len(heard) for heard in listening.turns.heard_in(ROOM)] == [4, 4, 4, 2, 2, 2, 1, 1, 1]
+    assert listening.marker_event() == "$m0"
+    [skip] = [log for log in logs if "skipped" in log["event"]]
+    assert (skip["log_level"], skip["event_id"]) == ("warning", "$m0")
+    listening.turns.error = None
+    await listening.service._poll_once(T0 + 200)
+
+    assert listening.turns.heard() == ["$m1", "$m2", "$m3"]
+    assert listening.marker_event() == "$m3"
+
+
+async def test_a_halved_turn_that_succeeds_moves_the_marker_only_past_what_it_heard(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a halved turn succeeds, the rest is heard by the next turn, at full size again."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_runs_per_hour": 60})
+    await listening.service._poll_once(T0)
+    for index in range(4):
+        await listening.say(f"$m{index}", 10 + index)
+    await listening.say("$bob", 20, sender=BOB)
+    listening.turns.error = RuntimeError("provider down")
+    for poll in range(3):
+        await listening.service._poll_once(T0 + 100 + poll)
+    listening.turns.error = None
+
+    await listening.service._poll_once(T0 + 110)
+
+    assert listening.turns.heard() == ["$m0", "$m1"]
+    assert listening.marker_event() == "$m1"
+    await listening.service._poll_once(T0 + 120)
+
+    assert listening.turns.heard() == ["$m2", "$m3"]
+    assert listening.marker_event() == "$bob"
+
+
+async def test_a_failing_room_does_not_starve_the_agents_other_rooms(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the hourly cap, the room that ran least recently goes first, so a room that keeps failing takes turns."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"rooms": [ROOM, STUDIO], "max_runs_per_hour": 1})
+    await listening.service._poll_once(T0)
+    await listening.say("$lobby", 10)
+    await admit(listening.journal, "$studio", room_id=STUDIO, sender=ALICE, ts=_ms(10))
+    listening.turns.error = RuntimeError("provider down")
+    listening.turns.error_room = ROOM
+
+    await listening.service._poll_once(T0 + 100)
+    await listening.service._poll_once(T0 + 100 + 3_601)
+
+    assert listening.turns.heard_in(ROOM) == [["$lobby"]]
+    assert listening.turns.heard_in(STUDIO) == [["$studio"]]
+
+
+async def test_a_turn_hears_only_what_fits_its_models_context_window(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Messages beyond half the model's window wait for the next turn, so a long backlog never overflows a turn."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_runs_per_hour": 60}, context_window=2_000)
+    await listening.service._poll_once(T0)
+    event_ids = [f"$m{index}" for index in range(6)]
+    for index, event_id in enumerate(event_ids):
+        await admit(
+            listening.journal,
+            event_id,
+            room_id=ROOM,
+            sender=ALICE,
+            ts=_ms(10 + index),
+            content=text(f"{index} " + "word " * 300),
+        )
+
+    await listening.service._poll_once(T0 + 100)
+
+    first = listening.turns.heard()
+    assert 1 <= len(first) < len(event_ids)
+    assert listening.marker_event() == first[-1]
+    for poll in range(len(event_ids)):
+        await listening.service._poll_once(T0 + 110 + poll)
+
+    heard = [event_id for turn in listening.turns.heard_in(ROOM) for event_id in turn]
+    assert heard == event_ids
 
 
 async def test_a_sync_gap_repaired_after_newer_messages_arrived_is_heard(listening: _Listening) -> None:

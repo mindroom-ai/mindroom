@@ -224,12 +224,13 @@ That uses the same sender authorization its replies use, judged on the person a 
 After the room has been quiet for `quiet_seconds`, one silent turn runs over at most `max_messages` of what it heard.
 Its text is never posted, and it acts only through its listen tools.
 Approval-gated tools and interactive questions are not offered.
-No more than `max_runs_per_hour` turns run per hour; the count starts again after a restart.
+No more than `max_runs_per_hour` turns run per hour, shared by the agent's listened rooms in turn; the count starts again after a restart.
+A turn hears no more than fits its model's `context_window`, and the rest waits for the next turn.
 
 The first run for a room starts at "now".
 The agent never reads history from before listening was turned on, and a room it stops listening in forgets its place.
 After a restart, the agent hears what it had not yet heard, including messages sent while MindRoom was down.
-A message that still awaits a refetch holds the room until it resolves, and MindRoom logs a warning after 10 polls (about 100 seconds).
+A message whose silent turn keeps failing is eventually skipped with a logged warning, so one bad message never stops listening in a room.
 
 A listening agent skips:
 

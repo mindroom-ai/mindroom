@@ -393,13 +393,15 @@ class RoomPage:
     a caller passes back as ``after`` to continue. It is ``None`` when nothing
     was returned, which means no progress: keep the cursor you had. The page
     stops before the first message owing a refetch, so the cursor never passes
-    one. A message owing a refetch is in ``refresh_pending`` and not
-    in ``messages``, as in a ``ConversationPage``.
+    one; ``stopped_at`` is that message's position, which a caller that gives
+    up on the refetch passes back to skip it. A message owing a refetch is in
+    ``refresh_pending`` and not in ``messages``, as in a ``ConversationPage``.
     """
 
     messages: tuple[VisibleMessage, ...]
     refresh_pending: tuple[RefreshRequest, ...]
     last_cursor: ConversationCursor | None
+    stopped_at: ConversationCursor | None
 
 
 @dataclass(frozen=True, slots=True)

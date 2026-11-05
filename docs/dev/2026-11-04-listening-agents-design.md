@@ -24,11 +24,14 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
    Each turn is self-contained, with the heard messages in its prompt and the memory tool for continuity.
 8. Budgets do not apply, because no requester asked for the turn.
    The caps and an optional cheaper `model` bound the cost.
-9. A page of heard messages stops at the first message awaiting a refetch, and the marker stays before it.
-   Never losing a heard message beats progress, so a stuck refetch stalls that room, with a warning after 10 polls.
-10. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
+9. No room stalls for good, and a skipped message is logged rather than silently lost.
+   A page stops at the first message awaiting a refetch, and the marker waits before it; what came before it is heard, and after 10 minutes without the refetch that one message is skipped.
+   A turn hears only the oldest messages that fit half its model's context window, leaving the rest for the agent's instructions, memory, tools, and requests, and the marker moves past only what it heard.
+   Three failed turns in a row from one marker halve the next turn's messages, and a single message that still fails three times is skipped, so a poisoned or oversized message cannot hold a room.
+10. The hourly cap is per agent, and the agent's rooms take turns at it, least recently run first, so a room that keeps failing cannot spend the whole cap.
+11. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
     Every poll repeats them, and the conversation index orders by thread first, so without it each poll sorted the room in a temporary B-tree, which the journal's hot-query rule forbids.
-11. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
+12. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
     Its key is at most 8 characters with no whitespace, enough for any emoji sequence, so a reaction cannot carry text to the room.
 
 ## Rejected alternatives
@@ -45,6 +48,8 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
   It would bypass `worker_scope` checks, tool limits, and reload restarts, so config validation requires a subset instead.
 - Storing silent turns in session history.
   Redacted heard messages would linger in the stored runs.
+- Holding a room until a refetch arrives, and retrying a failing turn forever.
+  Either stalls the room for good when the refetch never resolves or the turn always fails, such as on a message too large for the model.
 
 ## Risks
 

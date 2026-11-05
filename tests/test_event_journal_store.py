@@ -2166,6 +2166,7 @@ class TestReadingAWholeRoom:
         assert [m.logical_event_id for m in page.messages] == ["$a"]
         assert [r.logical_event_id for r in page.refresh_pending] == ["$p"]
         assert page.last_cursor == ConversationCursor(1_000, "$a")
+        assert page.stopped_at == ConversationCursor(2_000, "$p")
 
     async def test_a_pending_first_row_makes_no_progress_and_resolves_later(self, alice: PrincipalStore) -> None:
         """An empty page keeps the held cursor, and the message returns once its refetch resolves."""
@@ -2178,7 +2179,10 @@ class TestReadingAWholeRoom:
 
         assert page.messages == ()
         assert page.last_cursor is None
+        assert page.stopped_at == ConversationCursor(2_000, "$p")
         assert [r.logical_event_id for r in page.refresh_pending] == ["$p"]
+        skipped = await alice.read_room_after(room_id=ROOM, after=page.stopped_at, limit=50)
+        assert [m.logical_event_id for m in skipped.messages] == ["$z"]
         installed = await alice.install_refetched_revision(
             page.refresh_pending[0],
             revision_event_id="$p",
@@ -2190,6 +2194,7 @@ class TestReadingAWholeRoom:
         resolved = await alice.read_room_after(room_id=ROOM, after=held, limit=50)
         assert [m.logical_event_id for m in resolved.messages] == ["$p", "$z"]
         assert resolved.refresh_pending == ()
+        assert resolved.stopped_at is None
 
     async def test_read_room_after_shows_the_latest_revision_and_hides_a_redacted_one(
         self,
