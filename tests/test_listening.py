@@ -844,7 +844,8 @@ async def test_a_turn_that_runs_too_long_is_stopped_and_counts_as_a_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A silent turn past its time limit is stopped and keeps the marker, and three in a row skip its lone message."""
-    monkeypatch.setattr(service_module, "_TURN_TIMEOUT_SECONDS", 0.01)
+    # Long enough for each turn to reach the model on a busy machine, where it then hangs past the limit.
+    monkeypatch.setattr(service_module, "_TURN_TIMEOUT_SECONDS", 0.5)
     await listening.service._poll_once(T0)
     await listening.say("$a", 10)
     before = listening.marker()
