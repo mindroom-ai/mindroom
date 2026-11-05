@@ -1830,6 +1830,7 @@ def test_load_config_tolerates_unresolved_listen_tool_like_a_tools_entry(
             "    display_name: Assistant\n"
             "    role: test\n"
             "    rooms: [lobby]\n"
+            "    tools: [memory, dynamic_plugin_tool]\n"
             "    listen:\n"
             "      rooms: [lobby]\n"
             "      tools: [memory, dynamic_plugin_tool.run]\n"

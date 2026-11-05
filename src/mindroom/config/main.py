@@ -1463,20 +1463,33 @@ class Config(BaseModel):
         self._validate_listen_tools(tools)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
-        """Reject an explicit ``listen.tools`` name whose toolkit is not one this config can build.
+        """Reject a ``listen.tools`` entry whose toolkit this config cannot build or the agent's own tools leave out.
 
-        The default list is not checked: it names tools shipped with MindRoom, and an agent that never set ``tools``
-        must not fail because of them.
+        A silent turn narrows the agent's own tools to this list and never adds one, so the default list is checked too:
+        a listening agent without ``memory`` or ``react`` must name the tools it listens with.
         """
+        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
         for agent_name, agent in self.agents.items():
-            if agent.listen is None or "tools" not in agent.listen.model_fields_set:
+            if agent.listen is None:
                 continue
+            facts = agent_tool_facts(self, agent_name, policy=agent_policy(self, agent_name))
+            own_tools = {*facts.tool_names, *facts.injected}
             for index, name in enumerate(agent.listen.tools):
+                toolkit = name.partition(".")[0]
+                config_path_prefix = f"agents.{agent_name}.listen.tools[{index}]"
                 self._validate_authored_tool_entry(
-                    ToolConfigEntry(name=name.partition(".")[0]),
-                    config_path_prefix=f"agents.{agent_name}.listen.tools[{index}]",
+                    ToolConfigEntry(name=toolkit),
+                    config_path_prefix=config_path_prefix,
                     tools=tools,
                 )
+                if toolkit not in own_tools:
+                    msg = (
+                        f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' is not one of the agent's tools; "
+                        f"add it to agents.{agent_name}.tools."
+                    )
+                    raise ToolConfigOverrideError(msg)
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
         """Return agents and teams that depend on any of the given tools."""

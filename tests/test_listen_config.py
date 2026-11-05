@@ -18,10 +18,10 @@ if TYPE_CHECKING:
 _MODELS = {"default": {"provider": "openai", "id": "gpt-4o"}, "cheap": {"provider": "openai", "id": "gpt-4o-mini"}}
 
 
-def _config(listen: dict[str, object]) -> dict[str, object]:
+def _config(listen: dict[str, object], tools: tuple[str, ...] = ("memory", "react")) -> dict[str, object]:
     return {
         "models": _MODELS,
-        "agents": {"scribe": {"display_name": "Scribe", "rooms": ["lobby"], "listen": listen}},
+        "agents": {"scribe": {"display_name": "Scribe", "rooms": ["lobby"], "tools": list(tools), "listen": listen}},
     }
 
 
@@ -95,16 +95,31 @@ def test_agent_without_listen_is_none() -> None:
     assert AgentConfig(display_name="Scribe").listen is None
 
 
-def test_listen_without_tools_passes_runtime_validation(tmp_path: Path) -> None:
-    """Only an explicit ``tools`` list is checked against the registry, so the default never fails validation."""
-    Config.validate_with_runtime(_config({"rooms": ["lobby"]}), test_runtime_paths(tmp_path))
+@pytest.mark.parametrize(
+    ("listen", "tools", "rejected"),
+    [
+        ({"rooms": ["lobby"]}, ("memory",), r"listen\.tools\[1\]\.react: Tool 'react' is not one of the agent's tools"),
+        (
+            {"rooms": ["lobby"], "tools": ["memory.add_memory"]},
+            ("react",),
+            r"listen\.tools\[0\]\.memory: Tool 'memory' is not one of the agent's tools; add it to agents\.scribe\.tools",
+        ),
+    ],
+    ids=["default-list", "function-entry"],
+)
+def test_listen_tool_outside_agent_tools_rejected(
+    tmp_path: Path,
+    listen: dict[str, object],
+    tools: tuple[str, ...],
+    rejected: str,
+) -> None:
+    """A silent turn only narrows the agent's own tools, so a listen tool the agent lacks fails, the default ones too."""
+    with pytest.raises(ValueError, match=rejected):
+        Config.validate_with_runtime(_config(listen, tools), test_runtime_paths(tmp_path))
 
 
 def test_listen_default_tools_validate(tmp_path: Path) -> None:
-    """The default ``memory`` and ``react`` are both toolkits now, so a listen block validates when named in full."""
-    config = Config.validate_with_runtime(
-        _config({"rooms": ["lobby"], "tools": ["memory", "react"]}),
-        test_runtime_paths(tmp_path),
-    )
+    """The default ``memory`` and ``react`` validate for an agent that has both."""
+    config = Config.validate_with_runtime(_config({"rooms": ["lobby"]}), test_runtime_paths(tmp_path))
     assert config.agents["scribe"].listen is not None
-    assert config.agents["scribe"].listen.tools == ListenConfig(rooms=["lobby"]).tools
+    assert config.agents["scribe"].listen.tools == ["memory", "react"]

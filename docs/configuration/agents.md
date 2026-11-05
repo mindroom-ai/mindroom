@@ -196,12 +196,14 @@ An agent can listen in chosen rooms without replying.
 After a room has been quiet for a while, the agent runs one silent turn over what it heard.
 The turn never sends a message.
 It acts only through the tools you list, by default its memory and a `react` tool.
+Each of those must also be one of the agent's own `tools`.
 
 ```yaml
 agents:
   scribe:
     display_name: Scribe
     rooms: [lobby]
+    tools: [memory, react]
     listen:
       rooms: [lobby]
       quiet_seconds: 120
@@ -215,7 +217,7 @@ agents:
 | `quiet_seconds` | int, >= 10 | `60` | Seconds a room must stay quiet before the silent turn runs |
 | `max_messages` | int, 1 to 500 | `200` | Most messages one silent turn reads; the rest wait for the next turn |
 | `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour; further due runs are skipped and what was heard is kept |
-| `tools` | list | `[memory, react]` | The only tools a silent turn may use, as toolkit names or `toolkit.function`. Each toolkit must exist, as in `tools:` |
+| `tools` | list | `[memory, react]` | The only tools a silent turn may use, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools` |
 | `model` | string or null | `null` | Key of an entry under `models:` for silent turns; unset uses the agent's `model` |
 
 Listening starts at the newest message in each room, so the agent never reads history from before it was turned on.

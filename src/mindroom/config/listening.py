@@ -34,7 +34,10 @@ class ListenConfig(BaseModel):
     )
     tools: list[str] = Field(
         default_factory=lambda: ["memory", "react"],
-        description="Tools a silent turn may use, as toolkit names or toolkit.function; no other tool is available",
+        description=(
+            "Tools a silent turn may use, as toolkit names or toolkit.function, each one of the agent's own tools; "
+            "no other tool is available"
+        ),
         json_schema_extra=dashboard_hint(reference="tool"),
     )
     model: str | None = Field(
