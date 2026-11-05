@@ -8142,7 +8142,6 @@ depends_on = [
 path = "mindroom.orchestration.plugin_http_runtime"
 depends_on = [
     "mindroom.api.app_state",
-    "mindroom.api.main",
     "mindroom.constants",
 ]
 visibility = ["mindroom.orchestrator"]

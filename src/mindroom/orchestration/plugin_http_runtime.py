@@ -1,4 +1,4 @@
-"""Orchestrator-owned live room membership for plugin HTTP routes."""
+"""Live room membership for plugin HTTP routes, read through the orchestrator's running bots."""
 
 from __future__ import annotations
 
@@ -36,10 +36,11 @@ def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClie
     return None
 
 
-def _bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
+def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     """Publish a reader of a room's joined users, answered by a running bot in that room, the router first.
 
-    ``bots`` is read at each call, so a bot that stopped, left the room, or restarted with a new client counts as it is now.
+    ``bots`` must be the orchestrator's live mapping, read at each call, so a bot that stopped, left the room, or
+    restarted with a new client counts as it is now, and one binding lasts for as long as the API serves.
     """
 
     async def room_members(room_id: str) -> frozenset[str]:
@@ -59,30 +60,6 @@ def _bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     ensure_app_state(app).room_members = room_members
 
 
-def bind_room_members_if_ready(bots: Mapping[str, AgentBot], *, api_enabled: bool) -> None:
-    """Bind on the API app while any bot runs with a client; unbind otherwise.
-
-    ``bots`` must be the orchestrator's live mapping: the reader picks the bot to ask at each call.
-    """
-    if not api_enabled:
-        return
-    from mindroom.api import main  # noqa: PLC0415
-
-    if not any(bot.running and bot.client is not None for bot in bots.values()):
-        _unbind_room_members(main.app)
-        return
-    _bind_room_members(main.app, bots)
-
-
-def withdraw_room_members(*, api_enabled: bool) -> None:
-    """Unbind from the API app before entity reload or orchestrator shutdown."""
-    if not api_enabled:
-        return
-    from mindroom.api import main  # noqa: PLC0415
-
-    _unbind_room_members(main.app)
-
-
-def _unbind_room_members(app: FastAPI) -> None:
-    """Withdraw the reader before the bots' clients go away."""
+def unbind_room_members(app: FastAPI) -> None:
+    """Withdraw the reader once the API stops serving."""
     ensure_app_state(app).room_members = None
