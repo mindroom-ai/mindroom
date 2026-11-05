@@ -70,7 +70,7 @@ T0 = 1_760_000_000
 # What the patched model writes: the turn must never post it.
 REPLY = "Everyone, here is what I heard: please read this."
 # Who may reach the agent is what this suite checks, so the suite-wide authorization bypass stays off.
-pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("enforce_turn_authorization")]
 
 MEMORY_FUNCTIONS = {"add_memory", "search_memories", "list_memories", "get_memory", "update_memory", "delete_memory"}
 

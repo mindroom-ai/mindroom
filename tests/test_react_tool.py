@@ -37,6 +37,7 @@ def test_react_registered_with_one_tool() -> None:
     assert sorted(ReactTools().functions) == ["react"]
 
 
+@pytest.mark.asyncio
 async def test_react_sends_annotation(tmp_path: Path) -> None:
     """A reaction is one ``m.annotation`` on the event, sent to the current room."""
     context = _context(tmp_path)
@@ -51,6 +52,7 @@ async def test_react_sends_annotation(tmp_path: Path) -> None:
     assert kwargs["content"]["m.relates_to"] == {"rel_type": "m.annotation", "event_id": "$target", "key": "🎉"}
 
 
+@pytest.mark.asyncio
 async def test_react_other_room_refused(tmp_path: Path) -> None:
     """An event the current room does not hold is refused and nothing is sent."""
     context = _context(tmp_path)
@@ -66,6 +68,7 @@ async def test_react_other_room_refused(tmp_path: Path) -> None:
     context.client.room_send.assert_not_awaited()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [nio.RoomGetEventError("M_LIMIT_EXCEEDED", status_code="429"), nio.RoomGetEventError("timeout")],
@@ -82,6 +85,7 @@ async def test_react_unverifiable_event_is_retryable(tmp_path: Path, failure: ni
     context.client.room_send.assert_not_awaited()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("emoji", ["", "   "])
 async def test_react_blank_emoji_refused(tmp_path: Path, emoji: str) -> None:
     """A blank emoji is an error, not the 👍 that matrix_message would default to."""
@@ -94,6 +98,7 @@ async def test_react_blank_emoji_refused(tmp_path: Path, emoji: str) -> None:
     context.client.room_send.assert_not_awaited()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("emoji", ["thanks a lot", "123456789", "👍\u200a👍"])
 async def test_react_text_key_refused(tmp_path: Path, emoji: str) -> None:
     """A key longer than 8 characters or with whitespace inside is refused, so a reaction never carries text."""
@@ -106,6 +111,7 @@ async def test_react_text_key_refused(tmp_path: Path, emoji: str) -> None:
     context.client.room_send.assert_not_awaited()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("emoji", ["👨\u200d👩\u200d👧\u200d👦", "🇳🇱", "👍🏽", "12345678"])
 async def test_react_emoji_sequences_allowed(tmp_path: Path, emoji: str) -> None:
     """Emoji sequences such as a family, a flag, or a skin tone stay within the limit and are sent."""
@@ -117,6 +123,7 @@ async def test_react_emoji_sequences_allowed(tmp_path: Path, emoji: str) -> None
     assert context.client.room_send.await_args.kwargs["content"]["m.relates_to"]["key"] == emoji
 
 
+@pytest.mark.asyncio
 async def test_react_rate_limited(tmp_path: Path) -> None:
     """The room's matrix_message budget (12 per 30 seconds) is shared, so the 13th action is refused."""
     context = _context(tmp_path)
