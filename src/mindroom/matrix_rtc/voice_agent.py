@@ -590,9 +590,9 @@ class RealtimeVoiceBridge:
         elif isinstance(options, LiveVoiceAgentOptions):
             _drop_live_backlog_on_caller_speech(session)
         if options.on_session_terminated is not None:
-            self._register_caller_presence_watch(session, options.on_session_terminated)
+            self._register_caller_presence_watch(options.on_session_terminated)
 
-    def _register_caller_presence_watch(self, session: AgentSession, on_terminated: Callable[[bool], None]) -> None:
+    def _register_caller_presence_watch(self, on_terminated: Callable[[bool], None]) -> None:
         """End the session once no roster participant has been in the SFU room for a while.
 
         The call roster comes from Matrix call memberships. A client that closes without
@@ -606,8 +606,6 @@ class RealtimeVoiceBridge:
 
         def on_absent() -> None:
             self._caller_absent_timer = None
-            if self._session is not session:
-                return
             # Losing our own SFU connection also empties the room; a fresh session can rejoin the caller.
             sfu_connected = room.isconnected()
             logger.warning(
@@ -654,7 +652,7 @@ class RealtimeVoiceBridge:
         """Cancel the absence timer and stop following SFU participants."""
         self._on_callers_absent = None
         listener, self._caller_presence_listener = self._caller_presence_listener, None
-        if listener is not None and self._room is not None:
+        if listener is not None:
             self._room.off("participant_connected", listener)
             self._room.off("participant_disconnected", listener)
         if self._caller_absent_timer is not None:
