@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.resolution import entity_model_name
-from mindroom.entity_resolution import resolve_room_scoped_model_override
+from mindroom.entity_resolution import resolve_room_scoped_value
 from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.thread_models import resolve_thread_model_override
 
@@ -87,7 +87,7 @@ def _requested_model(config: Config, runtime_paths: RuntimePaths, scope: ModelSc
     room_override = resolve_room_model_override(runtime_paths, scope.room_id, configured_models=config.models).active
     if room_override is not None:
         return room_override, True
-    room_model = resolve_room_scoped_model_override(config.room_models, scope.room_id, runtime_paths)
+    room_model = resolve_room_scoped_value(config.room_models, scope.room_id, runtime_paths)
     return room_model or authored, False
 
 

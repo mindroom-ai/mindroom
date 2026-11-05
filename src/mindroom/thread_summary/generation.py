@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
-from mindroom.entity_resolution import resolve_room_scoped_model_override
+from mindroom.entity_resolution import resolve_room_scoped_value
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
 from mindroom.providers import registry as provider_registry
@@ -86,7 +86,7 @@ def resolve_thread_summary_model_name(
     entity's name as a ``room_thread_summary_models`` key (covers ad-hoc
     rooms with no managed alias) > ``defaults.thread_summary_model``.
     """
-    if override := resolve_room_scoped_model_override(config.room_thread_summary_models, room_id, runtime_paths):
+    if override := resolve_room_scoped_value(config.room_thread_summary_models, room_id, runtime_paths):
         return override
     if entity_name and entity_name in config.room_thread_summary_models:
         return config.room_thread_summary_models[entity_name]
