@@ -16962,6 +16962,17 @@ The `redeem` step answers a page that opens the app's URL, rather than a redirec
 Every step's state is single use and expires after 120 seconds, and a session started this way never opens the dashboard.
 Only `capacitor://localhost`, the app's own origin, may call these routes from a page, without credentials, whatever the dashboard's CORS settings say; the handlers do not check `Origin`, since the app's own bound token is the proof.
 
+## Client sessions for plugin routes
+
+`POST /api/client-sessions` is public and takes a Matrix OpenID token.
+MindRoom verifies it at the configured homeserver's `/_matrix/federation/v1/openid/userinfo`, and accepts only users of that homeserver.
+Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens to this deployment's audience, because without binding any backend a user opens from the client could replay their token; unlike Connections, no setting waives this.
+It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
+The store keeps at most 8 sessions per user and 256 in all, and past either cap it evicts the oldest session instead of refusing, so one user cannot lock others out.
+Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
+The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
+CORS for these paths allows only the origins in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, with credentials off and `Cache-Control: no-store`.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
@@ -18054,6 +18065,14 @@ See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-conne
 
 Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
 MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
+
+## HTTP routes for a Matrix web client
+
+A plugin route that serves a Matrix web client authenticates its caller with `require_client_user` from `mindroom.plugin_http`, as a FastAPI dependency: `user: ClientUser = Depends(require_client_user)`.
+`ClientUser.user_id` is the caller's Matrix user ID.
+The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
+Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
+Browser origins that may call these routes come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`.
 
 ## Plugin skills
 

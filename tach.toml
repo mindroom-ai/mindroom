@@ -2016,6 +2016,7 @@ depends_on = [
     "mindroom.api.agent_cli",
     "mindroom.api.config_reload",
     "mindroom.api.response_activity",
+    "mindroom.api.client_sessions",
     "mindroom.api.computers",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
@@ -8110,6 +8111,21 @@ depends_on = [
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend_kinds",
     "mindroom.origins",
+]
+
+[[modules]]
+path = "mindroom.api.client_sessions"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.api.config_lifecycle",
+    "mindroom.matrix_openid",
+]
+
+# Public: plugin routes import it to require a signed-in Matrix client.
+[[modules]]
+path = "mindroom.plugin_http"
+depends_on = [
+    "mindroom.api.app_state",
 ]
 
 [[modules]]

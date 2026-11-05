@@ -231,6 +231,17 @@ The `redeem` step answers a page that opens the app's URL, rather than a redirec
 Every step's state is single use and expires after 120 seconds, and a session started this way never opens the dashboard.
 Only `capacitor://localhost`, the app's own origin, may call these routes from a page, without credentials, whatever the dashboard's CORS settings say; the handlers do not check `Origin`, since the app's own bound token is the proof.
 
+## Client sessions for plugin routes
+
+`POST /api/client-sessions` is public and takes a Matrix OpenID token.
+MindRoom verifies it at the configured homeserver's `/_matrix/federation/v1/openid/userinfo`, and accepts only users of that homeserver.
+Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens to this deployment's audience, because without binding any backend a user opens from the client could replay their token; unlike Connections, no setting waives this.
+It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
+The store keeps at most 8 sessions per user and 256 in all, and past either cap it evicts the oldest session instead of refusing, so one user cannot lock others out.
+Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
+The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
+CORS for these paths allows only the origins in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, with credentials off and `Cache-Control: no-store`.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.

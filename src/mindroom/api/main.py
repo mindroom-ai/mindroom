@@ -24,6 +24,7 @@ from mindroom.api.auth import authenticate_user, dashboard_cors_origins, verify_
 from mindroom.api.auth import router as auth_router
 from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
 from mindroom.api.budgets import router as budgets_router
+from mindroom.api.client_sessions import router as client_sessions_router
 from mindroom.api.computers import active_computer_worker_keys, withdraw_computer_runtime
 from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
@@ -92,6 +93,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
+# Paths a Matrix web client calls from its own origin with a bearer token and no cookies.
+_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins")
 _IOS_APP_ORIGIN = "capacitor://localhost"
 _DASHBOARD_CORS_EXPOSE_HEADERS = (
     config_lifecycle.CONFIG_GENERATION_HEADER,
@@ -126,7 +129,7 @@ class _RuntimeDashboardCorsMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         middleware = self._middleware_for_current_runtime(scope.get("path", ""))
-        if scope.get("path", "").startswith("/api/computers"):
+        if scope.get("path", "").startswith(_CLIENT_ORIGIN_PATHS):
 
             async def no_store_send(message: Message) -> None:
                 if message["type"] == "http.response.start":
@@ -148,7 +151,7 @@ class _RuntimeDashboardCorsMiddleware:
         else:
             origins = (
                 allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV)
-                if path.startswith("/api/computers")
+                if path.startswith(_CLIENT_ORIGIN_PATHS)
                 else gateway_cors_origins(paths, path)
             )
             settings = (
@@ -472,6 +475,7 @@ app.include_router(external_triggers_router)
 for integration_router in integration_routers():
     app.include_router(integration_router)  # Each integration authenticates its own requests.
 app.include_router(computers_router)
+app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)
 # Each report admits the user who requested its run, administrator or not.

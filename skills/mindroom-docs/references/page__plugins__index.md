@@ -835,6 +835,14 @@ See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-conne
 Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
 MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
+## HTTP routes for a Matrix web client
+
+A plugin route that serves a Matrix web client authenticates its caller with `require_client_user` from `mindroom.plugin_http`, as a FastAPI dependency: `user: ClientUser = Depends(require_client_user)`.
+`ClientUser.user_id` is the caller's Matrix user ID.
+The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
+Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
+Browser origins that may call these routes come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`.
+
 ## Plugin skills
 
 Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
