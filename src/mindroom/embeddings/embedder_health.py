@@ -130,8 +130,8 @@ def _bound_probe_client_timeout(embedder: Embedder, provider: str) -> None:
     retries, and the Vertex AI embedder a 60-second one plus retries, which
     would hang `mindroom doctor` and pin probe threads for minutes; runtime
     searches and memory keep those defaults, and only a knowledge
-    refresh, which retries itself, turns its retries off. google-genai loads
-    only for a Vertex AI embedder.
+    refresh, which retries itself, turns the OpenAI embedder's retries off.
+    google-genai loads only for a Vertex AI embedder.
     """
     from mindroom.embeddings.openai_embedder import OpenAIEmbedder  # noqa: PLC0415
 

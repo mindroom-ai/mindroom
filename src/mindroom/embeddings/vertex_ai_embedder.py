@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from mindroom.llm.errors import ProviderError
 
 _PROVIDER = "vertex_ai"
-#: Attempts per text outside a caller that retries itself, as many as the OpenAI SDK's default.
+#: Attempts per text outside a health probe, as many as the OpenAI SDK's default.
 _ATTEMPTS = 3
 #: Wait before the first retry, doubled for each later one, unless the provider asks for its own.
 _RETRY_BASE_SECONDS = 0.5
@@ -132,7 +132,9 @@ class VertexAIEmbedder:
     async def _aembed_one(self, text: str, purpose: EmbeddingPurpose) -> list[float]:
         for attempt in range(1, _ATTEMPTS + 1):
             try:
-                response = await self._sdk_client().aio.models.embed_content(**self._request(text, purpose))
+                # Without a project, building the client looks up Application Default Credentials, which blocks.
+                client = self.client if self.client is not None else await asyncio.to_thread(self._sdk_client)
+                response = await client.aio.models.embed_content(**self._request(text, purpose))
             except Exception as exc:
                 error = _request_error(exc)
                 if (delay := self._retry_delay(error, attempt)) is None:

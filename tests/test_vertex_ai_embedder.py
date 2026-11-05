@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -307,6 +308,32 @@ def test_vertex_ai_embedder_builds_one_client_for_concurrent_texts(
 
     assert vectors == [[[0.5] * 8]] * 8
     assert len(built) == 1
+
+
+def test_vertex_ai_embedder_builds_its_client_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A search builds the client on a worker thread: without a project, google-genai looks up credentials, which blocks."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _serve_clients(monkeypatch, [[0.5] * 8], [])
+    serve = vertex_ai_embedder_module.genai.Client
+    built_on: list[int] = []
+
+    def record_thread(**kwargs: object) -> genai.Client:
+        built_on.append(threading.get_ident())
+        return serve(**kwargs)
+
+    monkeypatch.setattr(vertex_ai_embedder_module.genai, "Client", record_thread)
+    embedder = create_configured_embedder(_vertex_config(runtime_paths), runtime_paths)
+
+    async def search() -> int:
+        assert await embedder.aembed(["text"], purpose="query") == [[0.5] * 8]
+        return threading.get_ident()
+
+    event_loop_thread = asyncio.run(search())
+    assert len(built_on) == 1
+    assert built_on[0] != event_loop_thread
 
 
 @pytest.mark.parametrize("caller_retries", [False, True])
