@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from array import array
+from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.matrix.voice_message import (
     _is_opus_ogg,
     _parse_duration_ms,
+    _voice_waveform,
+    _waveform_levels,
     can_prepare_voice_audio,
     prepare_voice_audio_bytes,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 requires_ffmpeg = pytest.mark.skipif(not _FFMPEG_AVAILABLE, reason="ffmpeg and ffprobe are required")
@@ -62,9 +69,9 @@ def test_is_opus_ogg(probe_payload: dict[str, object], expected: bool) -> None:
     assert _is_opus_ogg(probe_payload) == expected
 
 
-def _generate_audio_bytes(*ffmpeg_output_args: str) -> bytes:
+def _generate_audio_bytes(*ffmpeg_output_args: str, source: str = "sine=frequency=440:duration=1") -> bytes:
     result = subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", *ffmpeg_output_args, "-"],
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", source, *ffmpeg_output_args, "-"],
         capture_output=True,
         check=True,
     )
@@ -102,6 +109,53 @@ async def test_prepare_voice_audio_bytes_transcodes_wav_to_opus_ogg() -> None:
     assert prepared.duration_ms is not None
     assert 900 <= prepared.duration_ms <= 1100
     assert prepared.waveform is not None
+
+
+@requires_ffmpeg
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_format", "ffmpeg_output_args"),
+    [("opus", ("-c:a", "libopus", "-f", "ogg")), ("wav", ("-f", "wav"))],
+)
+async def test_prepare_voice_audio_bytes_waveform_follows_loudness(
+    response_format: str,
+    ffmpeg_output_args: tuple[str, ...],
+) -> None:
+    """The waveform should be loud during a tone and near zero during the silence after it."""
+    audio_bytes = _generate_audio_bytes(
+        *ffmpeg_output_args,
+        source="sine=frequency=440:duration=1,apad=pad_dur=1",
+    )
+
+    prepared = await prepare_voice_audio_bytes(audio_bytes, response_format=response_format)
+
+    assert prepared is not None
+    assert prepared.waveform is not None
+    assert len(prepared.waveform) == 100
+    assert max(prepared.waveform) == 1024
+    tone, silence = prepared.waveform[:45], prepared.waveform[55:]
+    assert min(tone) > 900
+    assert max(silence) < 20
+
+
+@requires_ffmpeg
+@pytest.mark.asyncio
+async def test_voice_waveform_is_none_when_ffmpeg_cannot_decode(tmp_path: Path) -> None:
+    """Audio that ffmpeg cannot decode should get no waveform instead of a made-up one."""
+    audio_path = tmp_path / "broken.ogg"
+    audio_path.write_bytes(b"not audio at all")
+
+    assert await _voice_waveform(shutil.which("ffmpeg") or "ffmpeg", audio_path) is None
+
+
+def test_waveform_levels_of_silence_are_zero() -> None:
+    """Silent audio should produce a zero waveform without dividing by zero."""
+    assert _waveform_levels(array("h", [0] * 8000)) == [0] * 100
+
+
+def test_waveform_levels_need_one_sample_per_bucket() -> None:
+    """Audio shorter than one sample per bucket should get no waveform."""
+    assert _waveform_levels(array("h", [1000] * 99)) is None
 
 
 @requires_ffmpeg

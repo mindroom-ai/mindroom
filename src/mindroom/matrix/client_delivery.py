@@ -606,21 +606,14 @@ def _msgtype_for_mimetype(mimetype: str) -> str:
     return "m.file"
 
 
-def _normalized_voice_waveform(waveform: Sequence[int] | None) -> list[int]:
-    """Return a Matrix-compatible waveform payload."""
-    if waveform is None:
-        return [0] * 30
-    return [min(1024, max(0, int(level))) for level in waveform]
-
-
 def _voice_audio_details(duration_ms: int | None, waveform: Sequence[int] | None) -> dict[str, Any] | None:
     """Build Matrix voice-message audio details when duration is available."""
     if duration_ms is None:
         return None
-    return {
-        "duration": duration_ms,
-        "waveform": _normalized_voice_waveform(waveform),
-    }
+    audio_details: dict[str, Any] = {"duration": duration_ms}
+    if waveform is not None:
+        audio_details["waveform"] = [min(1024, max(0, int(level))) for level in waveform]
+    return audio_details
 
 
 def _media_message_content(
