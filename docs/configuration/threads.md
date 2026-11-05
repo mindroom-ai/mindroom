@@ -43,6 +43,7 @@ Set it with `rooms.<key>.reply_mode` (see [Room policy](../rooms.md#room-policy)
 
 - `auto` (default): the router or the room's only agent or team answers such a message, as described in [Routing & Responder Selection](router.md#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
 - `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
+  The router still shows the transcript, or the fallback text, of such a voice message ([router echo](../voice.md#voice-message-processing)) unless `voice.visible_router_echo` is `false`.
 
 ```yaml
 rooms:

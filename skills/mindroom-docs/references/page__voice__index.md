@@ -78,6 +78,7 @@ With `voice.enabled: false`, the router posts the fallback text directly instead
 The echo is display-only: agents answer the original voice message, not the echo.
 The echo appears only when the router is in the room and allowed to reply to the sender.
 Set `voice.visible_router_echo: false` to hide it; this does not change who answers.
+The echo also appears in a room whose [reply mode](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`, even for a voice message nobody answers there.
 
 **Responder already clear.**
 If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly without a router handoff.

@@ -60,8 +60,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
-    from mindroom.room_reply_modes import RoomReplyMode
 
 ROOM_ID = "!test:localhost"
 SENDER = "@user:localhost"
@@ -463,7 +463,7 @@ async def _send_upload(bot: AgentBot, room: nio.MatrixRoom, _paths: RuntimePaths
 
 
 async def _send_voice(bot: AgentBot, room: nio.MatrixRoom, _paths: RuntimePaths) -> None:
-    """Send a voice message; its transcript, patched in by the test, mentions general."""
+    """Send a voice message; the test patches in its transcript."""
     voice = {"msgtype": "m.audio", "body": "voice.ogg", "url": "mxc://localhost/voice"}
     event = {"event_id": "$voice", "sender": SENDER, "origin_server_ts": 1, "room_id": ROOM_ID, "content": voice}
     await bot._turn_ingress.handle_media_event(room, nio.RoomMessageAudio.from_dict(event))
@@ -545,17 +545,17 @@ def _ingress_bot(config: Config, paths: RuntimePaths, runtime: object, name: str
     return bot
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("path", "agents", "mode", "expected"), _INGRESS_CASES)
-async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
+async def _who_acts(
     tmp_path: Path,
-    path: str,
+    send: Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]],
     agents: tuple[str, ...],
     mode: RoomReplyMode,
-    expected: dict[str, int],
-) -> None:
-    """Text, uploads, voice, captioned uploads, edits, and room-mode follow-ups reach the router and agents as the mode says."""
-    room_mode = path == "untagged follow-up in a room-mode room"
+    *,
+    voice: dict[str, bool],
+    transcript: str = "🎤 @general what is on today",
+    room_mode: bool = False,
+) -> tuple[dict[str, int], AgentBot]:
+    """Send through the router's and each agent's ingress; return who acted, how many times, and the router."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -567,8 +567,7 @@ async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
                 for name in agents
             },
             rooms={ROOM_ID: RoomConfig(reply_mode=mode)},
-            # The router's visible echo would hold a voice turn; this grid covers who answers it.
-            voice={"enabled": True, "visible_router_echo": False},
+            voice=voice,
             # An upload waits this long for its caption, so the two are answered as one turn.
             defaults={"coalescing": {"debounce_ms": 100}},
         ),
@@ -605,17 +604,62 @@ async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
         patch("mindroom.voice.handler._download_audio", new=AsyncMock(return_value=voice_audio)),
         patch(
             "mindroom.voice.handler._handle_voice_message",
-            new=AsyncMock(return_value="🎤 @general what is on today"),
+            new=AsyncMock(return_value=transcript),
         ),
     ):
         for bot in bots.values():
             room = nio.MatrixRoom(ROOM_ID, bot.client.user_id)
             for member in (SENDER, *(current_entity_id(name, paths).full_id for name in bots)):
                 room.add_member(member, member, None)
-            await _PATHS[path](bot, room, paths)
+            await send(bot, room, paths)
             await drain_coalescing(bot)
 
     acted = {name: generate.await_count for name, generate in generates.items() if generate.await_count}
     if relay.await_count:
         acted[_RELAY] = relay.await_count
+    return acted, bots[ROUTER_AGENT_NAME]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "agents", "mode", "expected"), _INGRESS_CASES)
+async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
+    tmp_path: Path,
+    path: str,
+    agents: tuple[str, ...],
+    mode: RoomReplyMode,
+    expected: dict[str, int],
+) -> None:
+    """Text, uploads, voice, captioned uploads, edits, and room-mode follow-ups reach the router and agents as the mode says."""
+    acted, _router = await _who_acts(
+        tmp_path,
+        _PATHS[path],
+        agents,
+        mode,
+        # The router's visible echo would hold a voice turn; this grid covers who answers it.
+        voice={"enabled": True, "visible_router_echo": False},
+        room_mode=path == "untagged follow-up in a room-mode room",
+    )
     assert acted == expected
+
+
+@pytest.mark.asyncio
+async def test_router_still_echoes_an_unanswered_voice_message_in_a_mentions_room(tmp_path: Path) -> None:
+    """With the default visible echo, the router shows the transcript of a voice message nobody answers.
+
+    docs/configuration/threads.md and docs/voice.md say so.
+    """
+    acted, router = await _who_acts(
+        tmp_path,
+        _send_voice,
+        _BOTH,
+        "mentions",
+        voice={"enabled": True},
+        transcript="🎤 what is on today",
+    )
+
+    assert acted == {}
+    sent = [call.kwargs["content"] for call in router.client.room_send.await_args_list]
+    assert [content.get("m.new_content", content)["body"] for content in sent] == [
+        "Router agent is transcribing…",
+        "🎤 what is on today",
+    ]
