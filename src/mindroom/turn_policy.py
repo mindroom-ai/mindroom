@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.room_reply_modes import RoomReplyMode
 
 
 @dataclass(frozen=True)
@@ -109,10 +110,14 @@ _ROUTER_ONLY_MENTION_GUIDANCE = (
     "in a thread, you can keep going without an explicit tag. Explicit tags select who answers next; an untagged "
     "single-human thread may also continue an eligible ad-hoc team of participating individual agents. "
     "In multi-human threads, explicitly tag who should answer; eligible existing individual agents may opt into "
-    "adaptive participation, but teams do not form automatically. In a new untagged message, "
-    "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
-    "agent you can tag directly."
+    "adaptive participation, but teams do not form automatically. {new_message} The router is not a conversational "
+    "AI agent you can tag directly."
 )
+# What the guidance says about a new message that mentions no one, by the room's reply mode.
+_NEW_UNTAGGED_MESSAGE_GUIDANCE: dict[RoomReplyMode, str] = {
+    "auto": "In a new untagged message, automatic routing can still choose an agent or team when appropriate.",
+    "mentions": "In this room, a new message gets an answer only when it mentions an agent or team.",
+}
 
 
 @dataclass(frozen=True)
@@ -600,9 +605,11 @@ class TurnPolicy:
         if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
             return ignore
         if mention == "router_only":
+            reply_mode = self.deps.runtime.config.get_room_reply_mode(self.deps.runtime_paths, room.room_id)
+            guidance = _ROUTER_ONLY_MENTION_GUIDANCE.format(new_message=_NEW_UNTAGGED_MESSAGE_GUIDANCE[reply_mode])
             return DispatchPlan(
                 kind="respond",
-                response_action=ResponseAction(kind="reject", rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE),
+                response_action=ResponseAction(kind="reject", rejection_message=guidance),
             )
         available_responders = await self.responder_candidates_for_room(room, requester_user_id)
         if context.is_thread and self._thread_defers_to_named_responders(
@@ -637,7 +644,7 @@ class TurnPolicy:
     ) -> DispatchPlan:
         """Return the explicit policy plan for one prepared inbound turn."""
         if self._reply_mode_awaits_mention(dispatch, has_active_response_for_target=has_active_response_for_target):
-            self.deps.logger.debug("Skipping response: room reply mode requires a mention to start a conversation")
+            self.deps.logger.info("Skipping response: room reply mode requires a mention to start a conversation")
             is_router = self.deps.agent_name == ROUTER_AGENT_NAME
             return DispatchPlan(kind="ignore", ignore_reason="router" if is_router else None)
         router_plan = await self._plan_router_dispatch(

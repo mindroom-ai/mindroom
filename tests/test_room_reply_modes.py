@@ -12,9 +12,10 @@ import nio
 import pytest
 from pydantic import ValidationError
 
+from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
-from mindroom.config.agent import AgentConfig, RoomConfig
+from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_source import (
@@ -23,7 +24,10 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
 )
+from mindroom.entity_resolution import current_entity_id
+from mindroom.llm.media import Audio
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.room_reply_modes import (
     _store_path,
@@ -32,20 +36,31 @@ from mindroom.room_reply_modes import (
     set_room_reply_mode_override,
 )
 from tests.authorization_helpers import make_test_command_handler_context
+from tests.bot_helpers import _room_file_event, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
+    TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
+    install_generate_response_mock,
+    install_runtime_journal_support,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_visible_message,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
 )
 from tests.matrix_state_helpers import save_matrix_state
+from tests.response_attempt_helpers import install_direct_response_admission
+from tests.runtime_fakes import ready_runtime
 from tests.test_turn_policy import _context, _dispatch, _entity_id, _policy_for, _room_with_members, _text_event
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
+    from mindroom.constants import RuntimePaths
     from mindroom.room_reply_modes import RoomReplyMode
 
 ROOM_ID = "!test:localhost"
@@ -71,6 +86,7 @@ def _config(tmp_path: Path, *, reply_mode: RoomReplyMode | None = None, room_key
                 "general": AgentConfig(display_name="General"),
                 "research": AgentConfig(display_name="Research"),
             },
+            teams={"crew": TeamConfig(display_name="Crew", role="Answers together", agents=["general", "research"])},
             rooms=rooms,
         ),
         test_runtime_paths(tmp_path),
@@ -241,6 +257,18 @@ _WHO_ANSWERS = [
         {"general": "individual"},
         id="untagged-follow-up-while-general-answers",
     ),
+    pytest.param(
+        _Turn(agents=("general", "crew"), thread=(SENDER, "crew")),
+        {"crew": "individual"},
+        {"crew": "individual"},
+        id="untagged-follow-up-after-a-team-replied",
+    ),
+    pytest.param(
+        _Turn(thread=(SENDER, ROUTER_AGENT_NAME)),
+        {"general": "individual"},
+        {},
+        id="untagged-follow-up-after-only-the-router-posted",
+    ),
     pytest.param(_Turn(thread=(SENDER, OTHER_HUMAN, "general")), {}, {}, id="untagged-follow-up-two-people"),
     pytest.param(
         _Turn(thread=(SENDER, "general"), full_history=False),
@@ -277,7 +305,7 @@ async def _answers(config: Config, turn: _Turn) -> dict[str, str]:
     if turn.thread is not None:
         history = [
             make_visible_message(
-                sender=_entity_id(config, sender).full_id if sender in config.agents else sender,
+                sender=sender if sender.startswith("@") else _entity_id(config, sender).full_id,
                 body="earlier",
             )
             for sender in turn.thread
@@ -357,3 +385,237 @@ async def test_mentions_room_flow_from_a_mention_to_an_admin_switching_back(tmp_
     assert resolve_room_reply_mode_override(runtime_paths_for(config), ROOM_ID) == "auto"
     assert await _answers(config, two_agents) == {ROUTER_AGENT_NAME: "route"}
     assert await _answers(config, followed) == {"general": "individual"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "says"),
+    [
+        ("auto", "In a new untagged message, automatic routing can still choose an agent or team"),
+        ("mentions", "In this room, a new message gets an answer only when it mentions an agent or team."),
+    ],
+)
+async def test_router_only_mention_guidance_follows_the_reply_mode(
+    tmp_path: Path,
+    mode: RoomReplyMode,
+    says: str,
+) -> None:
+    """A person who mentions only the router learns how a new message gets an answer in this room."""
+    turn = _Turn(agents=_BOTH, mention=ROUTER_AGENT_NAME)
+    config = _config(tmp_path, reply_mode=mode)
+    room = _room_with_members(SENDER, *(_entity_id(config, agent).full_id for agent in turn.agents))
+    dispatch = _dispatch(
+        _context(mentioned=[_entity_id(config, ROUTER_AGENT_NAME)], am_i_mentioned=True),
+        agent_name=ROUTER_AGENT_NAME,
+    )
+
+    plan = await _policy_for(config, ROUTER_AGENT_NAME).plan_turn(
+        room,
+        _text_event("hello router"),
+        dispatch,
+        has_active_response_for_target=lambda _target: False,
+    )
+
+    assert plan.response_action.kind == "reject"
+    assert says in plan.response_action.rejection_message
+    assert plan.response_action.rejection_message.endswith(
+        "The router is not a conversational AI agent you can tag directly.",
+    )
+
+
+# Who acts on what a person sends, driven through each bot's ingress: the agents that answer, how many times each,
+# and the router's relays to the agent it picked.
+_RELAY = "router relay"
+_GENERAL_ONCE = {"general": 1}
+
+
+def _text_message(
+    paths: RuntimePaths,
+    event_id: str,
+    body: str,
+    *,
+    mention: str | None = None,
+    **content: object,
+) -> nio.RoomMessageText:
+    if mention is not None:
+        content["m.mentions"] = {"user_ids": [current_entity_id(mention, paths).full_id]}
+    return nio.RoomMessageText.from_dict(
+        {
+            "event_id": event_id,
+            "sender": SENDER,
+            "origin_server_ts": 1000 if event_id == "$caption" else 1,
+            "room_id": ROOM_ID,
+            "content": {"msgtype": "m.text", "body": body, **content},
+        },
+    )
+
+
+def _upload() -> nio.RoomMessageFile:
+    return _room_file_event(sender=SENDER, event_id="$file", room_id=ROOM_ID)
+
+
+async def _send_text(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+    await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$event", "hello"))
+
+
+async def _send_upload(bot: AgentBot, room: nio.MatrixRoom, _paths: RuntimePaths) -> None:
+    await bot._turn_ingress.handle_media_event(room, _upload())
+
+
+async def _send_voice(bot: AgentBot, room: nio.MatrixRoom, _paths: RuntimePaths) -> None:
+    """Send a voice message; its transcript, patched in by the test, mentions general."""
+    voice = {"msgtype": "m.audio", "body": "voice.ogg", "url": "mxc://localhost/voice"}
+    event = {"event_id": "$voice", "sender": SENDER, "origin_server_ts": 1, "room_id": ROOM_ID, "content": voice}
+    await bot._turn_ingress.handle_media_event(room, nio.RoomMessageAudio.from_dict(event))
+
+
+async def _send_upload_with_caption(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+    """Send an upload and, before it is answered, a caption mentioning general; the two are answered as one turn."""
+    await bot._turn_ingress.handle_media_event(room, _upload())
+    await bot._turn_ingress.handle_text_event(
+        room,
+        _text_message(paths, "$caption", "@general summarize this", mention="general"),
+    )
+
+
+async def _edit_a_mention_in(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+    """Send an untagged message, then edit it to mention general."""
+    await _send_text(bot, room, paths)
+    await drain_coalescing(bot)
+    mentioned = {"user_ids": [current_entity_id("general", paths).full_id]}
+    edit = {
+        "m.new_content": {"msgtype": "m.text", "body": "@general hello", "m.mentions": mentioned},
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$event"},
+    }
+    await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* @general hello", **edit))
+
+
+async def _follow_up_in_room_mode(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+    """Mention general, then send an untagged follow-up, in a room whose agents use `thread_mode: room`."""
+    await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$event", "@general hello", mention="general"))
+    await drain_coalescing(bot)
+    await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$follow-up", "and one more thing"))
+
+
+_PATHS: dict[str, Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]]] = {
+    "untagged text": _send_text,
+    "untagged upload": _send_upload,
+    "voice whose transcript mentions general": _send_voice,
+    "upload whose caption mentions general": _send_upload_with_caption,
+    "edit that adds a mention to an untagged message": _edit_a_mention_in,
+    "untagged follow-up in a room-mode room": _follow_up_in_room_mode,
+}
+# fmt: off
+_WHO_ACTS = {
+    #                                                    one agent: auto,  mentions            two agents: auto,              mentions
+    "untagged text":                                   (_GENERAL_ONCE,    {},                 {_RELAY: 1},                   {}),
+    "untagged upload":                                 (_GENERAL_ONCE,    {},                 {_RELAY: 1},                   {}),
+    "voice whose transcript mentions general":         (_GENERAL_ONCE,    _GENERAL_ONCE,      _GENERAL_ONCE,                 _GENERAL_ONCE),
+    "upload whose caption mentions general":           (_GENERAL_ONCE,    _GENERAL_ONCE,      _GENERAL_ONCE,                 _GENERAL_ONCE),
+    # The untagged message is answered or routed in `auto`; the edit starts nothing in either mode.
+    "edit that adds a mention to an untagged message": (_GENERAL_ONCE,    {},                 {_RELAY: 1},                   {}),
+    # Every message is room-level in room mode, so the follow-up is a new message that needs its own mention.
+    "untagged follow-up in a room-mode room":          ({"general": 2},   _GENERAL_ONCE,      {"general": 1, _RELAY: 1},     _GENERAL_ONCE),
+}
+# fmt: on
+_INGRESS_CASES = [
+    pytest.param(path, agents, mode, expected, id=f"{path}-{len(agents)}-agents-{mode}".replace(" ", "-"))
+    for path, outcomes in _WHO_ACTS.items()
+    for (agents, mode), expected in zip(
+        ((("general",), "auto"), (("general",), "mentions"), (_BOTH, "auto"), (_BOTH, "mentions")),
+        outcomes,
+        strict=True,
+    )
+]
+
+
+def _ingress_bot(config: Config, paths: RuntimePaths, runtime: object, name: str) -> AgentBot:
+    user_id = current_entity_id(name, paths).full_id
+    bot = make_test_agent_bot(
+        AgentMatrixUser(agent_name=name, password=TEST_PASSWORD, display_name=name.title(), user_id=user_id),
+        config,
+        paths,
+        rooms=[ROOM_ID],
+        orchestrator=runtime,
+    )
+    install_direct_response_admission(bot)
+    bot.client = make_matrix_client_mock(user_id=user_id)
+    unique_room_send_responses(bot.client)
+    install_runtime_journal_support(bot)
+    return bot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "agents", "mode", "expected"), _INGRESS_CASES)
+async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
+    tmp_path: Path,
+    path: str,
+    agents: tuple[str, ...],
+    mode: RoomReplyMode,
+    expected: dict[str, int],
+) -> None:
+    """Text, uploads, voice, captioned uploads, edits, and room-mode follow-ups reach the router and agents as the mode says."""
+    room_mode = path == "untagged follow-up in a room-mode room"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                name: AgentConfig(
+                    display_name=name.title(),
+                    rooms=[ROOM_ID],
+                    thread_mode="room" if room_mode else "thread",
+                )
+                for name in agents
+            },
+            rooms={ROOM_ID: RoomConfig(reply_mode=mode)},
+            # The router's visible echo would hold a voice turn; this grid covers who answers it.
+            voice={"enabled": True, "visible_router_echo": False},
+            # An upload waits this long for its caption, so the two are answered as one turn.
+            defaults={"coalescing": {"debounce_ms": 100}},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    runtime = ready_runtime(config, paths)
+    bots = {name: _ingress_bot(config, paths, runtime, name) for name in (ROUTER_AGENT_NAME, *agents)}
+    generates = {name: AsyncMock() for name in bots}
+    for name, bot in bots.items():
+        install_generate_response_mock(bot, generates[name])
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"pdf")
+    attachment = register_local_attachment(
+        paths.storage_root,
+        upload,
+        kind="file",
+        attachment_id=_attachment_id_for_event("$file"),
+        filename="report.pdf",
+        mime_type="application/pdf",
+        room_id=ROOM_ID,
+        thread_id="$file",
+        source_event_id="$file",
+        sender=SENDER,
+    )
+    voice_audio = Audio(content=b"voice", mime_type="audio/ogg")
+
+    with (
+        patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as relay,
+        patch(
+            "mindroom.inbound_turn_normalizer.register_matrix_media_attachment",
+            new=AsyncMock(return_value=attachment),
+        ),
+        patch("mindroom.voice.handler._download_audio", new=AsyncMock(return_value=voice_audio)),
+        patch(
+            "mindroom.voice.handler._handle_voice_message",
+            new=AsyncMock(return_value="🎤 @general what is on today"),
+        ),
+    ):
+        for bot in bots.values():
+            room = nio.MatrixRoom(ROOM_ID, bot.client.user_id)
+            for member in (SENDER, *(current_entity_id(name, paths).full_id for name in bots)):
+                room.add_member(member, member, None)
+            await _PATHS[path](bot, room, paths)
+            await drain_coalescing(bot)
+
+    acted = {name: generate.await_count for name, generate in generates.items() if generate.await_count}
+    if relay.await_count:
+        acted[_RELAY] = relay.await_count
+    assert acted == expected
