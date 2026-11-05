@@ -3,10 +3,11 @@
 
 One iteration sends the live message list to the model, appends the assistant message it answers with, runs the
 tool calls it requested, and appends their results; the loop ends when the model answers without tool calls, when
-a tool stops it, when the run waits for a decision, when a pre-request hook ends it, or when the run's request cap
-is reached. A resume enters the loop with the paused batch's decided calls, which it answers as the rest of that
-batch before any request. A run waits for a decision when a call of its own paused, or when a tool left an
-unresolved requirement on the record, as a team leader's delegation does for a paused member.
+a tool stops it, when the run waits for a decision, when a pre-request hook ends it, when the run's request cap
+is reached, or when the model keeps calling a tool the loop refused because it keeps failing. A resume enters the
+loop with the paused batch's decided calls, which it answers as the rest of that batch before any request. A run
+waits for a decision when a call of its own paused, or when a tool left an unresolved requirement on the record, as
+a team leader's delegation does for a paused member.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from mindroom.agent_loop.tools import (
     PlannedCall,
     RefusedCall,
     answered_tool_batch,
+    count_tool_failures,
     dispatch_tool_calls,
     failed_answer,
     media_follow_up,
@@ -46,7 +48,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import RunContext
     from mindroom.agent_loop.tools import PreparedTools, ToolBatch
     from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolFunction
@@ -56,6 +58,9 @@ logger = get_logger(__name__)
 # Every tool-calling request spends at least one budgeted call, so a run within its budget needs at most budget + 1
 # requests; one more lets the model answer after its first refused batch.
 _EXTRA_MODEL_REQUESTS = 2
+# A tool refused for failing in this many batches was called again after the model read the refusal telling it to
+# stop, so the loop ends the run before its next request.
+_FAILING_TOOL_REFUSALS_BEFORE_END = 2
 # The per-run request settings of callers that have none; the loop fills ``messages`` and ``tools`` per request.
 EMPTY_REQUEST = ModelRequest(messages=())
 
@@ -110,7 +115,8 @@ type LoopEndHook = Callable[[LoopState, ModelRequest], None]
 class LoopHooks:
     """The extension points of one loop, each fired at a fixed stage.
 
-    - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
+    - ``before_request``: awaited in order before every model request, after the loop's own stops (a tool the model
+      keeps calling after its refusal for failing, the request cap); a hook may rewrite
       ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
       (participation, the skill review's budget).
     - ``answer_tool_calls``: sees each assistant message that requests tools together with the turn's stop reason;
@@ -239,13 +245,32 @@ async def run_model_loop(
     yield LoopEnded(paused=progress.paused)
 
 
+def _keeps_calling_a_failing_tool(record: AnyRunRecord) -> bool:
+    """Return whether a tool was refused for failing in enough batches to end the run, logging the first such tool."""
+    for tool_name, tool in record.failing_tools.items():
+        if tool.refusals >= _FAILING_TOOL_REFUSALS_BEFORE_END:
+            logger.warning(
+                "failing_tool_ended_run",
+                entity=_entity(record),
+                tool_name=tool_name,
+                refusals=tool.refusals,
+            )
+            return True
+    return False
+
+
 async def _before_request(
     hooks: LoopHooks,
     state: LoopState,
     *,
     max_requests: int | None,
 ) -> bool:
-    """Apply the request cap, then the pre-request hooks; return whether to send the request or end the loop."""
+    """Apply the loop's own stops, then the pre-request hooks; return whether to send the request or end the loop.
+
+    The loop stops a run whose model keeps calling a tool it refused for failing, and one past its request cap.
+    """
+    if _keeps_calling_a_failing_tool(state.record):
+        return False
     if max_requests is not None and state.request_index >= max_requests:
         logger.warning(
             "tool_call_limit_reached",
@@ -310,6 +335,7 @@ async def _run_tool_batch(
             calls_so_far=progress.calls_so_far,
             max_tool_calls_per_turn=max_tool_calls_per_turn,
             entity=_entity(state.record),
+            failing_tools=state.record.failing_tools,
         )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
@@ -329,6 +355,10 @@ async def _run_tool_batch(
             call, result = item
             executed.append(result)
             yield ToolCompleted(call.execution.call)
+    # The calls that ran tell whether their tools work, in call order whatever order they finished in.
+    count_tool_failures(state.record.failing_tools, (call.execution for call in batch.planned))
+    for tool_name in batch.refused_for_failures:
+        state.record.failing_tools[tool_name].refusals += 1
     progress.calls_so_far += len(executed) + sum(isinstance(call, RefusedCall) and call.counts for call in batch.calls)
     progress.stopped = await _answer_batch(state.messages, batch.answers(executed), hooks.after_tool_batch)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
@@ -348,6 +378,7 @@ async def _answer_resumed(
     a member that paused once more leaves the record waiting, so the loop sends no request.
     """
     results: list[Message] = []
+    approved: list[ToolExecution] = []
     for requirement in decided:
         execution = requirement.tool_execution
         if execution.confirmed is True:
@@ -364,6 +395,7 @@ async def _answer_resumed(
                         yield item
                     else:
                         results.append(item[1])
+            approved.append(execution)
             yield ToolCompleted(execution.call)
         elif execution.confirmed is False:
             execution.is_error = True
@@ -380,6 +412,7 @@ async def _answer_resumed(
         if execution.external_execution_required:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
+    count_tool_failures(state.record.failing_tools, approved)
     progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
     progress.paused = _waits_for_decision(state.record)
 

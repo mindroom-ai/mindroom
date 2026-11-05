@@ -233,6 +233,33 @@ class RunRequirement:
 
 
 @dataclass(kw_only=True)
+class FailingTool:
+    """A tool whose calls that ran kept failing in one run, which the agent loop stops running past a limit.
+
+    ``failures`` counts the tool's batches in a row in which a call of it ran and failed and none succeeded, and
+    ``last_error`` is the latest such call's error text; ``refusals`` counts the batches since in which the loop refused
+    the tool instead of running it.
+    """
+
+    failures: int = 0
+    last_error: str | None = None
+    refusals: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stored dict, each field not at its default."""
+        return {name: value for name, value in asdict(self).items() if value not in (0, None)}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> FailingTool:
+        """Rebuild from a stored dict; an absent key keeps its default."""
+        return cls(
+            failures=data.get("failures", 0),
+            last_error=data.get("last_error"),
+            refusals=data.get("refusals", 0),
+        )
+
+
+@dataclass(kw_only=True)
 class _RunRecordCommon:
     """Fields shared by agent and team run records."""
 
@@ -254,6 +281,9 @@ class _RunRecordCommon:
     # How many of ``tools`` are refused calls that do not count toward the run's tool-call limit: a call naming no
     # offered function, one whose arguments do not decode, and one of a cut-off response. A resume counts the rest.
     uncounted_tool_calls: int = 0
+    # The tools whose calls that ran have been failing since their last success, by name; stored so a resume, which a
+    # delegation's result can start without anyone deciding, keeps counting them.
+    failing_tools: dict[str, FailingTool] = field(default_factory=dict)
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
@@ -322,8 +352,11 @@ class _RunRecordCommon:
 
     def _tools_dict(self) -> dict[str, Any]:
         tools = {} if self.tools is None else {"tools": [tool.to_dict() for tool in self.tools]}
-        # Written only when some call does not count, so a run whose every call counts stores no key.
-        return tools | ({"uncounted_tool_calls": self.uncounted_tool_calls} if self.uncounted_tool_calls else {})
+        # Written only when some call does not count, so a run whose every call counts stores no key; the same for
+        # ``failing_tools``, written only while some tool is failing.
+        uncounted = {"uncounted_tool_calls": self.uncounted_tool_calls} if self.uncounted_tool_calls else {}
+        failing = {name: tool.to_dict() for name, tool in self.failing_tools.items()}
+        return tools | uncounted | ({"failing_tools": failing} if failing else {})
 
 
 _TEXT_SEPARATOR = "\n\n"
@@ -358,6 +391,9 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "messages": messages,
         "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
         "uncounted_tool_calls": data.get("uncounted_tool_calls", 0),
+        "failing_tools": {
+            name: FailingTool.from_dict(tool) for name, tool in (data.get("failing_tools") or {}).items()
+        },
         "metrics": None if metrics is None else RunMetrics.from_dict(metrics),
         "metadata": data.get("metadata"),
     }
@@ -467,6 +503,7 @@ def run_tool_executions(record: AnyRunRecord) -> list[ToolExecution]:
 
 __all__ = [
     "AnyRunRecord",
+    "FailingTool",
     "RunRecord",
     "RunRequirement",
     "RunStatus",

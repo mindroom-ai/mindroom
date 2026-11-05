@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.events import ToolProgress
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import ToolExecution
+from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
@@ -32,8 +32,20 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The model reads the first for a call past the limit and the second for a result that carries media.
+# The model reads the first for a call past the limit, the second for a call of a tool that keeps failing, and the
+# third for a result that carries media.
 _LIMIT_ERROR_TEXT = "Tool call limit reached. Tool call {name} not executed. Don't try to execute it again."
+_FAILING_TOOL_ERROR_TEXT = (
+    "Tool {name} failed on {failures} attempts in a row in this turn, so this call was not executed. Its last error: "
+    "{error}\nDon't call {name} again in this turn. Tell the user what failed instead."
+)
+# A tool whose calls ran and failed in this many batches in a row within one turn, with no success of it in between,
+# is not run again in that turn. A model that keeps resending a call the tool rejects, or retrying an integration that
+# is down, otherwise loops until the per-turn call limit, paying for a model request per attempt; a batch counts once,
+# however many of its calls failed, since it cost one request.
+MAX_CONSECUTIVE_TOOL_FAILURES = 8
+# The refusal quotes this much of the tool's last error, enough to say what failed.
+_MAX_QUOTED_ERROR = 500
 # The model writes the name of a tool it was not offered, so the log keeps only this much of it.
 _MAX_LOGGED_TOOL_NAME = 100
 MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
@@ -113,9 +125,13 @@ class RefusedCall:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolBatch:
-    """One assistant message's tool calls after resolution and limit accounting, in the order the model made them."""
+    """One assistant message's tool calls after resolution and limit accounting, in the order the model made them.
+
+    ``refused_for_failures`` names, once each, the tools whose calls this batch refused because they keep failing.
+    """
 
     calls: tuple[PlannedCall | RefusedCall, ...]
+    refused_for_failures: tuple[str, ...] = ()
 
     @property
     def planned(self) -> tuple[PlannedCall, ...]:
@@ -137,6 +153,34 @@ class ToolBatch:
         ]
 
 
+def count_tool_failures(failing_tools: dict[str, FailingTool], executions: Iterable[ToolExecution]) -> None:
+    """Fold one batch's calls that ran into ``failing_tools``, the run's failing tools by name.
+
+    A tool with a call of the batch that succeeded leaves ``failing_tools``. A tool with only failed calls in the batch
+    counts one more failure, however many of its calls failed, and keeps the error of the last of them in call order. A
+    call that has not finished, such as a paused one, changes nothing.
+
+    Pass only calls that ran: a call the loop answered without running it (an unknown tool, undecodable arguments, the
+    call limit, a cut-off response, a denied approval, a refusal for failing) says nothing about whether the tool works.
+    A call its tool middleware answered with an error, such as a policy declining it, counts as failed, as the model
+    reads it.
+    """
+    errors: dict[str, str | None] = {}
+    succeeded: set[str] = set()
+    for execution in executions:
+        if execution.is_error:
+            errors[execution.tool_name] = execution.result
+        elif execution.is_error is False:
+            succeeded.add(execution.tool_name)
+    for name in succeeded:
+        failing_tools.pop(name, None)
+    for name, error in errors.items():
+        if name not in succeeded:
+            tool = failing_tools.setdefault(name, FailingTool())
+            tool.failures += 1
+            tool.last_error = error
+
+
 def plan_tool_batch(
     tool_calls: Sequence[Mapping[str, Any]],
     functions: Mapping[str, ToolFunction],
@@ -144,14 +188,19 @@ def plan_tool_batch(
     calls_so_far: int,
     max_tool_calls_per_turn: int | None,
     entity: str | None,
+    failing_tools: Mapping[str, FailingTool] | None = None,
 ) -> ToolBatch:
-    """Resolve an assistant message's tool calls in order, apply the limit, and classify the admitted ones.
+    """Resolve an assistant message's tool calls in order, apply the limits, and classify the admitted ones.
 
     A call naming no offered function, or whose arguments cannot be decoded, is refused with an error answer, logged
     for ``entity`` without its arguments, and never counts toward the limit. Of the rest, each call past
-    ``max_tool_calls_per_turn`` is refused with a limit error instead of running. An admitted call whose function's
-    gate pauses its run is planned paused, with the flags its stored execution carries.
+    ``max_tool_calls_per_turn`` is refused with a limit error instead of running, and each call of a tool that failed
+    in ``MAX_CONSECUTIVE_TOOL_FAILURES`` batches in a row by ``failing_tools`` is refused with the tool's last error,
+    logged, and named in the batch's ``refused_for_failures``. An admitted call whose function's gate pauses its run is
+    planned paused, with the flags its stored execution carries.
     """
+    failing = failing_tools or {}
+    refused_for_failures: dict[str, None] = {}
     calls: list[PlannedCall | RefusedCall] = []
     count = calls_so_far
     for tool_call in tool_calls:
@@ -174,8 +223,21 @@ def plan_tool_batch(
                 limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
                 calls.append(_refused(call_id, function.name, limit_text, arguments, counts=True))
                 continue
+        tool = failing.get(function.name)
+        if tool is not None and tool.failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
+            logger.warning(
+                "failing_tool_call_refused",
+                entity=entity,
+                tool_name=function.name,
+                consecutive_failures=tool.failures,
+            )
+            error = (tool.last_error or "unknown")[:_MAX_QUOTED_ERROR]
+            text = _FAILING_TOOL_ERROR_TEXT.format(name=function.name, failures=tool.failures, error=error)
+            calls.append(_refused(call_id, function.name, text, arguments, counts=True))
+            refused_for_failures[function.name] = None
+            continue
         calls.append(PlannedCall(function=function, execution=function.planned_execution(call_id, arguments)))
-    return ToolBatch(calls=tuple(calls))
+    return ToolBatch(calls=tuple(calls), refused_for_failures=tuple(refused_for_failures))
 
 
 def answered_tool_batch(answers: Sequence[Message]) -> ToolBatch:
@@ -221,7 +283,7 @@ def failed_answer(
     """Return the tool message that answers a call the loop did not run, marked failed so Claude and Gemini read it as one.
 
     The loop answers this way a call to a tool it does not offer, one whose arguments cannot be decoded, one past the
-    per-turn limit, one the output limit cut off, and one whose approval was denied.
+    per-turn limit, one of a tool that keeps failing, one the output limit cut off, and one whose approval was denied.
     """
     return Message(
         role="tool",
@@ -372,12 +434,14 @@ def is_media_follow_up(message: Message) -> bool:
 
 
 __all__ = [
+    "MAX_CONSECUTIVE_TOOL_FAILURES",
     "MEDIA_FOLLOW_UP_TEXT",
     "PlannedCall",
     "PreparedTools",
     "RefusedCall",
     "ToolBatch",
     "answered_tool_batch",
+    "count_tool_failures",
     "dispatch_tool_calls",
     "failed_answer",
     "is_media_follow_up",

@@ -19,10 +19,12 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import (
     _PROGRESS_FLUSH_SECONDS,
+    MAX_CONSECUTIVE_TOOL_FAILURES,
     MEDIA_FOLLOW_UP_TEXT,
     PreparedTools,
     RefusedCall,
     ToolBatch,
+    count_tool_failures,
     dispatch_tool_calls,
     media_follow_up,
     offered_toolkits,
@@ -30,6 +32,7 @@ from mindroom.agent_loop.tools import (
     toolkit_instructions,
 )
 from mindroom.llm.events import ToolProgress
+from mindroom.llm.runs import FailingTool, RunRecord, ToolExecution
 from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
@@ -217,6 +220,94 @@ def test_calls_past_the_limit_get_the_limit_error_in_call_order() -> None:
             {"a": 3, "b": 4},
         ),
     ]
+
+
+def test_tool_failures_count_once_per_batch_until_the_tool_succeeds() -> None:
+    failing: dict[str, FailingTool] = {}
+
+    count_tool_failures(
+        failing,
+        [
+            ToolExecution(tool_call_id="1", tool_name="a", is_error=True, result="first"),
+            ToolExecution(tool_call_id="2", tool_name="a", is_error=True, result="second"),
+            ToolExecution(tool_call_id="3", tool_name="b", is_error=True, result="b failed"),
+            ToolExecution(tool_call_id="4", tool_name="b", is_error=False, result="ok"),
+            ToolExecution(tool_call_id="5", tool_name="c", requires_confirmation=True),  # Paused: changes nothing.
+        ],
+    )
+    count_tool_failures(failing, [ToolExecution(tool_call_id="6", tool_name="a", is_error=True, result="third")])
+
+    # Two failures of one batch count once; a success in the batch outweighs a failure of the same tool.
+    assert failing == {"a": FailingTool(failures=2, last_error="third")}
+
+    count_tool_failures(failing, [ToolExecution(tool_call_id="7", tool_name="a", is_error=False, result="ok")])
+
+    assert failing == {}
+
+
+def test_failing_tools_round_trip_through_the_stored_record() -> None:
+    record = RunRecord(run_id="run-1", agent_id="code")
+    record.failing_tools = {"boom": FailingTool(failures=8, last_error="broken", refusals=1)}
+
+    assert RunRecord.from_dict(record.to_dict()).failing_tools == record.failing_tools
+    assert "failing_tools" not in RunRecord(run_id="run-2").to_dict()
+
+
+def test_calls_of_a_tool_that_keeps_failing_are_refused_with_its_last_error_while_others_run() -> None:
+    functions = spec(ScriptedModel([]), toolkit(add, boom)).functions
+    failing = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="broken link")}
+
+    with capture_logs() as logs:
+        batch = plan_tool_batch(
+            [
+                tool_call("boom", "c1", reason="again"),
+                tool_call("add", "c2", a=1, b=2),
+                tool_call("boom", "c3", reason="once more"),
+            ],
+            functions,
+            calls_so_far=0,
+            max_tool_calls_per_turn=None,
+            entity="code",
+            failing_tools=failing,
+        )
+
+    refusal = (
+        f"Tool boom failed on {MAX_CONSECUTIVE_TOOL_FAILURES} attempts in a row in this turn, so this call was not "
+        "executed. Its last error: broken link\nDon't call boom again in this turn. Tell the user what failed instead."
+    )
+    assert [call.execution.tool_call_id for call in batch.planned] == ["c2"]
+    assert [(m.tool_call_id, m.tool_name, m.content, m.tool_call_error) for m in _refused_answers(batch)] == [
+        ("c1", "boom", refusal, True),
+        ("c3", "boom", refusal, True),
+    ]
+    # Several refusals of one tool in a batch name it once.
+    assert batch.refused_for_failures == ("boom",)
+    assert [entry["event"] for entry in logs] == ["failing_tool_call_refused", "failing_tool_call_refused"]
+    assert [entry for entry in logs if entry["event"] == "failing_tool_call_refused"][:1] == [
+        {
+            "event": "failing_tool_call_refused",
+            "log_level": "warning",
+            "entity": "code",
+            "tool_name": "boom",
+            "consecutive_failures": MAX_CONSECUTIVE_TOOL_FAILURES,
+        },
+    ]
+
+
+def test_a_tool_one_failure_short_of_the_streak_limit_still_runs() -> None:
+    functions = spec(ScriptedModel([]), toolkit(boom)).functions
+
+    batch = plan_tool_batch(
+        [tool_call("boom", "c1", reason="again")],
+        functions,
+        calls_so_far=0,
+        max_tool_calls_per_turn=None,
+        entity="code",
+        failing_tools={"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES - 1, last_error="broken")},
+    )
+
+    assert [call.execution.tool_call_id for call in batch.planned] == ["c1"]
+    assert batch.refused_for_failures == ()
 
 
 def test_empty_list_arguments_plan_as_no_arguments() -> None:
