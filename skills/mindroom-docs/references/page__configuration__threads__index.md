@@ -38,7 +38,7 @@ A room's reply mode decides whether a message that mentions no agent or team can
 Set it with `rooms.<key>.reply_mode` (see [Room policy](https://docs.mindroom.chat/rooms/#room-policy)) or with [`!reply_mode`](#reply_mode).
 
 - `auto` (default): the router or the room's only agent or team answers such a message, as described in [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
-- `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in, where the rules below apply as in `auto`.
+- `mentions`: neither the router nor any agent or team answers such a message, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
 
 ```yaml
 rooms:
@@ -47,6 +47,7 @@ rooms:
 ```
 
 A message that mentions an agent or team is answered the same way in both modes, and mentions count as described in [Multi-Human Thread Protection](#multi-human-thread-protection).
+Editing a message that got no answer to add a mention does not get one; send a new message that mentions the agent or team.
 Scheduled tasks, hooks, and external triggers are not affected, and a direct-message room follows its reply mode like any other room.
 With `thread_mode: room`, every message is room-level, so each one needs a mention in a `mentions` room.
 
@@ -67,6 +68,7 @@ Show or switch the reply mode of the current Matrix room.
 `!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
+The router answers `!reply_mode`, so in a room without the router, such as a direct-message room with one agent, set the mode with a `rooms` entry keyed by the room's `!` room ID instead, for example `rooms: {"!abc123:example.com": {reply_mode: mentions}}`; the router then also joins that room when it can.
 
 ## Threading (MSC3440)
 
@@ -89,13 +91,12 @@ The rules are:
 4. **Threads with two or more humans**: explicit targeting is required, except for agents using adaptive participation.
 5. **Mentioning another joined room participant**: if a message tags only joined users who are neither agents, teams, nor configured bot accounts, agents and teams stay silent.
 
-A room in the `mentions` [reply mode](#reply-mode) also needs a mention to start a conversation.
-
 MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is empty from HTML mention pills in `formatted_body`, or otherwise from plain `@name` text in the body, so bridged messages without mention metadata still count.
 Mentions of users who are not in the room or only invited do not suppress normal responses.
 Mentioning a configured agent that has not joined the room still counts as an explicit mention for the other agents.
 
 A thread too long to read at once, more than 2,000 messages or 16 MiB of stored content, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+In a `mentions` room such a thread needs a mention even when the room has one possible responder.
 
 ### Bot accounts
 

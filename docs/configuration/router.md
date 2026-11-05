@@ -45,7 +45,7 @@ When a message mentions no agent or team, MindRoom first finds the responders th
 
 Then:
 
-1. If the room's [reply mode](threads.md#reply-mode) is `mentions`, nobody answers unless the message is in a thread an agent or team already replied in.
+1. If the room's [reply mode](threads.md#reply-mode) is `mentions`, nobody answers unless the message is in a thread an agent or team already replied in or is still answering.
 2. If the thread requires explicit targeting, the router stays silent; eligible individual agents already in the thread may still use opt-in [adaptive participation](threads.md#adaptive-participation).
 3. If exactly one eligible responder remains, it answers directly without an AI routing call.
 4. If several remain, the router reads the message and up to three previous thread messages (each cut to 100 characters) and picks the best match from the candidates' roles, tools, and instructions.

@@ -53,7 +53,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Display name** and **Description**
 - **Room model** - optional model override
 - **Agents in room**
-- **More settings** - per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides (see [Rooms](https://docs.mindroom.chat/rooms/))
+- **More settings** - per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides (see [Rooms](https://docs.mindroom.chat/rooms/)), and the room's `reply_mode` (see [Reply Mode](https://docs.mindroom.chat/configuration/threads/#reply-mode))
 
 ### Schedules
 
