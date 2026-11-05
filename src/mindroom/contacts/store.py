@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003 - pydantic resolves the field type at runtime
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,8 +18,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-type _PartyKind = Literal["agent", "person"]
-type _ContactStatus = Literal["pending", "active", "declined", "removed"]
+type PartyKind = Literal["agent", "person"]
+type ContactStatus = Literal["pending", "active", "declined", "removed"]
 type SideName = Literal["requester", "target"]
 
 _SIDES: tuple[SideName, SideName] = ("requester", "target")
@@ -29,7 +30,7 @@ class ContactParty(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: _PartyKind
+    kind: PartyKind
     id: str
     owner: str
 
@@ -44,12 +45,12 @@ class ContactSide(BaseModel):
 
 
 class ContactRecord(BaseModel):
-    """One contact and where its request came from, its notice, and its room."""
+    """One contact and where its request came from, its notice, its room, and when it was asked and answered."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    status: _ContactStatus
+    status: ContactStatus
     requester: ContactParty
     target: ContactParty
     reason: str
@@ -59,6 +60,15 @@ class ContactRecord(BaseModel):
     origin_thread_id: str | None
     notice_event_id: str | None = None
     room_id: str | None = None
+    # LEGACY_COMPAT: contact records without request and decision dates
+    # Legacy format: a record in tracking/contacts.json with no requested_at or decided_at field.
+    # Last legacy release: unreleased replacement; v2026.11.113, which added the contacts store, through v2026.11.122,
+    # the newest release when this was written, write records without them; the replacement dates every new request
+    # and decision.
+    # Handling: both read as None, so the Connections page shows no date for such a contact; nothing is migrated.
+    # Coverage: tests/contacts/test_store.py::test_a_record_written_before_dates_reads_them_unset
+    requested_at: datetime | None = None
+    decided_at: datetime | None = None
 
     def party(self, side: SideName) -> ContactParty:
         """Return the party on one side."""
@@ -157,6 +167,15 @@ def agent_contacts(
         (record, side)
         for record in read_contacts(runtime_paths).contacts
         if (side := record.agent_side(agent_name)) is not None
+    ]
+
+
+def owner_contacts(runtime_paths: RuntimePaths, owner: str) -> list[tuple[ContactRecord, SideName]]:
+    """Return the owner's contacts that are not removed, each with the owner's side, in the order they were asked."""
+    return [
+        (record, side)
+        for record in read_contacts(runtime_paths).contacts
+        if (side := record.owner_side(owner)) is not None and record.status != "removed"
     ]
 
 

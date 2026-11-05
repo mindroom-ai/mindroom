@@ -142,7 +142,7 @@ Matrix sync callback
 | `contacts/parties.py` | Who can be a party of a contact (personal agents with `contacts`, and people by canonical Matrix ID), target resolution, how a party is named, the Matrix accounts that speak for a party, and a user's personal room |
 | `contacts/policy.py` | The contact message policy: the consecutive-agent-message limit, the `contact:before_send` hooks, and the optional judge, failing closed, plus an agent's effective rules for a contact |
 | `contacts/turns.py` | Contact turns: the contact a room belongs to, who it admits, that its turns run as the agent's owner, and how a turn of an agent in its own contact room differs from a normal turn |
-| `contacts/flow.py` | The contact operations behind the `contacts` tools: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each checked against the requester's ownership |
+| `contacts/flow.py` | The contact operations behind the `contacts` tools and the Connections Contacts page: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each run for a `ContactActor` owner and checked against their ownership |
 | `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests, acceptances, and rule changes |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `thread_summary/state.py` | `SummaryState`: one walk of a thread's history into trusted summary notices, authorized human pins, and ordinary messages, and the current-title readers listings, exports, and calls share |
@@ -189,6 +189,7 @@ Matrix sync callback
 | `egress_broker/ca.py` | Local broker CA, per-host leaf certificates, the SNI check against the CONNECT host, and the worker trust bundle |
 | `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect, disconnect, and opt-in, the full request log, and the CA download |
 | `api/connections_session.py` | Connections portal sign-in: exchanges a Matrix OpenID token from MindRoom Chat for a portal session cookie |
+| `api/connections_contacts.py` | Contacts page routes under `/api/connections/contacts`: the signed-in owner's contacts with their own side's rules and tools, and accepting, declining, editing, and removing them without an approval card |
 | `api/connections_native.py` | Connections portal sign-in from the iOS app: the browser gets a pending cookie, and the app confirms it with its own token before the session starts |
 | `api/connections_session_cookie.py` | Signed, process-local portal session cookies with a fixed one-hour lifetime |
 | `api/egress_credentials.py` | Personal `/api/connections/egress` routes: per-agent services and keys, user services, account connections and opt-ins, and the caller's request log |

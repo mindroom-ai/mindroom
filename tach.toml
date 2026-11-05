@@ -1910,8 +1910,23 @@ depends_on = [
     "mindroom.api.connection_agents",
     "mindroom.api.egress_credentials",
     "mindroom.constants",
+    "mindroom.contacts.parties",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.egress_broker",
+    "mindroom.tool_system.plugins",
+]
+
+[[modules]]
+path = "mindroom.api.connections_contacts"
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.contacts.flow",
+    "mindroom.contacts.parties",
+    "mindroom.contacts.store",
+    "mindroom.contacts.turns",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.plugins",
 ]
 
@@ -2004,6 +2019,7 @@ depends_on = [
     "mindroom.api.computers",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
+    "mindroom.api.connections_contacts",
     "mindroom.api.connections_native",
     "mindroom.api.connections_session",
     "mindroom.api.thread_exports",
@@ -6752,6 +6768,7 @@ expose = [
     "ToolStatus",
     "ToolValidationInfo",
     "is_matrix_room_runtime_function",
+    "unconfined_by_file_access",
 ]
 from = ["mindroom.tool_system.declarations"]
 

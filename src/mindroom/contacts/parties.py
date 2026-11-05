@@ -25,6 +25,11 @@ def agent_party(config: Config, agent_name: str) -> ContactParty | None:
     return ContactParty(kind="agent", id=agent_name, owner=instance.user_id)
 
 
+def owner_contact_agents(config: Config, owner: str) -> list[str]:
+    """Return the owner's personal agents that have contacts, in config order."""
+    return [name for name in config.agents if (party := agent_party(config, name)) is not None and party.owner == owner]
+
+
 def person_party(config: Config, runtime_paths: RuntimePaths, user_id: str) -> ContactParty:
     """Return the party of a person by their canonical Matrix ID, so a bridge alias reaches the same person."""
     canonical = resolve_human_requester_alias(user_id, config, runtime_paths)

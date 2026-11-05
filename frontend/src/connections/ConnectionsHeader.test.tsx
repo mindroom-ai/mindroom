@@ -21,6 +21,7 @@ const identity = (
   email: "bob@example.org",
   is_administrator: false,
   egress_enabled: true,
+  contacts_enabled: false,
   dashboard_url: "/",
   ...overrides,
 });
@@ -33,7 +34,7 @@ function answerWith(response: () => Promise<Response>) {
 }
 
 const renderHeader = (
-  current: "agents" | "keys" = "agents",
+  current: "agents" | "keys" | "contacts" = "agents",
   howItWorks?: string,
 ) =>
   render(
@@ -135,6 +136,31 @@ describe("connections header", () => {
     expect(
       Array.from(nav.querySelectorAll("a")).map((link) => link.textContent),
     ).toEqual(["Agents"]);
+  });
+
+  it("links Contacts only for someone who owns an agent with contacts, or on that page", async () => {
+    answerWith(async () => json(identity({ contacts_enabled: true })));
+    renderHeader();
+    await screen.findByText("Signed in as Bob Builder");
+    const links = () =>
+      Array.from(
+        screen
+          .getByRole("navigation", { name: "Connections pages" })
+          .querySelectorAll("a"),
+      ).map((link) => [link.textContent, link.getAttribute("href")]);
+    expect(links()).toEqual([
+      ["Agents", "/connections"],
+      ["Agent Keys", "/connections/egress"],
+      ["Contacts", "/connections/contacts"],
+    ]);
+    cleanup();
+    answerWith(async () => json({}, 500));
+    renderHeader("contacts");
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    expect(screen.getByRole("link", { name: "Contacts" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("keeps the Agents link, and the open page's, when the identity cannot be loaded", async () => {

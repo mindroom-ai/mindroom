@@ -34,7 +34,7 @@ When the window that opened the portal does not answer within five seconds, such
 When the portal is opened directly rather than from Chat, or reloaded after the Chat tab that opened it closed, it uses the existing session or a [trusted upstream](deployment/trusted-upstream-auth.md) identity.
 Without a session or upstream identity, it sends the browser to `/connections` on the first web origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, so list the Chat origin people use first: Chat keeps its login per origin.
 When that Chat has this backend as its only backend, it signs the user in there and opens the portal again; a browser that comes back still signed out gets a link to that page instead, and without such an origin the portal asks the user to open Connections from Chat.
-If two Connections tabs, on the Agents or Agent Keys page, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
+If two Connections tabs, on any of its pages, are signed in as different accounts, the older tab refuses further requests and asks the user to reload.
 
 ## From The iOS App
 
@@ -77,6 +77,7 @@ An agent's shell and python commands use such a connection only after the user a
 Allowing it covers that provider's account for that agent's scope until the user stops it, so an account connected here later for the tools is then used by Agent Keys at once.
 Disconnecting a shared connection affects every agent using its [credential scope](oauth-framework.md#where-connections-are-stored).
 While the [egress broker](deployment/egress-broker.md) is on, the portal and its Agent Keys page link to each other.
+Owners of a personal agent with contacts also get a Contacts page, described under [Contacts Page](agent-contacts.md#contacts-page).
 The portal never shows tokens, model configuration, generic credential editing, or OAuth client settings; operators still configure OAuth clients.
 When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
 Users choose the agents and tools the optional [MCP Gateway](deployment/mcp-gateway.md#choose-exposed-agents-and-tools) exposes on the same page.

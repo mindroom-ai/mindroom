@@ -7,6 +7,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api.auth import require_same_origin
@@ -31,6 +32,14 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 CONNECTIONS_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
+
+
+class EmptyMutation(BaseModel):
+    """The body of a portal change that takes no fields, so a misspelled field is refused rather than ignored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 SHARED_CREDENTIALS_GATEWAY_MESSAGE = (
     "This shared agent runs tools with credentials shared by all its users and is not available through MCP. "
     "Use it in MindRoom chat."

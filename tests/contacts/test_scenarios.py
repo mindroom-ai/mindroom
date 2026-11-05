@@ -25,7 +25,7 @@ from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.message_target import MessageTarget
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
-from tests.contacts.test_accept import NOT_PENDING, _accept, _account, _room_lifecycle
+from tests.contacts.test_accept import NOT_PENDING, _accept, _account, _portal, _room_lifecycle
 from tests.contacts.test_matrix_message_policy import (  # noqa: F401 - _reset_rate_limit is an autouse pytest fixture
     _call,
     _reset_rate_limit,
@@ -289,7 +289,7 @@ async def test_a_declined_retry_is_answered_in_the_thread_that_retried(tmp_path:
     record = await _ask(world, SECOND_THREAD)
 
     bob = _context(world.config, world.paths, "mind_bob", CO_OWNER, world.runtime)
-    await flow.decline_contact(bob, "mind_bob", record.id)
+    await flow.decline_contact(flow.tool_actor(bob, "mind_bob"), record.id)
 
     [(_room_id, notice)] = _answers(world)
     assert notice.content["body"].startswith(f"{CO_OWNER} declined contact {record.id}")
@@ -382,6 +382,7 @@ async def _accepted_and_relayed(world: _World) -> str:
     return room_id
 
 
+@pytest.mark.parametrize("via", ["tool", "page"])
 @pytest.mark.parametrize(
     ("joining", "members_unreadable", "left"),
     [
@@ -398,9 +399,11 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(
     joining: set[str],
     members_unreadable: bool,
     left: tuple[set[str], set[str]],
+    via: str,
 ) -> None:
     """After Alice removes the contact, its agents are gone from the room and her agent's matrix_message sends nothing there.
 
+    She removes it through her agent's tool or on the Connections page, with the same outcome.
     An owner who joined keeps the room and its history, and an owner who never joined no longer holds an invitation to it.
     """
     world = _world(tmp_path)
@@ -409,9 +412,13 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(
         assert await world.server.membership(owner, room_id, "join")
     if members_unreadable:
         world.runtime.clients["mind_bob"].joined_members = AsyncMock(return_value=nio.JoinedMembersError("unavailable"))
-    alice = _context(world.config, world.paths, "mind_alice", OWNER, world.runtime)
+    alice = (
+        flow.tool_actor(_context(world.config, world.paths, "mind_alice", OWNER, world.runtime), "mind_alice")
+        if via == "tool"
+        else _portal(world.config, world.paths, world.runtime, OWNER)
+    )
 
-    await flow.remove_contact(alice, "mind_alice", _stored(world.paths)[0].id)
+    await flow.remove_contact(alice, _stored(world.paths)[0].id)
     refused = await _matrix_message(world, "mind_alice", room_id, message="Still there?")
 
     assert refused["message"].endswith("was removed, so nothing more can be sent into its room")
@@ -419,6 +426,31 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(
     assert (room.members, room.invited) == left
     assert len(room.timeline) == 1
     _assert_world_invariants(world, stranded=frozenset(left[1]))
+
+
+async def test_an_owner_accepts_and_removes_a_contact_on_the_connections_page(tmp_path: Path) -> None:
+    """Bob accepts Alice's request and later removes the contact on the Connections page, never through his agent.
+
+    The acceptance opens a room both agents join and tells Alice's agent in the thread she asked from; after the
+    removal both agents are gone, Bob, who joined, keeps the room, and Alice, who never joined, holds no invitation.
+    """
+    world = _world(tmp_path)
+    record = await _ask(world)
+    bob = _portal(world.config, world.paths, world.runtime, CO_OWNER)
+
+    accepted = await flow.accept_contact(bob, record.id, rules=None, tools=None)
+    assert accepted.room_id is not None
+    room = world.server.rooms[accepted.room_id]
+    assert room.members == {_account(world.paths, "mind_alice"), _account(world.paths, "mind_bob")}
+    assert len(_answers(world)) == 1
+    _assert_world_invariants(world)
+    assert await world.server.membership(CO_OWNER, accepted.room_id, "join")
+
+    await flow.remove_contact(bob, record.id)
+
+    assert [stored.status for stored in _stored(world.paths)] == ["removed"]
+    assert (room.members, room.invited) == ({CO_OWNER}, set())
+    _assert_world_invariants(world)
 
 
 async def test_an_owner_who_joins_while_another_invitation_is_withdrawn_keeps_the_room(tmp_path: Path) -> None:
@@ -436,7 +468,7 @@ async def test_an_owner_who_joins_while_another_invitation_is_withdrawn_keeps_th
     client.room_kick.side_effect = bob_joins_during_alices_withdrawal
     alice = _context(world.config, world.paths, "mind_alice", OWNER, world.runtime)
 
-    await flow.remove_contact(alice, "mind_alice", _stored(world.paths)[0].id)
+    await flow.remove_contact(flow.tool_actor(alice, "mind_alice"), _stored(world.paths)[0].id)
 
     room = world.server.rooms[room_id]
     assert (room.members, room.invited) == ({CO_OWNER}, set())

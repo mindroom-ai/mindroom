@@ -7,11 +7,12 @@ import { openInPage } from "./navigation";
 import { getSignedInUser, requestConnection } from "./request";
 import type { ConnectionsIdentity } from "./types";
 
-type Page = "agents" | "keys";
+type Page = "agents" | "keys" | "contacts";
 
 const LINKS: readonly { page: Page; href: string; label: string }[] = [
   { page: "agents", href: "/connections", label: "Agents" },
   { page: "keys", href: "/connections/egress", label: "Agent Keys" },
+  { page: "contacts", href: "/connections/contacts", label: "Contacts" },
 ];
 
 /** What a non-administrator turned away from the dashboard is told on arriving, with `notice=admin-only`. */
@@ -45,7 +46,8 @@ function noticeFromAddress(): { id: string; text: string } | null {
  * The identity is a courtesy: when it cannot be loaded the header shows the
  * links without it, and the page's own requests report any real failure.
  * It also says whether the egress broker is on. The Agent Keys page exists
- * only then, so other pages link it only once the identity says so.
+ * only then, so other pages link it only once the identity says so, and the
+ * Contacts page likewise only for someone who owns an agent with contacts.
  */
 export function ConnectionsHeader({
   current,
@@ -65,7 +67,9 @@ export function ConnectionsHeader({
   const [notice, setNotice] = useState(noticeFromAddress);
   const links = LINKS.filter(
     ({ page }) =>
-      page !== "keys" || current === "keys" || identity?.egress_enabled,
+      page === "agents" ||
+      page === current ||
+      (page === "keys" ? identity?.egress_enabled : identity?.contacts_enabled),
   );
 
   useEffect(() => {

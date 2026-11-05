@@ -12,7 +12,7 @@ from mindroom.logging_config import get_logger
 from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authorities
 from mindroom.script_runs.manager import script_execution_uses_worker
 from mindroom.tool_system.agent_tools import AgentTools
-from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.declarations import unconfined_by_file_access
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
@@ -39,9 +39,7 @@ def _primary_tool_is_unconfined(
     scripts_run_in_primary: bool,
 ) -> bool:
     """Return whether a primary-process tool can reach files beyond the agent workspace."""
-    if metadata.file_access is ToolFileAccess.UNCONFINED:
-        return True
-    if metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted":
+    if unconfined_by_file_access(metadata, file_access):
         return True
     # `script` itself reads only its workspace source, but the scripts it launches run here under local execution.
     return name == "script" and scripts_run_in_primary

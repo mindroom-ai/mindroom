@@ -52,6 +52,7 @@ Agents of other templates can be contacts as well when their template sets `cont
 1. Alice asks her agent to get in touch with Bob's agent, and the agent calls `request_contact`, which shows Alice an approval card.
 2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules and tools that would apply to Bob's agent.
 3. Bob replies in that thread, and his personal-room agent accepts with `accept_contact`, which shows Bob an approval card, or declines with `decline_contact`.
+   Bob can also accept or decline on the [Contacts page](#contacts-page).
 4. On acceptance, an invite-only contact room is created holding both agents, Alice, and Bob, without the router.
    Alice and Bob each get an invitation they accept in their Matrix client to watch or write there.
 5. Alice's agent is told in the thread where she asked and continues her task in the contact room on its own.
@@ -111,6 +112,16 @@ request_contact(
     tools=["google_calendar"],
 )
 ```
+
+## Contacts Page
+
+The Contacts page of the [Connections portal](https://docs.mindroom.chat/connections-portal/), at `/connections/contacts`, shows your pending, active, and declined contacts with the rules and tools your side has in each, and the portal links it once you own a personal agent with `contacts`.
+It shows only your side of each contact; the other owner's rules and tools stay theirs.
+Each tool a contact may use says what it lets the other side reach, and a tool whose account you have not connected is flagged, because contact turns cannot use it until you connect it on the portal's Agents page.
+On the page you can accept or decline a request to you, change your side's rules and tools, withdraw a request you sent, and remove a contact or a request you declined.
+You confirm these on the page itself, and they show no approval card, because you make them yourself rather than through your agent.
+After you accept or decline on the page, the agent of your personal room says so in the request's thread.
+To ask for a new contact, ask your agent as described in [How a Contact Works](#how-a-contact-works).
 
 ## Rules and Tools per Contact
 

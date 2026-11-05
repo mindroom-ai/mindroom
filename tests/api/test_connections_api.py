@@ -335,6 +335,7 @@ def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, i
         "email": f"{user}@example.org",
         "is_administrator": is_administrator,
         "egress_enabled": False,
+        "contacts_enabled": False,
         "dashboard_url": "/",
     }
     assert "no-store" in response.headers["cache-control"]

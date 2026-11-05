@@ -103,6 +103,8 @@ beforeEach(() => {
         egress_enabled: true,
         dashboard_url: "/",
       });
+    if (path === "/api/connections/contacts")
+      return json({ agents: [], contacts: [] });
     if (path === "/api/connections/mcp/selection")
       return json({ enabled: false, agents: {} });
     if (path === "/api/connections/mcp/clients")
@@ -144,6 +146,16 @@ it("signs the egress page in, so its requests name the account it shows", async 
       "X-MindRoom-Connections-User": "@bob:example.org",
     });
 });
+
+it.each(["/connections/contacts", "/connections/contacts/"])(
+  "renders the contacts page on %s",
+  async (pathname) => {
+    await loadEntry(pathname);
+    expect(
+      await screen.findByRole("heading", { name: "Your contacts" }),
+    ).toBeInTheDocument();
+  },
+);
 
 // The server serves the egress page for its own path segment only, so a
 // longer segment gets the portal.

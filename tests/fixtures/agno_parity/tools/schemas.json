@@ -5680,7 +5680,7 @@
       },
       {
         "name": "remove_contact",
-        "description": "Remove a contact; the agents leave its room and the owners keep it and its history.\nEither owner may remove a contact, but only the owner who declined a request may remove the declined contact.",
+        "description": "Remove a contact; the agents leave its room, which an owner keeps only if they joined it.\nEither owner may remove a contact, but only the owner who declined a request may remove the declined contact.",
         "parameters": {
           "type": "object",
           "properties": {
