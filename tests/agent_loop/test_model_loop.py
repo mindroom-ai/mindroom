@@ -24,6 +24,7 @@ from mindroom.agent_loop.model_loop import (
     run_model_loop,
 )
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
+from mindroom.agent_loop.run import resumed_record
 from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES, MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
@@ -650,10 +651,12 @@ async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_i
 
 
 async def test_a_resume_keeps_refusing_a_tool_that_was_failing_before_the_pause() -> None:
-    # A delegation's result resumes its parent without anyone deciding, so the count lives on the record.
+    # A delegation's result resumes its parent without anyone deciding, so the count lives on the stored record.
     model = ScriptedModel([calls(tool_call("boom", "c1", reason="again")), answer("done")])
-    record = _record()
-    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad link")}
+    paused = _record()
+    paused.status = RunStatus.paused
+    paused.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad link")}
+    record = resumed_record(RunRecord.from_dict(paused.to_dict()))
     messages = _prompt()
 
     events, record = await _run(spec(model, toolkit(boom)), messages, record=record, resumed=[])

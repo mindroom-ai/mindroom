@@ -40,6 +40,7 @@ _FAILING_TOOL_ERROR_TEXT = (
     "Tool {name} failed in {failures} requests of this turn with no success in between, so this call was not executed. "
     "Its last error: {error}\nDon't call {name} again in this turn. Tell the user what failed instead."
 )
+MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
 # The user reads this at the end of a reply whose run the loop ended because the model kept calling a failing tool.
 _FAILING_TOOL_STOP_TEXT = (
     "Stopped: tool {name} failed in {failures} requests with no success in between. Its last error: {error}"
@@ -54,7 +55,6 @@ MAX_CONSECUTIVE_TOOL_FAILURES = 8
 _MAX_QUOTED_ERROR = 500
 # The model writes the name of a tool it was not offered, so the log keeps only this much of it.
 _MAX_LOGGED_TOOL_NAME = 100
-MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
 # Live frames go out ten times a second; reports a call makes between two of them would never be seen.
 _PROGRESS_FLUSH_SECONDS = 0.1
 
