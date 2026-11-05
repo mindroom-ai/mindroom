@@ -16979,7 +16979,7 @@ Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.pl
 Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, or the Matrix call answered with an error, raised, or timed out).
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
 CORS for `/api/client-sessions` and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
-These paths allow only those origins, with credentials off, and every response carries `Cache-Control: no-store`.
+These paths allow only those origins, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 
 ## Known gaps
 

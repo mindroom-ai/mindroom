@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
+from starlette._utils import get_route_path
 
 from mindroom import constants
 from mindroom.agent_policy import PolicyInputs, build_agent_policy_seeds, resolve_agent_policy_index
@@ -135,8 +136,10 @@ class _RuntimeDashboardCorsMiddleware:
         self._middleware_by_settings: dict[_DashboardCorsSettings, CORSMiddleware] = {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        middleware = self._middleware_for_current_runtime(scope.get("path", ""))
-        if _is_client_origin_path(scope.get("path", "")):
+        # Under a proxy's root path ``path`` starts with it, so classify the path routes match, as Starlette does.
+        path = get_route_path(scope) if "path" in scope else ""
+        middleware = self._middleware_for_current_runtime(path)
+        if _is_client_origin_path(path):
 
             async def no_store_send(message: Message) -> None:
                 if message["type"] == "http.response.start":

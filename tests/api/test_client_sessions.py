@@ -201,6 +201,29 @@ def test_client_paths_are_never_cached_nor_credentialed(client: TestClient) -> N
         assert "access-control-allow-credentials" not in response.headers, response.request.url
 
 
+def test_client_paths_keep_their_policy_under_a_proxy_root_path(client: TestClient) -> None:
+    """Served under a proxy's root path, session and plugin paths keep the client policy, preflight or not."""
+    proxied = TestClient(client.app, root_path="/mindroom")
+    origin = {"Origin": CLIENT_ORIGIN}
+    preflight = {"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization"}
+    signed_in = proxied.post("/mindroom/api/client-sessions", json={"openid_token": OPENID_TOKEN}, headers=origin)
+    bearer = {"Authorization": f"Bearer {signed_in.json()['session_token']}"}
+    responses = [
+        signed_in,
+        proxied.get("/mindroom/api/plugins/x/whoami", headers={**origin, **bearer}),
+        proxied.options("/mindroom/api/client-sessions", headers={**origin, **preflight}),
+        proxied.options("/mindroom/api/plugins/x/whoami", headers={**origin, **preflight}),
+    ]
+    for response in responses:
+        assert response.status_code == 200, response.request.url
+        assert response.headers["cache-control"] == "no-store", response.request.url
+        assert response.headers["access-control-allow-origin"] == CLIENT_ORIGIN, response.request.url
+        assert "access-control-allow-credentials" not in response.headers, response.request.url
+    assert responses[1].json() == {"user_id": "@alice:example.org"}
+    denied = proxied.options("/mindroom/api/plugins/x/whoami", headers={**preflight, "Origin": "https://evil.example"})
+    assert "access-control-allow-origin" not in denied.headers
+
+
 def test_client_origin_paths_stop_at_their_own_segment(client: TestClient) -> None:
     """A sibling path that only starts with a client path's letters gets the dashboard's policy, not the client's."""
     headers = {
