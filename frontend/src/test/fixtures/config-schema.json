@@ -2986,6 +2986,7 @@
           "items": {
             "type": "string"
           },
+          "minItems": 1,
           "title": "Tools",
           "type": "array",
           "x-mindroom": {

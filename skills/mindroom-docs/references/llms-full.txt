@@ -1906,7 +1906,7 @@ agents:
 | `quiet_seconds` | int, >= 10 | `60` | Seconds without a message the agent hears before the silent turn runs |
 | `max_messages` | int, 1 to 500 | `200` | Most messages one silent turn reads; the rest wait for the next turn |
 | `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour for the agent; further due runs are skipped, logged, and what was heard is kept |
-| `tools` | list | `[memory, react]` | The only tools a silent turn may use, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools` |
+| `tools` | list | `[memory, react]` | The only tools a silent turn may use, at least one, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools`, and `matrix_message` is refused |
 | `model` | string or null | `null` | Key of an entry under `models:` for silent turns; unset uses the agent's `model` |
 
 ### What a silent turn does
@@ -1926,11 +1926,8 @@ The agent never reads history from before listening was turned on, and a room it
 After a restart, the agent hears what it had not yet heard, including messages sent while MindRoom was down.
 A message whose silent turn keeps failing is eventually skipped with a logged warning, so one bad message never stops listening in a room.
 
-A listening agent skips:
-
-- private agents, which have no single identity to listen as;
-- contact rooms, where only a reply passes the contact's message policy;
-- its own messages, which never count as heard input.
+Only shared agents can listen: `listen` on a private agent, which has no single identity to listen as, fails config load.
+A listening agent skips contact rooms, where only a reply passes the contact's message policy, and never hears its own messages.
 
 ### Privacy and cost
 

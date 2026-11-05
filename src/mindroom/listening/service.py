@@ -58,7 +58,7 @@ _QUIET_PAGES = 5
 
 @dataclass(frozen=True)
 class _Listener:
-    """One shared agent that listens, its settings, and the IDs of the rooms it listens in."""
+    """One agent that listens, its settings, and the IDs of the rooms it listens in."""
 
     agent_name: str
     listen: ListenConfig
@@ -89,11 +89,11 @@ def _cursor(message: ResolvedVisibleMessage) -> ConversationCursor:
 
 
 def _listeners(config: Config, runtime_paths: RuntimePaths) -> list[_Listener]:
-    """Return every shared agent with ``listen``; a private agent has no one instance that could hear a room."""
+    """Return every agent with ``listen``, which config validation allows only on shared agents."""
     return [
         _Listener(name, agent.listen, tuple(resolve_room_aliases(agent.listen.rooms, runtime_paths)))
         for name, agent in config.agents.items()
-        if agent.listen is not None and agent.private is None
+        if agent.listen is not None
     ]
 
 
@@ -160,7 +160,7 @@ class ListeningService:
                 await asyncio.to_thread(self._markers.retain, listened)
         except Exception:
             logger.exception("Listening could not forget the markers of rooms it no longer listens in")
-        if any(agent.listen is not None and agent.private is None for agent in config.agents.values()):
+        if any(agent.listen is not None for agent in config.agents.values()):
             self.start()
         else:
             await self.stop()

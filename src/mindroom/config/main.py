@@ -1463,7 +1463,7 @@ class Config(BaseModel):
         self._validate_listen_tools(tools)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
-        """Reject a ``listen.tools`` entry whose toolkit this config cannot build or the agent's own tools leave out.
+        """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
 
         A silent turn narrows the agent's own tools to this list and never adds one, so the default list is checked too:
         a listening agent without ``memory`` or ``react`` must name the tools it listens with.
@@ -1484,6 +1484,12 @@ class Config(BaseModel):
                     config_path_prefix=config_path_prefix,
                     tools=tools,
                 )
+                if toolkit == "matrix_message":
+                    msg = (
+                        f"{config_path_prefix}.{toolkit}: Tool 'matrix_message' posts to the room, "
+                        "which a silent turn never does; use react to acknowledge."
+                    )
+                    raise ToolConfigOverrideError(msg)
                 if toolkit not in own_tools:
                     msg = (
                         f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' is not one of the agent's tools; "

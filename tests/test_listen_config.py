@@ -90,6 +90,33 @@ def test_listen_rooms_required() -> None:
         ListenConfig(rooms=[])
 
 
+def test_listen_tools_must_name_one() -> None:
+    """A silent turn with no tool could only spend tokens, so an empty ``listen.tools`` is rejected."""
+    with pytest.raises(ValidationError, match="tools"):
+        ListenConfig(rooms=["lobby"], tools=[])
+
+
+def test_listen_matrix_message_rejected(tmp_path: Path) -> None:
+    """``matrix_message`` posts to the room, so it is refused in ``listen.tools`` even when the agent has it."""
+    with pytest.raises(
+        ValueError,
+        match=r"listen\.tools\[1\]\.matrix_message: Tool 'matrix_message' posts to the room, which a silent turn never does",
+    ):
+        Config.validate_with_runtime(
+            _config({"rooms": ["lobby"], "tools": ["react", "matrix_message.send_message"]}, ("react", "matrix_message")),
+            test_runtime_paths(tmp_path),
+        )
+
+
+def test_listen_on_a_private_agent_rejected() -> None:
+    """A private agent runs one instance per requester, none of which could listen, so ``listen`` is refused."""
+    authored = _config({"rooms": ["lobby"]})
+    authored["agents"]["scribe"]["private"] = {"per": "user"}  # type: ignore[index]
+
+    with pytest.raises(ValidationError, match="configure private or listen, not both"):
+        Config.model_validate(authored)
+
+
 def test_agent_without_listen_is_none() -> None:
     """Listening is opt-in."""
     assert AgentConfig(display_name="Scribe").listen is None

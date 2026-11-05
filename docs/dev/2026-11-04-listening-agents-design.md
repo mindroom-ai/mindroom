@@ -17,8 +17,9 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 3. A silent turn runs as the agent, with its identity, instructions, and memory, but offers only `listen.tools` and drops its text, so no tool outside the list can act and nothing can be posted.
 4. Every `listen.tools` entry must be among the agent's own `tools`, and config load fails otherwise.
    The cost is that an agent with `listen:` and the default tools needs `memory` and `react` in `tools:`.
+   The list needs at least one tool, since a turn without one only spends tokens, and `matrix_message` is refused, since its purpose is to post.
 5. A silent turn hears only messages the agent's replies would answer, judged on the person a relay speaks for, so listening opens no new door into the agent.
-6. Private agents and contact rooms are skipped.
+6. Config load rejects `listen` on a private agent, and contact rooms are skipped.
    A per-requester instance has no single listener identity, and only a reply passes a contact's message policy.
 7. A silent turn stores no run in session history, only its usage under the kind `listening`.
    Each turn is self-contained, with the heard messages in its prompt and the memory tool for continuity.
@@ -65,5 +66,4 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
 
 ## Open questions
 
-- `listen.tools: []` validates, though a silent turn without tools only spends tokens.
 - The prompt does not yet say that heard text is data rather than instructions.

@@ -479,6 +479,9 @@ class AgentConfig(BaseModel):
         if self.private is not None and self.worker_scope is not None:
             msg = "Private agents derive their execution scope from private.per; configure private or worker_scope, not both"
             raise ValueError(msg)
+        if self.private is not None and self.listen is not None:
+            msg = "Private agents run one instance per requester, so none can listen; configure private or listen, not both"
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="before")
