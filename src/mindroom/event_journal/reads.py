@@ -177,6 +177,14 @@ def read_room_after(
     ``read_conversation``, so a caller continues from ``last_cursor``. A thread
     root has no thread relation of its own and is stored at the room level, so
     it appears once.
+
+    The page stops at the first message whose visible revision awaits a
+    refetch, so ``last_cursor`` never passes a message that is not in
+    ``messages``; once the refetch resolves, a read from the same cursor
+    returns it. ``refresh_pending`` names the refetches the page's rows owe.
+    When the first row after ``after`` is one of them, ``messages`` is empty
+    and ``last_cursor`` is ``None``, which means no progress: keep your cursor,
+    never start over.
     """
     if limit <= 0:
         msg = "A room read requires a positive limit"
@@ -197,10 +205,12 @@ def read_room_after(
     kept = _rows_within_content_budget(sizes)
     rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
     rows = rows[: _rows_within_decoded_budget(rows)]
-    messages = tuple(_visible_message(row) for row in rows if row["content_json"] is not None)
+    pending = tuple(_refresh_request(row) for row in rows if row["content_json"] is None)
+    first_pending = next((index for index, row in enumerate(rows) if row["content_json"] is None), len(rows))
+    messages = tuple(_visible_message(row) for row in rows[:first_pending])
     return RoomPage(
         messages=messages,
-        refresh_pending=any(row["content_json"] is None for row in rows),
+        refresh_pending=pending,
         last_cursor=(
             ConversationCursor(created_ts=messages[-1].created_ts, logical_event_id=messages[-1].logical_event_id)
             if messages

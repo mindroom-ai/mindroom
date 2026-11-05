@@ -2108,7 +2108,7 @@ class TestReadingAWholeRoom:
         page = await alice.read_room_after(room_id=ROOM, after=None, limit=50)
 
         assert [m.logical_event_id for m in page.messages] == ["$root", "$other-thread", "$reply", "$room-level"]
-        assert page.refresh_pending is False
+        assert page.refresh_pending == ()
         assert page.last_cursor == ConversationCursor(created_ts=3_000, logical_event_id="$room-level")
 
     async def test_read_room_after_excludes_cursor_and_before(self, alice: PrincipalStore) -> None:
@@ -2148,6 +2148,88 @@ class TestReadingAWholeRoom:
         assert (await bob.read_room_after(room_id=ROOM, after=None, limit=50)).messages == ()
         assert await bob.latest_room_cursor(room_id=ROOM) is None
         assert (await alice.read_room_after(room_id=OTHER_ROOM, after=None, limit=50)).messages == ()
+
+    async def _pending_message(self, store: PrincipalStore, event_id: str, ts: int) -> None:
+        """Admit a message whose visible revision was then redacted, so it owes a refetch."""
+        await admit(store, event_id, ts=ts, content=text("first"))
+        await admit(store, f"{event_id}-edit", ts=ts + 1, content=edit(event_id, "deleted"))
+        await admit(store, f"{event_id}-redaction", ts=ts + 2, redacts=f"{event_id}-edit", kind=EventKind.REDACTION)
+
+    async def test_a_pending_row_in_the_middle_stops_the_page_before_it(self, alice: PrincipalStore) -> None:
+        """The cursor never passes a message that is not in the page."""
+        await admit(alice, "$a", ts=1_000)
+        await self._pending_message(alice, "$p", 2_000)
+        await admit(alice, "$z", ts=5_000, thread_id="$a")
+
+        page = await alice.read_room_after(room_id=ROOM, after=None, limit=50)
+
+        assert [m.logical_event_id for m in page.messages] == ["$a"]
+        assert [r.logical_event_id for r in page.refresh_pending] == ["$p"]
+        assert page.last_cursor == ConversationCursor(1_000, "$a")
+
+    async def test_a_pending_first_row_makes_no_progress_and_resolves_later(self, alice: PrincipalStore) -> None:
+        """An empty page keeps the held cursor, and the message returns once its refetch resolves."""
+        await admit(alice, "$a", ts=1_000)
+        await self._pending_message(alice, "$p", 2_000)
+        await admit(alice, "$z", ts=5_000)
+        held = ConversationCursor(1_000, "$a")
+
+        page = await alice.read_room_after(room_id=ROOM, after=held, limit=50)
+
+        assert page.messages == ()
+        assert page.last_cursor is None
+        assert [r.logical_event_id for r in page.refresh_pending] == ["$p"]
+        installed = await alice.install_refetched_revision(
+            page.refresh_pending[0],
+            revision_event_id="$p",
+            revision_ts=2_000,
+            revision_sender="alice",
+            content=text("first"),
+        )
+        assert installed
+        resolved = await alice.read_room_after(room_id=ROOM, after=held, limit=50)
+        assert [m.logical_event_id for m in resolved.messages] == ["$p", "$z"]
+        assert resolved.refresh_pending == ()
+
+    async def test_read_room_after_shows_the_latest_revision_and_hides_a_redacted_one(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Edits are projected into the message, and a redacted revision is reported, as in read_conversation."""
+        await admit(alice, "$a", ts=1_000, content=text("old"))
+        await admit(alice, "$a-edit", ts=2_000, content=edit("$a", "new"))
+        await self._pending_message(alice, "$p", 3_000)
+
+        page = await alice.read_room_after(room_id=ROOM, after=None, limit=50)
+        conversation = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+
+        assert [str(m.content["body"]) for m in page.messages] == ["new"]
+        assert page.refresh_pending == conversation.refresh_pending
+        assert [m.logical_event_id for m in conversation.messages] == ["$a"]
+
+    async def test_a_page_cut_by_the_content_budget_continues_from_its_cursor(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A page ends before the limit when its content passes the budget, and the rest follows."""
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        for index in range(5):
+            await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
+
+        collected: list[str] = []
+        cursor = None
+        sizes = []
+        while True:
+            page = await alice.read_room_after(room_id=ROOM, after=cursor, limit=50)
+            if not page.messages:
+                break
+            sizes.append(len(page.messages))
+            collected += [m.logical_event_id for m in page.messages]
+            cursor = page.last_cursor
+
+        assert sizes[0] < 5
+        assert collected == [f"$m{index}" for index in range(5)]
 
     async def test_latest_room_cursor(self, alice: PrincipalStore) -> None:
         """The newest message of the room, in any thread, is the cursor."""
