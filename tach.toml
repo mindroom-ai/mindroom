@@ -621,6 +621,7 @@ depends_on = [
     "mindroom.event_journal",
 ]
 visibility = [
+    "mindroom.listening.service",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.journal_ingress",
     "mindroom.turns.ingress",
@@ -9210,6 +9211,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.state",
+    "mindroom.matrix.transport_progress",
 ]
 visibility = ["mindroom.orchestrator"]
 

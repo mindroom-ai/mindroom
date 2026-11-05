@@ -1,17 +1,19 @@
 """The listening service: each listening agent hears its rooms and runs one silent turn once a room goes quiet.
 
-Each agent keeps a durable marker per room (``ListeningMarkers``), and each poll reads the agent's own event journal
-after it. What the agent wrote, and what senders it may not hear from wrote, is passed over; the rest waits until
-nothing the agent hears has been said for ``quiet_seconds``, or until the oldest of it is ten times that old, then one
-silent turn hears at most ``max_messages`` of it, no more than fits its model's context window, and the marker moves
-past what that turn heard. While the hourly cap holds an agent back, its rooms wait unread and keep their markers, and
-they take turns at the cap, least recently run first. Each room reads the current config, and a reload while it is read
-leaves its turn to the next poll, so a turn always starts under the config of its start.
+Each agent keeps a durable marker per room (``ListeningMarkers``), and each poll reads one page of the agent's own
+event journal after it. What the agent wrote, and what senders it may not hear from wrote, is passed over; the rest
+waits until nothing the agent hears has been said for ``quiet_seconds`` and the page holds all there is to read, or
+until the oldest of it is ten times that old, then one silent turn hears at most ``max_messages`` of it, no more than
+fits its model's context window, and the marker moves past what that turn heard. A page ends before a message awaiting
+its refetch and before a heard reply still being written, which then waits too. While the hourly cap holds an agent
+back, its rooms wait unread and keep their markers, and they take turns at the cap, least recently run first. Each room
+reads the current config, and a reload while it is read leaves its turn to the next poll, so a turn always starts under
+the config of its start.
 
 No room stalls for good: a turn that keeps failing hears fewer messages until one message alone fails, which is then
 skipped, and turns stay that small until they pass the first batch that failed; a message whose refetch never arrives
-is skipped after a while. Each skip is logged, and a skipped message
-is never heard.
+is skipped after a while. Each wait on the server is bounded, so a room it holds up keeps its marker and holds up no
+other. Each skip is logged, and a skipped message is never heard.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.conversation_reads import projected_visible_messages
 from mindroom.matrix.state import resolve_room_aliases
+from mindroom.matrix.transport_progress import is_unfinished_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -41,7 +44,6 @@ if TYPE_CHECKING:
     from mindroom.config.listening import ListenConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import RoomPage
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
@@ -58,8 +60,8 @@ _FAILURES_PER_BATCH = 3
 _TURN_TIMEOUT_SECONDS = 300
 # How many quiet windows the oldest heard message waits before a turn runs anyway, so a room that never pauses is heard.
 _MAX_WAIT_QUIET_WINDOWS = 10
-# Pages read past a turn's own to find what the agent heard last; a room with more after them counts as busy.
-_QUIET_PAGES = 5
+# How long a room's poll waits on the server for a gap repair, its read, or a refetch, before it tries again next poll.
+_READ_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -258,22 +260,25 @@ class ListeningService:
     ) -> None:
         """Hear one room after its marker, and run its silent turn when one is due."""
         reader = bot.conversation_reader
-        # What a sync gap skipped is older than what came after it, so it is installed before the marker can pass it.
-        await reader.hydrator.repair_room_history(room_id)
-        # The page stops before the first message owing a refetch, and the marker waits for it, for a while. A message
-        # stamped after now, which its sender's server sets, waits until then, so it cannot move the marker past others.
-        page = await reader.read_room_after(room_id, marker, listen.max_messages, int(now * 1000))
+        now_ms, quiet_ms = int(now * 1000), listen.quiet_seconds * 1000
+        # Each wait on the server is bounded, so a room it holds up keeps its marker and holds up no other room.
+        async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+            # What a sync gap skipped is older than what came after it, so it is installed before the marker passes it.
+            await reader.hydrator.repair_room_history(room_id)
+            # The page stops before the first message owing a refetch, and the marker waits for it, for a while. A
+            # message stamped after now, as its sender's server may, waits until then, so it cannot pass others.
+            page = await reader.read_room_after(room_id, marker, listen.max_messages, now_ms)
         waited = self._waited(agent_name, room_id, page.stopped_at, now)
         if page.last_cursor is None and page.stopped_at is not None and waited > _REFETCH_WAIT_SECONDS:
             await self._skip_refetch(agent_name, room_id, page.stopped_at)
             return
         if page.refresh_pending:
-            await reader.hydrator.resolve_refreshes(page.refresh_pending)
-        if page.last_cursor is None:
-            return
+            async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+                await reader.hydrator.resolve_refreshes(page.refresh_pending)
+        messages = projected_visible_messages(page)
         try:
-            heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
-            due = heard and await self._due(bot, agent_name, room_id, heard, page, listen, config, now)
+            waited_out_ms = now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms
+            heard, kept = self._heard(bot, agent_name, room_id, messages, config, waited_out_ms)
         except ReplyMembershipPendingError:
             # The marker stays, so a sender whose join the router has yet to apply is heard once it has.
             if (agent_name, room_id) not in self._membership_pending:
@@ -281,13 +286,17 @@ class ListeningService:
                 logger.info("Listening waits for room membership to resolve", agent=agent_name, room_id=room_id)
             return
         self._membership_pending.discard((agent_name, room_id))
+        # A reload while the room was read decides again on the next poll, so the marker moves and a turn runs only
+        # under the current config.
+        if not kept or self.config_provider() is not config:
+            return
         if not heard:
-            await self._mark(agent_name, room_id, page.last_cursor)
+            await self._mark(agent_name, room_id, _cursor(kept[-1]))
             return
-        # A reload while the room was read decides again on the next poll, so the turn runs under the current config.
-        if not due or self.config_provider() is not config or not self._start_run(agent_name, room_id, listen, clock()):
-            return
-        await self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, page.last_cursor)
+        # More after the page, or a message the page stops at, may be newer than any heard on it.
+        busy = page.more or page.stopped_at is not None or len(kept) < len(messages)
+        if self._due(heard, busy, now_ms, quiet_ms) and self._start_run(agent_name, room_id, listen, clock()):
+            await self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, _cursor(kept[-1]))
 
     async def _run_turn(
         self,
@@ -405,17 +414,21 @@ class ListeningService:
         room_id: str,
         messages: list[ResolvedVisibleMessage],
         config: Config,
-    ) -> list[ResolvedVisibleMessage]:
-        """Return the messages the agent hears, each shown as the one who said it.
+        unfinished_after_ms: int,
+    ) -> tuple[list[ResolvedVisibleMessage], list[ResolvedVisibleMessage]]:
+        """Return the messages the agent hears, each shown as the one who said it, and the page's messages they span.
 
         Like a reply, a message is judged by whom it speaks for, as ingress classifies it: the person a trusted relay
         names rather than the relaying account. The agent's own messages and senders not allowed to reach it in the
         room are left out. As for a reply, the agent's own view of the room lets a sender it has seen join wait for the
         router to apply the join, which raises ``ReplyMembershipPendingError``, rather than be left out.
+
+        A heard reply still being written, sent after ``unfinished_after_ms``, ends both lists before it, as a refetch
+        ends a page, so it is heard whole once it is finished; one older than that is heard as it stands.
         """
         observed_room = bot.client.rooms.get(room_id) if bot.client is not None else None
         heard: list[ResolvedVisibleMessage] = []
-        for message in messages:
+        for index, message in enumerate(messages):
             if message.sender == bot.matrix_id.full_id:
                 continue
             facts = bot.ingress_validator.classify_source(message.sender, {"content": message.content}, room_id=room_id)
@@ -430,67 +443,23 @@ class ListeningService:
                 observed_room=observed_room,
             ):
                 continue
+            if is_unfinished_reply(message.content) and message.timestamp > unfinished_after_ms:
+                return heard, messages[:index]
             # An entity's reply written for someone stays its author's; a relayed message is its original sender's.
             speaker = facts.physical_sender if facts.acts_for_requester else facts.run_requester_id
             heard.append(replace_visible_message(message, sender=speaker))
-        return heard
+        return heard, messages
 
-    async def _due(
-        self,
-        bot: AgentBot,
-        agent_name: str,
-        room_id: str,
-        heard: Sequence[ResolvedVisibleMessage],
-        page: RoomPage,
-        listen: ListenConfig,
-        config: Config,
-        now: float,
-    ) -> bool:
-        """Return whether a silent turn over ``heard``, read on ``page``, is due at ``now``.
+    def _due(self, heard: Sequence[ResolvedVisibleMessage], busy: bool, now_ms: int, quiet_ms: int) -> bool:
+        """Return whether a silent turn over ``heard`` is due at ``now_ms``.
 
-        It is once nothing the agent hears has been said in the room for ``quiet_seconds``, so what it does not hear,
-        such as a chatty bot or its own messages, never holds a turn back. The room's newest heard message decides, not
-        the newest one on the page, so a conversation longer than ``max_messages`` still waits, and so does a page
-        that stops at a message awaiting its refetch, as what follows it is unknown. A turn is due anyway once the
-        oldest heard message has waited ``_MAX_WAIT_QUIET_WINDOWS`` quiet windows.
+        It is once nothing the agent hears has been said in the room for ``quiet_ms``, so what it does not hear, such as
+        a chatty bot or its own messages, never holds a turn back. A ``busy`` page, which more may follow, is not quiet
+        yet. A turn is due anyway once the oldest heard message has waited ``_MAX_WAIT_QUIET_WINDOWS`` quiet windows.
         """
-        quiet_ms = listen.quiet_seconds * 1000
-        now_ms = int(now * 1000)
         if heard[0].timestamp <= now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms:
             return True
-        end = page.last_cursor
-        if end is None or page.stopped_at is not None or heard[-1].timestamp > now_ms - quiet_ms:
-            return False
-        return await self._heard_nothing_after(bot, agent_name, room_id, end, listen, config, now_ms, quiet_ms)
-
-    async def _heard_nothing_after(
-        self,
-        bot: AgentBot,
-        agent_name: str,
-        room_id: str,
-        after: ConversationCursor,
-        listen: ListenConfig,
-        config: Config,
-        now_ms: int,
-        quiet_ms: int,
-    ) -> bool:
-        """Return whether the agent heard nothing said after ``after`` in the last ``quiet_ms``, reading a few pages on.
-
-        A message awaiting its refetch ends what can be read, so its refetch is asked for and the room does not count
-        as quiet until it arrives; a room with more than ``_QUIET_PAGES`` pages after ``after`` counts as not quiet.
-        """
-        reader = bot.conversation_reader
-        for _ in range(_QUIET_PAGES):
-            page = await reader.read_room_after(room_id, after, listen.max_messages, now_ms)
-            if page.last_cursor is None:
-                if page.refresh_pending:
-                    await reader.hydrator.resolve_refreshes(page.refresh_pending)
-                return page.stopped_at is None
-            heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
-            if heard and heard[-1].timestamp > now_ms - quiet_ms:
-                return False
-            after = page.last_cursor
-        return False
+        return not busy and heard[-1].timestamp <= now_ms - quiet_ms
 
     def _at_cap(self, agent_name: str, room_id: str, listen: ListenConfig, now: float) -> bool:
         """Return whether the agent's hourly cap holds its turns back at ``now``, reporting it once per room."""

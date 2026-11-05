@@ -18,7 +18,15 @@ from structlog.testing import capture_logs
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
 from mindroom.config.main import Config
-from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, tracking_dir
+from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
+    ORIGINAL_SENDER_KEY,
+    SOURCE_KIND_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_STREAMING,
+    tracking_dir,
+)
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.event_journal import ConversationCursor, EventKind
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
@@ -341,15 +349,16 @@ async def test_busy_room_waits_then_one_turn_capped_at_max_messages(
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No turn runs while messages keep coming; then one turn hears at most ``max_messages``, and the marker follows."""
+    """No turn runs while messages come, nor while more than a page waits; then one turn hears ``max_messages``."""
     listening = _listening(tmp_path, journal_store, monkeypatch, {"max_messages": 3})
     await listening.service._poll_once(T0)
     for index in range(8):
         await listening.say(f"$m{index}", 10 + 20 * index)
         await listening.service._poll_once(T0 + 25 + 20 * index)
+    await listening.service._poll_once(T0 + 10 + 20 * 7 + 61)
     assert listening.turns.contexts == []
 
-    await listening.service._poll_once(T0 + 10 + 20 * 7 + 61)
+    await listening.service._poll_once(T0 + 10 + 600)
 
     assert len(listening.turns.contexts) == 1
     assert listening.turns.heard() == ["$m0", "$m1", "$m2"]
@@ -404,8 +413,9 @@ async def test_a_backlog_drains_over_successive_turns_until_caught_up(
     for index, event_id in enumerate(event_ids):
         await listening.say(event_id, 10 + index)
 
+    # A page with more after it counts as busy, so the backlog waits for ten quiet windows, then drains.
     for poll in range(5):
-        await listening.service._poll_once(T0 + 100 + poll)
+        await listening.service._poll_once(T0 + 700 + poll)
 
     assert listening.turns.heard_in(ROOM) == [event_ids[:3], event_ids[3:6], event_ids[6:]]
     assert listening.marker_event() == "$m6"
@@ -823,14 +833,20 @@ async def test_the_hourly_cap_counts_each_turn_from_its_own_start(
     assert listening.turns.heard_in(STUDIO) == [["$studio"]]
 
 
+@pytest.mark.parametrize("sender", [ALICE, BOB], ids=["heard before", "heard only after"])
 async def test_a_reload_governs_every_turn_that_starts_after_it(
     tmp_path: Path,
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
+    sender: str,
 ) -> None:
-    """A reload while a room is read leaves its turn to the next poll, and the rooms after it read the new config."""
+    """A reload while a room is read leaves its turn, or its move past what it did not hear, to the next poll.
+
+    The rooms after it read the new config.
+    """
     listening = _listening(tmp_path, journal_store, monkeypatch, {"rooms": [ROOM, STUDIO]})
-    reloaded = listening.config.model_copy(deep=True)
+    # The reload lists fewer tools and lets Bob reach the agent.
+    reloaded = with_responder_access(listening.config.model_copy(deep=True), "scribe", users=[ALICE, BOB])
     listen = reloaded.agents["scribe"].listen
     assert listen is not None
     listen.tools = ["react"]
@@ -842,7 +858,7 @@ async def test_a_reload_governs_every_turn_that_starts_after_it(
         agent_reply_memberships=isolated_membership_index(),
     )
     await service._poll_once(T0)
-    await listening.say("$lobby", 10)
+    await listening.say("$lobby", 10, sender=sender)
     await admit(listening.journal, "$studio", room_id=STUDIO, sender=ALICE, ts=_ms(10))
     await record_room_history_recovery(listening.journal, ROOM)
 
@@ -936,34 +952,66 @@ async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(
     assert listening.turns.heard() == ["$a", "$p", "$z"]
 
 
-async def test_a_message_owing_a_refetch_after_the_turns_messages_keeps_the_room_from_counting_as_quiet(
+async def test_a_refetch_the_server_never_answers_holds_up_only_its_own_room(
     tmp_path: Path,
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """What lies past a message awaiting its refetch is unknown, so the turn waits for the refetch, which is asked for."""
-    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_messages": 1})
+    """A refetch that never returns is cut off; its room keeps its marker, and the agent's other rooms are heard."""
+    monkeypatch.setattr(service_module, "_READ_TIMEOUT_SECONDS", 0.1)
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"rooms": [ROOM, STUDIO]})
     await listening.service._poll_once(T0)
-    await listening.say("$old", 10)
-    await _owe_refetch(listening, "$p", 50)
-    await listening.say("$fresh", 95)
-    resolve = cast("AsyncMock", listening.bot.conversation_reader.hydrator.resolve_refreshes)
+    await _owe_refetch(listening, "$p", 20)
+    await admit(listening.journal, "$studio", room_id=STUDIO, sender=ALICE, ts=_ms(10))
+    before = listening.marker()
+
+    async def never_answers(_requests: object) -> None:
+        await asyncio.Event().wait()
+
+    cast("AsyncMock", listening.bot.conversation_reader.hydrator.resolve_refreshes).side_effect = never_answers
+
+    with capture_logs() as logs:
+        await listening.service._poll_once(T0 + 100)
+
+    assert listening.marker() == before
+    assert listening.turns.heard_in(STUDIO) == [["$studio"]]
+    assert [log["room_id"] for log in logs if log["log_level"] == "error"] == [ROOM]
+
+
+@pytest.mark.parametrize("finished", [True, False], ids=["finished", "never finished"])
+async def test_a_reply_still_being_written_is_heard_once_it_is_finished(listening: _Listening, finished: bool) -> None:
+    """A heard reply still streaming holds the turn and the marker until it is finished, and is then heard whole.
+
+    One that never finishes is heard as it stands after ten quiet windows, so a stream that died cannot hold the room.
+    """
+    helper = entity_ids(listening.config, listening.runtime_paths)["helper"].full_id
+    await listening.service._poll_once(T0)
+    await listening.say("$question", 5)
+    streaming = {**text("Half an ans"), ACTING_REQUESTER_KEY: ALICE, STREAM_STATUS_KEY: STREAM_STATUS_STREAMING}
+    await admit(listening.journal, "$reply", room_id=ROOM, sender=helper, ts=_ms(10), content=streaming)
+    before = listening.marker()
 
     await listening.service._poll_once(T0 + 100)
 
     assert listening.turns.contexts == []
-    assert [request.logical_event_id for request in resolve.await_args.args[0]] == ["$p"]
-    page = await listening.journal.read_room_after(room_id=ROOM, after=None, limit=10)
-    await listening.journal.install_refetched_revision(
-        page.refresh_pending[0],
-        revision_event_id="$p",
-        revision_ts=_ms(50),
-        revision_sender=ALICE,
-        content=text("first"),
-    )
-    await listening.service._poll_once(T0 + 200)
-
-    assert listening.turns.heard() == ["$old"]
+    assert listening.marker() == before
+    if finished:
+        done = {**edit("$reply", "The whole answer."), ACTING_REQUESTER_KEY: ALICE}
+        done["m.new_content"] = {
+            **cast("dict[str, object]", done["m.new_content"]),
+            ACTING_REQUESTER_KEY: ALICE,
+            STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+        }
+        await admit(listening.journal, "$reply-done", room_id=ROOM, sender=helper, ts=_ms(110), content=done)
+        await listening.service._poll_once(T0 + 200)
+    else:
+        await listening.service._poll_once(T0 + 200)
+        assert listening.turns.contexts == []
+        await listening.service._poll_once(T0 + 10 + 601)
+    assert listening.turns.heard() == ["$question", "$reply"]
+    prompt = listening.turns.contexts[0].prompt
+    assert ("The whole answer." if finished else "Half an ans") in prompt
+    assert listening.marker_event() == "$reply"
 
 
 async def test_a_refetch_that_never_arrives_skips_its_message_after_ten_minutes(listening: _Listening) -> None:
