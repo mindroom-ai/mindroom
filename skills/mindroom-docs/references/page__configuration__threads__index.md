@@ -48,7 +48,7 @@ rooms:
 ```
 
 A message that mentions an agent or team is answered the same way in both modes, and mentions count as described in [Multi-Human Thread Protection](#multi-human-thread-protection).
-Editing a message that got no answer to add a mention does not get one; send a new message that mentions the agent or team.
+Editing a message that got no answer to add a mention does not get one; send a new message that mentions the agent or team. A message still waiting behind a reply in progress is read with its latest edit, so an edit there that adds a mention does count.
 Scheduled tasks, hooks, and external triggers are not affected, and a direct-message room follows its reply mode like any other room.
 With `thread_mode: room`, every message is room-level, so each one needs a mention in a `mentions` room.
 
