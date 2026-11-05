@@ -192,9 +192,9 @@ A cap too small to hold the headings and markers fails with `max_preload_chars=<
 
 ## Listening
 
-A listening agent also hears the messages in chosen rooms that are not addressed to it.
+A listening agent hears every message in chosen rooms from the people it may answer, whether or not the message is addressed to it.
 After a room has been quiet for a while, the agent runs one silent turn over what it heard and acts only through the tools you list, for example to remember something or react to a message.
-It stays a normal agent in those rooms: it still answers when addressed, under the room's usual rules, and listening only adds the silent turns.
+It stays a normal agent in those rooms: it still answers when addressed, under the room's usual rules, and listening only adds the silent turns, so a message addressed to it is answered and also heard by the next silent turn.
 
 The agent must already be in each listened room, for example because the room is in its `rooms`; listening does not join rooms, and MindRoom logs once when a listened room is not joined yet.
 Every entry in `listen.tools` must also be one of the agent's own `tools`, or the config fails to load.
@@ -236,6 +236,7 @@ The turn's own text is never sent to the room, and approval-gated tools and inte
 It acts only through its listen tools, each with its usual effect, so a listed tool that sends still sends.
 Tools that can post if you list them include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`; `matrix_message` is refused.
 No more than `max_runs_per_hour` turns run per hour; the count starts again after a restart.
+Each turn runs under the config current when it starts, so a reload that removes a tool or a sender applies to every turn after it.
 
 The first run for a room starts at "now".
 The agent never reads history from before listening was turned on, and a room it stops listening in forgets its place.
@@ -266,6 +267,7 @@ It suits a silent turn that should acknowledge what it heard without writing in 
 - A failed or timed-out silent turn is retried, and so is one cut off by a restart after its tools have acted, so a memory write or reaction may happen twice.
 - A heard message is skipped with a warning when the turns covering it keep failing, after the batch is halved down to that one message, or when it waits more than 10 minutes for a refetch.
 - A message whose timestamp is already older than the room's place when it arrives, such as one delayed by federation or backdated by a bridge, is not heard; MindRoom reads a room in timestamp order and logs nothing for it.
+- A message stamped later than now, such as one from a server whose clock runs ahead, waits to be heard until that time comes.
 - Heard text can carry prompt injection that drives the listed tools; read [Listening agents](../architecture/security-posture.md#listening-agents) before adding a tool to `listen.tools`.
 
 ## Naming Rules
