@@ -585,6 +585,31 @@ async def test_a_call_refused_for_failing_uses_up_the_call_limit() -> None:
     assert events[-1] == LoopEnded(paused=False)
 
 
+async def test_calling_a_refused_tool_again_past_the_call_limit_still_ends_the_run() -> None:
+    model = ScriptedModel(
+        [
+            calls(tool_call("boom", "refused", reason="again")),
+            calls(tool_call("boom", "past-the-limit", reason="again")),
+            answer("never sent"),
+        ],
+    )
+    record = _record()
+    record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad link")}
+    messages = _prompt()
+
+    events, record = await _run(spec(model, toolkit(boom), max_tool_calls_per_turn=1), messages, record=record)
+
+    # The second call is past the limit, but it calls the refused tool again, so the run ends without another request.
+    refusal = _failing_tool_refusal("bad link")
+    assert [message.content for message in messages if message.role == "tool"] == [refusal, refusal]
+    assert len(model.requests) == 2
+    assert record.content == (
+        f"Stopped: tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests with no success in between. "
+        "Its last error: bad link"
+    )
+    assert events[-1] == LoopEnded(paused=False)
+
+
 async def test_a_success_resets_the_failure_streak_of_its_tool() -> None:
     almost = MAX_CONSECUTIVE_TOOL_FAILURES - 1
     model = ScriptedModel(

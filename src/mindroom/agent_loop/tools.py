@@ -238,12 +238,8 @@ def plan_tool_batch(
             logger.warning("invalid_tool_arguments", entity=entity, tool_name=name, reason=arguments.reason)
             calls.append(_refused(call_id, function.name, arguments.error_text, None, counts=False))
             continue
-        if max_tool_calls_per_turn is not None:
-            count += 1
-            if count > max_tool_calls_per_turn:
-                limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
-                calls.append(_refused(call_id, function.name, limit_text, arguments, counts=True))
-                continue
+        count += 1
+        # A tool refused for failing is refused so past the call limit too, so calling it again still ends the run.
         tool = failing_tools.get(function.name)
         if tool is not None and tool.failures >= MAX_CONSECUTIVE_TOOL_FAILURES:
             logger.warning("failing_tool_call_refused", entity=entity, tool_name=function.name)
@@ -254,6 +250,10 @@ def plan_tool_batch(
             )
             calls.append(_refused(call_id, function.name, text, arguments, counts=True))
             refused_for_failures[function.name] = None
+            continue
+        if max_tool_calls_per_turn is not None and count > max_tool_calls_per_turn:
+            limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
+            calls.append(_refused(call_id, function.name, limit_text, arguments, counts=True))
             continue
         calls.append(PlannedCall(function=function, execution=function.planned_execution(call_id, arguments)))
     return ToolBatch(calls=tuple(calls), refused_for_failures=tuple(refused_for_failures))

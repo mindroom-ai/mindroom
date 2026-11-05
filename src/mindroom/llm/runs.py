@@ -269,7 +269,8 @@ class _RunRecordCommon:
     user_id: str | None = None
     status: RunStatus = RunStatus.running
     # What the run's model wrote, before a pause and after each resume, its requests' texts a blank line apart
-    # (``joined_texts``). A pause is in its paused ``tools`` and a failure in ``error``, never here.
+    # (``joined_texts``), then the line saying why when the loop ends the run for a tool that keeps failing.
+    # A pause is in its paused ``tools`` and a failure in ``error``, never here.
     content: str | None = None
     # Why the run failed or was stopped, credentials redacted, set by whatever ended it so: the loop for an ``ERROR``
     # run, and delegation recovery for a child run it fails or cancels. A run its own cancellation stopped has none.
@@ -365,7 +366,7 @@ _TEXT_SEPARATOR = "\n\n"
 def joined_texts(parts: Sequence[str]) -> str:
     """Return a run's texts as its content: one text as it is, several stripped and a blank line apart.
 
-    A resumed run's content joins its carried text and the texts of its requests since, so the text before and after
+    A resumed run's content joins its carried text and the texts written since, so the text before and after
     a tool call or an approval reads as two paragraphs.
     """
     texts = [part for part in parts if part.strip()]
