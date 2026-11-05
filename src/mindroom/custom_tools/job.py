@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_text
@@ -142,6 +143,10 @@ class JobTools(Toolkit):
             msg = "Tool function name job is reserved for managed job controls"
             raise ValueError(msg)
         return configure_toolkit_functions(JobTools(runtime_paths), output_files=output_file_policy)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Mark ``job`` as reporting other calls: a wait on a failed job fails with that job's tool's error."""
+        return replace(function, reports_other_calls=True)
 
     async def job(  # noqa: PLR0911 - Each public action returns its own result.
         self,

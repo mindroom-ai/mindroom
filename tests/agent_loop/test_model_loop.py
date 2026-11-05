@@ -494,6 +494,27 @@ async def test_a_model_that_heeds_the_refusal_keeps_its_other_tools_and_answers(
     assert [entry["event"] for entry in _failing_tool_events(logs)] == ["failing_tool_call_refused"] * 2
 
 
+async def test_a_function_that_reports_other_calls_is_never_refused_for_failing() -> None:
+    # A wait on a failed background job fails with that job's error, which says nothing about whether the wait works.
+    requests = MAX_CONSECUTIVE_TOOL_FAILURES + 1
+    model = ScriptedModel(
+        [
+            *(calls(tool_call("boom", f"c{index}", reason=f"job {index} failed")) for index in range(requests)),
+            answer("Every job failed."),
+        ],
+    )
+    messages = _prompt()
+
+    events, record = await _run(spec(model, toolkit(boom, reports_other_calls=True)), messages)
+
+    assert [message.content for message in messages if message.role == "tool"] == [
+        f"job {index} failed" for index in range(requests)
+    ]
+    assert record.failing_tools == {}
+    assert record.content == "Every job failed."
+    assert events[-1] == LoopEnded(paused=False)
+
+
 async def test_one_batch_of_many_failing_calls_counts_as_one_failure() -> None:
     many = MAX_CONSECUTIVE_TOOL_FAILURES + 2
     model = ScriptedModel(

@@ -167,6 +167,8 @@ async def test_job_controls_built_with_output_files_offer_the_output_path_and_st
 
     assert OUTPUT_PATH_ARGUMENT in job.parameters["properties"]
     assert is_job_function(job)
+    # A wait on a failed job fails with that job's error, which says nothing about whether ``job`` works.
+    assert job.reports_other_calls
 
 
 @pytest.mark.asyncio

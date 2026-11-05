@@ -62,6 +62,8 @@ class ToolFunction:
     ``stop_after_call`` stops the run after every call of the function, and ``may_stop_run`` marks a function whose
     call stops it only when the call's outcome says so (``ToolOutcome.stop_after_call``), as a model switch for the
     current response does; either way the function controls the run (``controls_run``).
+    ``reports_other_calls`` marks a function whose calls report how other calls ended, as the job controls report a
+    background job's outcome, so the loop never counts its failed calls toward refusing it as a failing tool.
     ``injected_params`` maps each entrypoint parameter the framework supplies at call time to what it receives; the
     model never sees one, and its model-sent values are dropped unless it is a media name the schema declares.
     ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
@@ -87,6 +89,7 @@ class ToolFunction:
     gate: ToolGate | None = None
     stop_after_call: bool = False
     may_stop_run: bool = False
+    reports_other_calls: bool = False
     entrypoint: Callable[..., Any]
     injected_params: Mapping[str, InjectedValue] = field(default_factory=dict)
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)

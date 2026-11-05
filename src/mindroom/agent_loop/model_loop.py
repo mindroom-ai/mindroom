@@ -349,7 +349,8 @@ async def _run_tool_batch(
             executed.append(result)
             yield ToolCompleted(call.execution.call)
     # The calls that ran tell whether their tools work, in call order whatever order they finished in.
-    count_tool_failures(state.record.failing_tools, (call.execution for call in batch.planned))
+    ran = (call.execution for call in batch.planned if not call.function.reports_other_calls)
+    count_tool_failures(state.record.failing_tools, ran)
     count_tool_refusals(state.record.failing_tools, batch)
     progress.calls_so_far += len(executed) + sum(isinstance(call, RefusedCall) and call.counts for call in batch.calls)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
@@ -409,7 +410,8 @@ async def _answer_resumed(
                     else:
                         results.append(item[1])
             yield ToolCompleted(execution.call)
-            answered.append(execution)
+            if not function.reports_other_calls:
+                answered.append(execution)
         elif execution.confirmed is False:
             execution.is_error = True
             execution.requires_confirmation = False

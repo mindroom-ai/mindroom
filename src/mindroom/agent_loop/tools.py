@@ -167,7 +167,8 @@ def count_tool_failures(failing_tools: dict[str, FailingTool], executions: Itera
     redacted and cut to ``_MAX_QUOTED_ERROR``. A call that has not finished, such as a paused one, changes nothing.
 
     Pass only calls that ran: a call the loop answered without running it (an unknown tool, undecodable arguments, the
-    call limit, a cut-off response, a denied approval, a refusal for failing) says nothing about whether the tool works.
+    call limit, a cut-off response, a denied approval, a refusal for failing) says nothing about whether the tool works,
+    and neither does a call of a function that reports other calls (``ToolFunction.reports_other_calls``).
     A call its tool middleware answered with an error, such as a policy declining it, counts as failed, as the model
     reads it.
     """
