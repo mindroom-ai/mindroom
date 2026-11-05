@@ -42,7 +42,7 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
 12. A journal index on `(principal_id, room_id, created_ts, logical_event_id)` serves the room reads.
     Every poll repeats them, and the conversation index orders by thread first, so without it each poll sorted the room in a temporary B-tree, which the journal's hot-query rule forbids.
 13. A separate `react` tool carries reactions, sharing `matrix_message`'s per-room rate limit.
-    Its key is at most 8 characters with no whitespace, so a reaction cannot carry text to the room.
+    Its key is at most 8 characters with no whitespace, which keeps it short but not text-free: a short word or number still fits.
     Some emoji sequences, such as a couple with skin tones (10 code points), are longer and are refused.
 
 ## Rejected alternatives

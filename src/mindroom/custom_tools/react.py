@@ -9,7 +9,8 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.tool_system.authoring import Toolkit
 
-# A cap of 8 characters keeps a reaction from carrying text; a few long emoji sequences, such as a couple with skin tones, are refused.
+# A cap of 8 characters keeps a reaction key short, not text-free: a short word still fits.
+# A few long emoji sequences, such as a couple with skin tones, are refused.
 _MAX_KEY_CHARACTERS = 8
 
 
@@ -20,7 +21,7 @@ def _payload(status: str, **kwargs: object) -> str:
 def _key_error(emoji: str) -> str | None:
     """Return why ``emoji`` cannot be a reaction key, or None when it can.
 
-    A reaction acknowledges a message, so a key long enough for words, or with spaces in it, is refused as text.
+    A reaction acknowledges a message, so a key longer than the cap, or with spaces in it, is refused.
     """
     if not emoji:
         return "emoji must be a non-empty string."

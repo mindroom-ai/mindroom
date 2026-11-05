@@ -265,6 +265,7 @@ It suits a silent turn that should acknowledge what it heard without writing in 
 
 - A failed or timed-out silent turn is retried, and so is one cut off by a restart after its tools have acted, so a memory write or reaction may happen twice.
 - A heard message is skipped with a warning when the turns covering it keep failing, after the batch is halved down to that one message, or when it waits more than 10 minutes for a refetch.
+- A message whose timestamp is already older than the room's place when it arrives, such as one delayed by federation or backdated by a bridge, is not heard; MindRoom reads a room in timestamp order and logs nothing for it.
 - Heard text can carry prompt injection that drives the listed tools; read [Listening agents](../architecture/security-posture.md#listening-agents) before adding a tool to `listen.tools`.
 
 ## Naming Rules
