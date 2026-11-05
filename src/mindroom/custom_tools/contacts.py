@@ -155,7 +155,7 @@ class ContactsTools(Toolkit):
         return f"Updated contact {record.id}." + flow.own_side_terms(actor, record)
 
     async def remove_contact(self, contact_id: str) -> str:
-        """Remove a contact; the agents leave its room and the owners keep it and its history.
+        """Remove a contact; the agents leave its room, which an owner keeps only if they joined it.
 
         Either owner may remove a contact, but only the owner who declined a request may remove the declined contact.
         """

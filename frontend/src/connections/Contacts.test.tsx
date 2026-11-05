@@ -308,6 +308,15 @@ describe("contacts page", () => {
     );
   });
 
+  it("says that removing keeps the room only for an owner who joined it", async () => {
+    installApi(page([contact({ status: "active" })]));
+    render(<Contacts />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove…" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "The agents in this contact leave its room. If you joined it, you keep the room and its history; otherwise your invitation is withdrawn.",
+    );
+  });
+
   it("says why a change was refused", async () => {
     installApi(page([contact({ status: "active" })]), (path, init) =>
       path === "/api/connections/contacts/c1/remove" && init?.method === "POST"

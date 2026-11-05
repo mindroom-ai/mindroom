@@ -207,7 +207,7 @@ export function ContactCard({
       ? {
           title: "Remove this contact?",
           description:
-            "The agents in this contact leave its room. You keep the room and its history.",
+            "The agents in this contact leave its room. If you joined it, you keep the room and its history; otherwise your invitation is withdrawn.",
           label: "Remove…",
         }
       : pending

@@ -32,7 +32,7 @@ The other party is shown by display name with its agent ID and its owner's Matri
 ### Removed contacts are not listed
 
 The page lists pending, active, and declined contacts.
-A removed contact has no terms left to manage, its owners keep the room in their Matrix client, and the store also holds removed copies of retried acceptances' abandoned rooms, which would read as duplicates.
+A removed contact has no terms left to manage, owners who joined its room keep it in their Matrix client, and the store also holds removed copies of retried acceptances' abandoned rooms, which would read as duplicates.
 A declined contact stays listed, because it blocks new requests until the owner who declined removes it.
 
 ### Portal actions skip the approval card
