@@ -272,7 +272,7 @@ def test_calls_of_a_tool_that_keeps_failing_are_refused_with_its_last_error_whil
         )
 
     refusal = (
-        f"Tool boom failed on {MAX_CONSECUTIVE_TOOL_FAILURES} attempts in a row in this turn, so this call was not "
+        f"Tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests in a row in this turn, so this call was not "
         "executed. Its last error: broken link\nDon't call boom again in this turn. Tell the user what failed instead."
     )
     assert [call.execution.tool_call_id for call in batch.planned] == ["c2"]

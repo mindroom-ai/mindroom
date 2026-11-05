@@ -36,11 +36,11 @@ logger = get_logger(__name__)
 # third for a result that carries media.
 _LIMIT_ERROR_TEXT = "Tool call limit reached. Tool call {name} not executed. Don't try to execute it again."
 _FAILING_TOOL_ERROR_TEXT = (
-    "Tool {name} failed on {failures} attempts in a row in this turn, so this call was not executed. Its last error: "
+    "Tool {name} failed in {failures} requests in a row in this turn, so this call was not executed. Its last error: "
     "{error}\nDon't call {name} again in this turn. Tell the user what failed instead."
 )
 # The user reads this at the end of a reply whose run the loop ended because the model kept calling a failing tool.
-_FAILING_TOOL_STOP_TEXT = "Stopped: tool {name} failed on {failures} attempts in a row. Its last error: {error}"
+_FAILING_TOOL_STOP_TEXT = "Stopped: tool {name} failed in {failures} requests in a row. Its last error: {error}"
 # A tool whose calls ran and failed in this many batches in a row within one turn, with no success of it in between,
 # is not run again in that turn. A model that keeps resending a call the tool rejects, or retrying an integration that
 # is down, otherwise loops until the per-turn call limit, paying for a model request per attempt; a batch counts once,
@@ -243,7 +243,9 @@ def plan_tool_batch(
                 consecutive_failures=tool.failures,
             )
             text = _FAILING_TOOL_ERROR_TEXT.format(
-                name=function.name, failures=tool.failures, error=_quoted_error(tool)
+                name=function.name,
+                failures=tool.failures,
+                error=_quoted_error(tool),
             )
             calls.append(_refused(call_id, function.name, text, arguments, counts=True))
             refused_for_failures[function.name] = None

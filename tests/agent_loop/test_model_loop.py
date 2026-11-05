@@ -408,7 +408,7 @@ def flaky(ok: bool) -> str:
 
 def _failing_tool_refusal(error: str) -> str:
     return (
-        f"Tool boom failed on {MAX_CONSECUTIVE_TOOL_FAILURES} attempts in a row in this turn, so this call was not "
+        f"Tool boom failed in {MAX_CONSECUTIVE_TOOL_FAILURES} requests in a row in this turn, so this call was not "
         f"executed. Its last error: {error}\nDon't call boom again in this turn. Tell the user what failed instead."
     )
 
@@ -441,7 +441,7 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
     assert all(tool.is_error for tool in record.tools)
     # The model called it again after reading the refusal, so the run ends before another request, and the reply
     # says why after the text so far.
-    stop = f"Stopped: tool boom failed on {limit} attempts in a row. Its last error: bad link {limit}"
+    stop = f"Stopped: tool boom failed in {limit} requests in a row. Its last error: bad link {limit}"
     assert len(model.requests) == limit + 2
     assert [event.text for event in events if isinstance(event, TextDelta)][-1] == f"\n\n{stop}"
     assert record.content == f"Fetching the file.\n\n{stop}"
