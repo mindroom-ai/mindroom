@@ -400,6 +400,8 @@ class RoomPage:
 
     messages: tuple[VisibleMessage, ...]
     refresh_pending: tuple[RefreshRequest, ...]
+    # Whether rows follow the page's, past its limit or its content budgets.
+    more: bool
     last_cursor: ConversationCursor | None
     stopped_at: ConversationCursor | None
 

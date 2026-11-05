@@ -69,7 +69,7 @@ from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
 from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
-from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE, _ROOM_CURSOR_CLAUSE
+from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE, _ROOM_CURSOR_CLAUSE, _ROOM_UNTIL_CLAUSE
 from mindroom.event_journal.replies import ApprovalEnded
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
@@ -2130,9 +2130,12 @@ class TestReadingAWholeRoom:
 
         first = await alice.read_room_after(room_id=ROOM, after=None, limit=2)
         second = await alice.read_room_after(room_id=ROOM, after=first.last_cursor, limit=2)
+        last = await alice.read_room_after(room_id=ROOM, after=second.last_cursor, limit=2)
 
         assert [m.logical_event_id for m in first.messages] == ["$m0", "$m1"]
         assert [m.logical_event_id for m in second.messages] == ["$m2", "$m3"]
+        assert [m.logical_event_id for m in last.messages] == ["$m4"]
+        assert (first.more, second.more, last.more) == (True, True, False)
         with pytest.raises(ValueError, match="positive limit"):
             await alice.read_room_after(room_id=ROOM, after=None, limit=0)
 
@@ -9585,7 +9588,7 @@ class TestHotQueriesAreIndexCovered:
         ),
         "room page after a cursor": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=?"  # noqa: S608 - the production clause, not input
-            f"{_ROOM_CURSOR_CLAUSE} ORDER BY created_ts, logical_event_id LIMIT 50"
+            f"{_ROOM_CURSOR_CLAUSE}{_ROOM_UNTIL_CLAUSE} ORDER BY created_ts, logical_event_id LIMIT 50"
         ),
         "room's newest message": (
             "SELECT created_ts, logical_event_id FROM visible_messages WHERE principal_id=? AND room_id=? "

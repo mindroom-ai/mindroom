@@ -99,6 +99,7 @@ _DECODED_BYTES_PER_SEPARATOR = 56
 # spelling that does not use one.
 _CONVERSATION_CURSOR_CLAUSE = " AND (created_ts, logical_event_id) < (?, ?)"
 _ROOM_CURSOR_CLAUSE = " AND (created_ts, logical_event_id) > (?, ?)"
+_ROOM_UNTIL_CLAUSE = " AND created_ts <= ?"
 
 
 def read_conversation(
@@ -176,7 +177,8 @@ def read_room_after(
 
     ``after`` is exclusive, and ``None`` starts at the room's first message.
     ``until_ts`` leaves out messages stamped later, such as one whose sender's
-    clock runs ahead; ``None`` reads up to the room's newest.
+    clock runs ahead; ``None`` reads up to the room's newest. ``more`` says
+    whether messages follow the page's rows, past its limit or its budgets.
     The page is bounded by ``limit`` and by the same content budgets as
     ``read_conversation``, so a caller continues from ``last_cursor``. A thread
     root has no thread relation of its own and is stored at the room level, so
@@ -196,8 +198,9 @@ def read_room_after(
     cursor_clause = "" if after is None else _ROOM_CURSOR_CLAUSE
     cursor_params: tuple[object, ...] = () if after is None else (after.created_ts, after.logical_event_id)
     if until_ts is not None:
-        cursor_clause += " AND created_ts <= ?"
+        cursor_clause += _ROOM_UNTIL_CLAUSE
         cursor_params = (*cursor_params, until_ts)
+    # One row past the limit says whether more follow.
     sizes = tuple(
         transaction.fetchall(
             f"""
@@ -206,10 +209,10 @@ def read_room_after(
             ORDER BY created_ts, logical_event_id
             LIMIT ?
             """,  # noqa: S608 - a fixed column list and a fixed clause, not input
-            (principal_id, room_id, *cursor_params, limit),
+            (principal_id, room_id, *cursor_params, limit + 1),
         ),
     )
-    kept = _rows_within_content_budget(sizes)
+    kept = _rows_within_content_budget(sizes[:limit])
     rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
     rows = rows[: _rows_within_decoded_budget(rows)]
     pending = tuple(_refresh_request(row) for row in rows if row["content_json"] is None)
@@ -218,6 +221,7 @@ def read_room_after(
     return RoomPage(
         messages=messages,
         refresh_pending=pending,
+        more=len(rows) < len(sizes),
         last_cursor=(
             ConversationCursor(created_ts=messages[-1].created_ts, logical_event_id=messages[-1].logical_event_id)
             if messages
