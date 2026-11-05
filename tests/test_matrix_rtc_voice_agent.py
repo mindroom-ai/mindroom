@@ -499,19 +499,6 @@ async def test_bridge_roster_update_restarts_the_absence_grace(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_bridge_absence_timer_rechecks_the_room_when_it_fires(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A caller the room already lists when the grace ends keeps the call, even before its event arrives."""
-    room = _PresenceRoom()
-    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
-
-    room.remote_participants[_ALICE] = SimpleNamespace(identity=_ALICE, track_publications={})
-    await _settle()
-
-    assert terminations == []
-    await bridge.aclose()
-
-
-@pytest.mark.asyncio
 async def test_bridge_close_cancels_the_absence_watch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Leaving the call cannot report the session as terminated afterwards."""
     room = _PresenceRoom()

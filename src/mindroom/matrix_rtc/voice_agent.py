@@ -593,17 +593,19 @@ class RealtimeVoiceBridge:
             self._register_caller_presence_watch(session, options.on_session_terminated)
 
     def _register_caller_presence_watch(self, session: AgentSession, on_terminated: Callable[[bool], None]) -> None:
-        """End the session as not retryable once no roster participant has been in the SFU room for a while.
+        """End the session once no roster participant has been in the SFU room for a while.
 
         The call roster comes from Matrix call memberships. A client that closes without
         removing its membership (a page reload, a crash, a lost network) leaves it behind
         until it expires, hours later, unless the homeserver removes it through delayed
         events (MSC4140). Without this watch the agent would wait in an empty SFU room,
-        counted as an active call, for that whole time.
+        counted as an active call, for that whole time. The end is retryable only when
+        the agent's own SFU connection is down, because the caller may still be in the call.
         """
         room = self._room
 
         def on_absent() -> None:
+            self._caller_absent_timer = None
             if self._session is not session:
                 return
             # Losing our own SFU connection also empties the room; a fresh session can rejoin the caller.
@@ -627,7 +629,7 @@ class RealtimeVoiceBridge:
 
     def _roster_in_sfu(self) -> bool:
         """Return whether any device in the Matrix call roster is connected to the SFU room."""
-        return self._room is not None and any(
+        return any(
             participant.identity in self._participant_identities
             for participant in self._room.remote_participants.values()
         )
@@ -638,23 +640,15 @@ class RealtimeVoiceBridge:
         ``restart`` gives the roster a fresh grace: a Matrix roster update may carry a
         membership the caller just published, even for a device already in the roster.
         """
-        if self._on_callers_absent is None:
+        on_absent = self._on_callers_absent
+        if on_absent is None:
             return
         present = self._roster_in_sfu()
         if (present or restart) and self._caller_absent_timer is not None:
             self._caller_absent_timer.cancel()
             self._caller_absent_timer = None
         if not present and self._caller_absent_timer is None:
-            self._caller_absent_timer = asyncio.get_running_loop().call_later(
-                _CALLER_ABSENT_TIMEOUT_S,
-                self._end_absent_call,
-            )
-
-    def _end_absent_call(self) -> None:
-        """Report the roster absent, unless a roster device connected without an event this watch saw."""
-        self._caller_absent_timer = None
-        if self._on_callers_absent is not None and not self._roster_in_sfu():
-            self._on_callers_absent()
+            self._caller_absent_timer = asyncio.get_running_loop().call_later(_CALLER_ABSENT_TIMEOUT_S, on_absent)
 
     def _stop_caller_presence_watch(self) -> None:
         """Cancel the absence timer and stop following SFU participants."""

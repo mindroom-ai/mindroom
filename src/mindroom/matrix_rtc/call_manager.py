@@ -201,6 +201,8 @@ class _PendingFrameKey:
 
 
 _JoinResult = Literal["joined", "retry", "skip"]
+#: ``(user_id, device_id, created_ts)`` of each membership in one call roster.
+type _MembershipIdentities = frozenset[tuple[str, str, int]]
 
 
 @dataclass
@@ -215,10 +217,10 @@ class _LogicalCallState:
     session_started_ms: int = 0
     reported_failures: set[str] = field(default_factory=set)
     #: Memberships of the roster a non-retryable session end blocked; only a membership outside them rejoins.
-    blocked_memberships: frozenset[tuple[str, str, int]] | None = None
+    blocked_memberships: _MembershipIdentities | None = None
 
 
-def _membership_identities(members: Iterable[CallMember]) -> frozenset[tuple[str, str, int]]:
+def _membership_identities(members: Iterable[CallMember]) -> _MembershipIdentities:
     """Identify each call membership; a client refresh keeps its identity and a rejoin replaces it.
 
     A join carries no ``created_ts`` and is timestamped by the server; refreshes repeat
@@ -1264,7 +1266,7 @@ class CallManager:
         )
         self._track_background_task(task, event="call_session_termination_failed", room_id=room.room_id)
 
-    def _session_memberships(self, room_id: str, bridge: VoiceBridgeLike) -> frozenset[tuple[str, str, int]]:
+    def _session_memberships(self, room_id: str, bridge: VoiceBridgeLike) -> _MembershipIdentities:
         """Return the membership identities of the active or starting session that drives ``bridge``."""
         room_call = self._rooms.get(room_id)
         if room_call is None:
@@ -1331,7 +1333,7 @@ class CallManager:
         bridge: VoiceBridgeLike,
         *,
         retryable: bool,
-        ended_memberships: frozenset[tuple[str, str, int]] = frozenset(),
+        ended_memberships: _MembershipIdentities,
     ) -> None:
         lock = self._locks.setdefault(room.room_id, asyncio.Lock())
         async with lock:
@@ -1348,7 +1350,7 @@ class CallManager:
                 if not retryable:
                     # The memberships stay in room state when the caller's client left without
                     # removing them, so they cannot reopen the call; the caller's rejoin replaces them.
-                    logical_call.blocked_memberships = ended_memberships or _membership_identities(session.members)
+                    logical_call.blocked_memberships = ended_memberships
             await _stop_session(session, event="call_failed_session_stop_failed")
             if room_call.session is session:
                 room_call.session = None
