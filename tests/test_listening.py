@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -717,11 +718,16 @@ async def test_hourly_cap_skips_and_keeps_marker(
     await listening.say("$a", 10)
     await listening.service._poll_once(T0 + 100)
     await listening.say("$b", 200)
+    reader = listening.bot.conversation_reader
+    reads = AsyncMock(wraps=reader.read_room_after)
+    monkeypatch.setattr(reader, "read_room_after", reads)
 
     with capture_logs() as logs:
         await listening.service._poll_once(T0 + 300)
         await listening.service._poll_once(T0 + 400)
 
+    # A capped agent's rooms are not even read until a turn may start.
+    reads.assert_not_awaited()
     assert len(listening.turns.contexts) == 1
     assert listening.marker_event() == "$a"
     skips = [log for log in logs if "hourly" in log["event"]]
@@ -734,6 +740,76 @@ async def test_hourly_cap_skips_and_keeps_marker(
 
 
 @pytest.mark.parametrize("error_replies", [False, True], ids=["raises", "fails"])
+async def test_the_hourly_cap_counts_each_turn_from_its_own_start(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that starts after another room's long turn counts from when it started, not from when the poll did."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"rooms": [ROOM, STUDIO], "max_runs_per_hour": 2})
+    elapsed = [0.0]
+    monkeypatch.setattr(service_module, "time", SimpleNamespace(time=time.time, monotonic=lambda: elapsed[0]))
+
+    async def two_minutes() -> None:
+        elapsed[0] += 120
+
+    await listening.service._poll_once(T0)
+    await listening.say("$lobby", 10)
+    await admit(listening.journal, "$studio", room_id=STUDIO, sender=ALICE, ts=_ms(10))
+    listening.turns.meanwhile = two_minutes
+    # The lobby's turn starts at 100 and takes two minutes, so the studio's starts at 220.
+    await listening.service._poll_once(T0 + 100)
+    listening.turns.meanwhile = None
+    await listening.say("$lobby-2", 3_000)
+    await admit(listening.journal, "$studio-2", room_id=STUDIO, sender=ALICE, ts=_ms(3_000))
+
+    # An hour after the lobby's turn only it has left the window, so one more turn may start, not two.
+    await listening.service._poll_once(T0 + 100 + 3_601)
+
+    assert listening.turns.heard_in(ROOM) == [["$lobby"], ["$lobby-2"]]
+    assert listening.turns.heard_in(STUDIO) == [["$studio"]]
+
+
+async def test_a_reload_governs_every_turn_that_starts_after_it(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload while a room is read leaves its turn to the next poll, and the rooms after it read the new config."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"rooms": [ROOM, STUDIO]})
+    reloaded = listening.config.model_copy(deep=True)
+    listen = reloaded.agents["scribe"].listen
+    assert listen is not None
+    listen.tools = ["react"]
+    current = {"config": listening.config}
+    service = ListeningService(
+        runtime_paths=listening.runtime_paths,
+        config_provider=lambda: current["config"],
+        bots=lambda: {"scribe": cast("AgentBot", listening.bot)},
+        agent_reply_memberships=isolated_membership_index(),
+    )
+    await service._poll_once(T0)
+    await listening.say("$lobby", 10)
+    await admit(listening.journal, "$studio", room_id=STUDIO, sender=ALICE, ts=_ms(10))
+    await record_room_history_recovery(listening.journal, ROOM)
+
+    async def reload_while_the_lobby_is_read(*, room_id: str, thread_id: str | None) -> None:
+        del room_id, thread_id
+        current["config"] = reloaded
+
+    hydrator = listening.bot.conversation_reader.hydrator
+    cast("AsyncMock", hydrator.ensure_hydrated).side_effect = reload_while_the_lobby_is_read
+
+    await service._poll_once(T0 + 100)
+
+    assert listening.turns.heard_in(ROOM) == []
+    assert listening.turns.heard_in(STUDIO) == [["$studio"]]
+    await service._poll_once(T0 + 110)
+
+    assert listening.turns.heard_in(ROOM) == [["$lobby"]]
+    assert [ctx.tool_names for ctx in listening.turns.contexts] == [("react",), ("react",)]
+
+
 async def test_turn_error_keeps_marker(listening: _Listening, error_replies: bool) -> None:
     """A turn that raises, or ends with a failure, keeps the marker and is retried on the next poll."""
     await listening.service._poll_once(T0)

@@ -4,8 +4,9 @@ Each agent keeps a durable marker per room (``ListeningMarkers``), and each poll
 after it. What the agent wrote, and what senders it may not hear from wrote, is passed over; the rest waits until
 nothing the agent hears has been said for ``quiet_seconds``, or until the oldest of it is ten times that old, then one
 silent turn hears at most ``max_messages`` of it, no more than fits its model's context window, and the marker moves
-past what that turn heard. A turn the hourly cap holds back keeps the marker, and the agent's rooms take turns at the
-cap, least recently run first.
+past what that turn heard. While the hourly cap holds an agent back, its rooms wait unread and keep their markers, and
+they take turns at the cap, least recently run first. Each room reads the current config, and a reload while it is read
+leaves its turn to the next poll, so a turn always starts under the config of its start.
 
 No room stalls for good: a turn that keeps failing hears fewer messages until one message alone fails, which is then
 skipped, and a message whose refetch never arrives is skipped after a while. Each skip is logged, and a skipped message
@@ -61,10 +62,9 @@ _QUIET_PAGES = 5
 
 @dataclass(frozen=True)
 class _Listener:
-    """One agent that listens, its settings, and the IDs of the rooms it listens in."""
+    """One agent that listens and the IDs of the rooms it listens in."""
 
     agent_name: str
-    listen: ListenConfig
     room_ids: tuple[str, ...]
 
 
@@ -91,10 +91,18 @@ def _cursor(message: ResolvedVisibleMessage) -> ConversationCursor:
     return ConversationCursor(created_ts=message.timestamp, logical_event_id=message.event_id)
 
 
+def _listening_in(config: Config, runtime_paths: RuntimePaths, agent_name: str, room_id: str) -> ListenConfig | None:
+    """Return the agent's listening settings while it listens in the room, or None."""
+    agent = config.agents.get(agent_name)
+    if agent is None or agent.listen is None or room_id not in resolve_room_aliases(agent.listen.rooms, runtime_paths):
+        return None
+    return agent.listen
+
+
 def _listeners(config: Config, runtime_paths: RuntimePaths) -> list[_Listener]:
     """Return every agent with ``listen``, which config validation allows only on shared agents."""
     return [
-        _Listener(name, agent.listen, tuple(resolve_room_aliases(agent.listen.rooms, runtime_paths)))
+        _Listener(name, tuple(resolve_room_aliases(agent.listen.rooms, runtime_paths)))
         for name, agent in config.agents.items()
         if agent.listen is not None
     ]
@@ -184,10 +192,17 @@ class ListeningService:
             await asyncio.sleep(_POLL_SECONDS)
 
     async def _poll_once(self, now: float) -> None:
-        """Hear every listened room each running agent has joined, and run the silent turns that are due at ``now``."""
-        config = self.config_provider()
+        """Hear every listened room each running agent has joined, and run the silent turns that are due.
+
+        ``now`` is when the poll starts; later rooms read the clock again, as the turns before them take time.
+        """
+        started = time.monotonic()
+
+        def clock() -> float:
+            return now + time.monotonic() - started
+
         bots = self.bots()
-        for listener in _listeners(config, self.runtime_paths):
+        for listener in _listeners(self.config_provider(), self.runtime_paths):
             bot = bots.get(listener.agent_name)
             client = bot.client if bot is not None and bot.running else None
             if bot is None or client is None:
@@ -198,9 +213,7 @@ class ListeningService:
                     continue
                 # One room that cannot be heard, or whose turn fails, must not stop the others.
                 try:
-                    if self._is_contact_room(config, listener.agent_name, room_id):
-                        continue
-                    await self._hear(bot, listener, room_id, config, now)
+                    await self._hear(bot, listener.agent_name, room_id, clock)
                 except Exception:
                     logger.exception(
                         "Listening failed in a room; it is heard again on the next poll",
@@ -208,14 +221,33 @@ class ListeningService:
                         room_id=room_id,
                     )
 
-    async def _hear(self, bot: AgentBot, listener: _Listener, room_id: str, config: Config, now: float) -> None:
-        """Hear one room after its marker, and run its silent turn when one is due."""
-        agent_name, listen = listener.agent_name, listener.listen
-        reader = bot.conversation_reader
+    async def _hear(self, bot: AgentBot, agent_name: str, room_id: str, clock: Callable[[], float]) -> None:
+        """Hear one room under the current config: mark where it starts, or, unless the hourly cap holds, read it."""
+        config = self.config_provider()
+        listen = _listening_in(config, self.runtime_paths, agent_name, room_id)
+        if listen is None or self._is_contact_room(config, agent_name, room_id):
+            return
+        now = clock()
         marker = self._markers.get(agent_name, room_id)
         if marker is None:
-            await self._mark(agent_name, room_id, _first_marker(await reader.latest_room_cursor(room_id), now))
-            return
+            latest = await bot.conversation_reader.latest_room_cursor(room_id)
+            await self._mark(agent_name, room_id, _first_marker(latest, now))
+        elif not self._at_cap(agent_name, room_id, listen, now):
+            await self._hear_after(bot, agent_name, room_id, listen, config, marker, clock, now)
+
+    async def _hear_after(
+        self,
+        bot: AgentBot,
+        agent_name: str,
+        room_id: str,
+        listen: ListenConfig,
+        config: Config,
+        marker: ConversationCursor,
+        clock: Callable[[], float],
+        now: float,
+    ) -> None:
+        """Hear one room after its marker, and run its silent turn when one is due."""
+        reader = bot.conversation_reader
         # What a sync gap skipped is older than what came after it, so it is installed before the marker can pass it.
         await reader.hydrator.repair_room_history(room_id)
         # The page stops before the first message owing a refetch, and the marker waits for it, for a while. A message
@@ -238,14 +270,16 @@ class ListeningService:
         except ReplyMembershipPendingError:
             logger.info("Listening waits for room membership to resolve", agent=agent_name, room_id=room_id)
             return
-        if not due or not self._start_run(agent_name, room_id, listen, now):
+        # A reload while the room was read decides again on the next poll, so the turn runs under the current config.
+        if not due or self.config_provider() is not config or not self._start_run(agent_name, room_id, listen, clock()):
             return
-        await self._run_turn(bot, listener, room_id, config, marker, heard, page.last_cursor)
+        await self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, page.last_cursor)
 
     async def _run_turn(
         self,
         bot: AgentBot,
-        listener: _Listener,
+        agent_name: str,
+        listen: ListenConfig,
         room_id: str,
         config: Config,
         marker: ConversationCursor,
@@ -256,7 +290,6 @@ class ListeningService:
 
         A turn that fails or runs out of time raises and keeps the marker, so the same messages are heard again.
         """
-        agent_name = listener.agent_name
         failures = self._failures.get((agent_name, room_id))
         if failures is None or failures.marker != marker:
             failures = _Failures(marker)
@@ -267,7 +300,7 @@ class ListeningService:
                     agent_name=agent_name,
                     room_id=room_id,
                     heard=batch,
-                    listen=listener.listen,
+                    listen=listen,
                     config=config,
                     runtime_paths=self.runtime_paths,
                 )
@@ -276,7 +309,7 @@ class ListeningService:
                     agent_name=agent_name,
                     room_id=room_id,
                     heard=batch,
-                    listen=listener.listen,
+                    listen=listen,
                     config=config,
                     runtime_paths=self.runtime_paths,
                 )
@@ -432,26 +465,32 @@ class ListeningService:
             after = page.last_cursor
         return False
 
+    def _at_cap(self, agent_name: str, room_id: str, listen: ListenConfig, now: float) -> bool:
+        """Return whether the agent's hourly cap holds its turns back at ``now``, reporting it once per room."""
+        runs = [started for started in self._runs.get(agent_name, []) if started > now - _HOUR_SECONDS]
+        self._runs[agent_name] = runs
+        if len(runs) < listen.max_runs_per_hour:
+            return False
+        if (agent_name, room_id) not in self._capped:
+            self._capped.add((agent_name, room_id))
+            logger.warning(
+                "Listening waits: the agent reached its hourly cap; what it hears is kept for a later turn",
+                agent=agent_name,
+                room_id=room_id,
+                max_runs_per_hour=listen.max_runs_per_hour,
+            )
+        return True
+
     def _start_run(self, agent_name: str, room_id: str, listen: ListenConfig, now: float) -> bool:
-        """Count one silent turn starting at ``now``, or report the hourly cap once and return False.
+        """Count one silent turn starting at ``now``, unless the hourly cap holds it back.
 
         A turn that fails counts too, so a failing room retries at most ``max_runs_per_hour`` times an hour.
         """
-        runs = [started for started in self._runs.get(agent_name, []) if started > now - _HOUR_SECONDS]
-        self._runs[agent_name] = runs
-        if len(runs) >= listen.max_runs_per_hour:
-            if (agent_name, room_id) not in self._capped:
-                self._capped.add((agent_name, room_id))
-                logger.warning(
-                    "Listening skipped a silent turn: the agent reached its hourly cap; what it heard waits",
-                    agent=agent_name,
-                    room_id=room_id,
-                    max_runs_per_hour=listen.max_runs_per_hour,
-                )
+        if self._at_cap(agent_name, room_id, listen, now):
             return False
         self._capped.discard((agent_name, room_id))
         self._last_run[agent_name, room_id] = now
-        runs.append(now)
+        self._runs[agent_name].append(now)
         return True
 
     def _waited(self, agent_name: str, room_id: str, stopped_at: ConversationCursor | None, now: float) -> float:
