@@ -3529,6 +3529,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.main"
 depends_on = [
+    "mindroom.config.contacts",
     "mindroom.config.judgment",
     "mindroom.agent_policy",
     "mindroom.config.memory",
