@@ -32,9 +32,12 @@ from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.memory.functions import list_all_agent_memories
 from mindroom.response_turn import HandledAttempt
+from mindroom.script_runs.models import ScriptToolGrant
+from mindroom.script_runs.policy import resolve_script_launch_grants
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.tool_system.events import FailedReply
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.access_schema_support import joined_members_response, with_responder_access
 from tests.authorization_helpers import isolated_membership_index, make_test_tool_runtime_context
 from tests.conftest import (
@@ -1220,6 +1223,41 @@ async def test_silent_turn_reacts_and_remembers_only_through_its_allowlist(
     assert sent["content"]["m.relates_to"] == {"rel_type": "m.annotation", "event_id": "$tea", "key": "👍"}
     memories = await list_all_agent_memories("scribe", config, runtime_paths, limit=10)
     assert any("Alice prefers tea." in memory.get("memory", "") for memory in memories)
+
+
+async def test_a_script_started_by_a_silent_turn_is_granted_only_listen_tools(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that builds its own catalog from the turn's context, as script does, keeps to listen.tools too."""
+    config = _config(tmp_path, {"tools": ["react"]})
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    grants: list[tuple[ScriptToolGrant, ...]] = []
+
+    async def launch_a_script(*_args: object, **_kwargs: object) -> TurnResult:
+        context = get_tool_runtime_context()
+        assert context is not None
+        grants.append(resolve_script_launch_grants(context))
+        return TurnResult(text="")
+
+    monkeypatch.setattr(turn_module, "ai_response", launch_a_script)
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    await run_silent_turn(
+        bot=cast("AgentBot", bot),
+        agent_name="scribe",
+        room_id=ROOM,
+        heard=[_heard_message("$a")],
+        listen=listen,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    # The agent's matrix_message, and the attachments it brings, stay out of reach.
+    assert grants == [(ScriptToolGrant("react", "react"),)]
 
 
 async def test_usage_recorded_as_listening(

@@ -1,7 +1,8 @@
 """One silent turn: a listening agent goes over what it heard in a room, acts only through its allowlist, and says nothing.
 
 The turn is the agent itself, with its identity, instructions, and memory, but it offers only the tools ``listen.tools``
-names, hides approval-gated tools and interactive questions, and drops its text. Each turn stands alone: it stores no
+names, hides approval-gated tools and interactive questions, and drops its text. Its tool context keeps to the same list,
+so a tool that offers others in turn, such as a script's, offers none beyond it. Each turn stands alone: it stores no
 run, so nothing it heard stays in any history, a redacted message included, and only its usage is kept, as listening,
 since nobody asked for it. What it learns lasts only through its tools, such as memory.
 """
@@ -9,11 +10,14 @@ since nobody asked for it. What it learns lasts only through its tools, such as 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.ai import ai_response
 from mindroom.config.resolution import entity_timezone
+from mindroom.delegation.personas import persona_allows
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.registry import model_token_counter
@@ -32,10 +36,17 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import TokenCounter
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.tool_system.tool_function import ToolFunction
 
 # What the heard messages may take of the turn model's context window; the rest holds the agent's instructions, its
 # memory, its tools, and the turn's own requests and answer.
 _HEARD_WINDOW_SHARE = 0.5
+
+
+def _listed(tools: tuple[str, ...], function: ToolFunction) -> bool:
+    """Return whether ``listen.tools`` names ``function``, by the registered toolkit it comes from or by its own name."""
+    toolkit = function.registered_toolkit or function.toolkit
+    return toolkit is not None and persona_allows(tools, toolkit, function.name)
 
 
 def _heard_tag(message: ResolvedVisibleMessage, timezone: str) -> str:
@@ -134,8 +145,12 @@ async def run_silent_turn(
         reply_to_event_id=None,
         session_id=session_id,
     )
-    # No requester asked for the turn, so its tools run as the agent's own account in the room.
-    context = bot.tool_runtime_support.build_turn_context(target, user_id=None, active_model_name=listen.model)
+    # No requester asked for the turn, so its tools run as the agent's own account in the room, and a tool that builds
+    # its own catalog, such as script, keeps to listen.tools as the turn's own build does.
+    context = replace(
+        bot.tool_runtime_support.build_turn_context(target, user_id=None, active_model_name=listen.model),
+        tool_function_filter=partial(_listed, tuple(listen.tools)),
+    )
     turn = ResponseTurnContext(
         entity_label=agent_name,
         session_id=session_id,

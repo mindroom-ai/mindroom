@@ -9188,6 +9188,7 @@ path = "mindroom.listening.turn"
 depends_on = [
     "mindroom.ai",
     "mindroom.config.resolution",
+    "mindroom.delegation.personas",
     "mindroom.prompt_message_tags",
     "mindroom.providers.registry",
     "mindroom.response_turn",
