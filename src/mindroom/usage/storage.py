@@ -27,6 +27,7 @@ type IndependentUsageKind = Literal[
     "dynamic_workflow",
     "knowledge_chunk_context",
     "knowledge_graph",
+    "listening",
     "live_voice",
     "realtime_voice",
     "skill_learning",
@@ -49,14 +50,15 @@ SYSTEM_USAGE_STORAGE_NAME = "system"
 SYSTEM_USAGE_OWNER = HistoryScope(kind="agent", scope_id=SYSTEM_USAGE_ENTITY)
 
 
-def run_usage_snapshot(record: AnyRunRecord) -> dict[str, object]:
+def run_usage_snapshot(record: AnyRunRecord, *, kind: IndependentUsageKind | None = None) -> dict[str, object]:
     """Return the ledger snapshot of ``record``'s usage, without the times of the save that records it.
 
     It keeps the run's attribution, its requester, its token counters in total and per model, and its requests: those
     mid-turn compaction carried out of its messages, then those its messages answered (``message_request_snapshot``),
     never conversation content. A run resumed from a row worker code wrote can hold values of any shape: an
     attribution value that is not a scalar is left out, and a parent or a counter of another shape becomes ``False``
-    for the reporter (``project_token_counters``).
+    for the reporter (``project_token_counters``). ``kind`` records the run as that helper, as a turn no requester
+    asked for is, instead of as a conversation's run.
     """
     team_id = record.team_id if isinstance(record, TeamRunRecord) else None
     attribution = {
@@ -82,6 +84,8 @@ def run_usage_snapshot(record: AnyRunRecord) -> dict[str, object]:
         *_carried_requests(record, metadata),
         *(request for request in requests if request is not None),
     ]
+    if kind is not None:
+        snapshot["kind"] = kind
     return snapshot
 
 

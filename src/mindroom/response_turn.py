@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.usage.storage import IndependentUsageKind
 
 logger = get_logger(__name__)
 
@@ -352,8 +353,11 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for authored subagents: their authored prompt and tool subset.
     persona: SubagentPersona | None = None
-    # Set only for contact turns: the agent's own tools the turn may offer, with no skills or knowledge.
+    # Set only for contact turns and silent listening turns: the agent's own tools the turn may offer, with no skills
+    # or knowledge.
     tool_names: tuple[str, ...] | None = None
+    # Set only for a turn no requester asked for, such as a silent listening turn: the helper its usage counts as.
+    usage_kind: IndependentUsageKind | None = None
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
     # Which events this turn's history derives from are redacted, each with the source a legacy summary consumed

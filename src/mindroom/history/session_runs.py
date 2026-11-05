@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_ids import is_listening_session
 from mindroom.session_storage.store import logged_runs
 from mindroom.session_storage.summary_rows import read_redaction_basis
 
@@ -76,11 +77,15 @@ class _DueScan:
 
 
 def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[str, int]]:
-    """Return ``(session_id, updated_at)`` of ``storage``'s conversations updated after ``since``, oldest first."""
+    """Return ``(session_id, updated_at)`` of ``storage``'s conversations updated after ``since``, oldest first.
+
+    A listening agent's silent turns are no conversation: what they heard reaches memory or anything else only through
+    the tools the turn was allowed.
+    """
     return [
         (session_id, updated_at)
         for session_id, updated_at in storage.list_updated_sessions(since=since)
-        if _WORKFLOW_SESSION_MARKER not in session_id
+        if _WORKFLOW_SESSION_MARKER not in session_id and not is_listening_session(session_id)
     ]
 
 

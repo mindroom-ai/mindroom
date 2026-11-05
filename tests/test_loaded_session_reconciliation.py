@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.usage.storage import IndependentUsageKind
 
 pytestmark = pytest.mark.asyncio
 
@@ -408,9 +409,10 @@ async def test_a_delegating_turn_leaves_its_parent_run_in_its_loaded_session_as_
         session: ConversationSession,
         *,
         replays: Callable[[AnyRunRecord], bool] | None,
+        usage_kind: IndependentUsageKind | None,
     ) -> Persist[AnyRunRecord]:
         persisted.append(session)
-        return persist_to(store, session, replays=replays)
+        return persist_to(store, session, replays=replays, usage_kind=usage_kind)
 
     monkeypatch.setattr(run_storage, "persist_to", recording_persist_to)
     store = _store("leader", config, paths)

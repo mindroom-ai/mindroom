@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import SaveOutcome
     from mindroom.session_storage.types import ConversationSession
+    from mindroom.usage.storage import IndependentUsageKind
 
 REQUESTER = "@alice:example.org"
 
@@ -912,8 +913,9 @@ async def test_a_fresh_child_hands_its_parent_the_record_its_run_ended_with_not_
         session: ConversationSession,
         *,
         replays: Callable[[AnyRunRecord], bool] | None = None,
+        usage_kind: IndependentUsageKind | None = None,
     ) -> Callable[[AnyRunRecord], Awaitable[None]]:
-        persist = persist_to(store, session, replays=replays)
+        persist = persist_to(store, session, replays=replays, usage_kind=usage_kind)
 
         async def plant(record: AnyRunRecord) -> None:
             # Stands in for a stored row that differs from the record the child's run handed over.

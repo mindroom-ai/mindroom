@@ -471,6 +471,7 @@ def _begin_attempt(
             record,
             is_empty=_is_empty_reply(stream_state, record),
         ),
+        usage_kind=run_context.turn.usage_kind,
     )
     attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
