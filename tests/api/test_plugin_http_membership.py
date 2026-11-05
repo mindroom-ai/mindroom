@@ -18,6 +18,7 @@ from mindroom.api.app_state import ensure_app_state
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
+from mindroom.orchestration import plugin_http_runtime
 from mindroom.orchestration.config_updates import build_config_update_plan
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
@@ -105,6 +106,22 @@ async def test_joined_members_raising_503() -> None:
     client.joined_members = AsyncMock(side_effect=TimeoutError("homeserver timed out"))
     with pytest.raises(HTTPException) as caught:
         await require_room_member(_request(_bound(client)), ROOM, "@alice:example.org")
+    assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
+
+
+@pytest.mark.asyncio
+async def test_joined_members_that_never_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Matrix call that hangs gives up after the lookup timeout with 503, never holding the request open."""
+    monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
+    client = _client()
+
+    async def never_answers(_room_id: str) -> None:
+        await asyncio.Event().wait()
+
+    client.joined_members = never_answers
+    with pytest.raises(HTTPException) as caught:
+        async with asyncio.timeout(5):
+            await require_room_member(_request(_bound(client)), ROOM, "@alice:example.org")
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
 
 

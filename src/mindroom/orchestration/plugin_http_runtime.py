@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import nio
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _UNAVAILABLE = "Room membership is unavailable."
+# As long as the computers API waits for the same membership check.
+_LOOKUP_TIMEOUT_SECONDS = 20
 
 
 def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClient | None:
@@ -48,9 +51,10 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
         if client is None:
             raise HTTPException(503, _UNAVAILABLE)
         try:
-            response = await client.joined_members(room_id)
+            async with asyncio.timeout(_LOOKUP_TIMEOUT_SECONDS):
+                response = await client.joined_members(room_id)
         except Exception as error:
-            # A failed lookup leaves membership unknown, which must never let the caller through.
+            # A failed or timed-out lookup leaves membership unknown, which must never let the caller through.
             logger.warning("Room membership lookup failed", room_id=room_id, error_type=type(error).__name__)
             raise HTTPException(503, _UNAVAILABLE) from None
         if not isinstance(response, nio.JoinedMembersResponse):
