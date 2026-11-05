@@ -513,7 +513,7 @@ async def test_one_batch_of_many_failing_calls_counts_as_one_failure() -> None:
 
 
 async def test_calls_the_loop_refused_without_running_leave_the_streak_alone() -> None:
-    # Undecodable arguments, unknown tools and the call limit say nothing about whether a tool works.
+    # Undecodable arguments and unknown tools say nothing about whether a tool works.
     limit = MAX_CONSECUTIVE_TOOL_FAILURES
     model = ScriptedModel(
         [
@@ -535,10 +535,11 @@ async def test_calls_the_loop_refused_without_running_leave_the_streak_alone() -
     assert not _failing_tool_events(logs)
 
 
-async def test_call_limit_refusals_do_not_end_the_run_before_the_model_answers() -> None:
+async def test_calls_past_the_call_limit_leave_the_streak_alone() -> None:
     model = ScriptedModel(
         [
-            calls(*(tool_call("boom", f"c{index}", reason="bad link") for index in range(12))),
+            calls(tool_call("boom", "runs-1", reason="bad link"), tool_call("boom", "runs-2", reason="bad link")),
+            calls(tool_call("boom", "past-the-limit", reason="bad link")),
             answer("Stopping here."),
         ],
     )
@@ -547,6 +548,8 @@ async def test_call_limit_refusals_do_not_end_the_run_before_the_model_answers()
     with capture_logs() as logs:
         events, record = await _run(spec(model, toolkit(boom), max_tool_calls_per_turn=2), messages)
 
+    # Only the batch whose calls ran counts; a call refused for the limit says nothing about whether the tool works.
+    assert record.failing_tools == {"boom": FailingTool(failures=1, last_error="bad link")}
     assert record.content == "Stopping here."
     assert events[-1] == LoopEnded(paused=False)
     assert not _failing_tool_events(logs)

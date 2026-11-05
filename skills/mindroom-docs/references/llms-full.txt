@@ -22615,7 +22615,7 @@ The model gets the tool's last error and is told to stop calling it; the run's o
 | `tool_name` | The refused tool |
 | `consecutive_failures` | Model requests since the tool's last success in which it failed |
 
-Check the tool's `tool_call_failed` warnings for the turn: one repeated error usually means an integration that is down, an expired grant, or arguments the model keeps resending.
+The refused call's result quotes the tool's last error, and a tool that raises also logs each failure as `tool_call_failed`; one repeated error usually means an integration that is down, an expired grant, or arguments the model keeps resending.
 
 ### `failing_tool_ended_run`
 

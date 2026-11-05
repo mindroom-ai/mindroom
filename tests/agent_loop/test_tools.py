@@ -26,6 +26,7 @@ from mindroom.agent_loop.tools import (
     ToolBatch,
     count_tool_failures,
     dispatch_tool_calls,
+    failing_tool_stop_text,
     media_follow_up,
     offered_toolkits,
     plan_tool_batch,
@@ -246,6 +247,24 @@ def test_tool_failures_count_once_per_batch_until_the_tool_succeeds() -> None:
     count_tool_failures(failing, [ToolExecution(tool_call_id="7", tool_name="a", is_error=False, result="ok")])
 
     assert failing == {}
+
+
+def test_a_failing_tool_keeps_its_last_error_redacted_and_cut_for_the_room_to_read() -> None:
+    url = "https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1&tempauth=v1.secret"
+    failing: dict[str, FailingTool] = {}
+
+    count_tool_failures(
+        failing,
+        [ToolExecution(tool_call_id="1", tool_name="download", is_error=True, result=f"403 for {url} {'x' * 1000}")],
+    )
+
+    # The refusal and the line that ends the reply quote the kept error, so neither carries the credential.
+    error = failing["download"].last_error
+    assert error is not None
+    assert error.startswith("403 for https://contoso-my.sharepoint.com/")
+    assert "tempauth=***redacted***" in error
+    assert "v1.secret" not in failing_tool_stop_text("download", failing["download"])
+    assert len(error) <= 500
 
 
 def test_failing_tools_round_trip_through_the_stored_record() -> None:

@@ -13,6 +13,7 @@ from mindroom.llm.events import ToolProgress
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -48,7 +49,8 @@ _FAILING_TOOL_STOP_TEXT = (
 # rejects, or retrying an integration that is down, otherwise loops until the per-turn call limit, paying for a model
 # request per attempt; a batch counts once, however many of its calls failed, since it cost one request.
 MAX_CONSECUTIVE_TOOL_FAILURES = 8
-# The refusal quotes this much of the tool's last error, enough to say what failed.
+# A failing tool keeps this much of its last error, redacted, for the refusal the model reads and the line that ends a
+# reply in the room: enough to say what failed.
 _MAX_QUOTED_ERROR = 500
 # The model writes the name of a tool it was not offered, so the log keeps only this much of it.
 _MAX_LOGGED_TOOL_NAME = 100
@@ -161,8 +163,8 @@ def count_tool_failures(failing_tools: dict[str, FailingTool], executions: Itera
     """Fold one batch's calls that ran into ``failing_tools``, the run's failing tools by name.
 
     A tool with a call of the batch that succeeded leaves ``failing_tools``. A tool with only failed calls in the batch
-    counts one more failure, however many of its calls failed, and keeps the error of the last of them in call order. A
-    call that has not finished, such as a paused one, changes nothing.
+    counts one more failure, however many of its calls failed, and keeps the error of the last of them in call order,
+    redacted and cut to ``_MAX_QUOTED_ERROR``. A call that has not finished, such as a paused one, changes nothing.
 
     Pass only calls that ran: a call the loop answered without running it (an unknown tool, undecodable arguments, the
     call limit, a cut-off response, a denied approval, a refusal for failing) says nothing about whether the tool works.
@@ -182,16 +184,23 @@ def count_tool_failures(failing_tools: dict[str, FailingTool], executions: Itera
         if name not in succeeded:
             tool = failing_tools.setdefault(name, FailingTool())
             tool.failures += 1
-            tool.last_error = error
+            tool.last_error = None if error is None else redact_sensitive_text(error, max_length=_MAX_QUOTED_ERROR)
+
+
+def count_tool_refusals(failing_tools: dict[str, FailingTool], batch: ToolBatch) -> str | None:
+    """Count a refusal for each tool ``batch`` refused for failing, and return one an earlier batch refused too, if any.
+
+    The model read that earlier refusal telling it to stop calling the tool, so the run ends. Several refusals of a
+    tool in one batch count once, since the model had read none of them.
+    """
+    for name in batch.refused_for_failures:
+        failing_tools[name].refusals += 1
+    return next((name for name in batch.refused_for_failures if failing_tools[name].refusals > 1), None)
 
 
 def failing_tool_stop_text(name: str, tool: FailingTool) -> str:
     """Return the line that ends a reply whose run the loop ended because the model kept calling ``name``."""
-    return _FAILING_TOOL_STOP_TEXT.format(name=name, failures=tool.failures, error=_quoted_error(tool))
-
-
-def _quoted_error(tool: FailingTool) -> str:
-    return (tool.last_error or "unknown")[:_MAX_QUOTED_ERROR]
+    return _FAILING_TOOL_STOP_TEXT.format(name=name, failures=tool.failures, error=tool.last_error or "unknown")
 
 
 def plan_tool_batch(
@@ -207,10 +216,10 @@ def plan_tool_batch(
 
     A call naming no offered function, or whose arguments cannot be decoded, is refused with an error answer, logged
     for ``entity`` without its arguments, and never counts toward the limit. Of the rest, each call past
-    ``max_tool_calls_per_turn`` is refused with a limit error instead of running, and each call of a tool that failed
-    in ``MAX_CONSECUTIVE_TOOL_FAILURES`` batches since its last success by ``failing_tools`` is refused with the tool's last error,
-    logged, and named in the batch's ``refused_for_failures``. An admitted call whose function's gate pauses its run is
-    planned paused, with the flags its stored execution carries.
+    ``max_tool_calls_per_turn`` is refused with a limit error instead of running, and each call of a tool that
+    ``failing_tools`` says failed in ``MAX_CONSECUTIVE_TOOL_FAILURES`` batches since its last success is refused with
+    the tool's last error, logged, and named in the batch's ``refused_for_failures``. An admitted call whose function's
+    gate pauses its run is planned paused, with the flags its stored execution carries.
     """
     refused_for_failures: dict[str, None] = {}
     calls: list[PlannedCall | RefusedCall] = []
@@ -246,7 +255,7 @@ def plan_tool_batch(
             text = _FAILING_TOOL_ERROR_TEXT.format(
                 name=function.name,
                 failures=tool.failures,
-                error=_quoted_error(tool),
+                error=tool.last_error or "unknown",
             )
             calls.append(_refused(call_id, function.name, text, arguments, counts=True))
             refused_for_failures[function.name] = None
@@ -457,6 +466,7 @@ __all__ = [
     "ToolBatch",
     "answered_tool_batch",
     "count_tool_failures",
+    "count_tool_refusals",
     "dispatch_tool_calls",
     "failed_answer",
     "failing_tool_stop_text",
