@@ -251,7 +251,8 @@ A listening agent skips contact rooms, where only a reply passes the contact's m
 Everyone in a listened room whom the agent may answer is heard, including people who never addressed it.
 Heard text is not extracted into memory automatically, and a silent turn stores no run in session history, so a heard message that is later redacted does not linger in a stored run.
 What a silent turn writes with its `memory` tool, though, is the agent's shared memory: heard text can resurface in the agent's replies in other rooms and to other users.
-Leave `memory` out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
+A listed tool that writes workspace files, such as `file`, `coding`, `shell`, `python`, or `script`, can write heard text anywhere it may write, `MEMORY.md` included; no call in a silent turn may save its result to a file with `mindroom_output_path`.
+Leave `memory` and tools that write files out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
 
 A silent turn records its usage under the kind `listening` (see [Usage](../usage.md)).
 [Budgets](../budgets.md) do not apply, because no requester asked for the turn.

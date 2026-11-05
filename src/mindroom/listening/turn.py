@@ -2,7 +2,8 @@
 
 The turn is the agent itself, with its identity, instructions, and memory, but it offers only the tools ``listen.tools``
 names, hides approval-gated tools and interactive questions, and drops its text. Its tool context keeps to the same list,
-so a tool that offers others in turn, such as a script's, offers none beyond it. Each turn stands alone: it stores no
+so a tool that offers others in turn, such as a script's, offers none beyond it, and no call may name a workspace file
+for its result, which heard text would otherwise choose. Each turn stands alone: it stores no
 run, so nothing it heard stays in any history, a redacted message included, and only its usage is kept, as listening,
 since nobody asked for it. What it learns lasts only through its tools, such as memory.
 """
@@ -150,6 +151,7 @@ async def run_silent_turn(
     context = replace(
         bot.tool_runtime_support.build_turn_context(target, user_id=None, active_model_name=listen.model),
         tool_function_filter=partial(_listed, tuple(listen.tools)),
+        tool_output_paths=False,
     )
     turn = ResponseTurnContext(
         entity_label=agent_name,

@@ -1225,6 +1225,52 @@ async def test_silent_turn_reacts_and_remembers_only_through_its_allowlist(
     assert any("Alice prefers tea." in memory.get("memory", "") for memory in memories)
 
 
+async def test_a_silent_turns_calls_cannot_pick_a_file_for_their_result(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heard text never chooses a workspace file for a tool to write, through a result or an error alike."""
+    config = _config(tmp_path, {"tools": ["react"]})
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    found = bot.client.room_get_event.side_effect
+    # Run, the second call would end in an error naming the missing event, which a redirect would write as well.
+    bot.client.room_get_event.side_effect = lambda room_id, event_id: (
+        nio.RoomGetEventError("M_NOT_FOUND", status_code="M_NOT_FOUND")
+        if event_id == "$missing"
+        else found(room_id, event_id)
+    )
+    model = ScriptedModel(
+        [
+            calls(
+                tool_call("react", "call-1", event_id="$tea", emoji="12345678", mindroom_output_path="MEMORY.md"),
+                tool_call("react", "call-2", event_id="$missing", emoji="👍", mindroom_output_path="missing.txt"),
+            ),
+            answer(""),
+        ],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    await run_silent_turn(
+        bot=cast("AgentBot", bot),
+        agent_name="scribe",
+        room_id=ROOM,
+        heard=[_heard_message("$tea")],
+        listen=listen,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert [path.name for path in tmp_path.rglob("*") if path.name in {"MEMORY.md", "missing.txt"}] == []
+    bot.client.room_send.assert_not_awaited()
+    bot.client.room_get_event.assert_not_awaited()
+    answers = str([message.content for message in model.requests[-1].messages])
+    assert answers.count("mindroom_output_path is not available in this turn") == 2
+
+
 async def test_a_script_started_by_a_silent_turn_is_granted_only_listen_tools(
     tmp_path: Path,
     journal_store: EventJournalStore,

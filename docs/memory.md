@@ -376,7 +376,8 @@ After storing, `add_memory` lists up to three similar existing memories with the
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 
-A [listening agent](configuration/agents.md#listening) writes memory from a silent turn only through this tool, and only when `memory` is in its `listen.tools`.
+A [listening agent](configuration/agents.md#listening) writes memory from a silent turn through this tool when `memory` is in its `listen.tools`, or through a listed tool that writes workspace files, such as `file`, `coding`, `shell`, `python`, or `script`, which can write `MEMORY.md` directly.
+No call in a silent turn may save its result to a file with `mindroom_output_path`, so a tool that does not write files, such as `react`, cannot.
 A silent turn stores no run, so neither automatic extraction nor the file auto-flush worker reads what the agent heard.
 
 ## UI Configuration
