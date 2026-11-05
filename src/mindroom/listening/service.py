@@ -50,6 +50,9 @@ _HOUR_SECONDS = 3600
 _REFETCH_WAIT_SECONDS = 600
 # Failed turns in a row over the same messages before the next one hears half as many, or, at one message, skips it.
 _FAILURES_PER_BATCH = 3
+# How long one silent turn may run; one that runs longer is stopped and counts as failed. A poll waits on its turns, so a
+# turn that hangs would otherwise stop listening everywhere.
+_TURN_TIMEOUT_SECONDS = 300
 # How many quiet windows the oldest heard message waits before a turn runs anyway, so a room that never pauses is heard.
 _MAX_WAIT_QUIET_WINDOWS = 10
 # Pages read past a turn's own to find what the agent heard last; a room with more after them counts as busy.
@@ -248,7 +251,7 @@ class ListeningService:
     ) -> None:
         """Run one silent turn over the oldest of ``heard`` it can take, and move the marker past those.
 
-        A turn that fails raises and keeps the marker, so the same messages are heard again.
+        A turn that fails or runs out of time raises and keeps the marker, so the same messages are heard again.
         """
         agent_name = listener.agent_name
         failures = self._failures.get((agent_name, room_id))
@@ -256,23 +259,24 @@ class ListeningService:
             failures = _Failures(marker)
         batch = heard if failures.batch is None else heard[: failures.batch]
         try:
-            batch = await heard_within_window(
-                agent_name=agent_name,
-                room_id=room_id,
-                heard=batch,
-                listen=listener.listen,
-                config=config,
-                runtime_paths=self.runtime_paths,
-            )
-            await run_silent_turn(
-                bot=bot,
-                agent_name=agent_name,
-                room_id=room_id,
-                heard=batch,
-                listen=listener.listen,
-                config=config,
-                runtime_paths=self.runtime_paths,
-            )
+            async with asyncio.timeout(_TURN_TIMEOUT_SECONDS):
+                batch = await heard_within_window(
+                    agent_name=agent_name,
+                    room_id=room_id,
+                    heard=batch,
+                    listen=listener.listen,
+                    config=config,
+                    runtime_paths=self.runtime_paths,
+                )
+                await run_silent_turn(
+                    bot=bot,
+                    agent_name=agent_name,
+                    room_id=room_id,
+                    heard=batch,
+                    listen=listener.listen,
+                    config=config,
+                    runtime_paths=self.runtime_paths,
+                )
         except Exception:
             await self._turn_failed(agent_name, room_id, failures, batch)
             raise

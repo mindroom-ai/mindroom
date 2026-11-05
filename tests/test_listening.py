@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -705,6 +706,29 @@ async def test_a_turn_that_keeps_failing_hears_half_as_much_then_skips_one_messa
 
     assert listening.turns.heard() == ["$m1", "$m2", "$m3"]
     assert listening.marker_event() == "$m3"
+
+
+async def test_a_turn_that_runs_too_long_is_stopped_and_counts_as_a_failure(
+    listening: _Listening,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent turn past its time limit is stopped and keeps the marker, and three in a row skip its lone message."""
+    monkeypatch.setattr(service_module, "_TURN_TIMEOUT_SECONDS", 0.01)
+    await listening.service._poll_once(T0)
+    await listening.say("$a", 10)
+    before = listening.marker()
+    listening.turns.meanwhile = lambda: asyncio.sleep(10)
+
+    with capture_logs() as logs:
+        await listening.service._poll_once(T0 + 100)
+        assert listening.marker() == before
+        await listening.service._poll_once(T0 + 101)
+        await listening.service._poll_once(T0 + 102)
+
+    assert len(listening.turns.contexts) == 3
+    assert listening.marker_event() == "$a"
+    assert len([log for log in logs if log.get("exc_info") and log["log_level"] == "error"]) == 3
+    assert any("skipped" in log["event"] for log in logs)
 
 
 async def test_a_halved_turn_that_succeeds_moves_the_marker_only_past_what_it_heard(

@@ -29,6 +29,7 @@ After a room goes quiet, the agent gets one silent turn over what it heard and a
    A page stops at the first message awaiting a refetch, and the marker waits before it; what came before it is heard, and after 10 minutes without the refetch that one message is skipped.
    A turn hears only the oldest messages that fit half its model's context window, leaving the rest for the agent's instructions, memory, tools, and requests, and the marker moves past only what it heard.
    Three failed turns in a row from one marker halve the next turn's messages, and a single message that still fails three times is skipped, so a poisoned or oversized message cannot hold a room.
+   A turn that runs longer than 5 minutes is stopped and counts as failed, because the poll waits on each turn, so one hung turn would stop listening in every room.
 10. A turn waits until nothing the agent hears has been said for `quiet_seconds`, so it hears a conversation once it pauses rather than mid-exchange.
     Only heard messages count, because counting every message let a chatty bot the agent may not hear, or the agent's own posts, hold the turn back forever.
     A turn runs anyway once the oldest heard message has waited ten quiet windows, so a room that never pauses is still heard; the cost is a turn in the middle of a very busy conversation.
