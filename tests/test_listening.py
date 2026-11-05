@@ -904,18 +904,19 @@ async def _owe_refetch(listening: _Listening, event_id: str, seconds: float) -> 
 
 
 async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(listening: _Listening) -> None:
-    """A message whose visible revision must be refetched is asked for and waited on; what came before it is heard."""
+    """A message whose visible revision must be refetched is asked for once a poll, and the turn waits for it."""
     await listening.service._poll_once(T0)
     await listening.say("$a", 10)
     await _owe_refetch(listening, "$p", 20)
     await listening.say("$z", 30)
+    before = listening.marker()
     resolve = cast("AsyncMock", listening.bot.conversation_reader.hydrator.resolve_refreshes)
 
     for poll in range(10):
         await listening.service._poll_once(T0 + 100 + poll)
 
-    assert listening.turns.heard_in(ROOM) == [["$a"]]
-    assert listening.marker_event() == "$a"
+    assert listening.turns.contexts == []
+    assert listening.marker() == before
     assert resolve.await_count == 10
     assert [request.logical_event_id for request in resolve.await_args.args[0]] == ["$p"]
 
@@ -929,7 +930,7 @@ async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(
     )
     await listening.service._poll_once(T0 + 200)
 
-    assert listening.turns.heard() == ["$p", "$z"]
+    assert listening.turns.heard() == ["$a", "$p", "$z"]
 
 
 async def test_a_message_owing_a_refetch_after_the_turns_messages_keeps_the_room_from_counting_as_quiet(

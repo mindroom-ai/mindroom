@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.config.listening import ListenConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import RoomPage
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
@@ -272,7 +273,7 @@ class ListeningService:
             return
         try:
             heard = self._heard(bot, agent_name, room_id, projected_visible_messages(page), config)
-            due = heard and await self._due(bot, agent_name, room_id, heard, page.last_cursor, listen, config, now)
+            due = heard and await self._due(bot, agent_name, room_id, heard, page, listen, config, now)
         except ReplyMembershipPendingError:
             # The marker stays, so a sender whose join the router has yet to apply is heard once it has.
             if (agent_name, room_id) not in self._membership_pending:
@@ -440,25 +441,27 @@ class ListeningService:
         agent_name: str,
         room_id: str,
         heard: Sequence[ResolvedVisibleMessage],
-        page_end: ConversationCursor,
+        page: RoomPage,
         listen: ListenConfig,
         config: Config,
         now: float,
     ) -> bool:
-        """Return whether a silent turn over ``heard`` is due at ``now``.
+        """Return whether a silent turn over ``heard``, read on ``page``, is due at ``now``.
 
         It is once nothing the agent hears has been said in the room for ``quiet_seconds``, so what it does not hear,
         such as a chatty bot or its own messages, never holds a turn back. The room's newest heard message decides, not
-        the newest one on the page, so a conversation longer than ``max_messages`` still waits. A turn is due anyway
-        once the oldest heard message has waited ``_MAX_WAIT_QUIET_WINDOWS`` quiet windows.
+        the newest one on the page, so a conversation longer than ``max_messages`` still waits, and so does a page
+        that stops at a message awaiting its refetch, as what follows it is unknown. A turn is due anyway once the
+        oldest heard message has waited ``_MAX_WAIT_QUIET_WINDOWS`` quiet windows.
         """
         quiet_ms = listen.quiet_seconds * 1000
         now_ms = int(now * 1000)
         if heard[0].timestamp <= now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms:
             return True
-        if heard[-1].timestamp > now_ms - quiet_ms:
+        end = page.last_cursor
+        if end is None or page.stopped_at is not None or heard[-1].timestamp > now_ms - quiet_ms:
             return False
-        return await self._heard_nothing_after(bot, agent_name, room_id, page_end, listen, config, now_ms, quiet_ms)
+        return await self._heard_nothing_after(bot, agent_name, room_id, end, listen, config, now_ms, quiet_ms)
 
     async def _heard_nothing_after(
         self,
