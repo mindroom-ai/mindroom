@@ -38,6 +38,7 @@ from PIL import Image as PILImage
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
+import mindroom.tool_system.worker_proxy_client as worker_proxy_client_module
 import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
@@ -60,7 +61,9 @@ from mindroom.hooks import HookRegistry
 from mindroom.llm.media import Image
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import Toolkit as AdaptableToolkit
 from mindroom.tool_system.agno_toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
@@ -68,6 +71,7 @@ from mindroom.tool_system.agno_toolkits import (
 )
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.authoring import tool, toolkit_functions
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     SupportsPrimaryCallPlacement,
     ToolCategory,
@@ -132,6 +136,7 @@ from mindroom.workers.protocol import (
     WorkerFailure,
     WorkerRoute,
 )
+from tests import test_tool_job_approval_modes as approval_modes
 from tests.agent_tool_helpers import blocking_entrypoint, detached_policy
 from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import (
@@ -149,6 +154,7 @@ from tests.conftest import (
 from tests.process_helpers import assert_linux_pid_not_running
 from tests.test_agent_tool_calls import _catalog, _events
 from tests.test_attachments_tool import _tool_context
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator, Mapping
@@ -8080,3 +8086,91 @@ def test_proxy_composition_finalizes_decoded_media_and_returns_json_as_it_is(
     assert [image.content for image in media.images] == [b"png"]
     assert json.loads(media.content)["attachment_id"].startswith("att_")
     assert plain == ordinary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preparation", ["worker startup", "credential lease"])
+@pytest.mark.parametrize("stop", [False, True])
+async def test_stop_while_an_approved_worker_call_prepares_sends_no_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preparation: str,
+    *,
+    stop: bool,
+) -> None:
+    """A Stop while an approved worker call starts its worker or leases its credentials refuses its execute request."""
+    preparing, ready = threading.Event(), threading.Event()
+    posted: list[tuple[str, dict[str, Any]]] = []
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        execution_mode="selective",
+        proxy_tools={"shell"},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=posted, responder=lambda _url, _json: {"ok": True, "result": "wrote"}),
+    )
+    owner, name = (
+        (sandbox_proxy_module, "_worker_route")
+        if preparation == "worker startup"
+        else (worker_proxy_client_module, "_create_credential_lease")
+    )
+    prepare = getattr(owner, name)
+
+    def held(*args: object, **kwargs: object) -> object:
+        preparing.set()
+        assert ready.wait(30)
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, held)
+
+    class _WorkerReports(AdaptableToolkit):
+        """The report writer as production routes it to a worker: its entrypoint is the worker stand-in."""
+
+        def __init__(self, effects: list[str], gate: asyncio.Event | None = None) -> None:
+            self.effects, self.gate = effects, gate
+            stand_in = sandbox_proxy_module._worker_stand_in(
+                "write_report",
+                self.write_report,
+                tool_name="shell",
+                runtime_paths=runtime_paths,
+                credentials_manager=None,
+                tools=builtin_tool_registry(),
+            )
+            super().__init__(name="reports", tools=[stand_in])
+            bind_toolkit_construction(self, ToolConstruction("reports", None))
+
+        async def write_report(self, title: str) -> str:
+            """Write one report."""
+            return title
+
+    monkeypatch.setattr(approval_modes, "_GatedTools", _WorkerReports)
+    async with (
+        approval_modes._GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run,
+        execution_resources(),
+    ):
+        principal, replies = approval_modes._reply_runtime(run)
+        with tool_runtime_context(run.context):
+            parent = asyncio.create_task(approval_modes._turn_in_reply(run, principal, replies, "$question"))
+            try:
+                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+                run.decide("approved")
+                assert await asyncio.wait_for(asyncio.to_thread(preparing.wait, 30), JOB_TEST_TIMEOUT)
+                entry = run.runtime._entries[approval_modes._job_of(run, "$question").job_id]
+                if stop:
+                    await approval_modes._stop_reply(principal, replies, "$question", by="reaction")
+                    assert (entry.job.status, entry.control.reply_stopped) == ("running", True)
+                ready.set()
+                await asyncio.wait_for(asyncio.gather(parent, entry.task, return_exceptions=True), JOB_TEST_TIMEOUT)
+                commands = [url for url, _payload in posted if url.endswith("/execute")]
+                assert len(commands) == (0 if stop else 1)
+                await asyncio.wait_for(
+                    wait_for_status(run.runtime, entry.job.job_id, "cancelled" if stop else "completed"),
+                    JOB_TEST_TIMEOUT,
+                )
+            finally:
+                ready.set()
+                if not parent.done():
+                    parent.cancel()
+                await asyncio.gather(parent, return_exceptions=True)

@@ -460,7 +460,8 @@ async def _execute_agent_tool_call(
                     outcome = await execute_tool_call(
                         function,
                         arguments,
-                        catalog.run.call_context(call_id),
+                        # A call resuming from its requirement was approved; a denied one returned above.
+                        replace(catalog.run.call_context(call_id), approved=requirement is not None),
                         middleware=catalog.middleware,
                     )
         if outcome.images or outcome.audios or outcome.videos or outcome.files:

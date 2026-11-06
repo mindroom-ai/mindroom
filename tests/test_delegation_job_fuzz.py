@@ -14,22 +14,24 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.delegation import execution, job_approvals, lifecycle
 from mindroom.event_journal import ToolJobStore
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT, HookRegistry, hook
+from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT, HookRegistry, hook
 from mindroom.llm.runs import RunStatus
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.tool_jobs import runtime as job_runtime
 from mindroom.tool_jobs.client_cancel import cancel_stopped_reply_jobs
 from tests import delegation_job_fuzz
 from tests.delegation_job_fuzz import ChildScript, DelegationFuzzRunner, Step
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import reply_span
 from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
-    from mindroom.hooks import ToolBeforeCallContext, ToolEnvironmentContext
+    from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext
 
 
 _SCRIPTS = st.builds(
@@ -379,6 +381,102 @@ async def test_stop_during_resumed_child_hook(tmp_path: Path, monkeypatch: pytes
             await runner._idle()
             assert not runner.executed
             assert [job.status for job in runner.runtime.retained_jobs()] == ["cancelled"]
+    finally:
+        release.set()
+        await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", ["run_subagent", "write_report"])
+@pytest.mark.parametrize("stop", [False, True])
+async def test_stop_while_an_approved_nested_delegation_prepares_starts_no_grandchild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held: str,
+    *,
+    stop: bool,
+) -> None:
+    """A child's approved delegation checks Stop after its hooks, before its own child starts; a started one finishes.
+
+    Holding the delegation's before-call hook leaves the Stop between approval and start. Holding the grandchild's
+    ungated call leaves it after the start, so the grandchild finishes as a running job's ungated call does.
+    """
+    entered, release = asyncio.Event(), asyncio.Event()
+    after: list[ToolAfterCallContext] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL, agents=["code"], timeout_ms=30_000)
+    async def hold(context: ToolBeforeCallContext) -> None:
+        if context.tool_name == held:
+            entered.set()
+            await release.wait()
+
+    @hook(EVENT_TOOL_AFTER_CALL, agents=["code"])
+    async def record(context: ToolAfterCallContext) -> None:
+        after.append(context)
+
+    registry = HookRegistry.from_plugins([_plugin("nested-start", [hold, record])])
+    monkeypatch.setattr(
+        delegation_job_fuzz,
+        "_delegate_runtime_context",
+        partial(delegation_job_fuzz._delegate_runtime_context, hook_registry=registry),
+    )
+    runner = DelegationFuzzRunner(tmp_path, monkeypatch)
+    runner.config.agents["code"].delegate_to = ["code"]
+    runner.config.tool_approval.rules = []
+    await runner.open()
+    principal = runner.runtime.journal.principal("leader@replies")
+    replies = ReplyRuntime(
+        store=principal,
+        entity_name="leader",
+        generation="gen-test",
+        retry_sources=lambda *_: None,
+        approval_ended=lambda *_: None,
+        reply_stopped=partial(cancel_stopped_reply_jobs, runner.paths),
+    )
+    try:
+        async with reply_span(
+            principal,
+            source_event_id="$question",
+            room_id="!room:example.org",
+            placeholder_event_id="$answer",
+            runtime=replies,
+        ) as handle:
+            await runner._delegate(Step("delegate", script=ChildScript(hold_start=True)))
+            runner.children[0].model = ScriptedModel(
+                [
+                    calls(tool_call("run_subagent", "nested", agent_name="code", task="script0")),
+                    calls(tool_call("write_report", "write-grandchild", note="grandchild")),
+                    answer("grandchild done"),
+                    answer("child done"),
+                ],
+            )
+            parent = runner.turns[-1].task
+            replies.spans.register(handle.span_id, parent)
+            await runner._idle()
+            # A rule added while the child thinks gates its delegation, which the person approves.
+            runner.config.tool_approval.rules = [ApprovalRuleConfig(match="run_subagent", action="require_approval")]
+            runner.gate.set()
+            for _ in range(4):
+                await runner._idle()
+                if entered.is_set():
+                    break
+                assert await runner.approvals.pending()
+                await runner._approve(Step("approve"))
+            assert entered.is_set()
+            assert not runner.executed
+            [entry] = list(runner.runtime._entries.values())
+            if stop:
+                stopped = await principal.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns())
+                await replies.run_effects(stopped.post_commit)
+                assert (entry.control.reply_stopped, entry.control.cancelled) == (True, False)
+                await asyncio.gather(parent, return_exceptions=True)
+                runner.turns.clear()
+            release.set()
+            await runner._idle()
+            refused = stop and held == "run_subagent"
+            assert dict(runner.executed) == ({} if refused else {"grandchild": 1})
+            assert [context.blocked for context in after if context.tool_name == "run_subagent"] == [refused]
+            assert [job.status for job in runner.runtime.retained_jobs()] == ["cancelled" if refused else "completed"]
     finally:
         release.set()
         await runner.close()

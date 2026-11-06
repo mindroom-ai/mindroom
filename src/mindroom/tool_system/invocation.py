@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
-from mindroom.tool_jobs.control import job_checkpoint
+from mindroom.tool_jobs.control import approved_call, job_checkpoint
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
@@ -309,7 +309,8 @@ async def run_tool_call(
         return CallResult("failed", error=ValueError(msg))
     token = _CURRENT_CALL.set(call)
     try:
-        with tool_runtime_model_context(context.model_name):
+        # Middleware and hooks run unapproved; only the entrypoint runs with the call's approval.
+        with tool_runtime_model_context(context.model_name), approved_call(False):
             value = await _run_chain(call, middleware)
     except Exception as error:
         return CallResult("failed", error=error)
@@ -399,14 +400,15 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
     # rewrites them, so values for injected names are dropped here as well.
     # A media name the schema declares belongs to the model, so that value replaces the framework's.
     kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
-    approval = context.approved or function.gate is ToolGate.JOB
-    if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
-        job_checkpoint(approval=approval)
-        result = entrypoint(**kwargs)
-    else:
-        result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs), approval=approval)
-    if inspect.isawaitable(result):
-        result = await result
+    # An entrypoint that prepares before its effect, as a worker stand-in or a CLI shell window does, checks again.
+    with approved_call(context.approved or function.gate is ToolGate.JOB):
+        if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
+            job_checkpoint()
+            result = entrypoint(**kwargs)
+        else:
+            result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs))
+        if inspect.isawaitable(result):
+            result = await result
     if isinstance(result, AsyncIterator):
         return await _drain_async(result)
     if isinstance(result, Iterator):

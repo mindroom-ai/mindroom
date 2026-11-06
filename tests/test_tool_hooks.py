@@ -48,7 +48,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.session_ids import create_session_id
-from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_jobs.control import JobControl, StoppedBeforeStart, job_control_context
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -56,7 +56,7 @@ from mindroom.tool_jobs.runtime import JobAccessError, register_background_runti
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import Function
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call, run_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -91,7 +91,7 @@ from tests.tool_job_helpers import job_tool, tool_job_runtime
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Iterator, Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -753,6 +753,89 @@ async def test_stop_before_sync_tool_executor_entry(gated: bool) -> None:
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
                 blocker.result()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["coroutine", "async generator", "function", "generator"])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_a_call_a_stop_refuses_after_its_hooks_reports_that_it_did_not_run(body: str, *, approved: bool) -> None:
+    """Every kind of body checks its call's approval at entry; a refused call reaches after-call hooks as blocked."""
+    control = JobControl()
+    effects: list[str] = []
+    after: list[ToolAfterCallContext] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def stop_meanwhile(_context: ToolBeforeCallContext) -> None:
+        await asyncio.sleep(0)
+        control.reply_stopped = True
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def record(context: ToolAfterCallContext) -> None:
+        after.append(context)
+
+    def function() -> str:
+        effects.append("ran")
+        return "ran"
+
+    async def coroutine() -> str:
+        return function()
+
+    def generator() -> Iterator[str]:
+        yield function()
+
+    async def async_generator() -> AsyncIterator[str]:
+        yield function()
+
+    entrypoint = {
+        "coroutine": coroutine,
+        "async generator": async_generator,
+        "function": function,
+        "generator": generator,
+    }[body]
+    registry = HookRegistry.from_plugins([_plugin("stop-meanwhile", [stop_meanwhile, record])])
+    with job_control_context(control):
+        call = run_tool_call(
+            ToolFunction(name="body", description=None, parameters={}, entrypoint=entrypoint),
+            {},
+            ToolCallContext(run_id="run", session_id="session", user_id=None, approved=approved),
+            middleware=(detached_policy(registry),),
+        )
+        if approved:
+            with pytest.raises(StoppedBeforeStart):
+                await call
+        else:
+            assert (await call).value == "ran"
+    assert effects == ([] if approved else ["ran"])
+    [reported] = after
+    assert reported.blocked is approved
+    assert isinstance(reported.error, StoppedBeforeStart) is approved
+
+
+@pytest.mark.asyncio
+async def test_an_approved_body_already_running_keeps_its_ungated_calls_after_a_stop() -> None:
+    """A Stop refuses no call an approved body makes once it runs: only the body's own entry carries the approval."""
+    control = JobControl()
+    effects: list[str] = []
+    policy = detached_policy(HookRegistry.empty())
+
+    def inner() -> str:
+        effects.append("inner")
+        return "inner"
+
+    async def outer() -> object:
+        control.reply_stopped = True
+        nested = ToolFunction(name="inner", description=None, parameters={}, entrypoint=inner)
+        context = ToolCallContext(run_id="run", session_id="session", user_id=None)
+        return (await run_tool_call(nested, {}, context, middleware=(policy,))).value
+
+    with job_control_context(control):
+        result = await run_tool_call(
+            ToolFunction(name="outer", description=None, parameters={}, entrypoint=outer),
+            {},
+            ToolCallContext(run_id="run", session_id="session", user_id=None, approved=True),
+            middleware=(policy,),
+        )
+    assert (result.value, effects) == ("inner", ["inner"])
 
 
 @pytest.mark.asyncio

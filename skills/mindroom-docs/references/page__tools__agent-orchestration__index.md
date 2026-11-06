@@ -285,6 +285,7 @@ The bar lists an agent's jobs only in rooms where the agent may send the `io.min
 In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
 After **Stop** on a reply, or an edit that regenerates a reply that is still answering, no job of that reply gets a new approval; a command already executing finishes.
+An approved command still waiting for its worker to start, or an approved subagent that has not started yet, does not run.
 Jobs waiting for approval are cancelled and their cards denied, so approving one later runs nothing, and any other job of the reply, such as a subagent still working, is cancelled when it next needs an approval.
 Deleting a message stops only its reply.
 An edit that regenerates a finished reply leaves its jobs alone, but the regenerated answer is the same reply, so a later **Stop** on it reaches them too.

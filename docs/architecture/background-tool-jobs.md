@@ -59,7 +59,10 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
 - A reply's Stop is checked where an approval is used, not where a job stands when the Stop arrives, so no order of the Stop and the job's own awaits lets a call through.
   The Stop marks the reply's span this instance runs before anything else, and the reply's jobs before it waits for the runtime lock.
-  Synchronous checkpoints check the job's mark before requesting a card and at the tool's invocation leaf, after hooks, recording, and function middleware; synchronous bodies check inside their executor callback, so a queued body still observes Stop before it starts.
+  One synchronous check, `job_checkpoint`, runs right before each approved action's effect with no await between: a card request, a decision taken, a tool body's entry after hooks, recording, and function middleware, a worker call's execute request after its worker starts and its credentials are leased, a CLI shell command once its window admits it, and a delegated child's turn after the delegation's hooks and saves.
+  A synchronous body checks inside its executor callback, so a queued body still observes Stop before it starts.
+  A tool call's approval reaches only the checks inside its own entrypoint: its middleware, its hooks, and the calls its running body makes see none, so a Stop never refuses work already running.
+  A call a Stop refused reaches its after-call hooks as blocked, since it never ran.
   Admission reads the span's mark after its last await, before it launches the job, and cancels an accepted job unlaunched when the span was stopped.
   The span's mark lives as long as the span's scope, which outlasts every admission its calls make; a job keeps its own mark.
   A cancel request the Stop could not save leaves the job marked, so it still runs nothing, and the revocation pass retries the save to deny its cards.

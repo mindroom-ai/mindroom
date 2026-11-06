@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from mindroom.delegation.state import DelegationHookState
+from mindroom.tool_jobs.control import StoppedBeforeStart
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
@@ -64,7 +65,7 @@ async def after_delegation(
         before=False,
         result=state.blocked_result or result,
         error=error,
-        blocked=state.blocked_result is not None,
+        blocked=state.blocked_result is not None or isinstance(error, StoppedBeforeStart),
         duration_ms=max(0, (time.time() - state.started_at) * 1000),
     )
     state.after_called = True

@@ -38,6 +38,7 @@ from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
 from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import (
     AgentToolCallEvent,
@@ -52,6 +53,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import tool_outcome
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata, tool_definition
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -482,6 +484,7 @@ class LiveTurnTools(TurnToolBridge):
         try:
             async with self._window(parent):
                 with bound_agent_cli_shell_env(self.shell_env, window=parent):
+                    job_checkpoint()
                     result = await run()
         finally:
             media = self._media.pop(parent, [])
@@ -503,9 +506,11 @@ class LiveTurnTools(TurnToolBridge):
         entrypoint = binding.function.entrypoint
         with bound_agent_cli_shell_env(self.shell_env, window=window):
             if inspect.iscoroutinefunction(entrypoint):
+                job_checkpoint()
                 return await entrypoint(**arguments)
             # Sync calls must finish before the owning operation's lifetime ends.
-            return await wait_for_future_until_complete(asyncio.create_task(asyncio.to_thread(entrypoint, **arguments)))
+            call = run_sync_tool_entrypoint(partial(entrypoint, **arguments))
+            return await wait_for_future_until_complete(asyncio.create_task(call))
 
     async def _execute(  # noqa: C901 - one call through its approval waits and its delegation
         self,

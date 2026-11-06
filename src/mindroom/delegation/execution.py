@@ -68,7 +68,7 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, application_arguments, read_background_after
-from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.tool_jobs.control import StoppedBeforeStart, job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.output_files import (
@@ -254,16 +254,19 @@ async def _run_child(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     approval_calls: Sequence[ApprovalCall] | None,
     fresh: bool,
+    approved: bool = False,
 ) -> _ChildOutcome:
     """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement.
 
     ``approval_calls`` are the decided calls a paused child resumes with, or None when no approval answers it; they
     name the child's calls by its own ids, as ``child_call_id`` gives them, and so does a bound approval receipt within
-    the scope.
+    the scope. ``approved`` says an approval starts the child, which a Stop of its job's reply since then refuses.
     """
     await reserve_child_turn(child, owner=caller_identity, runtime_paths=runtime_paths)
     async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
         with approval_receipt_call_ids(partial(child_call_id, child.delegation_id)):
+            # No await separates this check from the start of the child's turn.
+            job_checkpoint(approval=approved)
             response = await _execute_child(
                 child,
                 observation=observation,
@@ -1044,6 +1047,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     refresh_scheduler=refresh_scheduler,
                     approval_calls=child_calls,
                     fresh=fresh,
+                    approved=fresh and card_approved,
                 )
                 if child_calls is not None and on_event is not None:
                     await _complete_approved_child_tools(
@@ -1057,14 +1061,16 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     _pending_child(state, child, child_outcome)
                     await persist(state)
                     return None
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as cancelled:
+                # A Stop that refused the child's start reports a delegation that never ran.
+                refused = isinstance(cancelled, StoppedBeforeStart)
                 await interrupt_stopped_child(child, config=config, runtime_paths=runtime_paths)
                 await after_delegation(
                     hook_state,
                     config=config,
                     runtime_paths=runtime_paths,
                     result=child.result,
-                    error=asyncio.CancelledError("Delegation cancelled."),
+                    error=cancelled if refused else asyncio.CancelledError("Delegation cancelled."),
                 )
                 await persist(state)
                 raise

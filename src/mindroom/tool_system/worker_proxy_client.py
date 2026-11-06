@@ -21,7 +21,7 @@ from mindroom.credentials.manager import load_scoped_credentials
 from mindroom.credentials.policy import credential_service_policy
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import SANDBOX_RUNNER_API_ROOT, WorkerHandle, worker_api_endpoint
@@ -480,6 +480,8 @@ def execute_worker_proxy_request(
                 config.proxy_timeout_seconds,
                 read=max(config.proxy_timeout_seconds, 3 * EXECUTE_KEEPALIVE_SECONDS),
             )
+            # The call's last check before the worker runs it, after the worker started and its credentials were leased.
+            job_checkpoint()
             in_flight = (
                 worker_call_in_flight(worker_manager, worker_handle.worker_key)
                 if worker_handle is not None
