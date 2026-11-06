@@ -25,6 +25,7 @@ from mindroom.matrix_rtc.call_origin import (
     _CallBriefMessage,
     build_call_brief,
     build_call_handoff_note,
+    member_display_name,
     parse_call_origin,
     resolve_call_origin_context,
 )
@@ -753,3 +754,13 @@ def test_build_call_brief_fits_the_budget_as_its_recipient_counts_tokens() -> No
 
     assert len(brief) <= 1_500
     assert len(brief) < len(build_call_brief(_context(messages), token_budget=1_500, counter=_COUNTER))
+
+
+def test_member_display_name_falls_back_to_localpart() -> None:
+    """Speakers read by display name, or by their ID's localpart when they have none."""
+    room = nio.MatrixRoom(room_id=ORIGIN_ROOM, own_user_id=AGENT)
+    room.add_member("@alice:example.org", " Alice\n A ", None)
+    room.add_member("@bob:example.org", None, None)
+    assert member_display_name(room, "@alice:example.org") == "Alice A"
+    assert member_display_name(room, "@bob:example.org") == "bob"
+    assert member_display_name(None, "@carol:example.org") == "carol"

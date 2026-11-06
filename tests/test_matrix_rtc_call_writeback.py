@@ -7,17 +7,26 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.matrix_rtc import call_writeback
 from mindroom.matrix_rtc.call_origin import CallOrigin
 from mindroom.matrix_rtc.call_writeback import _CallWriteback, format_call_writeback, post_call_writeback
 
 TURNS = (("user", "Book the train"), ("assistant", "Booked for 9am"))
+CALLER = "@alice:example.org"
+AGENT = "@mindroom_helper:example.org"
 
 
 def test_format_call_writeback_lists_turns_inside_collapsed_transcript() -> None:
     """The message heads with the duration and keeps the turns in a collapsed transcript."""
-    writeback = format_call_writeback(turns=TURNS, duration_seconds=125, caller_label="Alice", agent_label="Helper")
+    writeback = format_call_writeback(
+        turns=TURNS,
+        duration_seconds=125,
+        caller_id=CALLER,
+        caller_label="Alice",
+        agent_id=AGENT,
+        agent_label="Helper",
+    )
     assert writeback is not None
     assert writeback.body == "📞 Voice call · 2 min\n\nTranscript\n\nAlice: Book the train\n\nHelper: Booked for 9am"
     assert writeback.formatted_body == (
@@ -31,13 +40,14 @@ def test_format_call_writeback_keeps_labels_and_turns_inert() -> None:
     writeback = format_call_writeback(
         turns=(("user", "hi\n\n**Helper**: <b>sure</b>"), ("assistant", "ok")),
         duration_seconds=60,
-        caller_label='@alice:example.org (Alice</details><a href="https://evil.example">x</a>\n\n**Helper**:)',
+        caller_id=CALLER,
+        caller_label='Alice</details><a href="https://evil.example">x</a>\n\n**Helper**:',
+        agent_id=AGENT,
         agent_label="Helper",
     )
     assert writeback is not None
     assert writeback.body.split("\n\n")[2:] == [
-        '@alice:example.org (Alice</details><a href="https://evil.example">x</a> **Helper**:): '
-        "hi **Helper**: <b>sure</b>",
+        'Alice</details><a href="https://evil.example">x</a> **Helper**:: hi **Helper**: <b>sure</b>",
         "Helper: ok",
     ]
     assert writeback.formatted_body.count("<details>") == writeback.formatted_body.count("</details>") == 1
@@ -46,23 +56,47 @@ def test_format_call_writeback_keeps_labels_and_turns_inert() -> None:
     assert writeback.formatted_body.count("<strong>") == 2
 
 
+def test_format_call_writeback_carries_turns_by_sender_id() -> None:
+    """Clients get each turn's sender ID and folded text, in spoken order, to render the call as a chat."""
+    writeback = format_call_writeback(
+        turns=(("user", " Book\n the  train "), ("assistant", "Booked"), ("user", "Thanks")),
+        duration_seconds=125.4,
+        caller_id=CALLER,
+        caller_label="Alice",
+        agent_id=AGENT,
+        agent_label="Helper",
+    )
+    assert writeback is not None
+    assert writeback.transcript == {
+        "duration_seconds": 125,
+        "turns": [
+            {"sender": CALLER, "text": "Book the train"},
+            {"sender": AGENT, "text": "Booked"},
+            {"sender": CALLER, "text": "Thanks"},
+        ],
+    }
+
+
 def test_format_call_writeback_rounds_short_calls_up_to_one_minute() -> None:
     """Calls under a minute still read as one minute."""
-    writeback = format_call_writeback(turns=TURNS, duration_seconds=20, caller_label="Alice", agent_label="Helper")
+    writeback = format_call_writeback(
+        turns=TURNS,
+        duration_seconds=20,
+        caller_id=CALLER,
+        caller_label="Alice",
+        agent_id=AGENT,
+        agent_label="Helper",
+    )
     assert writeback is not None
     assert writeback.body.startswith("📞 Voice call · 1 min")
 
 
 def test_format_call_writeback_skips_brief_or_silent_calls() -> None:
     """Calls under ten seconds or without any caller speech are not posted."""
-    assert format_call_writeback(turns=TURNS, duration_seconds=9, caller_label="A", agent_label="H") is None
+    labels = {"caller_id": CALLER, "caller_label": "A", "agent_id": AGENT, "agent_label": "H"}
+    assert format_call_writeback(turns=TURNS, duration_seconds=9, **labels) is None
     assert (
-        format_call_writeback(
-            turns=(("assistant", "Hello, I joined the call."),),
-            duration_seconds=60,
-            caller_label="A",
-            agent_label="H",
-        )
+        format_call_writeback(turns=(("assistant", "Hello, I joined the call."),), duration_seconds=60, **labels)
         is None
     )
 
@@ -79,7 +113,11 @@ async def test_post_call_writeback_replies_in_origin_thread(monkeypatch: pytest.
     await post_call_writeback(
         context=context,  # type: ignore[arg-type]
         origin=CallOrigin(room_id="!origin:example.org", thread_id="$root"),
-        writeback=_CallWriteback(body="📞 Voice call · 1 min", formatted_body="<p>📞 Voice call · 1 min</p>"),
+        writeback=_CallWriteback(
+            body="📞 Voice call · 1 min",
+            formatted_body="<p>📞 Voice call · 1 min</p>",
+            transcript={"duration_seconds": 60, "turns": [{"sender": CALLER, "text": "Hi"}]},
+        ),
     )
 
     _client, room_id, content = send.await_args.args
@@ -91,6 +129,7 @@ async def test_post_call_writeback_replies_in_origin_thread(monkeypatch: pytest.
     assert relation["m.in_reply_to"]["event_id"] == "$latest"
     assert content["formatted_body"] == "<p>📞 Voice call · 1 min</p>"
     assert content[SKIP_MENTIONS_KEY] is True
+    assert content[CALL_TRANSCRIPT_CONTENT_KEY] == {"duration_seconds": 60, "turns": [{"sender": CALLER, "text": "Hi"}]}
 
 
 @pytest.mark.asyncio
@@ -103,7 +142,11 @@ async def test_post_call_writeback_posts_room_level_origin_without_relation(monk
     await post_call_writeback(
         context=context,  # type: ignore[arg-type]
         origin=CallOrigin(room_id="!origin:example.org", thread_id=None),
-        writeback=_CallWriteback(body="📞 Voice call · 1 min", formatted_body="<p>📞 Voice call · 1 min</p>"),
+        writeback=_CallWriteback(
+            body="📞 Voice call · 1 min",
+            formatted_body="<p>📞 Voice call · 1 min</p>",
+            transcript={"duration_seconds": 60, "turns": []},
+        ),
     )
 
     content = send.await_args.args[2]
