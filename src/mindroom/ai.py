@@ -666,12 +666,14 @@ def _memory_conversation(
     Only file memory inlines a MEMORY.md. An authored persona recalls no memory, a minimal agent reads its memory on
     demand rather than in its system prompt, and a replay limit, configured or scheduled, moves the history after the
     system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
-    Without automatic compaction, fitting a long conversation into the context window is such a limit.
+    Without automatic compaction, fitting a long conversation into the context window is such a limit. Nor has a turn
+    that stores no run (``usage_kind``), as its later turns replay none of its memory writes.
     """
     if (
         ctx.persona is not None
         or ctx.agent_mode == "minimal"
         or ctx.scheduled_history_budget is not None
+        or ctx.usage_kind is not None
         or scope_context is None
     ):
         return None

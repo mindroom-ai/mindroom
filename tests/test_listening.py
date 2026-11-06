@@ -40,7 +40,7 @@ from mindroom.llm.errors import ProviderUnavailable
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
-from mindroom.memory.functions import list_all_agent_memories
+from mindroom.memory.functions import add_agent_memory, list_all_agent_memories
 from mindroom.response_turn import HandledAttempt
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.script_runs.policy import resolve_script_launch_grants
@@ -1500,6 +1500,41 @@ async def test_silent_turns_store_no_run_and_stand_alone(
     later_request = json.dumps([str(message.content) for message in model.requests[-1].messages])
     assert "Lunch is at noon." in later_request
     assert "launch code" not in later_request
+
+
+async def test_a_silent_turn_reads_memory_an_earlier_one_saw_added(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silent turns share a session but replay none of each other's memory writes, so each reads MEMORY.md afresh."""
+    config = _config(tmp_path, context_window=100_000)
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    model = ScriptedModel([answer(""), answer("")])
+    install_model_providers(monkeypatch, {"default": model, "summary": summary_model("SUMMARY")})
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    async def silent_turn() -> None:
+        await run_silent_turn(
+            bot=cast("AgentBot", bot),
+            agent_name="scribe",
+            room_id=ROOM,
+            heard=[_heard_message("$a")],
+            listen=listen,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    await add_agent_memory("Alice prefers tea.", "scribe", config, runtime_paths)
+    await silent_turn()
+    # Shares no word with the turn's prompt, so only MEMORY.md itself, not a search, can bring it in.
+    await add_agent_memory("Quokkas zephyr nine.", "scribe", config, runtime_paths)
+    await silent_turn()
+
+    assert "Quokkas zephyr nine." not in str(model.requests[0].messages)
+    assert "Quokkas zephyr nine." in str(model.requests[1].messages)
 
 
 async def test_a_silent_turn_that_folds_mid_turn_keeps_no_summary(
