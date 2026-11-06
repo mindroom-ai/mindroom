@@ -69,7 +69,7 @@ from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
 from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
-from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
+from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE, _ROOM_CURSOR_CLAUSE, _ROOM_UNTIL_CLAUSE
 from mindroom.event_journal.replies import ApprovalEnded
 from mindroom.event_journal.schema import (
     POSTGRES_DIALECT,
@@ -2089,6 +2089,164 @@ class TestAdmittedThreadId:
         await admit(alice, "$reply", thread_id="$root")
 
         assert await alice.admitted_thread_id(room_id=OTHER_ROOM, event_id="$reply") == (False, None)
+
+
+class TestReadingAWholeRoom:
+    """A room read spans every thread and the room level after a cursor."""
+
+    async def _ids_after(self, store: PrincipalStore, after: ConversationCursor | None, limit: int = 50) -> list[str]:
+        page = await store.read_room_after(room_id=ROOM, after=after, limit=limit)
+        return [m.logical_event_id for m in page.messages]
+
+    async def test_read_room_after_spans_threads_oldest_first(self, alice: PrincipalStore) -> None:
+        """Room-level messages, a thread's root and replies, and other threads come together by time."""
+        await admit(alice, "$root", ts=1_000)
+        await admit(alice, "$other-thread", ts=1_500, thread_id="$elsewhere")
+        await admit(alice, "$reply", ts=2_000, thread_id="$root")
+        await admit(alice, "$room-level", ts=3_000)
+
+        page = await alice.read_room_after(room_id=ROOM, after=None, limit=50)
+
+        assert [m.logical_event_id for m in page.messages] == ["$root", "$other-thread", "$reply", "$room-level"]
+        assert page.refresh_pending == ()
+        assert page.last_cursor == ConversationCursor(created_ts=3_000, logical_event_id="$room-level")
+
+    async def test_read_room_after_excludes_cursor_and_before(self, alice: PrincipalStore) -> None:
+        """The cursor is exclusive, and a tie on time resolves by event ID."""
+        await admit(alice, "$a", ts=1_000)
+        await admit(alice, "$b", ts=2_000, thread_id="$a")
+        await admit(alice, "$c", ts=2_000)
+        await admit(alice, "$d", ts=3_000)
+
+        after = ConversationCursor(created_ts=2_000, logical_event_id="$b")
+
+        assert await self._ids_after(alice, after) == ["$c", "$d"]
+        assert await self._ids_after(alice, ConversationCursor(created_ts=3_000, logical_event_id="$d")) == []
+
+    async def test_read_room_after_limit(self, alice: PrincipalStore) -> None:
+        """A limited page is the oldest messages, and its last cursor continues the read."""
+        for index in range(5):
+            await admit(alice, f"$m{index}", ts=1_000 + index, thread_id="$t" if index % 2 else None)
+
+        first = await alice.read_room_after(room_id=ROOM, after=None, limit=2)
+        second = await alice.read_room_after(room_id=ROOM, after=first.last_cursor, limit=2)
+        last = await alice.read_room_after(room_id=ROOM, after=second.last_cursor, limit=2)
+
+        assert [m.logical_event_id for m in first.messages] == ["$m0", "$m1"]
+        assert [m.logical_event_id for m in second.messages] == ["$m2", "$m3"]
+        assert [m.logical_event_id for m in last.messages] == ["$m4"]
+        assert (first.more, second.more, last.more) == (True, True, False)
+        with pytest.raises(ValueError, match="positive limit"):
+            await alice.read_room_after(room_id=ROOM, after=None, limit=0)
+
+    async def test_read_room_after_other_principal_sees_nothing(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """Another principal's view, and another room, hold none of these messages."""
+        await admit(alice, "$a", ts=1_000)
+        bob = journal_store.principal("agent@bob")
+
+        assert (await bob.read_room_after(room_id=ROOM, after=None, limit=50)).messages == ()
+        assert await bob.latest_room_cursor(room_id=ROOM) is None
+        assert (await alice.read_room_after(room_id=OTHER_ROOM, after=None, limit=50)).messages == ()
+
+    async def _pending_message(self, store: PrincipalStore, event_id: str, ts: int) -> None:
+        """Admit a message whose visible revision was then redacted, so it owes a refetch."""
+        await admit(store, event_id, ts=ts, content=text("first"))
+        await admit(store, f"{event_id}-edit", ts=ts + 1, content=edit(event_id, "deleted"))
+        await admit(store, f"{event_id}-redaction", ts=ts + 2, redacts=f"{event_id}-edit", kind=EventKind.REDACTION)
+
+    async def test_a_pending_row_in_the_middle_stops_the_page_before_it(self, alice: PrincipalStore) -> None:
+        """The cursor never passes a message that is not in the page."""
+        await admit(alice, "$a", ts=1_000)
+        await self._pending_message(alice, "$p", 2_000)
+        await admit(alice, "$z", ts=5_000, thread_id="$a")
+
+        page = await alice.read_room_after(room_id=ROOM, after=None, limit=50)
+
+        assert [m.logical_event_id for m in page.messages] == ["$a"]
+        assert [r.logical_event_id for r in page.refresh_pending] == ["$p"]
+        assert page.last_cursor == ConversationCursor(1_000, "$a")
+        assert page.stopped_at == ConversationCursor(2_000, "$p")
+
+    async def test_a_pending_first_row_makes_no_progress_and_resolves_later(self, alice: PrincipalStore) -> None:
+        """An empty page keeps the held cursor, and the message returns once its refetch resolves."""
+        await admit(alice, "$a", ts=1_000)
+        await self._pending_message(alice, "$p", 2_000)
+        await admit(alice, "$z", ts=5_000)
+        held = ConversationCursor(1_000, "$a")
+
+        page = await alice.read_room_after(room_id=ROOM, after=held, limit=50)
+
+        assert page.messages == ()
+        assert page.last_cursor is None
+        assert page.stopped_at == ConversationCursor(2_000, "$p")
+        assert [r.logical_event_id for r in page.refresh_pending] == ["$p"]
+        skipped = await alice.read_room_after(room_id=ROOM, after=page.stopped_at, limit=50)
+        assert [m.logical_event_id for m in skipped.messages] == ["$z"]
+        installed = await alice.install_refetched_revision(
+            page.refresh_pending[0],
+            revision_event_id="$p",
+            revision_ts=2_000,
+            revision_sender="alice",
+            content=text("first"),
+        )
+        assert installed
+        resolved = await alice.read_room_after(room_id=ROOM, after=held, limit=50)
+        assert [m.logical_event_id for m in resolved.messages] == ["$p", "$z"]
+        assert resolved.refresh_pending == ()
+        assert resolved.stopped_at is None
+
+    async def test_read_room_after_shows_the_latest_revision_and_hides_a_redacted_one(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Edits are projected into the message, and a redacted revision is reported, as in read_conversation."""
+        await admit(alice, "$a", ts=1_000, content=text("old"))
+        await admit(alice, "$a-edit", ts=2_000, content=edit("$a", "new"))
+        await self._pending_message(alice, "$p", 3_000)
+
+        page = await alice.read_room_after(room_id=ROOM, after=None, limit=50)
+        conversation = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+
+        assert [str(m.content["body"]) for m in page.messages] == ["new"]
+        assert page.refresh_pending == conversation.refresh_pending
+        assert [m.logical_event_id for m in conversation.messages] == ["$a"]
+
+    async def test_a_page_cut_by_the_content_budget_continues_from_its_cursor(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A page ends before the limit when its content passes the budget, and the rest follows."""
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        for index in range(5):
+            await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
+
+        collected: list[str] = []
+        cursor = None
+        sizes = []
+        while True:
+            page = await alice.read_room_after(room_id=ROOM, after=cursor, limit=50)
+            if not page.messages:
+                break
+            sizes.append(len(page.messages))
+            collected += [m.logical_event_id for m in page.messages]
+            cursor = page.last_cursor
+
+        assert sizes[0] < 5
+        assert collected == [f"$m{index}" for index in range(5)]
+
+    async def test_latest_room_cursor(self, alice: PrincipalStore) -> None:
+        """The newest message of the room, in any thread, is the cursor."""
+        assert await alice.latest_room_cursor(room_id=ROOM) is None
+        await admit(alice, "$a", ts=1_000)
+        await admit(alice, "$b", ts=2_000, thread_id="$a")
+        await admit(alice, "$c", ts=2_000)
+
+        assert await alice.latest_room_cursor(room_id=ROOM) == ConversationCursor(2_000, "$c")
 
 
 class TestLatestVisibleEvent:
@@ -9427,6 +9585,14 @@ class TestHotQueriesAreIndexCovered:
         "projection page after a cursor": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND thread_id=?"  # noqa: S608 - the production clause, not input
             f"{_CONVERSATION_CURSOR_CLAUSE} ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        ),
+        "room page after a cursor": (
+            "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=?"  # noqa: S608 - the production clause, not input
+            f"{_ROOM_CURSOR_CLAUSE}{_ROOM_UNTIL_CLAUSE} ORDER BY created_ts, logical_event_id LIMIT 50"
+        ),
+        "room's newest message": (
+            "SELECT created_ts, logical_event_id FROM visible_messages WHERE principal_id=? AND room_id=? "
+            "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 1"
         ),
         "projection page content": (
             "SELECT * FROM visible_messages WHERE principal_id=? AND room_id=? AND logical_event_id IN (?, ?, ?)"

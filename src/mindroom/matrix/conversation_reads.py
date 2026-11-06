@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
+    from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView, RoomPage
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
 logger = get_logger(__name__)
@@ -59,8 +59,8 @@ class ThreadReadMode(Enum):
     STRICT = auto()
 
 
-def projected_visible_messages(page: ConversationPage) -> list[ResolvedVisibleMessage]:
-    """Render one projected page as the visible messages every consumer reads.
+def projected_visible_messages(page: ConversationPage | RoomPage) -> list[ResolvedVisibleMessage]:
+    """Render one projected page, of a conversation or a whole room, as the visible messages every consumer reads.
 
     The single conversion from a projection row to the shape the rest of
     MindRoom renders, so a prompt and an exported thread cannot disagree about
@@ -288,6 +288,24 @@ class ConversationReader:
             limit=limit,
             before=before,
         )
+
+    async def read_room_after(
+        self,
+        room_id: str,
+        after: ConversationCursor | None,
+        limit: int,
+        until_ts: int,
+    ) -> RoomPage:
+        """Return up to ``limit`` visible messages of a whole room after a cursor, oldest first, stamped by ``until_ts``.
+
+        Every thread and the room level are read together, without waiting for
+        a hydration or a refetch: a message owing one is left out.
+        """
+        return await self.store.read_room_after(room_id=room_id, after=after, limit=limit, until_ts=until_ts)
+
+    async def latest_room_cursor(self, room_id: str) -> ConversationCursor | None:
+        """Return the position of a room's newest visible message, in any thread, or nothing when it has none."""
+        return await self.store.latest_room_cursor(room_id=room_id)
 
     async def read_strict(
         self,

@@ -31,8 +31,9 @@ def render_msg_tag(
     event_id: str | None = None,
     ts: str | None = None,
     display_name: str | None = None,
+    thread_id: str | None = None,
 ) -> str:
-    """Render one Matrix message as a ``<msg ...><![CDATA[...]]></msg>`` tag."""
+    """Render one Matrix message as a ``<msg ...><![CDATA[...]]></msg>`` tag; ``thread_id`` names its thread's root."""
     attrs: list[str] = []
     if event_id is not None:
         attrs.append(f"event_id={xml_quoteattr(event_id)}")
@@ -41,6 +42,8 @@ def render_msg_tag(
         attrs.append(f"display_name={xml_quoteattr(display_name)}")
     if ts is not None:
         attrs.append(f"ts={xml_quoteattr(ts)}")
+    if thread_id is not None:
+        attrs.append(f"thread_id={xml_quoteattr(thread_id)}")
     return f"<msg {' '.join(attrs)}><![CDATA[{_cdata_body(body)}]]></msg>"
 
 

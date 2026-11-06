@@ -386,6 +386,27 @@ class ConversationPage:
 
 
 @dataclass(frozen=True, slots=True)
+class RoomPage:
+    """Messages of a whole room after a cursor, oldest first.
+
+    ``last_cursor`` is the position of the last message in ``messages``, which
+    a caller passes back as ``after`` to continue. It is ``None`` when nothing
+    was returned, which means no progress: keep the cursor you had. The page
+    stops before the first message owing a refetch, so the cursor never passes
+    one; ``stopped_at`` is that message's position, which a caller that gives
+    up on the refetch passes back to skip it. A message owing a refetch is in
+    ``refresh_pending`` and not in ``messages``, as in a ``ConversationPage``.
+    """
+
+    messages: tuple[VisibleMessage, ...]
+    refresh_pending: tuple[RefreshRequest, ...]
+    # Whether rows follow the page's, past its limit or its content budgets.
+    more: bool
+    last_cursor: ConversationCursor | None
+    stopped_at: ConversationCursor | None
+
+
+@dataclass(frozen=True, slots=True)
 class ReplyRowFacts:
     """What a reply row's acknowledgement and late edit target need, recorded beside its payload."""
 

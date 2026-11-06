@@ -74,6 +74,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "knowledge_bases",
         "knowledge_graph",
         "knowledge_graph_edits",
+        "listen",
         "markdown",
         "max_tool_calls_from_history",
         "max_tool_calls_per_turn",

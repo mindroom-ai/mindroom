@@ -155,6 +155,28 @@ Workspace todo templates have the size, render, and listing limits documented in
 Workspace `SKILL.md` and subagent profile frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, `%TAG` directives, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
 Request sizing reads the page count of a PDF a request carries, an attachment or a tool's result, with pypdf in the primary, so a crafted PDF costs the parse time pypdf allows; the dependency floor follows pypdf's denial-of-service fixes.
 
+## Listening agents
+
+A [listening agent](https://docs.mindroom.chat/configuration/agents/#listening) runs model turns that no requester started, driven by room text.
+Everyone who may reach the agent in a listened room can put text in front of the model, and a silent turn has no requester whose budget or access it could be checked against.
+Heard text can therefore carry prompt injection that drives the turn's tools.
+
+What `listen.tools` names is the operator's choice, and the rest only narrows what a turn reaches:
+
+- A silent turn calls only `listen.tools`, each of which must also be one of the agent's own `tools`, so it gains no tool, `worker_scope` check bypass, or tool limit bypass.
+  A listed tool keeps its usual effects, though, and some act with the agent's full authority later or elsewhere.
+  [What listed tools can do](https://docs.mindroom.chat/configuration/agents/#what-listed-tools-can-do) names them, and the few tools and arguments MindRoom refuses; list them only if you trust everyone whose messages the agent hears.
+- Approval-gated tools and interactive questions are hidden, and the turn's text is dropped.
+- The prompt marks heard text as data rather than instructions, which lowers but does not remove the risk.
+- It hears only senders allowed to reach the agent in that room, judged on the person a relay speaks for.
+- `max_runs_per_hour` and `max_messages` bound the turns and what each reads.
+
+Keep `listen.tools` narrow: injected text can use any listed tool.
+
+Heard text also crosses rooms and users through memory and the knowledge graph.
+A silent turn with `memory`, or with `knowledge_graph` when `knowledge_graph_edits` is on, can store what anyone it may answer said in a listened room, including people who never addressed the agent, and both are shared, so that text can resurface in the agent's replies in other rooms and to other users ([Privacy and cost](https://docs.mindroom.chat/configuration/agents/#privacy-and-cost)).
+This is intended: an operator who lists either chooses to let the agent learn from the room.
+
 ## Hosted tenant isolation
 
 Hosted tenants share the `mindroom-instances` namespace, and a tenant can run code in its own primary and sandbox-runner sidecar by design.

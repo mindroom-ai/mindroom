@@ -146,6 +146,9 @@ class ToolRuntimeContext:
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
     # What posted this turn's message when a hook did; a resumed approval turn restores it.
     hook_source: str | None = None
+    # Whether a call may name a workspace file for its result (``mindroom_output_path``); a silent listening turn's may
+    # not, as the room text driving it would pick the file.
+    tool_output_paths: bool = True
 
     @property
     def current_config(self) -> Config:

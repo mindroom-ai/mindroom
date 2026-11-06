@@ -39,6 +39,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.budgets import BudgetsConfig  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
+from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
@@ -1008,6 +1009,8 @@ class Config(BaseModel):
         for name, agent in self.agents.items():
             references += [(f"agents.{name}.rooms", room) for room in agent.rooms]
             references += [(f"agents.{name}.room_thread_modes", room) for room in agent.room_thread_modes]
+            if agent.listen is not None:
+                references += [(f"agents.{name}.listen.rooms", room) for room in agent.listen.rooms]
             references += [
                 (f"agents.{name}.automations.{automation.name}.room", automation.room)
                 for automation in agent.automations or ()
@@ -1477,6 +1480,59 @@ class Config(BaseModel):
                 config_path_prefix=config_path_prefix,
                 tools=tools,
             )
+        self._validate_listen_tools(tools)
+
+    def _validate_listen_tools(self, tools: ToolRegistry) -> None:
+        """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
+
+        A ``toolkit.function`` entry must also name a function the toolkit declares, as a turn keeps only exact names.
+        A preset is refused, as a turn keeps only exact names, and so is a tool that acts with the agent's authority
+        beyond the room, such as ``delegate``, whose child runs would not be held to this list.
+
+        A silent turn narrows the agent's own tools to this list and never adds one, so the default list is checked too:
+        a listening agent without ``memory`` or ``react`` must name the tools it listens with.
+        """
+        # why-lazy: catalog and personas pull runtime tool registry paths and load agents+tools at config import.
+        from mindroom.delegation.personas import declared_function_names, missing_persona_tool  # noqa: PLC0415
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        for agent_name, agent in self.agents.items():
+            if agent.listen is None:
+                continue
+            facts = agent_tool_facts(self, agent_name, policy=agent_policy(self, agent_name))
+            own_tools = {*facts.tool_names, *facts.injected}
+            for index, name in enumerate(agent.listen.tools):
+                toolkit = name.partition(".")[0]
+                config_path_prefix = f"agents.{agent_name}.listen.tools[{index}]"
+                self._validate_authored_tool_entry(
+                    ToolConfigEntry(name=toolkit),
+                    config_path_prefix=config_path_prefix,
+                    tools=tools,
+                )
+                if toolkit == "matrix_message":
+                    msg = (
+                        f"{config_path_prefix}.{toolkit}: Tool 'matrix_message' posts to the room, "
+                        "which a silent turn never does; use react to acknowledge."
+                    )
+                    raise ToolConfigOverrideError(msg)
+                if self.is_tool_preset(toolkit):
+                    msg = f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' is a preset; list its tools instead."
+                    raise ToolConfigOverrideError(msg)
+                if toolkit in CONTACT_CONTROL_TOOLS:
+                    msg = (
+                        f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' acts with the agent's authority "
+                        "beyond the room, which a silent turn never does."
+                    )
+                    raise ToolConfigOverrideError(msg)
+                if toolkit not in own_tools:
+                    msg = (
+                        f"{config_path_prefix}.{toolkit}: Tool '{toolkit}' is not one of the agent's tools; "
+                        f"add it to agents.{agent_name}.tools."
+                    )
+                    raise ToolConfigOverrideError(msg)
+                if missing_persona_tool((name,), {toolkit: declared_function_names(toolkit, tools)}):
+                    msg = f"{config_path_prefix}.{name}: Tool '{toolkit}' has no function '{name.partition('.')[2]}'."
+                    raise ToolConfigOverrideError(msg)
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
         """Return agents and teams that depend on any of the given tools."""
@@ -1669,6 +1725,9 @@ class Config(BaseModel):
                     f"cold_cache needs a cheap_model for agent {agent_name!r}; "
                     "set agents.<name>.cheap_model or defaults.cheap_model"
                 )
+                raise ValueError(msg)
+            if agent.listen is not None and agent.listen.model is not None and agent.listen.model not in self.models:
+                msg = f"Unknown listen model for agent {agent_name!r}: {agent.listen.model!r}"
                 raise ValueError(msg)
             review_model = agent.skill_learning.model
             if review_model is not None and review_model not in self.models:

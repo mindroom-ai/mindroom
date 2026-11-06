@@ -100,6 +100,18 @@
           "default": null,
           "description": "Opt-in adaptive participation in existing multi-human threads across all rooms"
         },
+        "listen": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListenConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in listening: hear chosen rooms and act silently, through an allowlist of tools, after a quiet period"
+        },
         "contacts": {
           "anyOf": [
             {
@@ -2924,6 +2936,84 @@
         "model"
       ],
       "title": "LLMJudgmentConfig",
+      "type": "object"
+    },
+    "ListenConfig": {
+      "additionalProperties": false,
+      "description": "Rooms an agent listens in, when it runs a silent turn over what it heard, and what that turn may do.",
+      "properties": {
+        "rooms": {
+          "description": "Room keys, Matrix room IDs, or aliases the agent listens in",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Rooms",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "room"
+          }
+        },
+        "quiet_seconds": {
+          "default": 60,
+          "description": "Seconds a room must stay quiet before the agent runs a silent turn over what it heard",
+          "minimum": 10,
+          "title": "Quiet Seconds",
+          "type": "integer"
+        },
+        "max_messages": {
+          "default": 200,
+          "description": "Most messages one silent turn reads; the rest wait for the next turn",
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Max Messages",
+          "type": "integer"
+        },
+        "max_runs_per_hour": {
+          "default": 6,
+          "description": "Most silent turns per hour; further due runs are skipped and what was heard is kept",
+          "maximum": 60,
+          "minimum": 1,
+          "title": "Max Runs Per Hour",
+          "type": "integer"
+        },
+        "tools": {
+          "default": [
+            "memory",
+            "react"
+          ],
+          "description": "Tools a silent turn may use, as toolkit names or toolkit.function, each one of the agent's own tools; no other tool is available",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Tools",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model alias under models for silent turns; unset uses the room's model, then the agent's model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        }
+      },
+      "required": [
+        "rooms"
+      ],
+      "title": "ListenConfig",
       "type": "object"
     },
     "LiveCallProfile": {

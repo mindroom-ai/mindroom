@@ -377,6 +377,9 @@ After storing, `add_memory` lists up to three similar existing memories with the
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 
+A [listening agent](configuration/agents.md#listening) writes memory from a silent turn through this tool when `memory` is in its `listen.tools`, or through a listed tool that writes files (see [What listed tools can do](configuration/agents.md#what-listed-tools-can-do)).
+A silent turn stores no run, so neither automatic extraction nor the file auto-flush worker reads what the agent heard.
+
 ## UI Configuration
 
 The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, file settings (`max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.

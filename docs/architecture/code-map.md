@@ -419,6 +419,7 @@ Matrix sync callback
 | `skill_learning/tools.py` | Skill tools shared by chat and the review: ownership, read-before-write, and landed-change tracking |
 | `skill_learning/transcript.py` | Reply counting and the digest a replayed review reads: older turns shortened plus the newest messages verbatim |
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
+| `listening/` | Listening agents: durable per-room markers (`markers.py`), the polling service that hears rooms and decides when a silent turn is due (`service.py`), and the silent turn itself, which offers only `listen.tools` and never sends its text (`turn.py`) |
 | `automations/runner.py` | Automation schedule loop: cron timing per shared agent or private instance, definition lookup and `AutomationContext`, the visible prompts tagged `automation/<name>` in the agent's room or the requester's personal room, and the steps after their runs |
 | `automations/registry.py` | The `@automation` decorator, discovery in plugin hooks modules, and the catalog of plugin automations beside the lazily loaded built-ins, carried by the plugin snapshot (`HookRegistry.automations`) |
 | `automations/steps.py` | `AutomationContext`, the `Ask` and `Done` steps an automation returns to the runner, the automation hook-source prefix, and the always-loaded workspace files the built-ins maintain |
@@ -601,11 +602,13 @@ Matrix sync callback
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Resolves the knowledge bases an agent searches: published indexes, availability notices, and refresh scheduling |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
+| `custom_tools/react.py` | Reaction-only agent tool: reacts in the current room under `matrix_message`'s per-room rate limit |
 | `custom_tools/stop_reply.py` | Agent tool that stops another agent's reply with a 🛑 reaction relaying the caller's requester |
 | `custom_tools/shared_directories.py` | Agent tool that creates shared directories and invites agents on behalf of a user who may use them |
 | `shared_directories/` | The primary-only membership ledger and storage of shared directories, the paths agents see, and the share roots `file` and `coding` accept |
 | `custom_tools/thread_move.py` | Copies a thread into another room as a new thread: per-entity re-posts, mention-guarded router relays, tag copy, and the moved notice in the source thread |
 | `custom_tools/computer_announcement.py` | Tool hook that shows a chat_ui agent's worker computer in MindRoom Chat on its first worker browser call in a conversation |
+| `tools/react.py` | Tool-catalog registration for the reaction-only tool |
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
 | `voice/visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
@@ -633,3 +636,4 @@ Its tables are named after its sessions table `<agent>_sessions`: `_log_runs` ho
 A database converted from the Agno layout keeps its pre-conversion copy beside it as `<agent>.db.pre-storage-v2`, and one converted from layout version 2 or 3 as `<agent>.db.pre-storage-v4`.
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.
 `tracking/contacts.json` holds the contacts between personal agents and people, written only by the primary.
+`tracking/listening_markers.json` holds where each listening agent has heard each listened room up to.

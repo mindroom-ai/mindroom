@@ -59,6 +59,7 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler, runt
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
+from mindroom.listening.service import ListeningService
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.provisioning_heartbeat import run_provisioning_heartbeat
 from mindroom.matrix.users import load_agent_user
@@ -269,6 +270,7 @@ class _MultiAgentOrchestrator:
     _journal_held: bool = field(default=False, init=False, repr=False)
     running: bool = field(default=False, init=False)
     _memory_auto_flush: MemoryAutoFlushService = field(init=False, repr=False)
+    _listening: ListeningService = field(init=False, repr=False)
     # Services whose lifecycle follows the active config, in start order; they stop in reverse.
     _services: tuple[RuntimeService, ...] = field(init=False, repr=False)
     _skill_reviews: SkillReviewRunner = field(init=False, repr=False)
@@ -397,8 +399,15 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             redacted_event_ids=self.redacted_event_ids,
         )
+        self._listening = ListeningService(
+            self.runtime_paths,
+            lambda: self.config,
+            lambda: self.agent_bots,
+            self.agent_reply_memberships,
+        )
         self._services = (
             self._memory_auto_flush,
+            self._listening,
             self._knowledge_source_watcher,
             self._knowledge_graph,
             self._todo_poke_runtime,

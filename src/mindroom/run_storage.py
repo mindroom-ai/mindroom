@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import TurnRunState
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
+    from mindroom.usage.storage import IndependentUsageKind
 
 
 @dataclass(frozen=True)
@@ -32,13 +33,15 @@ class RunStorage:
 
     An agent turn outside a scope has no ``scope``, and a run without a ``store`` stores nothing. ``replays``, when
     given, says which terminal records the run hands over are stored as turns that later prompts replay; any other,
-    such as a response turn's empty reply, records only its usage.
+    such as a response turn's empty reply, records only its usage. ``usage_kind`` records the run's usage as that
+    helper (``ResponseTurnContext.usage_kind``).
     """
 
     store: ConversationStore | None
     session: ConversationSession
     scope: HistoryScope | None
     replays: Callable[[AnyRunRecord], bool] | None = None
+    usage_kind: IndependentUsageKind | None = None
 
 
 def scope_run_storage(scope_context: ScopeSessionContext) -> RunStorage:
@@ -46,15 +49,24 @@ def scope_run_storage(scope_context: ScopeSessionContext) -> RunStorage:
     return RunStorage(scope_context.storage, scope_context.stored_or_first_session(), scope_context.scope)
 
 
-def bind_turn_session(run: TurnRunState, *, replays: Callable[[AnyRunRecord], bool]) -> RunStorage:
+def bind_turn_session(
+    run: TurnRunState,
+    *,
+    replays: Callable[[AnyRunRecord], bool],
+    usage_kind: IndependentUsageKind | None = None,
+) -> RunStorage:
     """Bind the session the turn's runs save into to its scope context, and return where its next attempt is stored.
 
-    ``replays`` says which of the attempt's terminal records are stored as turns (``replays_as_turn``). A scope
-    without a stored session gets its first session, which stays on the turn's scope context, so a later attempt of
-    the same turn replays this one's run, as a reload of the scope would.
+    ``replays`` says which of the attempt's terminal records are stored as turns (``replays_as_turn``), and
+    ``usage_kind`` which helper their usage counts as, if any. A scope without a stored session gets its first
+    session, which stays on the turn's scope context, so a later attempt of the same turn replays this one's run, as a
+    reload of the scope would. A turn whose usage counts as a helper keeps no run, so it stores in no scope either: a
+    mid-turn fold stays in its own run instead of leaving a summary of what it read in the scope.
     """
     run.scope_context = run.scope.with_session()
-    return replace(scope_run_storage(run.scope_context), replays=replays)
+    storage = scope_run_storage(run.scope_context)
+    scope = storage.scope if usage_kind is None else None
+    return replace(storage, replays=replays, usage_kind=usage_kind, scope=scope)
 
 
 @dataclass
@@ -114,7 +126,7 @@ def persist_into[R: AnyRunRecord](
     nothing.
     """
     store_persist = (
-        persist_to(storage.store, storage.session, replays=storage.replays)
+        persist_to(storage.store, storage.session, replays=storage.replays, usage_kind=storage.usage_kind)
         if storage is not None and storage.store is not None
         else None
     )

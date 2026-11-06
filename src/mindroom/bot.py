@@ -86,7 +86,6 @@ from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
     EventKind,
-    HistoryRecoveryState,
     PrincipalStore,
 )
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -127,7 +126,7 @@ from .voice.readiness import VoiceReadiness
 from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
     from datetime import datetime
     from pathlib import Path
@@ -384,9 +383,7 @@ class AgentBot:
         Redactions inside a gap its sync skipped reach the journal only when the room is repaired, so the lookup runs
         that repair first, as a strict read of the room would.
         """
-        recovery = await self.journal_principal().room_history_recovery(room_id)
-        if recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE:
-            await self._conversation_reader.hydrator.ensure_hydrated(room_id=room_id, thread_id=None)
+        await self._conversation_reader.hydrator.repair_room_history(room_id)
         return await self._turn_store.redacted_event_ids(room_id, event_ids)
 
     def _init_runtime_components(self) -> None:
@@ -904,6 +901,11 @@ class AgentBot:
         return self._tool_runtime_support
 
     @property
+    def ingress_validator(self) -> IngressValidator:
+        """Return the classifier of whom this bot's inbound events speak for, which access judges."""
+        return self._ingress_validator
+
+    @property
     def ingestion_quiesced(self) -> bool:
         """Return whether shutdown or removal latched this generation's Matrix ingestion closed."""
         return self._runtime_view.ingestion_quiesced
@@ -916,6 +918,18 @@ class AgentBot:
     def _accepting_work(self) -> bool:
         """Return whether this generation accepts new work, which a sync or process shutdown stops."""
         return self._runtime_view.phase is RunPhase.ACCEPTING
+
+    @property
+    def accepting_work(self) -> bool:
+        """Return whether this generation still takes new work, which its removal, replacement, or shutdown ends."""
+        return self._accepting_work and not self.ingestion_quiesced
+
+    def create_owned_task(self, coro: Coroutine[object, object, None], *, name: str) -> asyncio.Task[None]:
+        """Run work done as this bot outside its responses, in a task its stop waits for and then cancels.
+
+        The task logs nothing of its own; whoever awaits it hears how it ended.
+        """
+        return create_background_task(coro, name=name, owner=self._runtime_view, log_exceptions=False)
 
     @property
     def in_flight_response_count(self) -> int:

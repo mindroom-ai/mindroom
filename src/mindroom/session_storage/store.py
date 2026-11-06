@@ -604,11 +604,13 @@ def persist_to(
     session: ConversationSession,
     *,
     replays: Callable[[AnyRunRecord], bool] | None = None,
+    usage_kind: IndependentUsageKind | None = None,
 ) -> Callable[[AnyRunRecord], Awaitable[None]]:
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
     A record saves as ``ConversationStore.save_run`` saves it with ``record_usage``, a turn later loads replay, unless
-    ``replays`` rejects it: such a record is no turn, and only its usage is recorded (``_save_usage``).
+    ``replays`` rejects it: such a record is no turn, and only its usage is recorded (``_save_usage``). ``usage_kind``
+    records that usage as the helper it names (``run_usage_snapshot``).
     The record, with its usage snapshot, and ``session.session_state``, which the run's tools change in place, are
     copied on the caller's task before the lane is awaited, so what lands is what was handed over. The state is written
     back, in the record's own transaction, when it differs from ``session.stored_session_state``, which every write of
@@ -618,7 +620,7 @@ def persist_to(
     """
 
     async def persist(record: AnyRunRecord) -> None:
-        data, kind, usage = record.to_dict(), run_kind(record), run_usage_snapshot(record)
+        data, kind, usage = record.to_dict(), run_kind(record), run_usage_snapshot(record, kind=usage_kind)
         turn = replays is None or replays(record)
 
         def save(opened: ConversationStore, state: dict[str, Any]) -> None:

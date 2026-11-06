@@ -240,7 +240,7 @@ _SIGNATURES = {
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
         "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
-        "cli_approval_handler, hook_source)"
+        "cli_approval_handler, hook_source, tool_output_paths)"
     ),
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",

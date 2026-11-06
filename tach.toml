@@ -552,6 +552,8 @@ visibility = [
     "mindroom.event_journal.matrix_delivery",
     "mindroom.event_journal.opening",
     "mindroom.journal_dispatch",
+    "mindroom.listening.markers",
+    "mindroom.listening.service",
     "mindroom.matrix._owned_session",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.journal_ingress",
@@ -629,6 +631,7 @@ depends_on = [
     "mindroom.event_journal",
 ]
 visibility = [
+    "mindroom.listening.service",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.journal_ingress",
     "mindroom.turns.ingress",
@@ -699,6 +702,7 @@ visibility = [
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.thread_move",
     "mindroom.hooks.context",
+    "mindroom.listening.service",
     "mindroom.matrix.projected_thread_membership",
     "mindroom.matrix_rtc.call_origin",
     "mindroom.post_response_effects",
@@ -828,6 +832,7 @@ visibility = [
     "mindroom.delegation.job_approvals",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.reply_turn.locked_turn",
+    "mindroom.listening.turn",
 ]
 
 [[modules]]
@@ -3229,6 +3234,7 @@ depends_on = [
     "mindroom.skill_learning.runner",
     "mindroom.knowledge_graph.runtime",
     "mindroom.egress_broker",
+    "mindroom.listening.service",
 ]
 
 [[modules]]
@@ -3381,6 +3387,7 @@ visibility = [
     "mindroom.api.external_triggers",
     "mindroom.bot_runtime_view",
     "mindroom.edit_regenerator",
+    "mindroom.listening.service",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.orchestrator",
     "mindroom.reply_turn.inbox",
@@ -3539,6 +3546,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.main"
 depends_on = [
+    "mindroom.config.contacts",
     "mindroom.config.judgment",
     "mindroom.agent_policy",
     "mindroom.config.memory",
@@ -3562,6 +3570,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
+    "mindroom.delegation.personas",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -3588,6 +3597,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
+    "mindroom.listening.turn",
     "mindroom.turn_record",
     "mindroom.turns.dispatch",
     "mindroom.user_turn_time",
@@ -3600,6 +3610,7 @@ visibility = [
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
     "mindroom.history.conversation_text",
+    "mindroom.listening.turn",
 ]
 
 [[modules]]
@@ -4365,6 +4376,7 @@ visibility = [
     "mindroom.edit_regenerator",
     "mindroom.execution_preparation",
     "mindroom.inbound_turn_normalizer",
+    "mindroom.listening.service",
     "mindroom.matrix.conversation_reads",
     "mindroom.reply_turn.enrichment",
     "mindroom.routing",
@@ -5623,6 +5635,7 @@ depends_on = []
 path = "mindroom.tool_system.invocation"
 depends_on = [
     "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
@@ -7986,6 +7999,11 @@ depends_on = ["mindroom.config.judgment", "mindroom.constants"]
 visibility = []
 
 [[modules]]
+path = "mindroom.config.listening"
+depends_on = ["mindroom.config.schema_hints"]
+visibility = []
+
+[[modules]]
 path = "mindroom.config.participation"
 depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 visibility = []
@@ -9226,6 +9244,43 @@ depends_on = [
     "mindroom.config.resolution",
 ]
 visibility = ["mindroom.automations.registry"]
+
+[[modules]]
+path = "mindroom.listening.markers"
+depends_on = ["mindroom.event_journal"]
+visibility = ["mindroom.listening.service"]
+
+[[modules]]
+path = "mindroom.listening.turn"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.config.resolution",
+    "mindroom.delegation.personas",
+    "mindroom.prompt_message_tags",
+    "mindroom.providers.registry",
+    "mindroom.response_turn",
+    "mindroom.timestamp_formatting",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.turn_model",
+]
+visibility = ["mindroom.listening.service"]
+
+[[modules]]
+path = "mindroom.listening.service"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.contacts.turns",
+    "mindroom.event_journal",
+    "mindroom.listening.markers",
+    "mindroom.listening.turn",
+    "mindroom.llm",
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.state",
+    "mindroom.matrix.transport_progress",
+    "mindroom.response_admission",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.automations.runner"

@@ -52,6 +52,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `claude_agent` | Each Claude Code turn run by the `claude_agent` tool, for its main conversation's responses but not the subagents it starts or requests Claude Code makes for itself, such as compaction summaries and session titles; it appears in totals but not in request rows |
 | `skill_learning` | Automatic [skill reviews](skills.md) |
 | `knowledge_graph` | Fact extraction for the [knowledge graph](knowledge-graph.md) |
+| `listening` | Silent turns of a [listening agent](configuration/agents.md#listening), which no requester asked for |
 | `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
 | `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
 
