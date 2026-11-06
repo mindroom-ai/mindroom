@@ -229,6 +229,13 @@ def member_label(room: nio.MatrixRoom | None, user_id: str) -> str:
     return f"{user_id} ({display_name})" if display_name else user_id
 
 
+def member_display_name(room: nio.MatrixRoom | None, user_id: str) -> str:
+    """Name a member by display name, or by its user ID's localpart when it has none."""
+    user = room.users.get(user_id) if room is not None else None
+    display_name = " ".join(user.display_name.split()) if user is not None and user.display_name else ""
+    return display_name or user_id.removeprefix("@").partition(":")[0]
+
+
 def _capped(body: str) -> str:
     if len(body) <= _BRIEF_MESSAGE_MAX_CHARS:
         return body

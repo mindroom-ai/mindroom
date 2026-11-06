@@ -43,7 +43,7 @@ from mindroom.matrix_rtc.call_origin import (
     CallOriginContext,
     build_call_brief,
     build_call_handoff_note,
-    member_label,
+    member_display_name,
     parse_call_origin,
     resolve_call_origin_context,
 )
@@ -1449,7 +1449,9 @@ class CallManager:
             writeback = format_call_writeback(
                 turns=turns,
                 duration_seconds=duration_seconds,
-                caller_label=member_label(origin_room, requester_id),
+                caller_id=requester_id,
+                caller_label=member_display_name(origin_room, requester_id),
+                agent_id=self._client.user_id,
                 agent_label=self._config.agents[self._agent_name].display_name,
             )
             if writeback is None:
