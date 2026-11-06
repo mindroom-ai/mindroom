@@ -46,8 +46,9 @@ jobs:
           tool: just@1.58.0
 
       # Content-bundle init scripts must also run with BusyBox applets; those tests fail in CI without it.
-      - name: Install BusyBox for content-bundle script tests
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends busybox
+      # The voice message tests need ffmpeg and ffprobe and are skipped without them.
+      - name: Install BusyBox and ffmpeg for script and voice message tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends busybox ffmpeg
 
       # The root-squash cases run the init in an unprivileged user namespace, which Ubuntu's AppArmor blocks by default.
       - name: Allow unprivileged user namespaces for content-bundle script tests
