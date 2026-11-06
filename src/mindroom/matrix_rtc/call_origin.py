@@ -219,10 +219,10 @@ def _brief_label(
     hook_source = hook_source_from_content(message.content) if message.sender in trusted_sender_ids else None
     if hook_source is not None:
         return f"{hook_source} hook"
-    return "You" if message.sender == own_user_id else member_label(room, message.sender)
+    return "You" if message.sender == own_user_id else _member_label(room, message.sender)
 
 
-def member_label(room: nio.MatrixRoom | None, user_id: str) -> str:
+def _member_label(room: nio.MatrixRoom | None, user_id: str) -> str:
     """Label a member by Matrix ID first, so no display name can pose as another speaker."""
     user = room.users.get(user_id) if room is not None else None
     display_name = " ".join(user.display_name.split()) if user is not None and user.display_name else ""
