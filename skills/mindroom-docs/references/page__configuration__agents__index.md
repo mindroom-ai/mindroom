@@ -189,7 +189,7 @@ A cap too small to hold the headings and markers fails with `max_preload_chars=<
 ## Listening
 
 A listening agent hears every message in chosen rooms from the people it may answer, whether or not the message is addressed to it.
-After a room has been quiet for a while, the agent runs one silent turn over what it heard and acts only through the tools you list, for example to remember something or react to a message.
+After a room has been quiet for a while, the agent runs one silent turn over what it heard and calls only the tools you list, for example to remember something or react to a message.
 It stays a normal agent in those rooms: it still answers when addressed, under the room's usual rules, and listening only adds the silent turns, so a message addressed to it is answered and also heard by the next silent turn.
 
 The agent must already be in each listened room, for example because the room is in its `rooms`; listening does not join rooms, and MindRoom logs once when a listened room is not joined yet.
@@ -216,7 +216,7 @@ agents:
 | `quiet_seconds` | int, >= 10 | `60` | Seconds without a message the agent hears before the silent turn runs |
 | `max_messages` | int, 1 to 500 | `200` | Most messages one silent turn reads; the rest wait for the next turn |
 | `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour for the agent, shared by its listened rooms in turn; further due runs are skipped, logged, and what was heard is kept |
-| `tools` | list | `[memory, react]` | The only tools a silent turn may use, at least one, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools`. `matrix_message`, presets, and tools that act with the agent's authority beyond the room, such as `delegate` and `self_config`, are refused |
+| `tools` | list | `[memory, react]` | The only tools a silent turn may call, at least one, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools`, and some are refused; see [What listed tools can do](#what-listed-tools-can-do) |
 | `model` | string or null | `null` | Key of an entry under `models:` for silent turns; unset uses the agent's `model` |
 
 ### What a silent turn does
@@ -230,8 +230,7 @@ In a room that never goes quiet, or stays busy, a turn runs anyway once the olde
 A turn also hears no more than fits its model's `context_window`, and the rest waits for the next turn.
 
 The turn's own text is never sent to the room, and approval-gated tools and interactive questions are not offered.
-It acts only through its listen tools, each with its usual effect, so a listed tool that sends still sends.
-Tools that can post if you list them include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`; `matrix_message` is refused.
+It calls only its listen tools, each with its usual effect; see [What listed tools can do](#what-listed-tools-can-do).
 No more than `max_runs_per_hour` turns run per hour; the count starts again after a restart.
 Each turn runs under the config current when it starts, so a reload that removes a tool or a sender applies to every turn after it.
 
@@ -243,13 +242,32 @@ Some messages from a long outage may not be heard.
 Only shared agents can listen: `listen` on a private agent, which has no single identity to listen as, fails config load.
 A listening agent skips contact rooms, where only a reply passes the contact's message policy.
 
+### What listed tools can do
+
+`listen.tools` is a configuration choice.
+A silent turn calls only the tools it names, but each keeps its usual effects, heard text can drive any of them, and some act with the agent's full authority later or elsewhere:
+
+- `scheduler`, one of the default agent tools, schedules a later turn of the agent, which runs as a normal turn with all of the agent's tools, as the agent's own requester.
+- `script` starts a background script, and `shell` and other tools that run code, such as `python` and `coding`, run with the agent's worker, workspace, and credentials; they can write any workspace file, `MEMORY.md` included.
+- A tool that starts turns, or checks who asked, sees the agent's own account as the requester, because no person asked for a silent turn.
+- A tool that sends still sends, for example `matrix_api`, `matrix_voice_message`, `thread_move`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`.
+
+List these only if you trust everyone whose messages the agent hears.
+
+MindRoom holds a silent turn to a few lines of its own:
+
+- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, and `dynamic_tools`.
+- The turn's tool context carries `listen.tools`, so a tool that builds its own catalog from it, such as the functions a `script` may call, offers nothing outside the list.
+- No call may save its result to a file with `mindroom_output_path`, so a tool that writes no files of its own, such as `react`, cannot overwrite one.
+- A shell in a silent turn does not offer `mindroom-agent`, because no requester owns a grant for it.
+
 ### Privacy and cost
 
 Everyone in a listened room whom the agent may answer is heard, including people who never addressed it.
 Heard text is not extracted into memory automatically, and a silent turn stores no run in session history, so a heard message that is later redacted does not linger in a stored run.
 What a silent turn writes with its `memory` tool, though, is the agent's shared memory: heard text can resurface in the agent's replies in other rooms and to other users.
-A listed tool that writes workspace files, such as `file`, `coding`, `shell`, `python`, or `script`, can write heard text anywhere it may write, `MEMORY.md` included; no call in a silent turn may save its result to a file with `mindroom_output_path`.
-Leave `memory` and tools that write files out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
+A listed tool that writes files can write heard text into `MEMORY.md` as well (see [What listed tools can do](#what-listed-tools-can-do)).
+Leave `memory` and such tools out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
 
 A silent turn records its usage under the kind `listening` (see [Usage](https://docs.mindroom.chat/usage/)).
 [Budgets](https://docs.mindroom.chat/budgets/) do not apply, because no requester asked for the turn.
@@ -264,6 +282,7 @@ It suits a silent turn that should acknowledge what it heard without writing in 
 
 - A failed or timed-out silent turn is retried, and so is one cut off by a restart after its tools have acted, so a memory write or reaction may happen twice.
 - A heard message is skipped with a warning when the turns covering it keep failing, after the batch is halved down to that one message, or when it waits more than 10 minutes for a refetch.
+  A turn that fails on its provider, unreachable, busy, or refusing the credentials, counts toward no skip; the agent's rooms wait a minute and try again.
 - A backlog longer than `max_messages`, or a message awaiting its refetch, holds the room's turn for up to ten times `quiet_seconds`.
 - A message whose timestamp is already older than the room's place when it arrives, such as one delayed by federation or backdated by a bridge, is not heard; MindRoom reads a room in timestamp order and logs nothing for it.
 - A message stamped later than now, such as one from a server whose clock runs ahead, waits to be heard until that time comes.

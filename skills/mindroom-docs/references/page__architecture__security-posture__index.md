@@ -161,22 +161,17 @@ A [listening agent](https://docs.mindroom.chat/configuration/agents/#listening) 
 Everyone who may reach the agent in a listened room can put text in front of the model, and a silent turn has no requester whose budget or access it could be checked against.
 Heard text can therefore carry prompt injection that drives the turn's tools.
 
-The allowlist and caps contain this:
+What `listen.tools` names is the operator's choice, and the rest only narrows what a turn reaches:
 
-- A silent turn offers only `listen.tools`, each of which must also be one of the agent's own `tools`, so it never gains a tool, a `worker_scope` check bypass, or a tool limit bypass.
-  Its tool context carries the same list, so a tool that offers others in turn, such as the functions a `script` may call, offers none beyond it.
-- No call in a silent turn may save its result to a workspace file with `mindroom_output_path`, so heard text cannot make a tool that writes no files, such as `react`, overwrite one such as `MEMORY.md`.
-  A listed tool that writes files itself, such as `file`, `coding`, `shell`, `python`, or `script`, still writes wherever it may.
-- Config load refuses in `listen.tools` the tools a contact turn never offers, which act with the agent's authority beyond the room: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, and `dynamic_tools`.
-  A delegated run, for one, would get the agent's full tools rather than the turn's.
+- A silent turn calls only `listen.tools`, each of which must also be one of the agent's own `tools`, so it gains no tool, `worker_scope` check bypass, or tool limit bypass.
+  A listed tool keeps its usual effects, though, and some act with the agent's full authority later or elsewhere.
+  [What listed tools can do](https://docs.mindroom.chat/configuration/agents/#what-listed-tools-can-do) names them, and the few tools and arguments MindRoom refuses; list them only if you trust everyone whose messages the agent hears.
 - Approval-gated tools and interactive questions are hidden, and the turn's text is dropped.
-  Config load refuses `matrix_message` in `listen.tools`, so a silent turn cannot post through it, but any other listed tool that sends still can.
-  These include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`.
 - The prompt marks heard text as data rather than instructions, which lowers but does not remove the risk.
 - It hears only senders allowed to reach the agent in that room, judged on the person a relay speaks for.
 - `max_runs_per_hour` and `max_messages` bound the turns and what each reads.
 
-Keep `listen.tools` narrow: injected text can use any listed tool, so a tool that sends, spends, or deletes defeats the containment.
+Keep `listen.tools` narrow: injected text can use any listed tool.
 
 Heard text also crosses rooms and users through memory.
 A silent turn with `memory` can store what anyone it may answer said in a listened room, including people who never addressed the agent, and the agent's memory is shared, so that text can resurface in its replies in other rooms and to other users.

@@ -6,7 +6,7 @@ The behavior itself is in [Agent Configuration](../configuration/agents.md#liste
 ## Goal
 
 Let an agent learn from the messages in chosen rooms that are not addressed to it, without its silent turns writing there.
-After a room goes quiet, the agent gets one silent turn over what it heard and acts only through a short list of tools.
+After a room goes quiet, the agent gets one silent turn over what it heard and calls only a short list of tools.
 The agent stays a normal agent in those rooms: it still answers when addressed, under the room's usual rules, because listening only adds silent turns and silencing the agent is a separate concern.
 
 ## Decisions
@@ -17,11 +17,9 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
    A restart in the middle of a turn runs that turn again, so its tool effects can repeat (see Risks).
    A room owing a sync-gap repair is repaired before it is read, because the messages a gap skipped are older than those after it, and a marker moved past those would never hear them.
 2. The first run for a room starts at "now", so turning listening on never reads history from before it.
-3. A silent turn runs as the agent, with its identity, instructions, and memory, but offers only `listen.tools` and drops its text, so no tool outside the list can act and the turn's own text is never posted.
-   The turn's tool context carries the same list as a function filter, so a tool that builds its own catalog from it, such as a script's grants, stays inside the list, and it refuses `mindroom_output_path`, so heard text cannot pick a file for a tool's result.
-   Config load also refuses the tools a contact turn never offers, such as `delegate`, and presets.
-   A listed tool keeps its effects, so a tool that sends can still post; config refuses `matrix_message`, whose purpose is posting, and `react` covers acknowledging.
-   Tools that can still post when listed include `matrix_api`, `matrix_voice_message`, `thread_move`, `scheduler`, and the external messengers.
+3. A silent turn runs as the agent, with its identity, instructions, and memory, but calls only `listen.tools` and drops its text, so the turn's own text is never posted.
+   `listen.tools` is a configuration choice: a listed tool keeps its effects, and some act with the agent's full authority later or elsewhere.
+   [What listed tools can do](../configuration/agents.md#what-listed-tools-can-do) names them, and the few tools and arguments MindRoom refuses; `react` covers acknowledging without `matrix_message`.
 4. Every `listen.tools` entry must be among the agent's own `tools`, and config load fails otherwise.
    The cost is that an agent with `listen:` and the default tools needs `memory` and `react` in `tools:`.
    The list needs at least one tool, since a turn without one only spends tokens.
@@ -68,13 +66,15 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
   Either stalls the room for good when the refetch never resolves or the turn always fails, such as on a message too large for the model.
 - Reading pages past the turn's own to judge quiet.
   It rescanned the same backlog every poll and still stopped short of a long one; a page that more follow counts as busy instead.
+- Refusing every tool that can act with the agent's authority.
+  Tools reach it through side channels, such as a scheduled turn, a script, or a shell, so a list of names never closes it; the operator chooses, and the docs name the known ones.
 - Trying only the oldest message after three failed turns, then skipping it after three more.
   Every message before a poisoned one would cost three failed turns and one that succeeds, under the hourly cap, where halving costs three failed turns per halving.
 
 ## Risks
 
 - Prompt injection from heard text can drive the listed tools.
-  The prompt tells the model that heard text is data, not instructions, but a model can still be persuaded, so the allowlist, the hidden approval-gated tools, the dropped text, and the sender authorization contain it, and operators must keep `listen.tools` narrow.
+  The prompt tells the model that heard text is data, not instructions, but a model can still be persuaded; the allowlist, the hidden approval-gated tools, the dropped text, and the sender authorization narrow what it reaches, and a listed tool that acts with the agent's authority is the operator's choice.
 - Heard text crosses rooms and users through memory.
   A silent turn with `memory` can store what people who never addressed the agent said, and the shared memory can surface it in other rooms and to other users; the docs say so, and leaving `memory` out of `listen.tools` prevents it.
 - Cost without budgets.

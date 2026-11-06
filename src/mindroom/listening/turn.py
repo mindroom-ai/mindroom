@@ -1,4 +1,4 @@
-"""One silent turn: a listening agent goes over what it heard in a room, acts only through its allowlist, and says nothing.
+"""One silent turn: a listening agent goes over what it heard in a room, calls only its allowlist, and says nothing.
 
 The turn is the agent itself, with its identity, instructions, and memory, but it offers only the tools ``listen.tools``
 names, hides approval-gated tools and interactive questions, and drops its text. Its tool context keeps to the same list,
