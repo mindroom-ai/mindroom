@@ -627,6 +627,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = await handle_thread_mode_command(
             command.args.get("args_text", ""),
             client=context.client,
+            config=context.config,
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,

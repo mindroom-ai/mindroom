@@ -15,6 +15,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.room_reconciliation import read_room_state
+from mindroom.matrix.room_thread_mode import publish_room_thread_mode
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -145,8 +146,21 @@ class RoomSetup:
         await asyncio.gather(*(bot.ensure_rooms() for bot in bots if bot.agent_name != ROUTER_AGENT_NAME))
 
         await self.refresh_agent_reply_memberships()
+        await self.publish_thread_modes()
 
         logger.info("All agents have joined their configured rooms")
+
+    async def publish_thread_modes(self) -> None:
+        """Reconcile room presentation after setup or live configuration changes."""
+        client = self.router_client()
+        if client is None:
+            return
+        config = self.config_provider()
+        room_ids = set(resolve_room_aliases(list(config.get_all_configured_rooms()), runtime_paths=self.runtime_paths))
+        room_ids.update(client.rooms)
+        for room_id in sorted(room_ids):
+            if room_id.startswith("!"):
+                await publish_room_thread_mode(client, config, self.runtime_paths, room_id)
 
     async def ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.

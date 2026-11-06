@@ -1283,6 +1283,7 @@ class _MultiAgentOrchestrator:
             await self._rooms.link_root_space(await self._rooms.ensure_rooms_exist())
         if plan.server_emoji_changed:
             await self._rooms.ensure_server_emoji_room()
+        await self._rooms.publish_thread_modes()
 
     async def _finalize_config_reload(
         self,
