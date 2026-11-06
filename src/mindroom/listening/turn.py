@@ -174,6 +174,8 @@ async def run_silent_turn(
         show_tool_calls=False,
         execution_identity=context.execution_identity,
         include_interactive_questions=False,
+        # Nobody asked for the turn, so no requester owns a CLI grant for its shell.
+        agent_cli_in_shell=False,
         supports_native_tool_approval=False,
     )
     with tool_runtime_context(context):

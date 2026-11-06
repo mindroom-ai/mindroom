@@ -807,7 +807,7 @@ async def _prepare_agent_and_prompt(
                 supports_native_tool_approval=ctx.supports_native_tool_approval,
                 eager_deferred_tools=ctx.eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
-                agent_cli_in_shell=True,
+                agent_cli_in_shell=ctx.agent_cli_in_shell,
                 inline_tools=ctx.inline_tools,
                 persona=ctx.persona,
                 tool_names=ctx.tool_names,

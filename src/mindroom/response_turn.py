@@ -385,6 +385,8 @@ class ResponseTurnContext:
     # How an agent turn's agent is built: its knowledge, prompt sections, tool policy, and approval support.
     knowledge: AgentKnowledge | None = None
     include_interactive_questions: bool = True
+    # Whether a standard shell offers ``mindroom-agent``; a silent listening turn has no turn owner to grant it.
+    agent_cli_in_shell: bool = True
     tool_function_filter: Callable[[ToolFunction], bool] | None = None
     delegation_depth: int = 0
     # Send deferred toolkits as ordinary tools; models with native tool search keep native deferral.

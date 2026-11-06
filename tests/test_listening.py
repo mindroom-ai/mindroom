@@ -15,6 +15,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import ai as ai_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
 from mindroom.config.main import Config
@@ -763,6 +764,7 @@ async def test_only_allowlisted_tools_and_no_send(
     assert ctx.tool_names == ("react",)
     assert ctx.supports_native_tool_approval is False
     assert ctx.include_interactive_questions is False
+    assert ctx.agent_cli_in_shell is False
     assert ctx.inline_tools is True
     assert ctx.session_id == f"{ROOM}:listen"
     assert ctx.active_model_name == "cheap"
@@ -1501,3 +1503,37 @@ async def test_a_silent_turn_that_does_nothing_ends_without_a_retry(
 
     assert len(model.requests) == 1
     bot.client.room_send.assert_not_awaited()
+
+
+async def test_a_silent_turns_shell_offers_no_agent_cli(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No requester owns a CLI grant for a silent turn, so its build never offers mindroom-agent in a shell."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer("")])})
+    builds: list[object] = []
+    create_agent = ai_module.create_agent
+
+    def recording_create_agent(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 - create_agent's own signature
+        builds.append(kwargs["agent_cli_in_shell"])
+        return create_agent(*args, **kwargs)
+
+    monkeypatch.setattr(ai_module, "create_agent", recording_create_agent)
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    await run_silent_turn(
+        bot=cast("AgentBot", bot),
+        agent_name="scribe",
+        room_id=ROOM,
+        heard=[_heard_message("$a")],
+        listen=listen,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert builds == [False]
