@@ -248,7 +248,9 @@ A listening agent skips contact rooms, where only a reply passes the contact's m
 A silent turn calls only the tools it names, but each keeps its usual effects, heard text can drive any of them, and some act with the agent's full authority later or elsewhere:
 
 - `scheduler`, one of the default agent tools, schedules a later turn of the agent, which runs as a normal turn with all of the agent's tools, as the agent's own requester.
-- `script` starts a background script, and `shell` and other tools that run code, such as `python` and `coding`, run with the agent's worker, workspace, and credentials; they can write any workspace file, `MEMORY.md` included.
+  A scheduled message can also address other agents and teams in the room, which answer the listening agent's account under that account's access, not the heard sender's.
+- `file`, `coding`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
+- A tool with a shared connection acts on that connection's credentials, for example `github`, `sql`, `postgres`, `google_drive`, `homeassistant`, and `composio`.
 - A tool that starts turns, or checks who asked, sees the agent's own account as the requester, because no person asked for a silent turn.
 - A tool that sends still sends, for example `matrix_api`, `matrix_voice_message`, `thread_move`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`.
 

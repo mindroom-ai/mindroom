@@ -24,6 +24,7 @@ The agent stays a normal agent in those rooms: it still answers when addressed, 
    The cost is that an agent with `listen:` and the default tools needs `memory` and `react` in `tools:`.
    The list needs at least one tool, since a turn without one only spends tokens.
 5. A silent turn hears only messages the agent's replies would answer, judged on the person a relay speaks for, so listening opens no new door into the agent.
+   What it starts acts as the agent's own account, though: a message it schedules can address other agents and teams in the room, which answer that account under its access, not the heard sender's.
 6. Config load rejects `listen` on a private agent, and contact rooms are skipped.
    A per-requester instance has no single listener identity, and only a reply passes a contact's message policy.
 7. A silent turn stores no run in session history, only its usage under the kind `listening`.
