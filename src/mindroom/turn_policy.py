@@ -39,6 +39,7 @@ from mindroom.thread_utils import (
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
     is_router_only_agent_mention,
+    mentions_another_participant,
     thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import timed
@@ -701,28 +702,32 @@ class TurnPolicy:
             has_active_response_for_target=has_active_response_for_target,
         )
 
-    def reply_mode_leaves_unanswered(
+    def not_for_this_agent(
         self,
         room: nio.MatrixRoom,
         source: dict[str, Any],
         target: MessageTarget,
         envelope: MessageEnvelope,
     ) -> bool:
-        """Return whether a `mentions` room is sure to leave this arriving message to nobody, before any thread is read.
+        """Return whether this agent is sure not to answer this arriving message, before any thread is read.
 
-        Only a message outside any thread is sure to be left: no agent took part in it and it is no follow-up. Ingress
-        asks this so such a message neither asks a running response to wrap up nor shows that it waits for an approval.
+        It is not this agent's when it mentions only other agents or people, or when a `mentions` room leaves it to
+        nobody: it mentions no one and is outside any thread, so no agent took part in it and it is no follow-up.
+        Ingress asks this so such a message neither asks this agent's running response to wrap up nor shows that it
+        waits for this agent's approval.
         """
-        if target.source_thread_id is not None:
-            return False
-        mentioned_agents, _am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+        for_another = mentions_another_participant(
             source,
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
         )
-        return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=bool(mentioned_agents))
+        if for_another is not None:
+            return for_another
+        if target.source_thread_id is not None:
+            return False
+        return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=False)
 
     def _reply_mode_requires_mention(self, room_id: str, envelope: MessageEnvelope, *, mentions_an_agent: bool) -> bool:
         """Return whether this is a person's message that mentions no agent or team in a `mentions` room."""

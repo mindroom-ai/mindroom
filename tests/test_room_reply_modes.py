@@ -17,13 +17,14 @@ from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
+    TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
 from mindroom.entity_resolution import current_entity_id
 from mindroom.llm.media import Audio
@@ -438,6 +439,7 @@ def _text_message(
     body: str,
     *,
     mention: str | None = None,
+    sender: str = SENDER,
     **content: object,
 ) -> nio.RoomMessageText:
     if mention is not None:
@@ -445,7 +447,7 @@ def _text_message(
     return nio.RoomMessageText.from_dict(
         {
             "event_id": event_id,
-            "sender": SENDER,
+            "sender": sender,
             "origin_server_ts": 1000 if event_id == "$caption" else 1,
             "room_id": ROOM_ID,
             "content": {"msgtype": "m.text", "body": body, **content},
@@ -500,30 +502,50 @@ async def _follow_up_in_room_mode(bot: AgentBot, room: nio.MatrixRoom, paths: Ru
     await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$follow-up", "and one more thing"))
 
 
-async def _follow_up_in_general_thread(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
-    """Send an untagged follow-up in a thread general already replied in, whose history reads in full."""
-    history = thread_history_result(
-        [
-            make_visible_message(sender=SENDER, body="hello", event_id=THREAD_ID),
-            make_visible_message(
-                sender=current_entity_id("general", paths).full_id,
-                body="Hi there",
-                event_id="$general-reply",
-                thread_id=THREAD_ID,
-            ),
-        ],
-        is_full_history=True,
-    )
-    in_thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": THREAD_ID}}
-    with (
-        patch.object(ConversationResolver, "dispatch_thread_snapshot", new=AsyncMock(return_value=history)),
-        patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=history)),
-    ):
-        await bot._turn_ingress.handle_text_event(
-            room,
-            _text_message(paths, "$follow-up", "and one more thing", **in_thread),
+def _in_general_thread(
+    body: str,
+    *mentions: str,
+    relayed: bool = False,
+) -> Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]]:
+    """Return a sender of ``body``, mentioning ``mentions``, in a thread general already replied in.
+
+    The thread's history reads in full. ``relayed`` sends it as the router's relay of the person's message.
+    """
+
+    async def send(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+        history = thread_history_result(
+            [
+                make_visible_message(sender=SENDER, body="hello", event_id=THREAD_ID),
+                make_visible_message(
+                    sender=current_entity_id("general", paths).full_id,
+                    body="Hi there",
+                    event_id="$general-reply",
+                    thread_id=THREAD_ID,
+                ),
+            ],
+            is_full_history=True,
         )
-        await drain_coalescing(bot)
+        content: dict[str, object] = {"m.relates_to": {"rel_type": "m.thread", "event_id": THREAD_ID}}
+        if mentions:
+            content["m.mentions"] = {"user_ids": [current_entity_id(name, paths).full_id for name in mentions]}
+        sender = SENDER
+        if relayed:
+            content |= {ORIGINAL_SENDER_KEY: SENDER, SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND}
+            sender = current_entity_id(ROUTER_AGENT_NAME, paths).full_id
+        with (
+            patch.object(ConversationResolver, "dispatch_thread_snapshot", new=AsyncMock(return_value=history)),
+            patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=history)),
+        ):
+            await bot._turn_ingress.handle_text_event(
+                room,
+                _text_message(paths, "$follow-up", body, sender=sender, **content),
+            )
+            await drain_coalescing(bot)
+
+    return send
+
+
+_follow_up_in_general_thread = _in_general_thread("and one more thing")
 
 
 _PATHS: dict[str, Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]]] = {
@@ -700,6 +722,46 @@ async def _mention_general(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePa
     await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$event", "@general hello", mention="general"))
 
 
+async def _mention_research(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
+    await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$event", "@research hello", mention="research"))
+
+
+async def _general_nudged_and_shown_waiting(
+    tmp_path: Path,
+    send: Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]],
+    agents: tuple[str, ...],
+    mode: RoomReplyMode,
+    *,
+    transcript: str,
+    room_mode: bool,
+) -> tuple[bool, bool]:
+    """While general is still answering, send a message; return whether it nudged general and got general's ⏳."""
+    with (
+        patch.object(ResponseRunner, "has_active_response_for_target", return_value=True),
+        patch.object(ResponseRunner, "reserve_waiting_human_message", autospec=True, return_value=None) as reserve,
+        patch("mindroom.turns.ingress.mark_waiting_for_approval") as text_waits,
+        patch("mindroom.voice.ingress.mark_waiting_for_approval") as voice_waits,
+    ):
+        await _who_acts(
+            tmp_path,
+            send,
+            agents,
+            mode,
+            voice={"enabled": True, "visible_router_echo": False},
+            transcript=transcript,
+            room_mode=room_mode,
+        )
+
+    general_id = current_entity_id("general", test_runtime_paths(tmp_path)).full_id
+    nudged = [call for call in reserve.call_args_list if call.kwargs["response_envelope"].agent_name == "general"]
+    shown_waiting = [
+        call
+        for call in (*text_waits.call_args_list, *voice_waits.call_args_list)
+        if call.args[0].matrix_id.full_id == general_id
+    ]
+    return bool(nudged), bool(shown_waiting)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "send", "transcript", "nudges"),
@@ -730,28 +792,70 @@ async def test_unanswered_chatter_does_not_nudge_a_running_response(
     A message the room's reply mode leaves to nobody neither asks general's running response to wrap up nor gets the
     ⏳ that says it waits for an approval; a message general will answer does both.
     """
-    with (
-        patch.object(ResponseRunner, "has_active_response_for_target", return_value=True),
-        patch.object(ResponseRunner, "reserve_waiting_human_message", autospec=True, return_value=None) as reserve,
-        patch("mindroom.turns.ingress.mark_waiting_for_approval") as text_waits,
-        patch("mindroom.voice.ingress.mark_waiting_for_approval") as voice_waits,
-    ):
-        await _who_acts(
-            tmp_path,
-            send,
-            ("general",),
-            mode,
-            voice={"enabled": True, "visible_router_echo": False},
-            transcript=transcript,
-            room_mode=True,
-        )
+    nudged, shown_waiting = await _general_nudged_and_shown_waiting(
+        tmp_path,
+        send,
+        ("general",),
+        mode,
+        transcript=transcript,
+        room_mode=True,
+    )
+    assert nudged is nudges
+    assert shown_waiting is nudges
 
-    general_id = current_entity_id("general", test_runtime_paths(tmp_path)).full_id
-    nudged = [call for call in reserve.call_args_list if call.kwargs["response_envelope"].agent_name == "general"]
-    shown_waiting = [
-        call
-        for call in (*text_waits.call_args_list, *voice_waits.call_args_list)
-        if call.args[0].matrix_id.full_id == general_id
-    ]
-    assert bool(nudged) is nudges
-    assert bool(shown_waiting) is nudges
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("send", "room_mode", "transcript", "nudges"),
+    [
+        pytest.param(_in_general_thread("@research look", "research"), False, "", False, id="mentions-only-research"),
+        pytest.param(
+            _in_general_thread("@research look", "research", relayed=True),
+            False,
+            "",
+            False,
+            id="router-relay-to-research",
+        ),
+        pytest.param(_mention_research, True, "", False, id="mentions-only-research-room-mode"),
+        pytest.param(_follow_up_in_general_thread, False, "", True, id="untagged-in-general-thread"),
+        pytest.param(
+            _in_general_thread("@general @research look", "general", "research"),
+            False,
+            "",
+            True,
+            id="mentions-general-and-research",
+        ),
+        pytest.param(
+            _in_general_thread("@general look", "general", relayed=True),
+            False,
+            "",
+            True,
+            id="router-relay-to-general",
+        ),
+        pytest.param(_mention_general, True, "", True, id="mentions-general-room-mode"),
+    ],
+)
+async def test_a_message_for_another_agent_does_not_nudge_a_running_response(
+    tmp_path: Path,
+    send: Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]],
+    transcript: str,
+    *,
+    room_mode: bool,
+    nudges: bool,
+) -> None:
+    """While general works through a long task, a message that mentions only research leaves general's response alone.
+
+    It neither asks general to wrap up nor gets general's ⏳, typed or relayed by the router, in a thread or in a
+    `thread_mode: room` room. A message general would answer does both: an untagged follow-up in the thread only
+    general took part in, a message that mentions general and research, and the router's relay to general.
+    """
+    nudged, shown_waiting = await _general_nudged_and_shown_waiting(
+        tmp_path,
+        send,
+        _BOTH,
+        "auto",
+        transcript=transcript,
+        room_mode=room_mode,
+    )
+    assert nudged is nudges
+    assert shown_waiting is nudges
