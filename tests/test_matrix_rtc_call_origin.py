@@ -774,5 +774,5 @@ def test_disambiguated_display_name_cannot_pose_as_agent_or_another_member() -> 
     room.add_member(CALLER, "Helper", None)
     assert disambiguated_display_name(room, CALLER, agent_label="Helper") == f"Helper ({CALLER})"
     assert disambiguated_display_name(None, CALLER, agent_label="alice") == f"alice ({CALLER})"
-    room.add_member(CALLER, "Bob\u00a0", None)
-    assert disambiguated_display_name(room, CALLER, agent_label="Helper") == f"Bob ({CALLER})"
+    room.add_member("@eve:example.org", "Bob\u00a0", None)
+    assert disambiguated_display_name(room, "@eve:example.org", agent_label="Helper") == "Bob (@eve:example.org)"
