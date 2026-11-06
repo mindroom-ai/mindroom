@@ -392,7 +392,8 @@ async def test_a_chatty_bot_it_does_not_hear_never_holds_a_turn_back(listening: 
     await listening.service._poll_once(T0 + 71)
 
     assert listening.turns.heard() == ["$alice"]
-    assert listening.marker_event() == "$own-70"
+    # The marker passes what it did not hear only up to what has settled, 30 seconds before the turn.
+    assert listening.marker_event() == "$own-40"
 
 
 async def test_a_room_that_never_goes_quiet_is_heard_after_ten_quiet_windows(
