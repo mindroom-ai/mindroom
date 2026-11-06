@@ -30,7 +30,7 @@ from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
@@ -301,7 +301,8 @@ async def run_tool_call(
     """
     call = ToolCall(function=function, arguments=model_arguments(arguments or {}, function), context=context)
     runtime = get_tool_runtime_context()
-    if runtime is not None and not runtime.tool_output_paths and OUTPUT_PATH_ARGUMENT in call.arguments:
+    output_path = normalize_output_path_argument(call.arguments.get(OUTPUT_PATH_ARGUMENT))
+    if runtime is not None and not runtime.tool_output_paths and output_path is not None:
         msg = f"{OUTPUT_PATH_ARGUMENT} is not available in this turn; the result stays in the call's answer."
         return CallResult("failed", error=ValueError(msg))
     token = _CURRENT_CALL.set(call)

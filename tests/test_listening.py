@@ -1294,6 +1294,8 @@ async def test_a_silent_turns_calls_cannot_pick_a_file_for_their_result(
             calls(
                 tool_call("react", "call-1", event_id="$tea", emoji="12345678", mindroom_output_path="MEMORY.md"),
                 tool_call("react", "call-2", event_id="$missing", emoji="👍", mindroom_output_path="missing.txt"),
+                # An unset path, as a model may send it, names no file and the call runs.
+                tool_call("react", "call-3", event_id="$tea", emoji="👍", mindroom_output_path=None),
             ),
             answer(""),
         ],
@@ -1313,8 +1315,10 @@ async def test_a_silent_turns_calls_cannot_pick_a_file_for_their_result(
     )
 
     assert [path.name for path in tmp_path.rglob("*") if path.name in {"MEMORY.md", "missing.txt"}] == []
-    bot.client.room_send.assert_not_awaited()
-    bot.client.room_get_event.assert_not_awaited()
+    sent = bot.client.room_send.await_args.kwargs
+    assert sent["content"]["m.relates_to"]["key"] == "👍"
+    bot.client.room_send.assert_awaited_once()
+    bot.client.room_get_event.assert_awaited_once()
     answers = str([message.content for message in model.requests[-1].messages])
     assert answers.count("mindroom_output_path is not available in this turn") == 2
 
