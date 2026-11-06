@@ -36,7 +36,7 @@ from mindroom.listening import turn as turn_module
 from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.service import ListeningService
 from mindroom.listening.turn import run_silent_turn
-from mindroom.llm.errors import ProviderUnavailable
+from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError, ProviderUnavailable
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
@@ -1106,10 +1106,19 @@ async def test_a_turn_that_keeps_failing_hears_half_as_much_then_skips_one_messa
     assert listening.marker_event() == "$m3"
 
 
+@pytest.mark.parametrize(
+    "outage",
+    [
+        ProviderUnavailable("The provider is down", provider="openai"),
+        ProviderError("The account is out of credit", provider="openai", code=QUOTA_EXHAUSTED),
+    ],
+    ids=["down", "out of credit"],
+)
 async def test_a_provider_outage_skips_no_message_and_rests_the_agent(
     tmp_path: Path,
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
+    outage: ProviderError,
 ) -> None:
     """A turn the provider fails, not its messages, halves and skips nothing; the agent's rooms wait a minute instead."""
     listening = _listening(tmp_path, journal_store, monkeypatch, {"max_runs_per_hour": 60})
@@ -1117,7 +1126,7 @@ async def test_a_provider_outage_skips_no_message_and_rests_the_agent(
     for index in range(4):
         await listening.say(f"$m{index}", 10 + index)
     before = listening.marker()
-    listening.turns.error = ProviderUnavailable("The provider is down", provider="openai")
+    listening.turns.error = outage
 
     with capture_logs() as logs:
         for poll in range(8):

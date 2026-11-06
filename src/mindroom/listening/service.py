@@ -31,7 +31,7 @@ from mindroom.contacts.turns import contact_room
 from mindroom.event_journal import ConversationCursor
 from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.turn import heard_within_window, run_silent_turn
-from mindroom.llm.errors import AuthenticationFailed, ProviderError
+from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ModelSafeguardRefusal, ProviderError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.conversation_reads import projected_visible_messages
@@ -106,8 +106,12 @@ def _cursor(message: ResolvedVisibleMessage) -> ConversationCursor:
 
 
 def _outage(error: BaseException) -> bool:
-    """Return whether a turn failed on its provider, unreachable, busy, or refusing the credentials, not its messages."""
-    return isinstance(error, ProviderError) and (error.retryable or isinstance(error, AuthenticationFailed))
+    """Return whether a turn failed on its provider, such as unreachable, busy, out of credit, or refusing the account.
+
+    A request too large for the model, one it rejected, or one its safeguards refused is the heard messages' doing.
+    """
+    message_caused = (ContextWindowExceeded, InvalidRequest, ModelSafeguardRefusal)
+    return isinstance(error, ProviderError) and not isinstance(error, message_caused)
 
 
 def _listening_in(config: Config, runtime_paths: RuntimePaths, agent_name: str, room_id: str) -> ListenConfig | None:
