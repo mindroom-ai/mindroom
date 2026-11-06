@@ -19,6 +19,7 @@ other. Each skip is logged, and a skipped message is never heard.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -30,6 +31,7 @@ from mindroom.contacts.turns import contact_room
 from mindroom.event_journal import ConversationCursor
 from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.turn import heard_within_window, run_silent_turn
+from mindroom.llm.errors import AuthenticationFailed, ProviderError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.conversation_reads import projected_visible_messages
@@ -55,6 +57,8 @@ _HOUR_SECONDS = 3600
 _REFETCH_WAIT_SECONDS = 600
 # Failed turns in a row over the same messages before the next one hears half as many, or, at one message, skips it.
 _FAILURES_PER_BATCH = 3
+# How long an agent's rooms rest after a turn failed on its provider, which the heard messages did not cause.
+_OUTAGE_REST_SECONDS = 60
 # How long one silent turn may run; one that runs longer is stopped and counts as failed. A poll waits on its turns, so a
 # turn that hangs would otherwise stop listening everywhere.
 _TURN_TIMEOUT_SECONDS = 300
@@ -99,6 +103,11 @@ def _position(cursor: ConversationCursor) -> tuple[int, str]:
 def _cursor(message: ResolvedVisibleMessage) -> ConversationCursor:
     """Return the position of a heard message, which a marker standing on it has heard up to."""
     return ConversationCursor(created_ts=message.timestamp, logical_event_id=message.event_id)
+
+
+def _outage(error: BaseException) -> bool:
+    """Return whether a turn failed on its provider, unreachable, busy, or refusing the credentials, not its messages."""
+    return isinstance(error, ProviderError) and (error.retryable or isinstance(error, AuthenticationFailed))
 
 
 def _listening_in(config: Config, runtime_paths: RuntimePaths, agent_name: str, room_id: str) -> ListenConfig | None:
@@ -147,6 +156,8 @@ class ListeningService:
     _capped: set[tuple[str, str]] = field(default_factory=set, init=False)
     # When each room's last silent turn started; under the cap, the least recently run room goes first.
     _last_run: dict[tuple[str, str], float] = field(default_factory=dict, init=False)
+    # When each agent's turns may run again after one failed on its provider; until then its rooms wait unread.
+    _resting: dict[str, float] = field(default_factory=dict, init=False)
     # Rooms whose turns failed in a row from their current marker.
     _failures: dict[tuple[str, str], _Failures] = field(default_factory=dict, init=False)
     # Rooms whose reads stop at a message awaiting its refetch.
@@ -243,8 +254,8 @@ class ListeningService:
         marker = self._markers.get(agent_name, room_id)
         if marker is None:
             latest = await bot.conversation_reader.latest_room_cursor(room_id)
-            await self._mark(agent_name, room_id, _first_marker(latest, now))
-        elif not self._at_cap(agent_name, room_id, listen, now):
+            await self._mark(agent_name, room_id, _first_marker(latest, now), first=True)
+        elif now >= self._resting.get(agent_name, 0) and not self._at_cap(agent_name, room_id, listen, now):
             await self._hear_after(bot, agent_name, room_id, listen, config, marker, clock, now)
 
     async def _hear_after(
@@ -273,8 +284,11 @@ class ListeningService:
             await self._skip_refetch(agent_name, room_id, page.stopped_at)
             return
         if page.refresh_pending:
-            async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
-                await reader.hydrator.resolve_refreshes(page.refresh_pending)
+            # A refetch the server holds up leaves what came before it to be heard, so the room drains up to it, where
+            # the 10-minute skip applies.
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+                    await reader.hydrator.resolve_refreshes(page.refresh_pending)
         messages = projected_visible_messages(page)
         try:
             waited_out_ms = now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms
@@ -296,7 +310,7 @@ class ListeningService:
         # More after the page, or a message the page stops at, may be newer than any heard on it.
         busy = page.more or page.stopped_at is not None or len(kept) < len(messages)
         if self._due(heard, busy, now_ms, quiet_ms) and self._start_run(agent_name, room_id, listen, clock()):
-            await self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, _cursor(kept[-1]))
+            await self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, _cursor(kept[-1]), clock)
 
     async def _run_turn(
         self,
@@ -308,10 +322,12 @@ class ListeningService:
         marker: ConversationCursor,
         heard: Sequence[ResolvedVisibleMessage],
         page_end: ConversationCursor,
+        clock: Callable[[], float],
     ) -> None:
         """Run one silent turn over the oldest of ``heard`` it can take, and move the marker past those.
 
-        A turn that fails or runs out of time raises and keeps the marker, so the same messages are heard again.
+        A turn that fails or runs out of time raises and keeps the marker, so the same messages are heard again. One
+        that failed on its provider counts toward no skip; the agent's rooms rest a while instead.
         """
         failures = self._failures.get((agent_name, room_id))
         if failures is None or failures.marker != marker:
@@ -336,8 +352,11 @@ class ListeningService:
                     config=config,
                     runtime_paths=self.runtime_paths,
                 )
-        except Exception:
-            await self._turn_failed(agent_name, room_id, failures, batch)
+        except Exception as error:
+            if _outage(error):
+                self._resting[agent_name] = clock() + _OUTAGE_REST_SECONDS
+            else:
+                await self._turn_failed(agent_name, room_id, failures, batch)
             raise
         end = page_end if len(batch) == len(heard) else _cursor(batch[-1])
         self._failures.pop((agent_name, room_id), None)
@@ -510,9 +529,15 @@ class ListeningService:
         )
         await self._mark(agent_name, room_id, stopped_at)
 
-    async def _mark(self, agent_name: str, room_id: str, cursor: ConversationCursor) -> None:
+    async def _mark(self, agent_name: str, room_id: str, cursor: ConversationCursor, *, first: bool = False) -> None:
+        """Record where the agent has heard the room up to; only a ``first`` marker is made, every other one moves.
+
+        A sync that stopped listening in the room while it was read forgot the marker, and it stays forgotten, even once
+        the room is listened in again, which then starts at its newest message.
+        """
         async with self._marker_writes:
-            # A sync that stopped listening in the room while its turn ran forgot the marker, and it stays forgotten.
             if self._listened is not None and (agent_name, room_id) not in self._listened:
+                return
+            if not first and self._markers.get(agent_name, room_id) is None:
                 return
             await asyncio.to_thread(self._markers.set, agent_name, room_id, cursor)

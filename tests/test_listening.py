@@ -36,6 +36,7 @@ from mindroom.listening import turn as turn_module
 from mindroom.listening.markers import ListeningMarkers
 from mindroom.listening.service import ListeningService
 from mindroom.listening.turn import run_silent_turn
+from mindroom.llm.errors import ProviderUnavailable
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
@@ -696,6 +697,35 @@ async def test_a_contact_room_is_not_listened_in(listening: _Listening, monkeypa
     assert len([log for log in logs if "contact room" in log["event"]]) == 1
 
 
+async def test_a_turn_still_running_when_its_room_is_dropped_and_taken_up_again_restores_no_marker(
+    listening: _Listening,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room dropped from listening and taken up again while its turn runs starts again at its newest message."""
+    # The syncs below would start the poll loop; this test polls on its own.
+    monkeypatch.setattr(listening.service, "start", lambda: None)
+    await listening.service._poll_once(T0)
+    await listening.say("$a", 10)
+    off = listening.config.model_copy(deep=True)
+    off.agents["scribe"].listen = None
+
+    async def off_and_on_again() -> None:
+        await listening.service.sync(off)
+        await listening.say("$while-off", 50)
+        await listening.service.sync(listening.config)
+
+    listening.turns.meanwhile = off_and_on_again
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.marker() is None
+    listening.turns.meanwhile = None
+    await listening.service._poll_once(T0 + 110)
+    await listening.say("$back-on", 200)
+    await listening.service._poll_once(T0 + 300)
+
+    assert listening.turns.heard_in(ROOM) == [["$a"], ["$back-on"]]
+
+
 async def test_a_turn_still_running_when_listening_stops_keeps_no_marker(listening: _Listening) -> None:
     """A reload that stops listening in a room mid-turn wins, so turning it back on never hears the gap."""
     await listening.service._poll_once(T0)
@@ -954,30 +984,40 @@ async def test_a_message_owing_a_refetch_holds_the_marker_until_it_is_refetched(
     assert listening.turns.heard() == ["$a", "$p", "$z"]
 
 
-async def test_a_refetch_the_server_never_answers_holds_up_only_its_own_room(
+async def test_a_refetch_the_server_never_answers_holds_up_neither_its_room_nor_the_others(
     tmp_path: Path,
     journal_store: EventJournalStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refetch that never returns is cut off; its room keeps its marker, and the agent's other rooms are heard."""
+    """A refetch that never returns is cut off each poll, so the other rooms are heard and its room drains up to it.
+
+    The stuck message is then skipped after 10 minutes, and what follows it is heard.
+    """
     monkeypatch.setattr(service_module, "_READ_TIMEOUT_SECONDS", 0.1)
     listening = _listening(tmp_path, journal_store, monkeypatch, {"rooms": [ROOM, STUDIO]})
     await listening.service._poll_once(T0)
+    await listening.say("$a", 10)
     await _owe_refetch(listening, "$p", 20)
+    await listening.say("$z", 30)
     await admit(listening.journal, "$studio", room_id=STUDIO, sender=ALICE, ts=_ms(10))
-    before = listening.marker()
 
     async def never_answers(_requests: object) -> None:
         await asyncio.Event().wait()
 
     cast("AsyncMock", listening.bot.conversation_reader.hydrator.resolve_refreshes).side_effect = never_answers
 
-    with capture_logs() as logs:
-        await listening.service._poll_once(T0 + 100)
+    await listening.service._poll_once(T0 + 100)
 
-    assert listening.marker() == before
     assert listening.turns.heard_in(STUDIO) == [["$studio"]]
-    assert [log["room_id"] for log in logs if log["log_level"] == "error"] == [ROOM]
+    assert listening.turns.heard_in(ROOM) == []
+    # What came before the stuck message waits ten quiet windows, as for any refetch, and is then heard.
+    await listening.service._poll_once(T0 + 611)
+    assert listening.turns.heard_in(ROOM) == [["$a"]]
+    await listening.service._poll_once(T0 + 720)
+    await listening.service._poll_once(T0 + 730)
+
+    assert listening.turns.heard_in(ROOM) == [["$a"], ["$z"]]
+    assert listening.marker_event() == "$z"
 
 
 @pytest.mark.parametrize("finished", [True, False], ids=["finished", "never finished"])
@@ -1064,6 +1104,33 @@ async def test_a_turn_that_keeps_failing_hears_half_as_much_then_skips_one_messa
 
     assert listening.turns.heard() == ["$m1", "$m2", "$m3"]
     assert listening.marker_event() == "$m3"
+
+
+async def test_a_provider_outage_skips_no_message_and_rests_the_agent(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn the provider fails, not its messages, halves and skips nothing; the agent's rooms wait a minute instead."""
+    listening = _listening(tmp_path, journal_store, monkeypatch, {"max_runs_per_hour": 60})
+    await listening.service._poll_once(T0)
+    for index in range(4):
+        await listening.say(f"$m{index}", 10 + index)
+    before = listening.marker()
+    listening.turns.error = ProviderUnavailable("The provider is down", provider="openai")
+
+    with capture_logs() as logs:
+        for poll in range(8):
+            await listening.service._poll_once(T0 + 100 + 25 * poll)
+
+    # A turn at 100, 175, and 250: each waited a minute after the last one failed.
+    assert [len(heard) for heard in listening.turns.heard_in(ROOM)] == [4, 4, 4]
+    assert listening.marker() == before
+    assert not any("half" in log["event"] or "skipped" in log["event"] for log in logs)
+    listening.turns.error = None
+    await listening.service._poll_once(T0 + 400)
+
+    assert listening.turns.heard() == ["$m0", "$m1", "$m2", "$m3"]
 
 
 async def test_a_turn_that_runs_too_long_is_stopped_and_counts_as_a_failure(
