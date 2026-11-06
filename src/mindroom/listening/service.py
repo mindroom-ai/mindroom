@@ -347,7 +347,12 @@ class ListeningService:
         """
         try:
             async with bot.admission_fence():
-                if not bot.accepting_work or not self._start_run(agent_name, room_id, listen, clock()):
+                # Admission may have waited out a replacement, whose config judges this batch again on the next poll.
+                if (
+                    self.config_provider() is not config
+                    or not bot.accepting_work
+                    or not self._start_run(agent_name, room_id, listen, clock())
+                ):
                     return
                 turn = bot.create_owned_task(
                     self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, page_end, clock),

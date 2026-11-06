@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import re
 import time
@@ -43,6 +42,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.memory.functions import add_agent_memory, list_all_agent_memories
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from mindroom.response_turn import HandledAttempt
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.script_runs.policy import resolve_script_launch_grants
@@ -66,7 +66,8 @@ from tests.journal_helpers import record_room_history_recovery
 from tests.test_event_journal_store import admit, edit, text
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -111,11 +112,17 @@ class _Bot:
     ingress_validator: IngressValidator
     running: bool = True
     accepting_work: bool = True
+    # The runtime's real admission gate, which a runtime replacement holds closed.
+    admission: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
 
-    @contextlib.asynccontextmanager
-    async def admission_fence(self) -> AsyncIterator[None]:
-        """Admit work at once, as an open runtime does."""
-        yield
+    def admission_fence(self) -> AbstractAsyncContextManager[None]:
+        """Admit work through the gate, waiting while it is closed."""
+
+        async def reopened() -> bool:
+            await self.admission.wait_until_open()
+            return True
+
+        return admitted_response_decision(self.admission, reopened)
 
     def create_owned_task(self, coro: Coroutine[object, object, None], *, name: str) -> asyncio.Task[None]:
         """Run work in a task this bot owns, as the bot's stop finds them."""
@@ -983,6 +990,45 @@ async def test_a_reload_governs_every_turn_that_starts_after_it(
 
     assert listening.turns.heard_in(ROOM) == [["$lobby"]]
     assert [ctx.tool_names for ctx in listening.turns.contexts] == [("react",), ("react",)]
+
+
+async def test_a_reload_while_a_turn_waits_for_admission_runs_no_turn(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn waiting out a runtime replacement is dropped when the config changed meanwhile, its marker kept."""
+    listening = _listening(tmp_path, journal_store, monkeypatch)
+    revoked = with_responder_access(listening.config.model_copy(deep=True), "scribe", users=[SIGNAL_BOT])
+    current = {"config": listening.config}
+    service = ListeningService(
+        runtime_paths=listening.runtime_paths,
+        config_provider=lambda: current["config"],
+        bots=lambda: {"scribe": cast("AgentBot", listening.bot)},
+        agent_reply_memberships=isolated_membership_index(),
+    )
+    await service._poll_once(T0)
+    await listening.say("$a", 10)
+    before = listening.marker()
+    gate = listening.bot.admission
+    waiting = asyncio.Event()
+    wait_until_open = gate.wait_until_open
+
+    async def waits_until_open() -> None:
+        waiting.set()
+        await wait_until_open()
+
+    monkeypatch.setattr(gate, "wait_until_open", waits_until_open)
+    gate.close()
+    poll = asyncio.create_task(service._poll_once(T0 + 100))
+    await asyncio.wait_for(waiting.wait(), 5)
+    # The replacement applies a config that no longer lets Alice reach the agent, then reopens admission.
+    current["config"] = revoked
+    gate.reopen()
+    await asyncio.wait_for(poll, 5)
+
+    assert listening.turns.contexts == []
+    assert listening.marker() == before
 
 
 @pytest.mark.parametrize("error_replies", [False, True], ids=["raises", "fails"])
