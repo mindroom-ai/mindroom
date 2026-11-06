@@ -43,7 +43,7 @@ from mindroom.matrix_rtc.call_origin import (
     CallOriginContext,
     build_call_brief,
     build_call_handoff_note,
-    member_display_name,
+    disambiguated_display_name,
     parse_call_origin,
     resolve_call_origin_context,
 )
@@ -1446,13 +1446,14 @@ class CallManager:
         """Post one finished call's transcript once admitted, if the caller can still access the origin."""
         try:
             origin_room = self._client.rooms.get(origin.room_id)
+            agent_label = self._config.agents[self._agent_name].display_name
             writeback = format_call_writeback(
                 turns=turns,
                 duration_seconds=duration_seconds,
                 caller_id=requester_id,
-                caller_label=member_display_name(origin_room, requester_id),
+                caller_label=disambiguated_display_name(origin_room, requester_id, agent_label=agent_label),
                 agent_id=self._client.user_id,
-                agent_label=self._config.agents[self._agent_name].display_name,
+                agent_label=agent_label,
             )
             if writeback is None:
                 return

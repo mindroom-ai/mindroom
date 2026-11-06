@@ -229,11 +229,17 @@ def _member_label(room: nio.MatrixRoom | None, user_id: str) -> str:
     return f"{user_id} ({display_name})" if display_name else user_id
 
 
-def member_display_name(room: nio.MatrixRoom | None, user_id: str) -> str:
-    """Name a member by display name, or by its user ID's localpart when it has none."""
-    user = room.users.get(user_id) if room is not None else None
-    display_name = " ".join(user.display_name.split()) if user is not None and user.display_name else ""
-    return display_name or user_id.removeprefix("@").partition(":")[0]
+def disambiguated_display_name(room: nio.MatrixRoom | None, user_id: str, *, agent_label: str) -> str:
+    """Name a member by display name or localpart, plus the Matrix ID when the agent or another member reads the same.
+
+    Names compare after whitespace folding, so a trailing NBSP cannot pose as another speaker.
+    """
+    users = room.users if room is not None else {}
+    user = users.get(user_id)
+    name = " ".join(user.display_name.split()) if user is not None and user.display_name else ""
+    name = name or user_id.removeprefix("@").partition(":")[0]
+    taken = {" ".join(other.name.split()) for other_id, other in users.items() if other_id != user_id}
+    return f"{name} ({user_id})" if name in taken or name == " ".join(agent_label.split()) else name
 
 
 def _capped(body: str) -> str:
