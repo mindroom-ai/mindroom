@@ -359,6 +359,7 @@ async def test_a_job_card_names_the_reply_whose_call_started_the_job(
     """A gated call's card names the event of the reply that made the call, when that reply already shows one."""
     handle = MagicMock(spec=SpanHandle)
     handle.reply = MagicMock(event_id=reply_event_id)
+    handle.stopped.return_value = False
     token = _current_slot.set(SpanSlot(handle=handle) if in_reply else None)
     try:
         async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
@@ -540,11 +541,16 @@ async def test_stopping_a_reply_denies_the_approvals_its_jobs_wait_for(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["require_approval", "auto_approve"])
 async def test_a_stop_before_the_job_posts_its_card_leaves_no_card(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    policy: str,
 ) -> None:
-    """A Stop that lands after the reply started the job, while the job still prepares its card, still ends the job."""
+    """A Stop that lands after the reply started the job, while the policy still decides its call, still ends the job.
+
+    The job posts no card, and a call the policy approves without one does not run either.
+    """
     planning, plan = asyncio.Event(), asyncio.Event()
     original_plan = approvals_module.plan_approval_calls
 
@@ -559,6 +565,7 @@ async def test_a_stop_before_the_job_posts_its_card_leaves_no_card(
         with tool_runtime_context(run.context):
             stopped = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
             await asyncio.wait_for(planning.wait(), JOB_TEST_TIMEOUT)
+            run.config.tool_approval = ToolApprovalConfig(default=policy)
 
             await _stop_reply(principal, replies, "$question", by="reaction")
             plan.set()
@@ -570,27 +577,30 @@ async def test_a_stop_before_the_job_posts_its_card_leaves_no_card(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_reply_ends_only_its_jobs_that_wait_for_approval(tmp_path: Path) -> None:
-    """A job the reply started that already runs keeps running; one whose call still waits for approval ends.
+async def test_a_stopped_reply_s_jobs_get_no_approval_after_the_stop(tmp_path: Path) -> None:
+    """A Stop cancels the reply's jobs that wait on their cards and refuses its other jobs every later approval.
 
-    A call waits from its job's start, before its card posts, until the policy or a person decides it.
+    A job whose call runs keeps running until it asks for an approval; another reply's jobs are untouched.
     """
     runtime = await tool_job_runtime(tmp_path)
+    ask = asyncio.Event()
 
     async def forever() -> BackgroundOutcome:
         await asyncio.Event().wait()
         raise AssertionError
 
+    async def asks_later() -> BackgroundOutcome:
+        await ask.wait()
+        return await awaiting_approval(runtime, "asks later")
+
     jobs = {
-        # A tool job still preparing the card for its call.
-        "asks": ("reply", True, forever),
-        # A job waiting on its cards, as a subagent job does for its child's call.
-        "waits": ("reply", False, partial(awaiting_approval, runtime, "waits")),
-        "runs": ("reply", False, forever),
-        "other": ("other", False, partial(awaiting_approval, runtime, "other")),
+        "waits": ("reply", partial(awaiting_approval, runtime, "waits")),
+        "runs": ("reply", forever),
+        "asks later": ("reply", asks_later),
+        "other": ("other", partial(awaiting_approval, runtime, "other")),
     }
     try:
-        for job_id, (reply_id, asks_approval, operation) in jobs.items():
+        for job_id, (reply_id, operation) in jobs.items():
             await start_job(
                 runtime,
                 job_id,
@@ -600,17 +610,17 @@ async def test_a_stopped_reply_ends_only_its_jobs_that_wait_for_approval(tmp_pat
                 owner=job_owner(),
                 operation=operation,
                 reply_id=reply_id,
-                asks_approval=asks_approval,
             )
         for job_id in ("waits", "other"):
             await asyncio.wait_for(wait_for_status(runtime, job_id, "awaiting_approval"), JOB_TEST_TIMEOUT)
-        await runtime.cancel_stopped_reply("reply", None)
-        for job_id in ("asks", "waits"):
-            await asyncio.wait_for(wait_for_status(runtime, job_id, "cancelled"), JOB_TEST_TIMEOUT)
+        await runtime.cancel_stopped_reply("reply")
+        await asyncio.wait_for(wait_for_status(runtime, "waits", "cancelled"), JOB_TEST_TIMEOUT)
+        ask.set()
+        await asyncio.wait_for(wait_for_status(runtime, "asks later", "cancelled"), JOB_TEST_TIMEOUT)
         assert {job.job_id: job.status for job in runtime.retained_jobs()} == {
-            "asks": "cancelled",
             "waits": "cancelled",
             "runs": "running",
+            "asks later": "cancelled",
             "other": "awaiting_approval",
         }
     finally:
@@ -625,7 +635,7 @@ async def test_a_call_on_its_way_to_its_job_when_its_reply_stops_starts_none(
     """A call the reply recorded before its Stop, whose job the Stop's look for the reply's jobs overtook, starts none.
 
     The reply's second call queues for its job's start while the Stop saves the first job's cancel request, so its
-    start runs only after the Stop looked; had it started, its card would stay answerable and approving would run it.
+    start runs only after the Stop looked; its job is cancelled before it launches, so it posts no card to approve.
     """
     saving_cancel, second_waits = asyncio.Event(), asyncio.Event()
     original_save, original_start = ToolJobStore.save, ToolJobRuntime.start
@@ -663,8 +673,9 @@ async def test_a_call_on_its_way_to_its_job_when_its_reply_stops_starts_none(
                 await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
             assert second_waits.is_set()
             jobs = run.runtime.retained_jobs()
-            assert [job.adapter["tool_call_id"] for job in jobs] == ["write-1"]
-            await asyncio.wait_for(wait_for_status(run.runtime, jobs[0].job_id, "cancelled"), JOB_TEST_TIMEOUT)
+            for job in jobs:
+                await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
+            assert [job.adapter["tool_call_id"] for job in jobs] == ["write-1", "write-2"]
             assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", REPLY_STOPPED_REASON)]
         assert run.effects == []
 
@@ -707,14 +718,16 @@ async def test_a_decision_that_reaches_the_runtime_before_its_replys_stop_runs_n
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("then", ["approve", "retry"])
 async def test_a_stop_whose_cancel_save_fails_still_runs_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    then: str,
 ) -> None:
-    """A job whose cancel request the Stop could not save never runs its call, and the next pass saves the request.
+    """A job whose cancel request the Stop could not save never runs its call, and its cancel is saved later.
 
-    Approving the card while the request is unsaved runs nothing; the retried save denies the card, saying the reply
-    was stopped, and settles the job cancelled.
+    Approving the card refuses the job and saves its cancel; without a decision, the revocation pass saves it. Either
+    save denies the card, saying the reply was stopped, and settles the job cancelled.
     """
     original_save = ToolJobStore.save
     failures: list[str] = []
@@ -748,14 +761,18 @@ async def test_a_stop_whose_cancel_save_fails_still_runs_nothing(
             assert (failures, job.status, await run.cards.decisions()) == ([job.job_id], "awaiting_approval", [None])
             execution = run.runtime._entries[job.job_id].task
             assert execution is not None
-            run.decide("approved")
-            await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
-            assert run.effects == []
-
-            await run.runtime.cancel_revoked()
+            if then == "approve":
+                run.decide("approved")
+                await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
+                assert run.effects == []
+            else:
+                await run.runtime.cancel_revoked()
 
             await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
             assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", REPLY_STOPPED_REASON)]
+            if then == "retry":
+                run.decide("approved")
+                await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
         assert run.effects == []
 
 
@@ -766,7 +783,7 @@ async def test_a_stop_leaves_a_job_running_the_call_its_policy_approved(
 ) -> None:
     """A gated job whose call the requester's auto-approve window passed without a card runs on after its reply's Stop.
 
-    The policy's decision ends the call's approval as a person's does, so the Stop finds no approval ahead of it.
+    The policy granted the approval before the Stop, and the job asks for no other, so nothing refuses it.
     """
     async with (
         _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None, gate=asyncio.Event()) as run,

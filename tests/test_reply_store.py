@@ -1606,7 +1606,7 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
     principal = await _stop_waiting_for_the_create(journal_store)
     # The Stop also reaches the jobs the reply's calls started.
     assert await _acknowledge_the_create(principal) == (
-        ReplyStopped("reply-1", "span-1"),
+        ReplyStopped("reply-1"),
         rl.CancelSpan("span-1", by_stop=True),
     )
     stored = await principal.replies.load("reply-1")
@@ -1639,7 +1639,7 @@ async def test_a_pending_stop_from_another_room_never_reaches_the_reply(
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     if own_room_stop:
-        assert effects == (ReplyStopped("reply-1", "span-1"), rl.CancelSpan("span-1", by_stop=True))
+        assert effects == (ReplyStopped("reply-1"), rl.CancelSpan("span-1", by_stop=True))
         assert stored.stop_receipt_order == 9
     else:
         assert effects == ()

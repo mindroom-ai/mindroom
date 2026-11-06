@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from mindroom.response_runner import ResponseRunner
 
 
-async def no_reply_jobs(_reply_id: str, _span_id: str | None) -> None:
+async def no_reply_jobs(_reply_id: str) -> None:
     """End no jobs on a reply's Stop, for a bot instance whose replies start none."""
 
 

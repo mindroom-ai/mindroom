@@ -106,6 +106,10 @@ class SpanHandle:
         """Return the reply this span writes."""
         return self.reply.reply_id
 
+    def stopped(self) -> bool:
+        """Return whether a Stop reached this span, whose calls then start no background job."""
+        return self.runtime.spans.stopped(self.span_id)
+
     def note_reply(self, reply: rl.Reply) -> None:
         """Remember the reply as last committed or read."""
         self.reply = reply
@@ -281,9 +285,8 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Settles what the reply of an ended approval owes, given the reply's id.
     approval_ended: Callable[[str], None]
-    # Ends the jobs a stopped reply's calls started that await approval, given the reply's id and the id of its span
-    # this instance runs, if any.
-    reply_stopped: Callable[[str, str | None], Awaitable[None]]
+    # Refuses approvals to the jobs a stopped reply's calls started, given the reply's id.
+    reply_stopped: Callable[[str], Awaitable[None]]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -300,13 +303,18 @@ class ReplyRuntime:
         in the span's own task, whose next await the cancel interrupts. The
         in-memory effects run even when an awaited one fails, so a failed read
         cannot keep a stopped span running or a claim waiting.
+        A Stop first marks the span it reaches, so none of the span's calls starts a job after it, however its awaits
+        and the Stop's interleave.
         """
+        for effect in effects:
+            if isinstance(effect, rl.CancelSpan) and effect.by_stop:
+                self.spans.stop(effect.span_id)
         try:
             for effect in effects:
                 if isinstance(effect, WakeApproval):
                     await self._wake_fenced_approval(effect.approval_id)
                 elif isinstance(effect, ReplyStopped):
-                    await self.reply_stopped(effect.reply_id, effect.span_id)
+                    await self.reply_stopped(effect.reply_id)
         finally:
             for effect in effects:
                 if isinstance(effect, ApprovalEnded):

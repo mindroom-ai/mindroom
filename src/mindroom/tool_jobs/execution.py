@@ -407,7 +407,6 @@ async def _call_job(
             "authority": dict(job_call.tool.authority),
         },
         operation=lambda: _run_operation(inner, function, detached, owner, baseline, approval),
-        asks_approval=approval is not None,
     )
 
 
@@ -465,11 +464,9 @@ async def _run_managed_call(
             operation=partial(_releasing, reference, job.operation, function.name),
             cancel=job.cancel,
             reattach=True,
-            # A Stop of the reply making the call ends the job while it awaits approval, and keeps a call whose job
-            # the Stop overtook from starting one.
+            # A Stop of the reply making the call refuses the job every later approval, and a stopped span starts none.
             reply_id=None if span is None else span.reply_id,
-            span_id=None if span is None else span.span_id,
-            asks_approval=job.asks_approval,
+            span_stopped=None if span is None else span.stopped,
         )
         waited = await runtime.wait(
             job_id,

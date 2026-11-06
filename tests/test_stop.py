@@ -36,6 +36,17 @@ async def test_a_cancel_for_a_span_this_instance_does_not_run_is_not_kept() -> N
     assert not task.cancelled()
 
 
+def test_a_span_stays_stopped_only_while_its_scope_is_open() -> None:
+    """A Stop marks only a span this instance runs, and the mark goes with the span's scope, so marks never pile up."""
+    registry = SpanRegistry()
+    registry.stop("elsewhere")
+    registry.expect("span-1")
+    registry.stop("span-1")
+    assert (registry.stopped("elsewhere"), registry.stopped("span-1")) == (False, True)
+    registry.forget("span-1")
+    assert not registry.stopped("span-1")
+
+
 def _registry_running(task: asyncio.Task[None]) -> SpanRegistry:
     """Return a registry whose span ``span-1`` is executed by ``task``."""
     registry = SpanRegistry()

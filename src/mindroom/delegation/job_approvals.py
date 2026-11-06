@@ -45,9 +45,6 @@ async def request_child_approvals(
     if paused is None or owner.requester_id is None:
         msg = "Delegated child paused without supported exact approval requirements"
         raise RuntimeError(msg)
-    # The child waits for approval from its pause, so a Stop of the reply that started the job while the policy
-    # decides ends the job before any card posts.
-    runtime.expect_approval(job_id)
     # A child can pause long after its job started: the policy and approver current when it asks decide, as for a
     # paused reply.
     config = live_delegation_config(config)

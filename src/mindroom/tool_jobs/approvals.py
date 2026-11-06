@@ -76,7 +76,7 @@ async def ask_job_approvals(
         # Cancellation or a failed card ends this wait; the job's end denies its cards, so none may post after it.
         await run_coroutine_until_complete(_end_wait(decisions))
         raise
-    # Every call is decided, by a person or the policy, which also ends the approval a tool job asked for its call.
+    # Every call is decided, by a person or the policy; a job whose reply a Stop reached acts on no decision.
     await runtime.set_awaiting_approval(job_id, awaiting=False)
     return tuple(decided)
 
