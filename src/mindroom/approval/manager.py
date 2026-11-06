@@ -298,11 +298,13 @@ class ApprovalManager:
         timeout_seconds: float,
         entity_name: str | None = None,
         grant_operation: ApprovalOperation | None = None,
+        response_event_id: str | None = None,
     ) -> BackgroundApprovalDecision:
         """Publish and await one durable exact-call background approval.
 
         With a grant operation, the card offers timed approvals scoped like a paused reply's to the conversation
         of ``entity_name``, and an active grant of that scope approves the call without a card.
+        ``response_event_id`` names the reply event whose tool call the card gates, as a paused reply's card does.
         """
         cards = self.cards
         if cards is None:
@@ -338,6 +340,7 @@ class ApprovalManager:
                 "approval_target": "background_script",
                 "background_run_id": origin.run_id,
                 "background_call_id": origin.call_id,
+                **({} if response_event_id is None else {"response_event_id": response_event_id}),
                 **(
                     {}
                     if grant_operation is None or grant_scope is None

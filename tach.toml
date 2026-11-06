@@ -8589,6 +8589,7 @@ depends_on = [
     "mindroom.custom_tools.job",
     "mindroom.failure_text",
     "mindroom.llm",
+    "mindroom.reply_scope",
     "mindroom.session_storage.types",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.authorization",

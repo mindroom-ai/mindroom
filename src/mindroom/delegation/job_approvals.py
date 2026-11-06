@@ -65,6 +65,8 @@ async def request_child_approvals(
         owner=owner,
         config=config,
         runtime_paths=runtime_paths,
+        # The child's calls are not in the reply that started the job, so the cards name no reply event.
+        response_event_id=None,
     )
     return tuple(
         replace(
