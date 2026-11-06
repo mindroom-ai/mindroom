@@ -284,8 +284,9 @@ MindRoom Chat shows a jobs bar in the room or thread with each running job, a âœ
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
-**Stop** on a reply, or an edit that regenerates a reply that is still answering, also cancels the jobs of that reply that still wait for approval and denies their cards, so approving one later runs nothing.
-The reply's other jobs keep running until they are cancelled, and deleting a message stops only its reply.
+After **Stop** on a reply, or an edit that regenerates a reply that is still answering, no job of that reply gets a new approval; a command already executing finishes.
+Jobs waiting for approval are cancelled and their cards denied, so approving one later runs nothing, and any other job of the reply, such as a subagent still working, is cancelled when it next needs an approval.
+Deleting a message stops only its reply.
 An edit that regenerates a finished reply leaves its jobs alone, but the regenerated answer is the same reply, so a later **Stop** on it reaches them too.
 Removing the agent from a room cancels its jobs there.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
@@ -345,7 +346,7 @@ Cancelling the job before the decision denies its card, and so does **Stop** on 
 Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that can stop the current model step (such as model switching) or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
-Cancelling the job denies its open cards, and so does **Stop** on the reply that started it, from the moment its child pauses for approval.
+Cancelling the job denies its open cards; after **Stop** on the reply that started it, the job is cancelled when its child next needs an approval.
 A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job.
 Cards a job posts offer the same [auto-approval for a few minutes](https://docs.mindroom.chat/tool-approval/#auto-approval-for-a-few-minutes) as other approval cards, and an active auto-approval also approves matching job calls without a card.
 A message never counts as an approval, and current permissions are rechecked before a job's call runs.

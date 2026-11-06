@@ -9,11 +9,12 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Only a newer human message releases a tool's wait; scheduled turns, other agents' messages, and follow-ups queue behind the reply instead of detaching its work.
   No time limit stands in for that message in scheduled, hook, or follow-up replies, because where a turn came from does not tell whether a person can release it: router relays, follow-ups, and silent schedules each broke that guess; a reply that waits on a call that never ends shows its job for cancelling.
 - With `mid_turn`, a wait and the post-batch check share one judgment per queued snapshot, so each queue gets one decision and at most one defer reaction, and a message the judge lets wait never moves a call to the background.
-- A Stop on a reply also cancels the reply's jobs that await approval, so approving one of their cards later cannot run a call the person stopped; the cards end denied, saying the reply was stopped.
-  An edit that regenerates a reply still answering stops it the same way first, so the old question's waiting calls end too.
-  The reply's jobs whose call already passed its approval keep running, as do all jobs after a deletion or an edit of a finished reply, because each job stays visible and cancellable on its own; a job otherwise ends only through its own cancel, revoked access, or the bot leaving the room.
-  A regeneration keeps its reply's record, so a later Stop of the regenerated answer also ends the earlier answer's jobs that still await approval, as the cards of both name the same reply.
-  The Stop cancels such jobs instead of only denying their cards, because a subagent job told its child's call was denied would resume the child and keep working.
+- After a Stop on a reply, no job of that reply gets a new approval; a command already executing finishes.
+  A job waiting on its cards is cancelled at once and its cards end denied, saying the reply was stopped; any other job of the reply, such as a subagent still working, is cancelled when it next asks, card or not, policy or person; and a call of the stopped reply that has not become a job yet never becomes one.
+  All jobs keep running after a deletion or an edit of a finished reply, because each job stays visible and cancellable on its own; a job otherwise ends only through its own cancel, revoked access, or the bot leaving the room.
+  An edit that regenerates a reply still answering stops it the same way first, so the old question's calls get no approval either, while the regeneration's own calls do.
+  A regeneration keeps its reply's record, so a later Stop of the regenerated answer also reaches the earlier answer's jobs, as the cards of both name the same reply.
+  The Stop cancels such jobs instead of only denying their calls, because a subagent job told its child's call was denied would resume the child and keep working.
   Jobs are found by the reply record whose call started them, not by the reply event their cards name, because a reply may not show an event yet when its call starts a job; the link lives only in memory, because a restart interrupts every job that awaits approval.
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
@@ -56,12 +57,13 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A job's cancel request denies its open approval cards in the commit that saves the request, and its end denies any card a request still in flight posted after that, so no card of a stopping or ended job stays answerable, even while the router cannot post the denial yet.
 - A job-gated call never runs inline: one that cannot become a job fails, and the agent CLI never offers it, because such a function asks for no confirmation of its own and its job's approval phase is its only approval gate.
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
-- A reply's Stop ends its jobs whose call has not passed its approval yet, card posted or not, in whatever order the Stop and the jobs' own steps run.
-  The runtime tracks that in memory: accepting such a job as `awaiting_approval` was rejected, because a call the policy approves would then count its policy check against `approval_wait_timeout` and could leave its reply early.
-  The Stop marks those jobs in memory before it waits for the runtime lock, and a marked job posts no card, passes no approval, and enters no tool, so a decision that arrives meanwhile runs nothing.
-  It looks again under the lock that accepting a job holds, and the stopped span accepts no job afterwards, so a call the span recorded before the Stop never becomes a job after it, whatever its task awaits on the way.
-  A subagent job counts from its child's pause, before the policy decides the child's calls; a subagent whose child is still working keeps running.
-  A cancel request the Stop could not save leaves the job marked, and the revocation pass retries the save, so a failed write never lets the call run.
+- A reply's Stop is checked where an approval is used, not where a job stands when the Stop arrives, so no order of the Stop and the job's own awaits lets a call through.
+  The Stop marks the reply's span this instance runs before anything else, and the reply's jobs before it waits for the runtime lock.
+  A job is checked under that lock when it starts waiting on its cards and when it takes a decision, whether a person's or the policy's, and a gated tool call runs right after its decision is taken.
+  Admission reads the span's mark after its last await, before it launches the job, and cancels an accepted job unlaunched when the span was stopped.
+  The span's mark lives as long as the span's scope, which outlasts every admission its calls make; a job keeps its own mark.
+  A cancel request the Stop could not save leaves the job marked, so it still runs nothing, and the revocation pass retries the save to deny its cards.
+  A person's approval that commits between the Stop and the job taking it is refused too, though its card keeps reading approved: a decision is final once recorded, and the Stop cannot deny the card in its own commit because the job's link to its reply lives only in memory.
 - Revocation stops execution through internal ownership although discovery and control are no longer authorized, so losing access never leaves work running unseen.
   A config reload keeps active jobs, and controls and result reads check current authorization.
 - A follow-up is named by its conversation and the set of jobs it reports, so admitting it again changes nothing.
