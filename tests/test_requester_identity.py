@@ -6,6 +6,7 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 import nio
+import pytest
 
 from mindroom import entity_resolution, requester_identity
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -23,8 +24,6 @@ from tests.matrix_state_helpers import save_matrix_state
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    import pytest
 
 
 def test_managed_entity_check_reads_matrix_state_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,6 +58,7 @@ def test_managed_entity_check_reads_matrix_state_once(tmp_path: Path, monkeypatc
     assert reads == 4
 
 
+@pytest.mark.usefixtures("enforce_turn_authorization")
 def test_authorizing_a_message_derives_entity_identities_once_for_every_responder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
