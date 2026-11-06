@@ -31,7 +31,7 @@ from tests.api.test_connections_signin import (
 if TYPE_CHECKING:
     from httpx import Response
 
-    from mindroom.api.connections_session_cookie import _ConnectionsSession
+    from mindroom.api.connections_session_cookie import ConnectionsSession
 
 NATIVE = "/api/connections/session/native"
 PENDING_COOKIE = f"{CONNECTIONS_SESSION_COOKIE}_native"
@@ -116,7 +116,7 @@ def run_native_flow(client: TestClient, name: str = "alice", next_path: str | No
     return continue_in(client, confirmed)
 
 
-def _session_of(browser: TestClient, cookie: str = CONNECTIONS_SESSION_COOKIE) -> _ConnectionsSession | None:
+def _session_of(browser: TestClient, cookie: str = CONNECTIONS_SESSION_COOKIE) -> ConnectionsSession | None:
     token = browser.cookies.get(cookie)
     return read_connections_session(token, now=time.time()) if token else None
 

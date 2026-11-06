@@ -13,7 +13,7 @@ CONNECTIONS_SESSION_SECONDS = 3600
 _SESSION_KEY = secrets.token_bytes(32)
 
 
-class _ConnectionsSession(NamedTuple):
+class ConnectionsSession(NamedTuple):
     """A live portal session: who signed in, and whether the sign-in may open the dashboard."""
 
     matrix_user_id: str
@@ -35,7 +35,7 @@ def issue_connections_session(matrix_user_id: str, *, now: float, dashboard: boo
     return f"{payload}.{_signature(payload)}"
 
 
-def read_connections_session(token: str, *, now: float) -> _ConnectionsSession | None:
+def read_connections_session(token: str, *, now: float) -> ConnectionsSession | None:
     """Return the session of a live cookie value this process issued, else `None`."""
     payload, _, signature = token.rpartition(".")
     if not hmac.compare_digest(signature.encode(), _signature(payload).encode()):
@@ -44,4 +44,4 @@ def read_connections_session(token: str, *, now: float) -> _ConnectionsSession |
     dashboard, _, matrix_user_id = rest.partition("|")
     if dashboard not in {"0", "1"} or not matrix_user_id or now >= int(expires_at):
         return None
-    return _ConnectionsSession(matrix_user_id, dashboard=dashboard == "1")
+    return ConnectionsSession(matrix_user_id, dashboard=dashboard == "1")

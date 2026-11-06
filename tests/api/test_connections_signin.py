@@ -602,6 +602,51 @@ def test_admin_dashboard_session_loads_dashboard_page(
     assert response.text == "administrator dashboard"
 
 
+@pytest.fixture
+def dashboard_dist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve a stand-in dashboard bundle."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("administrator dashboard")
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
+
+
+@pytest.mark.usefixtures("dashboard_dist")
+@pytest.mark.parametrize("page", ["/", "/agents"])
+def test_signed_in_non_administrator_opening_the_dashboard_goes_back_to_chat(signin: dict[str, Any], page: str) -> None:
+    """Someone signed in to Connections who may not open the dashboard lands in Chat, not on the API-key login."""
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+
+    response = client.get(page, headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"{CHAT_ORIGIN}/"
+
+
+@pytest.mark.usefixtures("dashboard_dist")
+def test_signed_in_administrator_without_dashboard_bit_still_gets_the_login(signin: dict[str, Any]) -> None:
+    """An administrator whose sign-in the dashboard does not accept can still sign in there with the API key."""
+    _with_admin(signin)
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+
+    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 307
+    assert urlparse(response.headers["location"]).path == "/login"
+
+
+@pytest.mark.usefixtures("dashboard_dist")
+def test_signed_in_non_administrator_gets_the_login_without_a_listed_web_chat(signin: dict[str, Any]) -> None:
+    """Without a listed web Chat there is nowhere to send them, so the dashboard keeps its login."""
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["capacitor://localhost"]')
+
+    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 307
+    assert urlparse(response.headers["location"]).path == "/login"
+
+
 def test_session_without_dashboard_bit_keeps_api_key_rule(signin: dict[str, Any]) -> None:
     """An administrator whose sign-in was not proven bound still needs the API key for the dashboard."""
     _with_admin(signin)
