@@ -46,10 +46,18 @@ def test_session_expires_after_one_hour() -> None:
 
 
 def test_session_naming_another_user_is_rejected() -> None:
-    """Swapping the user, the expiry, or the dashboard bit in the payload breaks the signature."""
+    """Swapping the user, the expiry, the dashboard bit, or the Chat origin in the payload breaks the signature."""
     expires = int(NOW) + CONNECTIONS_SESSION_SECONDS
-    _payload, _, signature = issue_connections_session(ALICE, now=NOW, dashboard=False).rpartition(".")
-    for forged in (f"{expires}|0|@mallory:example.org", f"{int(NOW) + 10**9}|0|{ALICE}", f"{expires}|1|{ALICE}"):
+    chat = "https://chat.example.org"
+    token = issue_connections_session(ALICE, now=NOW, dashboard=False, chat_origin=chat)
+    _payload, _, signature = token.rpartition(".")
+    assert read_connections_session(token, now=NOW) == (ALICE, False, chat)
+    for forged in (
+        f"{expires}|0|{chat}|@mallory:example.org",
+        f"{int(NOW) + 10**9}|0|{chat}|{ALICE}",
+        f"{expires}|1|{chat}|{ALICE}",
+        f"{expires}|0|https://evil.example.org|{ALICE}",
+    ):
         payload = forged.encode().hex()
         assert read_connections_session(f"{payload}.{signature}", now=NOW) is None
 

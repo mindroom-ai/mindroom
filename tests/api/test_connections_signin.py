@@ -22,6 +22,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import auth, connections_session, frontend, main
 from mindroom.api.connections_session_cookie import (
+    ConnectionsSession,
     connections_session_cookie,
     issue_connections_session,
     read_connections_session,
@@ -175,7 +176,7 @@ def test_sign_in_sets_portal_session_cookie(signin: dict[str, Any]) -> None:
     assert signin["verifier"].await_args.args[1] == signin["paths"]
 
 
-def _session_of(client: TestClient) -> tuple[str, bool] | None:
+def _session_of(client: TestClient) -> ConnectionsSession | None:
     """Read the portal session cookie the client holds."""
     token = client.cookies.get(CONNECTIONS_SESSION_COOKIE)
     return read_connections_session(token, now=time.time()) if token else None
