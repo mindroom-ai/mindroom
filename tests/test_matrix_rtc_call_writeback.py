@@ -77,6 +77,24 @@ def test_format_call_writeback_carries_turns_by_sender_id() -> None:
     }
 
 
+def test_format_call_writeback_leaves_out_turns_from_other_roles() -> None:
+    """Only the caller's and the agent's turns reach the fallback and the structured transcript."""
+    writeback = format_call_writeback(
+        turns=(("system", "Be brief"), ("user", "Hi"), ("developer", "Use tools"), ("assistant", "Hello")),
+        duration_seconds=60,
+        caller_id=CALLER,
+        caller_label="Alice",
+        agent_id=AGENT,
+        agent_label="Helper",
+    )
+    assert writeback is not None
+    assert writeback.body.split("\n\n")[2:] == ["Alice: Hi", "Helper: Hello"]
+    assert writeback.formatted_body.count("<strong>") == 2
+    assert "Be brief" not in writeback.formatted_body
+    assert "Use tools" not in writeback.formatted_body
+    assert writeback.transcript["turns"] == [{"sender": CALLER, "text": "Hi"}, {"sender": AGENT, "text": "Hello"}]
+
+
 def test_format_call_writeback_rounds_short_calls_up_to_one_minute() -> None:
     """Calls under a minute still read as one minute."""
     writeback = format_call_writeback(
