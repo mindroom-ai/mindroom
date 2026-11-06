@@ -59,7 +59,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
 - A reply's Stop is checked where an approval is used, not where a job stands when the Stop arrives, so no order of the Stop and the job's own awaits lets a call through.
   The Stop marks the reply's span this instance runs before anything else, and the reply's jobs before it waits for the runtime lock.
-  Synchronous checkpoints check the job's mark immediately before requesting a card and entering a gated tool call, including a child's resumed call, so no Stop can interleave before the action.
+  Synchronous checkpoints check the job's mark before requesting a card and at the tool's invocation leaf, after hooks, recording, and function middleware; synchronous bodies check inside their executor callback, so a queued body still observes Stop before it starts.
   Admission reads the span's mark after its last await, before it launches the job, and cancels an accepted job unlaunched when the span was stopped.
   The span's mark lives as long as the span's scope, which outlasts every admission its calls make; a job keeps its own mark.
   A cancel request the Stop could not save leaves the job marked, so it still runs nothing, and the revocation pass retries the save to deny its cards.

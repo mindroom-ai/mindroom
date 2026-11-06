@@ -302,7 +302,7 @@ def _resolve_tool_context(
     )
 
 
-async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _ToolHookResult:
+async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult], *, approval: bool = False) -> _ToolHookResult:
     """Run one synchronous tool call off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
     if tracker is not None and tracker._loop is not asyncio.get_running_loop():
@@ -317,6 +317,7 @@ async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _Tool
     def invoke() -> _ToolHookResult:
         if not claim.claim_start():
             raise asyncio.CancelledError
+        job_checkpoint(approval=approval)
         return call()
 
     async def offload() -> _ToolHookResult:
@@ -667,7 +668,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     if declined_result is not None:
         return await decline("blocked_environment_hooks", declined_result)
 
-    # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
+    # Report cancellation and lost grants as blocked before recording; the invocation leaf checks a reply's Stop.
     try:
         job_checkpoint()
         check_current_execution_authority(arguments=args)

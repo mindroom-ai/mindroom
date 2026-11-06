@@ -7,6 +7,7 @@ import itertools
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
@@ -63,7 +64,7 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate, ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import detached_policy, offered_agno_function, tool_policy
 from tests.authorization_helpers import (
@@ -703,6 +704,55 @@ async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
         )
 
     assert ran == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gated", [False, True])
+async def test_stop_before_sync_tool_executor_entry(gated: bool) -> None:
+    """A queued synchronous body checks Stop in its executor; ungated work continues."""
+    release = threading.Event()
+    effects: list[str] = []
+    control = JobControl()
+
+    def body() -> str:
+        effects.append("ran")
+        return "done"
+
+    function = ToolFunction(
+        name="body",
+        description=None,
+        parameters={},
+        entrypoint=body,
+        gate=ToolGate.JOB if gated else None,
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor, job_control_context(control):
+        blocker = executor.submit(release.wait)
+        async with tool_hooks.owned_sync_tool_completion(executor):
+            task = asyncio.create_task(
+                execute_tool_call(
+                    function,
+                    {},
+                    ToolCallContext(run_id="run", session_id="session", user_id=None),
+                    middleware=(detached_policy(HookRegistry.empty()),),
+                ),
+            )
+            try:
+                async with asyncio.timeout(5):
+                    while not blocker.running() or executor._work_queue.qsize() == 0:  # noqa: ASYNC110
+                        await asyncio.sleep(0)
+                assert not effects
+                control.reply_stopped = True
+                release.set()
+                if gated:
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                else:
+                    await task
+                assert effects == ([] if gated else ["ran"])
+            finally:
+                release.set()
+                await asyncio.gather(task, return_exceptions=True)
+                blocker.result()
 
 
 @pytest.mark.asyncio

@@ -28,11 +28,12 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_model_context
-from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome, ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:
@@ -87,6 +88,7 @@ class ToolCallContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     history_scope: HistoryScope | None = None
     model_name: str | None = None
+    approved: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -397,10 +399,12 @@ async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], con
     # rewrites them, so values for injected names are dropped here as well.
     # A media name the schema declares belongs to the model, so that value replaces the framework's.
     kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
+    approval = context.approved or function.gate is ToolGate.JOB
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
+        job_checkpoint(approval=approval)
         result = entrypoint(**kwargs)
     else:
-        result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs))
+        result = await run_sync_tool_entrypoint(partial(_invoke_and_drain_sync, entrypoint, kwargs), approval=approval)
     if inspect.isawaitable(result):
         result = await result
     if isinstance(result, AsyncIterator):

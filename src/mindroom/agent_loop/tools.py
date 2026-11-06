@@ -14,7 +14,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -357,7 +356,7 @@ async def _run_call(
 ) -> None:
     """Run one call, hand over its progress while it runs, record its outcome, and hand it over with its result."""
     execution = call.execution
-    context = run.call_context(execution.tool_call_id)
+    context = replace(run.call_context(execution.tool_call_id), approved=execution.confirmed is True)
     loop = asyncio.get_running_loop()
     lock = threading.Lock()
     latest: str | None = None
@@ -392,7 +391,6 @@ async def _run_call(
 
     try:
         with tool_progress_reporter(report):
-            job_checkpoint(approval=execution.confirmed is True)
             outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
     finally:
         with lock:

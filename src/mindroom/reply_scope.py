@@ -299,12 +299,9 @@ class ReplyRuntime:
     async def run_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
         """Run what committed reply transitions left for after their commit.
 
-        Span cancels run last: the acknowledgement that applies a Stop can run
-        in the span's own task, whose next await the cancel interrupts. The
-        in-memory effects run even when an awaited one fails, so a failed read
-        cannot keep a stopped span running or a claim waiting.
-        A Stop first marks the span it reaches, so none of the span's calls starts a job after it, however its awaits
-        and the Stop's interleave.
+        Span cancels run last: a Stop acknowledgement can run in its own span, whose next await cancellation interrupts.
+        Run in-memory effects even when an awaited effect fails, so spans stop and waiting claims wake.
+        A Stop first marks its span so pending admissions cannot launch after awaited effects.
         """
         for effect in effects:
             if isinstance(effect, rl.CancelSpan) and effect.by_stop:

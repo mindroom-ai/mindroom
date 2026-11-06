@@ -16,15 +16,20 @@ from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_s
 
 from mindroom.delegation import execution, job_approvals, lifecycle
 from mindroom.event_journal import ToolJobStore
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT, HookRegistry, hook
 from mindroom.llm.runs import RunStatus
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.tool_jobs import runtime as job_runtime
 from mindroom.tool_jobs.client_cancel import cancel_stopped_reply_jobs
+from tests import delegation_job_fuzz
 from tests.delegation_job_fuzz import ChildScript, DelegationFuzzRunner, Step
 from tests.reply_span_helpers import reply_span
+from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
+
+    from mindroom.hooks import ToolBeforeCallContext, ToolEnvironmentContext
 
 
 _SCRIPTS = st.builds(
@@ -319,6 +324,61 @@ async def test_a_stop_refuses_the_reply_s_subagent_every_later_approval(
             assert not await runner.approvals.pending()
             assert [job.status for job in runner.runtime.retained_jobs()] == ["cancelled"]
             assert not runner.executed
+    finally:
+        release.set()
+        await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", [EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT])
+async def test_stop_during_resumed_child_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: str) -> None:
+    """The job's Stop mark reaches its child's tool body after the resumed call's hooks finish."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @hook(event, agents=["code"], timeout_ms=30_000)
+    async def preparing(_context: ToolBeforeCallContext | ToolEnvironmentContext) -> None:
+        entered.set()
+        await release.wait()
+
+    registry = HookRegistry.from_plugins([_plugin("preparing", [preparing])])
+    monkeypatch.setattr(
+        delegation_job_fuzz,
+        "_delegate_runtime_context",
+        partial(delegation_job_fuzz._delegate_runtime_context, hook_registry=registry),
+    )
+    runner = await _runner(tmp_path, monkeypatch)
+    principal = runner.runtime.journal.principal("leader@replies")
+    replies = ReplyRuntime(
+        store=principal,
+        entity_name="leader",
+        generation="gen-test",
+        retry_sources=lambda *_: None,
+        approval_ended=lambda *_: None,
+        reply_stopped=partial(cancel_stopped_reply_jobs, runner.paths),
+    )
+    try:
+        async with reply_span(
+            principal,
+            source_event_id="$question",
+            room_id="!room:example.org",
+            placeholder_event_id="$answer",
+            runtime=replies,
+        ) as handle:
+            await runner._delegate(Step("delegate", script=ChildScript(approvals=1)))
+            parent = runner.turns[-1].task
+            replies.spans.register(handle.span_id, parent)
+            await runner._idle()
+            await runner._approve(Step("approve"))
+            await asyncio.wait_for(entered.wait(), 10)
+            assert not runner.executed
+            stopped = await principal.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns())
+            await replies.run_effects(stopped.post_commit)
+            await asyncio.gather(parent, return_exceptions=True)
+            runner.turns.clear()
+            release.set()
+            await runner._idle()
+            assert not runner.executed
+            assert [job.status for job in runner.runtime.retained_jobs()] == ["cancelled"]
     finally:
         release.set()
         await runner.close()

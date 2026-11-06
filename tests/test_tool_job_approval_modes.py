@@ -30,6 +30,7 @@ from mindroom.event_journal import (
     ToolJobStore,
     tool_job_run_id,
 )
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT, HookBindings, HookRegistry, hook
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, SpanSlot, _current_slot
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
@@ -44,10 +45,12 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import reply_span
+from tests.test_tool_hooks import _plugin
 from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -73,6 +76,7 @@ if TYPE_CHECKING:
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.event_journal import PrincipalStore
+    from mindroom.hooks import ToolBeforeCallContext, ToolEnvironmentContext
     from mindroom.llm.runs import RunRecord
 
 
@@ -301,9 +305,23 @@ class _GatedRun:
             tool_call("write_report", f"write-{index}", title=title, **budget) for index, title in enumerate(titles, 1)
         ]
         model = ScriptedModel([calls(*made), answer("done")])
+        middleware = (build_tool_hook_middleware(self.context.hooks, self.config, self.paths),)
         if generated:
-            return await run_job_turn(job_actor(), model, "Write", generated=(function,), run_id=run_id)
-        return await run_job_turn(job_actor(replace(tool, function=function)), model, "Write", run_id=run_id)
+            return await run_job_turn(
+                job_actor(),
+                model,
+                "Write",
+                generated=(function,),
+                run_id=run_id,
+                middleware=middleware,
+            )
+        return await run_job_turn(
+            job_actor(replace(tool, function=function)),
+            model,
+            "Write",
+            run_id=run_id,
+            middleware=middleware,
+        )
 
     def decide(self, status: Literal["approved", "denied"]) -> None:
         self.cards.decision.set_result(BackgroundApprovalDecision(status, None if status == "approved" else "No."))
@@ -845,6 +863,45 @@ async def test_stop_during_approval_state_save(
                     if task is not None and not task.done():
                         task.cancel()
                 await asyncio.gather(*(task for task in (parent, stop) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", [EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT])
+async def test_stop_during_approved_call_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+) -> None:
+    """A Stop during hook preparation refuses the approved tool body, before-call and environment hooks included."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @hook(event, timeout_ms=30_000)
+    async def preparing(_context: ToolBeforeCallContext | ToolEnvironmentContext) -> None:
+        entered.set()
+        await release.wait()
+
+    registry = HookRegistry.from_plugins([_plugin("preparing", [preparing])])
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+        run.context = replace(run.context, hooks=HookBindings(registry=registry))
+        principal, replies = _reply_runtime(run)
+        with tool_runtime_context(run.context):
+            parent = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
+            try:
+                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+                run.decide("approved")
+                await asyncio.wait_for(entered.wait(), JOB_TEST_TIMEOUT)
+                entry = run.runtime._entries[_job_of(run, "$question").job_id]
+                assert not run.effects
+                await _stop_reply(principal, replies, "$question", by="reaction")
+                release.set()
+                await asyncio.wait_for(asyncio.gather(parent, entry.task, return_exceptions=True), JOB_TEST_TIMEOUT)
+                assert not run.effects
+                await asyncio.wait_for(wait_for_status(run.runtime, entry.job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
+            finally:
+                release.set()
+                if not parent.done():
+                    parent.cancel()
+                await asyncio.gather(parent, return_exceptions=True)
 
 
 @pytest.mark.asyncio
