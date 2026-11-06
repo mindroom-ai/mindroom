@@ -43,6 +43,6 @@ class ListenConfig(BaseModel):
     )
     model: str | None = Field(
         default=None,
-        description="Model alias under models for silent turns; unset uses the agent's model",
+        description="Model alias under models for silent turns; unset uses the room's model, then the agent's model",
         json_schema_extra=dashboard_hint(reference="model"),
     )

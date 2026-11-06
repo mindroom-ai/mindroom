@@ -3003,7 +3003,7 @@
             }
           ],
           "default": null,
-          "description": "Model alias under models for silent turns; unset uses the agent's model",
+          "description": "Model alias under models for silent turns; unset uses the room's model, then the agent's model",
           "title": "Model",
           "x-mindroom": {
             "reference": "model"

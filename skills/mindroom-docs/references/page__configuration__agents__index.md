@@ -217,7 +217,7 @@ agents:
 | `max_messages` | int, 1 to 500 | `200` | Most messages one silent turn reads; the rest wait for the next turn |
 | `max_runs_per_hour` | int, 1 to 60 | `6` | Most silent turns per hour for the agent, shared by its listened rooms in turn; further due runs are skipped, logged, and what was heard is kept |
 | `tools` | list | `[memory, react]` | The only tools a silent turn may call, at least one, as toolkit names or `toolkit.function`. Each toolkit must also be in the agent's `tools`, and some are refused; see [What listed tools can do](#what-listed-tools-can-do) |
-| `model` | string or null | `null` | Key of an entry under `models:` for silent turns; unset uses the agent's `model` |
+| `model` | string or null | `null` | Key of an entry under `models:` for silent turns, which pins them to it. Unset, a silent turn uses the room's model, set with [`!room_model`](https://docs.mindroom.chat/configuration/models/#room_model) or `room_models`, and otherwise the agent's `model` |
 
 ### What a silent turn does
 
@@ -247,11 +247,12 @@ A listening agent skips contact rooms, where only a reply passes the contact's m
 `listen.tools` is a configuration choice.
 A silent turn calls only the tools it names, but each keeps its usual effects, heard text can drive any of them, and some act with the agent's full authority later or elsewhere:
 
-- `scheduler`, one of the default agent tools, schedules a later turn of the agent, which runs as a normal turn with all of the agent's tools, as the agent's own requester.
+- `scheduler`, one of the default agent tools, schedules a later turn of the agent, and can edit or cancel any pending task in the room; an edited task becomes the agent's own.
   A scheduled message can also address other agents and teams in the room, which answer the listening agent's account under that account's access, not the heard sender's.
 - `file`, `coding`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
 - A tool with a shared connection acts on that connection's credentials, for example `github`, `sql`, `postgres`, `google_drive`, `homeassistant`, and `composio`.
-- A tool that starts turns, or checks who asked, sees the agent's own account as the requester, because no person asked for a silent turn.
+- `report_publishing` publishes workspace files at a public link.
+- A tool that starts a turn starts it with all of the agent's tools, as the agent's own account, and a tool that checks who asked sees that account, because no person asked for a silent turn.
 - A tool that sends still sends, for example `matrix_api`, `matrix_voice_message`, `thread_move`, and messengers such as `slack`, `discord`, `telegram`, `whatsapp`, `twilio`, `email`, `gmail`, `outlook_mail`, and `microsoft_teams`.
 
 List these only if you trust everyone whose messages the agent hears.
@@ -287,6 +288,7 @@ It suits a silent turn that should acknowledge what it heard without writing in 
 - A heard message is skipped with a warning when the turns covering it keep failing, after the batch is halved down to that one message, or when it waits more than 10 minutes for a refetch.
   A turn that fails on its provider, unreachable, busy, out of credit, or refusing the credentials, counts toward no skip; the agent's rooms wait a minute and try again.
 - A backlog longer than `max_messages`, or a message awaiting its refetch, holds the room's turn for up to ten times `quiet_seconds`.
+  What follows a message awaiting its refetch waits up to 10 minutes, or ten quiet windows if that is longer.
 - A message whose timestamp is already older than the room's place when it arrives, such as one delayed by federation or backdated by a bridge, is not heard; MindRoom reads a room in timestamp order and logs nothing for it.
   The place moves onto a message the agent did not hear only once it is 30 seconds old, or one quiet window if that is shorter, so a message that arrives a moment late is still heard.
 - A message stamped later than now, such as one from a server whose clock runs ahead, waits to be heard until that time comes.
