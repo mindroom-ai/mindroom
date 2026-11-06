@@ -1824,7 +1824,7 @@ path = "mindroom.external_triggers.executor"
 depends_on = [
     "mindroom.constants",
     "mindroom.hooks.sender",
-    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_reconciliation",
 ]
 
 [[modules]]
@@ -4002,6 +4002,7 @@ visibility = ["mindroom.custom_tools.matrix_voice_message"]
 path = "mindroom.matrix.room_reconciliation"
 depends_on = ["mindroom.matrix.room_power"]
 visibility = [
+    "mindroom.external_triggers.executor",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
     "mindroom.orchestration.rooms",
@@ -4040,7 +4041,6 @@ visibility = [
     "mindroom.commands.room_model_commands",
     "mindroom.commands.thread_mode_commands",
     "mindroom.commands.reply_mode_commands",
-    "mindroom.external_triggers.executor",
     "mindroom.hooks.matrix_admin",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",

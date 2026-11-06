@@ -1350,29 +1350,35 @@ def test_exception_during_first_delivery_releases_thread_key_reservation(
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("capability", [False, True], ids=["signed-reusable", "single-use-capability"])
 @pytest.mark.parametrize(
-    ("joined_id", "unavailable", "expected_status"),
+    ("joined_id", "membership", "state_failure", "expected_status"),
     [
-        pytest.param(_OWNER, False, 202, id="canonical-only"),
-        pytest.param("@bridge_owner:example.org", False, 202, id="alias-only"),
-        pytest.param(None, False, 403, id="neither-joined"),
-        pytest.param(None, True, 403, id="membership-unavailable"),
-        pytest.param("@bridgebot:example.org", False, 403, id="excluded-bot"),
-        pytest.param("@persisted_research:localhost", False, 403, id="excluded-persisted-agent"),
-        pytest.param("@mindroom_research:localhost", False, 403, id="excluded-generated-agent"),
-        pytest.param("@persisted_router:localhost", False, 403, id="excluded-router"),
-        pytest.param("@internal:localhost", False, 403, id="excluded-internal-user"),
+        pytest.param(_OWNER, "join", None, 202, id="canonical-raced-lookup"),
+        pytest.param("@bridge_owner:example.org", "join", None, 202, id="alias-raced-lookup"),
+        pytest.param(None, "join", None, 403, id="neither-joined"),
+        pytest.param(_OWNER, "invite", None, 403, id="owner-invited"),
+        pytest.param(_OWNER, "leave", None, 403, id="owner-left"),
+        pytest.param(_OWNER, "ban", None, 403, id="owner-banned"),
+        pytest.param(None, "join", "response", 503, id="membership-unavailable"),
+        pytest.param(None, "join", "timeout", 503, id="membership-timeout"),
+        pytest.param(None, "join", "invalid", 503, id="membership-invalid"),
+        pytest.param("@bridgebot:example.org", "join", None, 403, id="excluded-bot"),
+        pytest.param("@persisted_research:localhost", "join", None, 403, id="excluded-persisted-agent"),
+        pytest.param("@mindroom_research:localhost", "join", None, 403, id="excluded-generated-agent"),
+        pytest.param("@persisted_router:localhost", "join", None, 403, id="excluded-router"),
+        pytest.param("@internal:localhost", "join", None, 403, id="excluded-internal-user"),
     ],
 )
 def test_trigger_endpoint_requires_live_human_equivalent_membership(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
     joined_id: str | None,
+    membership: str,
+    state_failure: str | None,
     expected_status: int,
     *,
     capability: bool,
-    unavailable: bool,
 ) -> None:
-    """Both authenticated endpoints apply human aliases before delivery and replay claims."""
+    """Both endpoints bypass a raced member cache and distinguish denial from unreadable state."""
     payload = _config_payload()
     payload["bot_accounts"] = ["@bridgebot:example.org"]
     payload["mindroom_user"] = {"username": "internal"}
@@ -1403,13 +1409,26 @@ def test_trigger_endpoint_requires_live_human_equivalent_membership(
     assert runtime is not None
     matrix_client = AsyncMock(spec=nio.AsyncClient)
 
-    async def joined_members(room_id: str) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
-        if unavailable:
-            return nio.JoinedMembersError("forbidden", "M_FORBIDDEN")
-        members = [nio.RoomMember(joined_id, None, None)] if joined_id is not None else []
-        return nio.JoinedMembersResponse(members=members, room_id=room_id)
+    matrix_client.joined_members.side_effect = nio.LocalProtocolError("room membership changed during lookup")
 
-    matrix_client.joined_members.side_effect = joined_members
+    async def room_get_state(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        if state_failure == "response":
+            return nio.RoomGetStateError("forbidden", "M_FORBIDDEN", room_id=room_id)
+        if state_failure == "timeout":
+            raise TimeoutError
+        if state_failure == "invalid":
+            return nio.RoomGetStateResponse(
+                events=[{"type": "m.room.member", "state_key": _OWNER, "content": None}],
+                room_id=room_id,
+            )
+        events = (
+            [{"type": "m.room.member", "state_key": joined_id, "content": {"membership": membership}}]
+            if joined_id is not None
+            else []
+        )
+        return nio.RoomGetStateResponse(events=events, room_id=room_id)
+
+    matrix_client.room_get_state.side_effect = room_get_state
     conversation_reader = AsyncMock()
     conversation_reader.latest_thread_event_id.return_value = "$latest"
     app_state.external_trigger_runtime = replace(runtime, client=matrix_client, conversation_reader=conversation_reader)
@@ -1437,7 +1456,9 @@ def test_trigger_endpoint_requires_live_human_equivalent_membership(
 
     assert response.status_code == expected_status
     assert delivered_owners == ([_OWNER] if expected_status == 202 else [])
-    if expected_status == 403:
+    matrix_client.joined_members.assert_not_awaited()
+    matrix_client.room_get_state.assert_awaited_once_with(trigger_api.ready_snapshots[-1].resolved_room_id)
+    if expected_status in {403, 503}:
         assert runtime_paths.control_state_root is not None
         assert not (runtime_paths.control_state_root / "external_triggers" / "replay").exists()
         if capability:
