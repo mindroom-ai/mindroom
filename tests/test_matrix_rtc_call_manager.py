@@ -3357,6 +3357,8 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert body.startswith("📞 Voice call · 2 min")
     assert "@alice:example.org (Alice): Book the train" in body
     assert "Helper: Booked" in body
+    senders = [turn["sender"] for turn in post.await_args.kwargs["writeback"].transcript["turns"]]
+    assert senders == ["@alice:example.org", BOT_USER]
     await manager.shutdown()
 
 
