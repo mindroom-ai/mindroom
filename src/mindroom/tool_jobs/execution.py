@@ -24,6 +24,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
+from mindroom.reply_scope import current_span
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.shell.execution import shell_job_wait_seconds
 from mindroom.tool_jobs.approvals import ask_tool_call_approval
@@ -403,6 +404,7 @@ async def _call_job(
             "authority": dict(job_call.tool.authority),
         },
         operation=lambda: _run_operation(inner, function, detached, owner, baseline, approval),
+        asks_approval=approval is not None,
     )
 
 
@@ -446,6 +448,7 @@ async def _run_managed_call(
             job_id=job_id,
         )
         reference = scope.resources.acquire()
+        span = current_span()
         _, claim = await runtime.start(
             job_id,
             tool_name=job.tool_name,
@@ -459,6 +462,9 @@ async def _run_managed_call(
             operation=partial(_releasing, reference, job.operation, function.name),
             cancel=job.cancel,
             reattach=True,
+            # A Stop of the reply making the call ends the job while it awaits approval.
+            reply_id=None if span is None else span.reply_id,
+            asks_approval=job.asks_approval,
         )
         waited = await runtime.wait(
             job_id,

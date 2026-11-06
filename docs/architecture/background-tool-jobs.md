@@ -9,7 +9,11 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Only a newer human message releases a tool's wait; scheduled turns, other agents' messages, and follow-ups queue behind the reply instead of detaching its work.
   No time limit stands in for that message in scheduled, hook, or follow-up replies, because where a turn came from does not tell whether a person can release it: router relays, follow-ups, and silent schedules each broke that guess; a reply that waits on a call that never ends shows its job for cancelling.
 - With `mid_turn`, a wait and the post-batch check share one judgment per queued snapshot, so each queue gets one decision and at most one defer reaction, and a message the judge lets wait never moves a call to the background.
-- Stop, an edit, or deleting a message stops only the reply, because each job stays visible and cancellable on its own; a job ends only through its own cancel, revoked access, or the bot leaving the room.
+- A Stop on a reply also cancels the reply's jobs that await approval, so approving one of their cards later cannot run a call the person stopped; the cards end denied, saying the reply was stopped.
+  An edit that regenerates a reply still answering stops it the same way first, so the old question's waiting calls end too.
+  The reply's jobs that already run keep running, as do all jobs after a deletion or an edit of a finished reply, because each job stays visible and cancellable on its own and a finished reply's jobs are independent work; a job otherwise ends only through its own cancel, revoked access, or the bot leaving the room.
+  The Stop cancels such jobs instead of only denying their cards, because a subagent job told its child's call was denied would resume the child and keep working.
+  Jobs are found by the reply record whose call started them, not by the reply's event, because a reply may not show an event yet when its call starts a job; the link lives only in memory, because a restart interrupts every job that awaits approval.
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
   A follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
@@ -49,6 +53,8 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A job's cancel request denies its open approval cards in the commit that saves the request, and its end denies any card a request still in flight posted after that, so no card of a stopping or ended job stays answerable, even while the router cannot post the denial yet.
 - A job-gated call never runs inline: one that cannot become a job fails, and the agent CLI never offers it, because such a function asks for no confirmation of its own and its job's approval phase is its only approval gate.
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
+- A reply's Stop also ends its tool jobs whose call has not passed its approval yet, card posted or not, and looks for them under the runtime lock that accepting a job holds, so a Stop that commits while a job is being accepted or is preparing its card still ends that job.
+  Accepting such a job as `awaiting_approval` instead was rejected, because a call the policy approves would then count its policy check against `approval_wait_timeout` and could leave its reply early.
 - Revocation stops execution through internal ownership although discovery and control are no longer authorized, so losing access never leaves work running unseen.
   A config reload keeps active jobs, and controls and result reads check current authorization.
 - A follow-up is named by its conversation and the set of jobs it reports, so admitting it again changes nothing.

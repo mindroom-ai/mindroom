@@ -56,8 +56,15 @@ class ApprovalEnded:
     reply_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReplyStopped:
+    """After commit: a Stop reached this reply, so the jobs its calls started stop waiting for approval."""
+
+    reply_id: str
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | ReplyStopped
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -442,10 +449,13 @@ def _apply_stop(
     receipt_order: int,
     now_ns: int,
 ) -> AppliedTransition:
-    """Apply a Stop to a reply, cancelling its span when this bot instance runs it."""
+    """Apply a Stop to a reply, cancelling its span when this bot instance runs it and its jobs that await approval."""
     span_live = _runs_here(transaction, principal_id, reply, span)
     facts = rl.StopFacts(receipt_order=receipt_order, span_live=span_live)
-    return apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
+    applied = apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
+    if not applied.transition.applied:
+        return applied
+    return replace(applied, post_commit=(ReplyStopped(reply.reply_id), *applied.post_commit))
 
 
 def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:

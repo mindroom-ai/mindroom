@@ -284,7 +284,8 @@ MindRoom Chat shows a jobs bar in the room or thread with each running job, a âœ
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
-**Stop**, an edit, or deleting a message stops only that reply; its jobs keep running until they are cancelled.
+**Stop** on a reply, or an edit that regenerates a reply that is still answering, also cancels the jobs of that reply that still wait for approval and denies their cards, so approving one later runs nothing.
+The reply's other jobs keep running until they are cancelled, and deleting a message stops only its reply.
 Removing the agent from a room cancels its jobs there.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
 The agent is told a cancelled call was cancelled, and not to run it again unless you ask.

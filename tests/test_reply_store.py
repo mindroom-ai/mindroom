@@ -51,7 +51,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import paused_for_approval, reply_shown_for_approval
+from tests.reply_span_helpers import no_reply_jobs, paused_for_approval, reply_shown_for_approval
 from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
@@ -646,6 +646,7 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     await principal.replies.record_tool_call(
         span_id=first.span_id,
@@ -687,6 +688,7 @@ async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     lost_regeneration = replace(
         first,
@@ -965,6 +967,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=ended.append,
+        reply_stopped=no_reply_jobs,
         spans=_Spans(),
     )
     with (
@@ -1015,6 +1018,7 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     runtime.spans.expect(span.span_id)
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -1040,6 +1044,7 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
         spans=spans,
     )
     await _delete(principal, "$source")
@@ -1273,6 +1278,7 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         generation="gen-2",
         retry_sources=lambda room_id, sources: retried.append((room_id, sources)),
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     await runtime.take_ownership()
     stored = await alice.approvals.approval_continuation("approval-1")
@@ -1357,6 +1363,7 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=ended.append,
+        reply_stopped=no_reply_jobs,
     )
     committing = asyncio.Event()
     finish = ApprovalStore.finish_approval_continuation

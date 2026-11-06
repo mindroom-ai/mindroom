@@ -27,6 +27,7 @@ from mindroom.event_journal.replies import (
     ApprovalEnded,
     Decide,
     ReplyCreation,
+    ReplyStopped,
     WakeApproval,
 )
 from mindroom.final_delivery import Cancelled, Failed, FailureCause
@@ -274,6 +275,8 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Settles what the reply of an ended approval owes, given the reply's id.
     approval_ended: Callable[[str], None]
+    # Ends the jobs a stopped reply's calls started that await approval, given the reply's id.
+    reply_stopped: Callable[[str], Awaitable[None]]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -295,6 +298,8 @@ class ReplyRuntime:
             for effect in effects:
                 if isinstance(effect, WakeApproval):
                     await self._wake_fenced_approval(effect.approval_id)
+                elif isinstance(effect, ReplyStopped):
+                    await self.reply_stopped(effect.reply_id)
         finally:
             for effect in effects:
                 if isinstance(effect, ApprovalEnded):

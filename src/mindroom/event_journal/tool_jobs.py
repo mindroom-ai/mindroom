@@ -81,23 +81,24 @@ def save(
     job_json: str,
     result_payload_json: str | None,
     *,
-    ends_approvals: bool,
+    approval_end_reason: str | None,
 ) -> None:
     """Replace an accepted job's snapshot, and its outcome payload when one is given.
 
-    A snapshot that ends the job's approvals, its end or its cancel request, denies the calls its approval cards still
-    ask about and queues those cards' terminal edits, so no card of a stopping or ended job stays answerable.
+    A snapshot that ends the job's approvals, its end or its cancel request, gives the reason they end with; it denies
+    the calls its approval cards still ask about with that reason and queues those cards' terminal edits, so no card
+    of a stopping or ended job stays answerable.
     """
     require_ownership(transaction, runtime_generation)
     transaction.execute(
         "UPDATE tool_jobs SET job_json = ?, result_payload_json = COALESCE(?, result_payload_json) WHERE job_id = ?",
         (job_json, result_payload_json, job_id),
     )
-    if ends_approvals:
+    if approval_end_reason is not None:
         approval_calls.deny_pending(
             transaction,
             owner_id=approval_calls.tool_job_run_id(job_id),
-            reason=approval_calls.JOB_ENDED_REASON,
+            reason=approval_end_reason,
         )
 
 
