@@ -26,7 +26,7 @@ from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
 )
-from mindroom.matrix.transport_progress import is_transport_progress_revision
+from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -156,15 +156,23 @@ def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) 
     That subsumes the narrower rule this used to carry for this bot's own
     stream frames: those are notices, so they are covered by being notices.
 
-    A msgtype nio could not type is the other exception, for a plainer reason:
+    A msgtype nio could not type is another exception, for a plainer reason:
     `RoomMessageUnknown` carries no `body`, so there is no utterance for a turn
     to answer. Demoting the class nio uses for "I do not know this msgtype" is
     not the same mistake as enumerating msgtypes -- the set stays correct as
     Matrix grows -- and it still projects, so the conversation keeps the event.
+
+    A text message whose status says it will be revised again is the last one:
+    an agent's `pending` placeholder is `m.text`, and the turn engine never
+    answers an unfinished reply, only its terminal edit. Every agent in a room
+    receives every agent's placeholder, so admitting them as work queued each
+    one in every agent's ordered room lane, ahead of the prompts behind it.
     """
     if not _happened_while_member(provenance):
         return EventClass.CONTEXT_ONLY
     if isinstance(event, nio.RoomMessageNotice | nio.RoomMessageUnknown):
+        return EventClass.CONTEXT_ONLY
+    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(event.source.get("content") or {}):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 

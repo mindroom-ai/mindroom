@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
+from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver, runtime_mindroom_namespace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id, matrix_account_user_id
 from mindroom.matrix.state import matrix_state_for_runtime
@@ -12,13 +12,18 @@ from mindroom.matrix_identifiers import agent_username_localpart, extract_server
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.state import MatrixState
 
 logger = get_logger(__name__)
 INTERNAL_USER_ENTITY_NAME = "user"
+# How many input combinations one identity memo keeps, enough for the runtime's and the API's configs.
+_IDENTITY_MEMO_LIMIT = 8
+type IdentityMemo[T] = dict[tuple[object, ...], tuple[MatrixState, T]]
+_MANAGED_ENTITY_IDS: IdentityMemo[frozenset[str]] = {}
 
 
 def runtime_matrix_domain(runtime_paths: RuntimePaths) -> str:
@@ -46,19 +51,55 @@ def is_managed_entity_id(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether one Matrix user ID is a configured router, agent, or team account."""
+    return user_id in _managed_entity_ids(config, runtime_paths)
+
+
+def memoized_entity_identities[T](
+    memo: IdentityMemo[T],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    derive: Callable[[str, MatrixState], T],
+) -> T:
+    """Return ``derive(domain, state)`` for the configured entities, deriving it again only when an input changes.
+
+    Every agent authorizes each message once per responder in the room, so deriving the entities' Matrix IDs on
+    each check made a burst of messages cost the fourth power of the agent count.
+    The inputs are the entity names, the domain, the namespace, whether an internal user is configured, and the
+    persisted state, which ``matrix_state_for_runtime`` returns as one shared object until its file changes.
+    """
     domain = runtime_matrix_domain(runtime_paths)
-    # One state read for all entities: an API request can run this check hundreds of times.
     state = matrix_state_for_runtime(runtime_paths)
-    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
-        account = state.get_account(managed_account_key(entity_name))
-        persisted_user_id = matrix_account_user_id(account, domain) if account is not None else None
-        generated_user_id = MatrixID.from_username(
-            agent_username_localpart(entity_name, runtime_paths),
-            domain,
-        ).full_id
-        if user_id in {persisted_user_id, generated_user_id}:
-            return True
-    return False
+    key = (
+        domain,
+        runtime_mindroom_namespace(runtime_paths),
+        config.mindroom_user is not None,
+        ROUTER_AGENT_NAME,
+        *config.agents,
+        *config.teams,
+    )
+    cached = memo.get(key)
+    if cached is not None and cached[0] is state:
+        return cached[1]
+    value = derive(domain, state)
+    if len(memo) >= _IDENTITY_MEMO_LIMIT:
+        memo.clear()
+    memo[key] = (state, value)
+    return value
+
+
+def _managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the persisted and the generated Matrix ID of every configured router, agent, and team."""
+
+    def derive(domain: str, state: MatrixState) -> frozenset[str]:
+        user_ids: set[str] = set()
+        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+            account = state.get_account(managed_account_key(entity_name))
+            if account is not None:
+                user_ids.add(matrix_account_user_id(account, domain))
+            user_ids.add(MatrixID.from_username(agent_username_localpart(entity_name, runtime_paths), domain).full_id)
+        return frozenset(user_ids)
+
+    return memoized_entity_identities(_MANAGED_ENTITY_IDS, config, runtime_paths, derive)
 
 
 def is_human_requester_id(

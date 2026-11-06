@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -10,7 +11,13 @@ from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
 from mindroom.matrix_identifiers import managed_room_key_for_alias
-from mindroom.requester_identity import INTERNAL_USER_ENTITY_NAME, mindroom_user_id, runtime_matrix_domain
+from mindroom.requester_identity import (
+    INTERNAL_USER_ENTITY_NAME,
+    IdentityMemo,
+    memoized_entity_identities,
+    mindroom_user_id,
+    runtime_matrix_domain,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -220,7 +227,10 @@ def managed_entity_power_user_ids_for_room(
 
 @dataclass(frozen=True)
 class EntityIdentityRegistry:
-    """Current configured entity aliases mapped to actual persisted Matrix IDs."""
+    """Current configured entity aliases mapped to actual persisted Matrix IDs.
+
+    One registry is shared by every caller until its inputs change, so it must not be mutated.
+    """
 
     current_ids: dict[str, MatrixID]
 
@@ -228,14 +238,17 @@ class EntityIdentityRegistry:
         """Return one configured entity's current persisted Matrix ID."""
         return self.current_ids[entity_name]
 
+    @cached_property
+    def _entity_names_by_user_id(self) -> dict[str, str]:
+        """Return each current Matrix ID's entity, which is unique because the registry was validated."""
+        return {matrix_id.full_id: entity_name for entity_name, matrix_id in self.current_ids.items()}
+
     def current_entity_name_for_user_id(self, user_id: str, *, include_router: bool = True) -> str | None:
         """Return the configured entity currently represented by one Matrix user ID."""
-        for entity_name, current_id in self.current_ids.items():
-            if not include_router and entity_name == ROUTER_AGENT_NAME:
-                continue
-            if current_id.full_id == user_id:
-                return entity_name
-        return None
+        entity_name = self._entity_names_by_user_id.get(user_id)
+        if not include_router and entity_name == ROUTER_AGENT_NAME:
+            return None
+        return entity_name
 
     def entity_name_or_username(self, matrix_id: MatrixID) -> str:
         """Return the configured entity, router included, behind one Matrix ID, else the ID's username."""
@@ -251,12 +264,19 @@ class EntityIdentityRegistry:
         return frozenset(matrix_id.full_id for matrix_id in self.current_ids.values())
 
 
+_REGISTRIES: IdentityMemo[EntityIdentityRegistry] = {}
+
+
 def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> EntityIdentityRegistry:
     """Return current persisted Matrix identities for configured runtime entities."""
-    current_ids = _persisted_entity_id_map(config, runtime_paths)
-    _validate_unique_entity_ids(current_ids)
-    _validate_internal_user_id_is_unique(config, runtime_paths, current_ids)
-    return EntityIdentityRegistry(current_ids=current_ids)
+
+    def derive(domain: str, state: MatrixState) -> EntityIdentityRegistry:
+        current_ids = _persisted_entity_id_map(config, domain, state)
+        _validate_unique_entity_ids(current_ids)
+        _validate_internal_user_id_is_unique(config, runtime_paths, current_ids)
+        return EntityIdentityRegistry(current_ids=current_ids)
+
+    return memoized_entity_identities(_REGISTRIES, config, runtime_paths, derive)
 
 
 def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:
@@ -280,9 +300,7 @@ def prepared_entity_names_by_user_id(config: Config, runtime_paths: RuntimePaths
     return names
 
 
-def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
-    domain = runtime_matrix_domain(runtime_paths)
-    state = matrix_state.matrix_state_for_runtime(runtime_paths)
+def _persisted_entity_id_map(config: Config, domain: str, state: MatrixState) -> dict[str, MatrixID]:
     return {
         entity_name: _persisted_entity_matrix_id(entity_name, domain, state)
         for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]
