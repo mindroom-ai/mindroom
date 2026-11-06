@@ -102,7 +102,6 @@ from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader
 from .matrix.relation_lookup import RelationLookup
-from .matrix.room_thread_mode import record_room_thread_mode_membership
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
 from .reply_turn.inbox import InboxResponses
@@ -1103,13 +1102,6 @@ class AgentBot:
                 admission_progress=self._ingestion_admission_progress,
                 subscribe_awaited_rooms=lambda: subscribe_sliding_rooms(session, self.config, self.rooms),
                 is_authorized=is_authorized,
-            )
-        if changed:
-            record_room_thread_mode_membership(
-                self.runtime_paths,
-                room_id,
-                self.agent_user.user_id,
-                target_membership,
             )
         if changed and target_membership == "join" and self.client is not None:
             content = server_state_content(

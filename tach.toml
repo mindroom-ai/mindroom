@@ -4802,7 +4802,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
-    "mindroom.matrix.room_thread_mode",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.approval.continuation_runner",
     "mindroom.orchestration.server_state",
@@ -9742,6 +9741,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.room_thread_mode"
 depends_on = [
+    "mindroom.matrix.room_membership",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.room_reconciliation",

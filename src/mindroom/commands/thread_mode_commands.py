@@ -49,6 +49,7 @@ async def handle_thread_mode_command(
     """Show, set, or clear the room-level thread mode override."""
     requested = args_text.strip().lower()
     if not requested or requested in _LIST_ARGUMENTS:
+        await publish_room_thread_mode(client, config, runtime_paths, room_id)
         return _show_room_thread_mode(runtime_paths, room_id)
 
     if requested not in _VALID_MODES and requested not in _RESET_ARGUMENTS:
@@ -58,8 +59,9 @@ async def handle_thread_mode_command(
         return "❌ Room admin only."
 
     if requested in _RESET_ARGUMENTS:
-        if clear_room_thread_mode_override(runtime_paths, room_id):
-            await publish_room_thread_mode(client, config, runtime_paths, room_id)
+        removed = clear_room_thread_mode_override(runtime_paths, room_id)
+        await publish_room_thread_mode(client, config, runtime_paths, room_id)
+        if removed:
             return "✅ Room thread mode override removed. Agents use their configured modes again."
         return "This room has no thread mode override."
 
