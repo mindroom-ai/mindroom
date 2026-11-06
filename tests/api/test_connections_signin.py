@@ -170,7 +170,7 @@ def test_sign_in_sets_portal_session_cookie(signin: dict[str, Any]) -> None:
     assert response.headers["referrer-policy"] == "no-referrer"
     token = signin["client"].cookies.get(CONNECTIONS_SESSION_COOKIE)
     assert token is not None
-    assert read_connections_session(token, now=time.time()) == ("@alice:example.org", False)
+    assert read_connections_session(token, now=time.time()) == ("@alice:example.org", False, CHAT_ORIGIN)
     assert signin["verifier"].await_args.args[0].access_token == "alice"  # noqa: S105
     assert signin["verifier"].await_args.args[1] == signin["paths"]
 
@@ -190,7 +190,7 @@ def test_admin_sign_in_on_binding_homeserver_gets_dashboard_bit(signin: dict[str
     _with_admin(signin)
     signin["binds"].return_value = True
     assert sign_in(signin["client"], "alice").status_code == 200
-    assert _session_of(signin["client"]) == ("@alice:example.org", True)
+    assert _session_of(signin["client"]) == ("@alice:example.org", True, CHAT_ORIGIN)
 
 
 @pytest.mark.parametrize(
@@ -203,7 +203,7 @@ def test_dashboard_bit_needs_admin_and_binding(signin: dict[str, Any], admin: st
     _with_admin(signin, admin)
     signin["binds"].return_value = binds
     assert sign_in(signin["client"], "alice").status_code == 200
-    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+    assert _session_of(signin["client"]) == ("@alice:example.org", False, CHAT_ORIGIN)
 
 
 def test_failed_check_after_binding_probe_logs_why_dashboard_was_refused(signin: dict[str, Any]) -> None:
@@ -216,7 +216,7 @@ def test_failed_check_after_binding_probe_logs_why_dashboard_was_refused(signin:
     ]
     with capture_logs() as logs:
         assert sign_in(signin["client"], "alice").status_code == 200
-    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+    assert _session_of(signin["client"]) == ("@alice:example.org", False, CHAT_ORIGIN)
     assert [
         log.get("detail") for log in logs if log["event"] == "Dashboard access check failed after the binding probe"
     ] == [
@@ -614,6 +614,31 @@ def test_signed_in_non_administrator_opening_the_dashboard_goes_back_to_chat(sig
     response = client.get(page, headers={"Accept": "text/html"}, follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"] == f"{CHAT_ORIGIN}/"
+
+
+@pytest.mark.usefixtures("dashboard_dist")
+@pytest.mark.parametrize(
+    ("listed_after_sign_in", "expected"),
+    [
+        (f'["{CHAT_ORIGIN}", "https://other-chat.example.org"]', "https://other-chat.example.org/"),
+        (f'["{CHAT_ORIGIN}"]', f"{CHAT_ORIGIN}/"),
+    ],
+    ids=["still-listed", "no-longer-listed"],
+)
+def test_non_administrator_goes_back_to_the_chat_they_signed_in_from_while_it_is_listed(
+    signin: dict[str, Any],
+    listed_after_sign_in: str,
+    expected: str,
+) -> None:
+    """The dashboard sends them to the Chat that signed them in, or to the first listed one once that is unlisted."""
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS=f'["{CHAT_ORIGIN}", "https://other-chat.example.org"]')
+    client = signin["client"]
+    assert sign_in(client, "alice", origin="https://other-chat.example.org").status_code == 200
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS=listed_after_sign_in)
+
+    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == expected
 
 
 @pytest.mark.usefixtures("dashboard_dist")
@@ -1205,7 +1230,7 @@ def test_binding_switched_on_during_sign_in_grants_no_dashboard(
 
         assert sign_in(signin["client"], "alice").status_code == 200
         assert binding["on"] is True
-        assert _session_of(signin["client"]) == ("@alice:example.org", False)
+        assert _session_of(signin["client"]) == ("@alice:example.org", False, CHAT_ORIGIN)
         assert signin["client"].get(_DASHBOARD_ROUTE).status_code == 401
     finally:
         run(runner.cleanup())
@@ -1231,7 +1256,7 @@ def test_handoff_from_chat_signs_in_and_opens_the_portal(signin: dict[str, Any])
     assert response.status_code == 303, response.text
     assert response.headers["location"] == "/connections/"
     assert "no-store" in response.headers["cache-control"]
-    assert _session_of(signin["client"]) == ("@alice:example.org", False)
+    assert _session_of(signin["client"]) == ("@alice:example.org", False, CHAT_ORIGIN)
 
 
 @pytest.mark.parametrize("origin", [None, "null", "https://evil.example.org", PORTAL_ORIGIN])

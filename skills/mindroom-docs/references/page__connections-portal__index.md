@@ -99,7 +99,7 @@ Without binding, a token could have been replayed from another deployment on the
 So the session reaches the dashboard only when it was started while the homeserver bound tokens, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
 The Connections header links the dashboard for administrators only, at `MINDROOM_DASHBOARD_URL` when it is set.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
-Someone signed in to Connections who is neither in `administrators` nor `MINDROOM_OWNER_USER_ID` and opens a dashboard page goes back to the first web Chat origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` instead of the login; `/login` still answers.
+Someone signed in to Connections who is neither in `administrators` nor `MINDROOM_OWNER_USER_ID` and opens a dashboard page goes back to the Chat origin they signed in from instead of the login, while `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` still lists it, else to the first web Chat origin listed there; `/login` still answers.
 Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 
 ## Token Binding

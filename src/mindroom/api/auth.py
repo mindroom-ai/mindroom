@@ -825,7 +825,7 @@ def _read_request_connections_session(request: Request) -> ConnectionsSession | 
 
 
 def non_administrator_chat_redirect(request: Request) -> RedirectResponse | None:
-    """Send someone signed in to Connections who is no administrator back to MindRoom Chat, the first listed web one.
+    """Send someone signed in to Connections who is no administrator back to the MindRoom Chat that signed them in.
 
     The dashboard is for administrators, so its login is a dead end for them, as when they trim `/connections` off the
     portal's address. An administrator whose sign-in the dashboard does not accept keeps the login, and so does the
@@ -835,7 +835,7 @@ def non_administrator_chat_redirect(request: Request) -> RedirectResponse | None
     if session is None:
         return None
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    chat_origin = connections_chat_origin(snapshot.runtime_paths)
+    chat_origin = connections_chat_origin(snapshot.runtime_paths, session.chat_origin)
     owner = snapshot.runtime_paths.env_value("MINDROOM_OWNER_USER_ID")
     if chat_origin is None or session.matrix_user_id == owner or is_administrator(session.matrix_user_id, snapshot):
         return None

@@ -139,13 +139,18 @@ def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, s
     return client_origin == _HOSTED_CHAT_ORIGIN or (is_local_origin(server_origin) and is_local_origin(client_origin))
 
 
-def connections_chat_origin(paths: RuntimePaths) -> str | None:
-    """Return the first web MindRoom Chat origin the operator lists for Connections, or `None` without one."""
+def connections_chat_origin(paths: RuntimePaths, signed_in_from: str | None = None) -> str | None:
+    """Return a web MindRoom Chat origin the operator lists for Connections, or `None` without one.
+
+    That is `signed_in_from` while the list still names it, else the first listed one.
+    """
     web_origins = [
         origin
         for origin in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV)
         if origin != "capacitor://localhost"
     ]
+    if signed_in_from in web_origins:
+        return signed_in_from
     return web_origins[0] if web_origins else None
 
 
