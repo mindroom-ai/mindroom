@@ -695,6 +695,23 @@ async def test_a_newcomer_the_agent_saw_join_is_heard_once_the_router_applies_th
     assert listening.turns.heard() == ["$hello"]
 
 
+async def test_a_sender_whose_membership_never_resolves_holds_up_no_one_past_the_deadline(
+    listening: _Listening,
+) -> None:
+    """A pending sender ends the page before their message, until it is ten quiet windows old and left out unheard."""
+    # Bob could reach the agent only through a room whose membership never resolves; Alice is listed by name.
+    with_responder_access(listening.config, "scribe", users=[ALICE], members_of_rooms=["vault"])
+    await listening.service._poll_once(T0)
+    await listening.say("$bob", 10, sender=BOB)
+    await listening.say("$alice", 20)
+
+    await listening.service._poll_once(T0 + 100)
+    assert listening.turns.contexts == []
+    await listening.service._poll_once(T0 + 10 + 601)
+
+    assert listening.turns.heard() == ["$alice"]
+
+
 async def test_a_listened_room_the_agent_has_not_joined_waits_and_is_reported_once(listening: _Listening) -> None:
     """Listening does not join rooms: an unjoined listened room is reported once and heard from once the agent joins."""
     joined = listening.bot.client.rooms

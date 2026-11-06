@@ -302,16 +302,8 @@ class ListeningService:
                 await self._skip_refetch(agent_name, room_id, page.stopped_at)
             return
         messages = projected_visible_messages(page)
-        try:
-            waited_out_ms = now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms
-            heard, kept = self._heard(bot, agent_name, room_id, messages, config, waited_out_ms)
-        except ReplyMembershipPendingError:
-            # The marker stays, so a sender whose join the router has yet to apply is heard once it has.
-            if (agent_name, room_id) not in self._membership_pending:
-                self._membership_pending.add((agent_name, room_id))
-                logger.info("Listening waits for room membership to resolve", agent=agent_name, room_id=room_id)
-            return
-        self._membership_pending.discard((agent_name, room_id))
+        waited_out_ms = now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms
+        heard, kept = self._heard(bot, agent_name, room_id, messages, config, waited_out_ms)
         # A reload while the room was read decides again on the next poll, so the marker moves and a turn runs only
         # under the current config.
         if not kept or self.config_provider() is not config:
@@ -490,17 +482,18 @@ class ListeningService:
         room_id: str,
         messages: list[ResolvedVisibleMessage],
         config: Config,
-        unfinished_after_ms: int,
+        waited_out_ms: int,
     ) -> tuple[list[ResolvedVisibleMessage], list[ResolvedVisibleMessage]]:
         """Return the messages the agent hears, each shown as the one who said it, and the page's messages they span.
 
         Like a reply, a message is judged by whom it speaks for, as ingress classifies it: the person a trusted relay
         names rather than the relaying account. The agent's own messages and senders not allowed to reach it in the
         room are left out. As for a reply, the agent's own view of the room lets a sender it has seen join wait for the
-        router to apply the join, which raises ``ReplyMembershipPendingError``, rather than be left out.
+        router to apply the join.
 
-        A heard reply still being written, sent after ``unfinished_after_ms``, ends both lists before it, as a refetch
-        ends a page, so it is heard whole once it is finished; one older than that is heard as it stands.
+        A message whose sender's membership is still pending, or a heard reply still being written, ends both lists
+        before it, as a refetch ends a page, so it is judged, or heard whole, later. One sent before ``waited_out_ms``
+        waits no longer: a pending sender is left out, and an unfinished reply is heard as it stands.
         """
         observed_room = bot.client.rooms.get(room_id) if bot.client is not None else None
         heard: list[ResolvedVisibleMessage] = []
@@ -508,22 +501,33 @@ class ListeningService:
             if message.sender == bot.matrix_id.full_id:
                 continue
             facts = bot.ingress_validator.classify_source(message.sender, {"content": message.content}, room_id=room_id)
-            if not is_sender_allowed_for_agent_reply_in_room(
-                facts.run_requester_id,
-                agent_name,
-                config,
-                room_id,
-                self.runtime_paths,
-                self.agent_reply_memberships,
-                require_resolved_membership=True,
-                observed_room=observed_room,
-            ):
+            waited_out = message.timestamp <= waited_out_ms
+            try:
+                allowed = is_sender_allowed_for_agent_reply_in_room(
+                    facts.run_requester_id,
+                    agent_name,
+                    config,
+                    room_id,
+                    self.runtime_paths,
+                    self.agent_reply_memberships,
+                    require_resolved_membership=True,
+                    observed_room=observed_room,
+                )
+            except ReplyMembershipPendingError:
+                if waited_out:
+                    continue
+                if (agent_name, room_id) not in self._membership_pending:
+                    self._membership_pending.add((agent_name, room_id))
+                    logger.info("Listening waits for room membership to resolve", agent=agent_name, room_id=room_id)
+                return heard, messages[:index]
+            if not allowed:
                 continue
-            if is_unfinished_reply(message.content) and message.timestamp > unfinished_after_ms:
+            if is_unfinished_reply(message.content) and not waited_out:
                 return heard, messages[:index]
             # An entity's reply written for someone stays its author's; a relayed message is its original sender's.
             speaker = facts.physical_sender if facts.acts_for_requester else facts.run_requester_id
             heard.append(replace_visible_message(message, sender=speaker))
+        self._membership_pending.discard((agent_name, room_id))
         return heard, messages
 
     def _due(self, heard: Sequence[ResolvedVisibleMessage], busy: bool, now_ms: int, quiet_ms: int) -> bool:
