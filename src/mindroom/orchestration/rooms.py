@@ -14,6 +14,7 @@ from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_user_id
+from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -176,11 +177,13 @@ class RoomSetup:
         invite_user_ids = _root_space_user_ids_to_invite(config)
         if root_space_id is None or not invite_user_ids:
             return
-        current_members = await get_room_members(client, root_space_id)
-        if current_members is None:
+        # Read members from room state: the durable client's member lookup fails when a sync
+        # changes the new Space's membership mid-request, and nothing would retry this invite.
+        snapshot = await read_room_state(client, root_space_id)
+        if snapshot is None:
             logger.warning("room_invitations_skipped_members_unavailable", room_id=root_space_id)
             return
-        await _invite_missing(client, root_space_id, invite_user_ids, current_members)
+        await _invite_missing(client, root_space_id, invite_user_ids, snapshot.present_user_ids())
 
     async def ensure_server_emoji_room(self) -> None:
         """Create and maintain the optional server custom emoji room through the router."""
