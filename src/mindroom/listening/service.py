@@ -63,6 +63,9 @@ _OUTAGE_REST_SECONDS = 60
 # How long one silent turn may run; one that runs longer is stopped and counts as failed. A poll waits on its turns, so a
 # turn that hangs would otherwise stop listening everywhere.
 _TURN_TIMEOUT_SECONDS = 300
+# How long a message must have been in the room before the marker moves onto it, unless a turn heard it, at most one
+# quiet window: a message stamped a moment earlier may still arrive, and a marker past it would never hear it.
+_SETTLE_MS = 30_000
 # How many quiet windows the oldest heard message waits before a turn runs anyway, so a room that never pauses is heard.
 _MAX_WAIT_QUIET_WINDOWS = 10
 # How long a room's poll waits on the server for a gap repair, its read, or a refetch, before it tries again next poll.
@@ -309,13 +312,16 @@ class ListeningService:
         # under the current config.
         if not kept or self.config_provider() is not config:
             return
+        settled = [message for message in kept if message.timestamp <= now_ms - min(quiet_ms, _SETTLE_MS)]
         if not heard:
-            await self._mark(agent_name, room_id, _cursor(kept[-1]))
+            if settled:
+                await self._mark(agent_name, room_id, _cursor(settled[-1]))
             return
         # More after the page, or a message the page stops at, may be newer than any heard on it.
         busy = page.more or page.stopped_at is not None or len(kept) < len(messages)
         if self._due(heard, busy, now_ms, quiet_ms):
-            await self._admit_turn(bot, agent_name, listen, room_id, config, marker, heard, _cursor(kept[-1]), clock)
+            end = max((_cursor(heard[-1]), *(_cursor(message) for message in settled[-1:])), key=_position)
+            await self._admit_turn(bot, agent_name, listen, room_id, config, marker, heard, end, clock)
 
     async def _admit_turn(
         self,

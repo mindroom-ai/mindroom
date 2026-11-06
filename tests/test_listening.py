@@ -463,6 +463,22 @@ async def test_a_message_stamped_in_the_future_never_deafens_the_room(listening:
     assert listening.marker_event() == "$b"
 
 
+async def test_the_marker_never_moves_onto_an_unheard_message_a_moment_old(listening: _Listening) -> None:
+    """A message stamped just before an unheard one can arrive after it; the marker waits, so that message is heard."""
+    await listening.service._poll_once(T0)
+    await listening.say("$a", 10)
+    await listening.say("$bob", 99, sender=BOB)
+    await listening.service._poll_once(T0 + 100)
+    await listening.say("$late", 98)
+    await listening.service._poll_once(T0 + 200)
+
+    assert listening.turns.heard_in(ROOM) == [["$a"], ["$late"]]
+    await listening.say("$bob-again", 250, sender=BOB)
+    await listening.service._poll_once(T0 + 251)
+
+    assert listening.marker_event() == "$bob"
+
+
 async def test_restart_resumes_from_marker(listening: _Listening) -> None:
     """A restart before the room went quiet still runs the turn once, with nothing lost or heard twice."""
     await listening.service._poll_once(T0)

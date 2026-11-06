@@ -289,6 +289,7 @@ It suits a silent turn that should acknowledge what it heard without writing in 
   A turn that fails on its provider, unreachable, busy, out of credit, or refusing the credentials, counts toward no skip; the agent's rooms wait a minute and try again.
 - A backlog longer than `max_messages`, or a message awaiting its refetch, holds the room's turn for up to ten times `quiet_seconds`.
 - A message whose timestamp is already older than the room's place when it arrives, such as one delayed by federation or backdated by a bridge, is not heard; MindRoom reads a room in timestamp order and logs nothing for it.
+  The place moves onto a message the agent did not hear only once it is 30 seconds old, or one quiet window if that is shorter, so a message that arrives a moment late is still heard.
 - A message stamped later than now, such as one from a server whose clock runs ahead, waits to be heard until that time comes.
 - Heard text can carry prompt injection that drives the listed tools; read [Listening agents](../architecture/security-posture.md#listening-agents) before adding a tool to `listen.tools`.
 
