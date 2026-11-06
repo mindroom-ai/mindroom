@@ -436,6 +436,7 @@ class _MultiAgentOrchestrator:
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
             rebind_published_config_consumers=lambda: self._bind_trigger_runtimes(),
             finish_reload=self._script_runtime.finish_reload,
+            after_reload=lambda: self._rooms.publish_thread_modes(allow_read=False),
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -459,6 +460,7 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             router_client=self._router_client,
             refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
+            publication_allowed=lambda: not self.response_admission_gate.closed,
         )
         self._startup_maintenance = StartupMaintenanceController(
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
@@ -1283,7 +1285,6 @@ class _MultiAgentOrchestrator:
             await self._rooms.link_root_space(await self._rooms.ensure_rooms_exist())
         if plan.server_emoji_changed:
             await self._rooms.ensure_server_emoji_room()
-        await self._rooms.publish_thread_modes()
 
     async def _finalize_config_reload(
         self,

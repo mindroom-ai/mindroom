@@ -2620,6 +2620,7 @@ def make_config_reload_lifecycle(
         before_runtime_replacement=AsyncMock(),
         rebind_published_config_consumers=MagicMock(),
         finish_reload=AsyncMock(),
+        after_reload=AsyncMock(),
     )
 
 

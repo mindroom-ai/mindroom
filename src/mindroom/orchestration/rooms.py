@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom import constants
@@ -15,7 +15,11 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.room_reconciliation import read_room_state
-from mindroom.matrix.room_thread_mode import publish_room_thread_mode
+from mindroom.matrix.room_thread_mode import (
+    initialize_room_thread_mode_state,
+    publish_room_thread_mode,
+    seed_room_thread_mode_state,
+)
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -112,6 +116,7 @@ class RoomSetup:
     # The router's client when it runs; managed room work runs through its account.
     router_client: Callable[[], nio.AsyncClient | None]
     refresh_agent_reply_memberships: Callable[[], Awaitable[None]]
+    publication_allowed: Callable[[], bool] = field(default=lambda: True)
 
     async def setup(self, bots: list[AgentBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.
@@ -132,6 +137,9 @@ class RoomSetup:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
         snapshots = await self._reconcile_room_policies(room_ids)
+        for snapshot in snapshots.values():
+            seed_room_thread_mode_state(self.runtime_paths, snapshot)
+        await self.publish_thread_modes(initialize_only=True)
         await self._ensure_room_invitations(snapshots)
         all_rooms = load_rooms(runtime_paths=self.runtime_paths)
         all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
@@ -150,17 +158,33 @@ class RoomSetup:
 
         logger.info("All agents have joined their configured rooms")
 
-    async def publish_thread_modes(self) -> None:
+    async def publish_thread_modes(self, *, allow_read: bool = True, initialize_only: bool = False) -> None:
         """Reconcile room presentation after setup or live configuration changes."""
-        client = self.router_client()
-        if client is None:
-            return
-        config = self.config_provider()
-        room_ids = set(resolve_room_aliases(list(config.get_all_configured_rooms()), runtime_paths=self.runtime_paths))
-        room_ids.update(client.rooms)
-        for room_id in sorted(room_ids):
-            if room_id.startswith("!"):
-                await publish_room_thread_mode(client, config, self.runtime_paths, room_id)
+        try:
+            if not initialize_only and not self.publication_allowed():
+                return
+            client = self.router_client()
+            if client is None:
+                return
+            config = self.config_provider()
+            room_ids = set(
+                resolve_room_aliases(list(config.get_all_configured_rooms()), runtime_paths=self.runtime_paths),
+            )
+            room_ids.update(client.rooms)
+            for room_id in sorted(room_ids):
+                if room_id.startswith("!"):
+                    if initialize_only:
+                        await initialize_room_thread_mode_state(client, self.runtime_paths, room_id)
+                    else:
+                        await publish_room_thread_mode(
+                            client,
+                            config,
+                            self.runtime_paths,
+                            room_id,
+                            allow_read=allow_read,
+                        )
+        except Exception:
+            logger.warning("room_thread_mode_publish_failed", exc_info=True)
 
     async def ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.

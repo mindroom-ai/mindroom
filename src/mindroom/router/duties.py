@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.commands import config_confirmation
-from mindroom.entity_resolution import prepared_entity_names_by_user_id
+from mindroom.entity_resolution import is_configured_room, prepared_entity_names_by_user_id
 from mindroom.hooks import (
     EVENT_ROOM_MEMBER_JOINED,
     EVENT_ROOM_MEMBER_LEFT,
@@ -22,7 +22,7 @@ from mindroom.matrix.room_member_joins import (
     emit_room_member_join_at_least_once,
     room_member_left_from_event,
 )
-from mindroom.matrix.room_thread_mode import publish_room_thread_mode
+from mindroom.matrix.room_thread_mode import publish_room_thread_mode, record_room_thread_mode_membership
 
 if TYPE_CHECKING:
     import nio
@@ -85,7 +85,14 @@ class RouterDuties:
                 restored_config_count=restored_configs,
             )
         await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
-        await publish_room_thread_mode(client, self.deps.runtime.config, self.deps.runtime.runtime_paths, room_id)
+        runtime = self.deps.runtime
+        await publish_room_thread_mode(
+            client,
+            runtime.config,
+            runtime.runtime_paths,
+            room_id,
+            allow_read=not is_configured_room(runtime.config, room_id, runtime.runtime_paths),
+        )
 
     def invalidate_memberships(self, *, reason: str) -> None:
         """Fail closed when the router's view of Matrix membership is uncertain."""
@@ -118,11 +125,19 @@ class RouterDuties:
         """Refresh responder presentation and emit human membership hooks."""
         registry = self.deps.hook_context.registry
         runtime = self.deps.runtime
-        if runtime.client is not None and event.state_key in prepared_entity_names_by_user_id(
-            runtime.config,
-            runtime.runtime_paths,
+        if (
+            event.membership != event.prev_membership
+            and runtime.client is not None
+            and event.state_key in prepared_entity_names_by_user_id(runtime.config, runtime.runtime_paths)
         ):
-            await publish_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room.room_id)
+            record_room_thread_mode_membership(runtime.runtime_paths, room.room_id, event.state_key, event.membership)
+            await publish_room_thread_mode(
+                runtime.client,
+                runtime.config,
+                runtime.runtime_paths,
+                room.room_id,
+                allow_read=not is_configured_room(runtime.config, room.room_id, runtime.runtime_paths),
+            )
         if registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
             leave = room_member_left_from_event(room, event, config=runtime.config, runtime_paths=runtime.runtime_paths)
             if leave is not None:
