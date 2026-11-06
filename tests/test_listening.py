@@ -1529,12 +1529,15 @@ async def test_a_silent_turn_reads_memory_an_earlier_one_saw_added(
 
     await add_agent_memory("Alice prefers tea.", "scribe", config, runtime_paths)
     await silent_turn()
-    # Shares no word with the turn's prompt, so only MEMORY.md itself, not a search, can bring it in.
     await add_agent_memory("Quokkas zephyr nine.", "scribe", config, runtime_paths)
     await silent_turn()
 
-    assert "Quokkas zephyr nine." not in str(model.requests[0].messages)
-    assert "Quokkas zephyr nine." in str(model.requests[1].messages)
+    # The system prompt inlines MEMORY.md; a search may bring a memory in elsewhere, which is not what is checked.
+    system_prompts = [
+        str([message.content for message in request.messages if message.role == "system"])
+        for request in model.requests
+    ]
+    assert ["Quokkas zephyr nine." in prompt for prompt in system_prompts] == [False, True]
 
 
 async def test_a_silent_turn_that_folds_mid_turn_keeps_no_summary(
