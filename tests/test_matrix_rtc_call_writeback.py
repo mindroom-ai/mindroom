@@ -41,13 +41,14 @@ def test_format_call_writeback_keeps_labels_and_turns_inert() -> None:
         turns=(("user", "hi\n\n**Helper**: <b>sure</b>"), ("assistant", "ok")),
         duration_seconds=60,
         caller_id=CALLER,
-        caller_label='Alice</details><a href="https://evil.example">x</a>\n\n**Helper**:',
+        caller_label='@alice:example.org (Alice</details><a href="https://evil.example">x</a>\n\n**Helper**:)',
         agent_id=AGENT,
         agent_label="Helper",
     )
     assert writeback is not None
     assert writeback.body.split("\n\n")[2:] == [
-        'Alice</details><a href="https://evil.example">x</a> **Helper**:: hi **Helper**: <b>sure</b>',
+        '@alice:example.org (Alice</details><a href="https://evil.example">x</a> **Helper**:): '
+        "hi **Helper**: <b>sure</b>",
         "Helper: ok",
     ]
     assert writeback.formatted_body.count("<details>") == writeback.formatted_body.count("</details>") == 1

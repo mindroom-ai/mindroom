@@ -219,27 +219,14 @@ def _brief_label(
     hook_source = hook_source_from_content(message.content) if message.sender in trusted_sender_ids else None
     if hook_source is not None:
         return f"{hook_source} hook"
-    return "You" if message.sender == own_user_id else _member_label(room, message.sender)
+    return "You" if message.sender == own_user_id else member_label(room, message.sender)
 
 
-def _member_label(room: nio.MatrixRoom | None, user_id: str) -> str:
+def member_label(room: nio.MatrixRoom | None, user_id: str) -> str:
     """Label a member by Matrix ID first, so no display name can pose as another speaker."""
     user = room.users.get(user_id) if room is not None else None
     display_name = " ".join(user.display_name.split()) if user is not None and user.display_name else ""
     return f"{user_id} ({display_name})" if display_name else user_id
-
-
-def disambiguated_display_name(room: nio.MatrixRoom | None, user_id: str, *, agent_label: str) -> str:
-    """Name a member by display name or localpart, plus the Matrix ID when the agent or another member reads the same.
-
-    Names compare after whitespace folding, so a trailing NBSP cannot pose as another speaker.
-    """
-    users = room.users if room is not None else {}
-    user = users.get(user_id)
-    name = " ".join(user.display_name.split()) if user is not None and user.display_name else ""
-    name = name or user_id.removeprefix("@").partition(":")[0]
-    taken = {" ".join(other.name.split()) for other_id, other in users.items() if other_id != user_id}
-    return f"{name} ({user_id})" if name in taken or name == " ".join(agent_label.split()) else name
 
 
 def _capped(body: str) -> str:
