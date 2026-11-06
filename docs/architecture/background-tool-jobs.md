@@ -17,7 +17,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
   They bind timed approvals to the same scope as a paused reply's cards, so one grant covers a conversation's gated calls whether they run as jobs or pause the reply.
-  A card for the reply's own call names that reply's event, as a paused reply's card does, so a client links it to the call it gates; the reply's trace does not name the job instead, because its public entries carry no call identity and show a call as started before its job exists.
+  A card for the reply's own call names that reply's event, as a paused reply's card does, so a client links it to the reply that made the call; the reply's trace does not name the job instead, because its public entries carry no call identity and show a call as started before its job exists.
   A card for a call made before its reply showed an event names none, because waiting for that event could hold the card as long as the reply waits for its decision.
 - Jobs are the only way long work runs in the background, so the shell stops a command at its `timeout` instead of handing back a handle of its own.
   A job's command has no default limit and any other command has 120 seconds, so a command outside a job always stops by its timeout; Desktop shell keeps its handles because each request crosses the Desktop bridge under its own deadline, and script runs keep the engine to host processes that outlive replies and restarts.

@@ -168,7 +168,8 @@ Clients consume approval events under these rules, which this repository's code 
 - Clients associate approval history with the response through `response_event_id`, never by tool names or argument similarity.
   A paused reply's cards always carry it.
   A background job's card for the reply's own tool call carries it when that reply showed an event before making the call, and names the job in `background_run_id` as `tool-job:<job_id>`, the `job_id` of the call's job handle.
-  A job card without it names no reply: a background subagent's card, whose call is the child's, or a card for a call made before its reply showed an event, as every card of a silent schedule or contact turn is, since those replies show no progress.
+  A job card without it names no reply: a background subagent's card, whose call is the child's, or a card for a call made before its reply showed an event, such as every card of a silent schedule, a contact turn, or a participation-judged turn that does not stream, and the card of a call that is the first output of a turn that compacts first.
+  The field names the reply, not the call: an edit regenerates a reply in place, so a job its earlier generation started can still hold a pending card naming the same event as the new generation's cards, and a client prefers the job that the call's job handle names when the call has one.
 - Clients render compact history from the original event plus its latest same-sender terminal edit, taking complete argument evidence from the original, inline or as its Matrix attachment, because terminal edits omit it.
 - Only the originating grant card carries mutable auto-approval controls, and revocation or expiry never changes the historical authorization of calls the grant covered.
 - After a device change, a missing terminal receipt may be republished because it offers no action, so clients deduplicate receipts by exact approval and tool-call identity, scoped to the event sender.
