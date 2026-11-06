@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.hooks.sender import send_matrix_message
-from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
@@ -102,14 +102,17 @@ async def is_external_trigger_owner_joined_target_room(
     snapshot: TriggerDeliverySnapshot,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> bool:
+) -> bool | None:
     """Return whether the trigger owner is currently joined to the delivery room.
 
-    A failed membership fetch counts as not joined so delivery stays fail-closed.
+    Return None when authoritative state is unreadable so callers can retry safely.
     """
-    member_ids = await get_room_members(client, snapshot.resolved_room_id)
-    return member_ids is not None and not member_ids.isdisjoint(
-        equivalent_requester_ids(snapshot.owner_user_id, config, runtime_paths),
+    room_state = await read_room_state(client, snapshot.resolved_room_id)
+    if room_state is None:
+        return None
+    return any(
+        room_state.events.get(("m.room.member", user_id), {}).get("membership") == "join"
+        for user_id in equivalent_requester_ids(snapshot.owner_user_id, config, runtime_paths)
     )
 
 

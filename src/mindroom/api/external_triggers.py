@@ -539,5 +539,7 @@ async def _require_owner_joined_target_room(
         config,
         runtime_paths,
     )
+    if owner_joined is None:
+        raise HTTPException(status_code=503, detail="External trigger owner membership is not available")
     if not owner_joined:
         raise HTTPException(status_code=403, detail="External trigger owner is not joined to the target room")
