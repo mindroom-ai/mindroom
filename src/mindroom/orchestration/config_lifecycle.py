@@ -141,7 +141,7 @@ class ConfigReloadLifecycle:
     # Releases the background script launch fence a reload took; launches read the applied config this publishes.
     finish_reload: Callable[[], Awaitable[None]]
     # Presentation writes run after reply admission reopens.
-    after_reload: Callable[[Config | None], Awaitable[None]]
+    after_reload: Callable[[], Awaitable[None]]
     # Shared with manual plugin reloads and MCP catalog-change handling so no
     # two publication flows can interleave their read-plan-apply sequences.
     config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -307,7 +307,7 @@ class ConfigReloadLifecycle:
                 wait_for_idle=requested_plan is None or requested_plan.requires_response_drain,
             )
             if applied:
-                await self.after_reload(current_config)
+                await self.after_reload()
             return updated if applied else None
 
     async def _apply_config_update_steps(
@@ -465,7 +465,7 @@ class ConfigReloadLifecycle:
                 yield
             finally:
                 self.response_admission_gate.reopen()
-            await self.after_reload(None)
+            await self.after_reload()
 
     async def apply_with_response_admission(
         self,

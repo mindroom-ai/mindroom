@@ -436,7 +436,7 @@ class _MultiAgentOrchestrator:
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
             rebind_published_config_consumers=lambda: self._bind_trigger_runtimes(),
             finish_reload=self._script_runtime.finish_reload,
-            after_reload=lambda previous: self._rooms.publish_thread_modes(previous),
+            after_reload=lambda: self._rooms.publish_thread_modes(),
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(

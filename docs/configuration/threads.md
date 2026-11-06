@@ -17,11 +17,12 @@ A team uses its members' mode for the room when all members agree, and `thread` 
 The router uses the mode shared by all agents relevant to the room, including agents that join through `teams.<name>.rooms`, and `thread` when they differ.
 
 MindRoom publishes each managed room's effective reply placement in room state event `io.mindroom.thread_mode`, with an empty state key and content `{"mode": "room"}`, `{"mode": "thread"}`, or `{"mode": "mixed"}`.
-`room` means all joined responding agents and teams use the main timeline, `thread` means all use threads, and `mixed` means both modes are present; a room without responders defaults to `thread` unless a room override is set.
+`room` means all eligible responding agents and teams use the main timeline, `thread` means all use threads, and `mixed` means both modes are present; a room without responders defaults to `thread` unless a room override is set.
 When a room has configured responders, other visiting agents and teams do not affect its mode.
 The router updates this state during setup and reconciliation, after configuration or `!thread_mode` changes, and when responders join or leave, so clients can choose the appropriate conversation view.
-Setup compares fresh room state, and configuration or membership changes publish only when the desired mode changes.
-An explicit `!thread_mode` command reasserts the resulting mode, and unavailable room-state permissions do not prevent setup or replies.
+MindRoom writes the event only when its current value differs from the effective mode.
+Setting or resetting `!thread_mode` reconciles the resulting mode; `show` only reads the override.
+Unavailable room-state permissions do not prevent setup or replies.
 
 ### `!thread_mode`
 

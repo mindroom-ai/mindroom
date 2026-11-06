@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from mindroom.matrix.client_room_admin import room_admin_power_user
-from mindroom.matrix.room_thread_mode import publish_room_thread_mode
+from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.room_thread_modes import (
     RoomThreadMode,
     clear_room_thread_mode_override,
@@ -49,7 +49,6 @@ async def handle_thread_mode_command(
     """Show, set, or clear the room-level thread mode override."""
     requested = args_text.strip().lower()
     if not requested or requested in _LIST_ARGUMENTS:
-        await publish_room_thread_mode(client, config, runtime_paths, room_id)
         return _show_room_thread_mode(runtime_paths, room_id)
 
     if requested not in _VALID_MODES and requested not in _RESET_ARGUMENTS:
@@ -60,14 +59,14 @@ async def handle_thread_mode_command(
 
     if requested in _RESET_ARGUMENTS:
         removed = clear_room_thread_mode_override(runtime_paths, room_id)
-        await publish_room_thread_mode(client, config, runtime_paths, room_id)
+        await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
         if removed:
             return "✅ Room thread mode override removed. Agents use their configured modes again."
         return "This room has no thread mode override."
 
     mode = cast("RoomThreadMode", requested)
     set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=mode)
-    await publish_room_thread_mode(client, config, runtime_paths, room_id)
+    await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
     return (
         f"✅ This room now uses `{mode}` thread mode for future agent replies.\n\n"
         "Use `!thread_mode reset` to restore configured modes."

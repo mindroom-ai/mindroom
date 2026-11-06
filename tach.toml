@@ -4003,7 +4003,6 @@ visibility = ["mindroom.custom_tools.matrix_voice_message"]
 path = "mindroom.matrix.room_reconciliation"
 depends_on = ["mindroom.matrix.room_power"]
 visibility = [
-    "mindroom.matrix.room_thread_mode",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
     "mindroom.orchestration.rooms",
@@ -9744,6 +9743,5 @@ depends_on = [
     "mindroom.matrix.room_membership",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.matrix.room_reconciliation",
     "mindroom.room_thread_modes",
 ]
