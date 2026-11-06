@@ -14,7 +14,7 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
-from mindroom.delegation import job_approvals, lifecycle
+from mindroom.delegation import execution, job_approvals, lifecycle
 from mindroom.event_journal import ToolJobStore
 from mindroom.llm.runs import RunStatus
 from mindroom.reply_scope import ReplyRuntime
@@ -227,6 +227,7 @@ _HOLDS: dict[str, tuple[object, str, Callable[..., bool]]] = {
     ),
     "settling": (lifecycle, "update_subagent_turn", lambda child, *_args, **_kwargs: child.status == "paused"),
     "planning": (job_approvals, "plan_approval_calls", lambda *_args, **_kwargs: True),
+    "resuming": (execution, "required_approval_tool_names", lambda *_args, **_kwargs: True),
 }
 
 
@@ -246,7 +247,10 @@ def _hold_subagent(monkeypatch: pytest.MonkeyPatch, stop_while: str, hold: Calla
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop_while", ["admitting", "working", "pausing", "settling", "planning", "waiting"])
+@pytest.mark.parametrize(
+    "stop_while",
+    ["admitting", "working", "pausing", "settling", "planning", "waiting", "resuming"],
+)
 async def test_a_stop_refuses_the_reply_s_subagent_every_later_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -255,8 +259,8 @@ async def test_a_stop_refuses_the_reply_s_subagent_every_later_approval(
     """Whenever a Stop reaches the reply that started a subagent, the child's gated call never runs after it.
 
     The Stop lands while the job is being accepted, while its child still works, while its child's pause or its paused
-    state is being saved, while the policy decides the child's call, or while the card waits. The job ends cancelled, no card stays
-    answerable, and approving runs nothing.
+    state is being saved, while the policy decides the child's call, while the card waits, or during resume preparation.
+    The job ends cancelled, no card stays answerable, and approving runs nothing.
     """
     runner = await _runner(tmp_path, monkeypatch)
     held, release = asyncio.Event(), asyncio.Event()
@@ -291,6 +295,9 @@ async def test_a_stop_refuses_the_reply_s_subagent_every_later_approval(
             )
             [parent] = runner.turns
             replies.spans.register(handle.span_id, parent.task)
+            if stop_while == "resuming":
+                await runner._idle()
+                await runner._approve(Step("approve"))
             if stop_while in {"working", "waiting"}:
                 await runner._idle()
             else:

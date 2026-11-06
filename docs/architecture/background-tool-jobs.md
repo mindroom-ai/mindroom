@@ -10,7 +10,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   No time limit stands in for that message in scheduled, hook, or follow-up replies, because where a turn came from does not tell whether a person can release it: router relays, follow-ups, and silent schedules each broke that guess; a reply that waits on a call that never ends shows its job for cancelling.
 - With `mid_turn`, a wait and the post-batch check share one judgment per queued snapshot, so each queue gets one decision and at most one defer reaction, and a message the judge lets wait never moves a call to the background.
 - After a Stop on a reply, no job of that reply gets a new approval; a command already executing finishes.
-  A job waiting on its cards is cancelled at once and its cards end denied, saying the reply was stopped; any other job of the reply, such as a subagent still working, is cancelled when it next asks, card or not, policy or person; and a call of the stopped reply that has not become a job yet never becomes one.
+  A job waiting on its cards is cancelled at once and its cards end denied, saying the reply was stopped; any other job of the reply, such as a subagent still working, is cancelled when it next asks, card or not, policy or person; and a call of the stopped reply that has not become a job yet never launches one.
   All jobs keep running after a deletion or an edit of a finished reply, because each job stays visible and cancellable on its own; a job otherwise ends only through its own cancel, revoked access, or the bot leaving the room.
   An edit that regenerates a reply still answering stops it the same way first, so the old question's calls get no approval either, while the regeneration's own calls do.
   A regeneration keeps its reply's record, so a later Stop of the regenerated answer also reaches the earlier answer's jobs, as the cards of both name the same reply.
@@ -59,11 +59,11 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A gated job durably leaves `awaiting_approval` before its call runs, so a stop says a call did not run only when it never started.
 - A reply's Stop is checked where an approval is used, not where a job stands when the Stop arrives, so no order of the Stop and the job's own awaits lets a call through.
   The Stop marks the reply's span this instance runs before anything else, and the reply's jobs before it waits for the runtime lock.
-  A job is checked under that lock when it starts waiting on its cards and when it takes a decision, whether a person's or the policy's, and a gated tool call runs right after its decision is taken.
+  Synchronous checkpoints check the job's mark immediately before requesting a card and entering a gated tool call, including a child's resumed call, so no Stop can interleave before the action.
   Admission reads the span's mark after its last await, before it launches the job, and cancels an accepted job unlaunched when the span was stopped.
   The span's mark lives as long as the span's scope, which outlasts every admission its calls make; a job keeps its own mark.
   A cancel request the Stop could not save leaves the job marked, so it still runs nothing, and the revocation pass retries the save to deny its cards.
-  A person's approval that commits between the Stop and the job taking it is refused too, though its card keeps reading approved: a decision is final once recorded, and the Stop cannot deny the card in its own commit because the job's link to its reply lives only in memory.
+  A person's approval already recorded when Stop refuses tool entry keeps reading approved: a decision is final once recorded, and the Stop cannot deny the card in its own commit because the job's link to its reply lives only in memory.
 - Revocation stops execution through internal ownership although discovery and control are no longer authorized, so losing access never leaves work running unseen.
   A config reload keeps active jobs, and controls and result reads check current authorization.
 - A follow-up is named by its conversation and the set of jobs it reports, so admitting it again changes nothing.

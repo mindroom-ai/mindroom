@@ -6126,6 +6126,7 @@ depends_on = [
 path = "mindroom.agent_loop"
 depends_on = [
     "mindroom.llm",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.progress",
@@ -8535,6 +8536,7 @@ visibility = [
 path = "mindroom.tool_jobs.control"
 depends_on = []
 visibility = [
+    "mindroom.agent_loop",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
     "mindroom.tool_jobs.runtime",

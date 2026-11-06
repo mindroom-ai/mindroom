@@ -14,6 +14,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -391,6 +392,7 @@ async def _run_call(
 
     try:
         with tool_progress_reporter(report):
+            job_checkpoint(approval=execution.confirmed is True)
             outcome = await execute_tool_call(call.function, execution.tool_args, context, middleware=middleware)
     finally:
         with lock:

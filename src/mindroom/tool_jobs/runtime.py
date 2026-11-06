@@ -251,8 +251,6 @@ class _Entry:
     progress: str | None = None
     # The reply whose call started the job in this process, whose Stop refuses the job every later approval.
     reply_id: str | None = None
-    # Set once a Stop reached that reply: the job is cancelled when it waits for or is granted an approval.
-    reply_stopped: bool = False
 
     def notify_changed(self) -> None:
         """Wake existing state waiters while keeping the next wait fresh."""
@@ -280,9 +278,9 @@ def _conversation_key(owner: ToolExecutionIdentity) -> tuple[str, str | None, st
 def _stop_owed(entry: _Entry) -> bool:
     """Whether a stopped reply's job still owes the cancel that its Stop or its refused launch tried to save."""
     return (
-        entry.reply_stopped
+        entry.control.reply_stopped
         and entry.job.status in _RUNNING_STATUSES
-        and (entry.task is None or entry.job.status == "awaiting_approval")
+        and (entry.task is None or entry.task.done() or entry.job.status == "awaiting_approval")
     )
 
 
@@ -476,7 +474,7 @@ class ToolJobRuntime:
                     job.job_id,
                     job_json,
                     payload_json,
-                    approval_end_reason=(REPLY_STOPPED_REASON if entry.reply_stopped else JOB_ENDED_REASON)
+                    approval_end_reason=(REPLY_STOPPED_REASON if entry.control.reply_stopped else JOB_ENDED_REASON)
                     if ends_approvals
                     else None,
                 )
@@ -602,15 +600,11 @@ class ToolJobRuntime:
         operation: _Operation,
         span_stopped: Callable[[], bool] | None,
     ) -> None:
-        """Publish accepted ownership, then launch it; callers finish this before propagating cancellation.
-
-        Whether a Stop reached the span making the call is read after the last await: a Stop that came first cancels
-        the accepted job unlaunched, and one that comes later finds it among its reply's jobs.
-        """
+        """Publish ownership, then check Stop before launching; callers drain admission before cancellation."""
         await self._publish(entry, job, accepted=True)
         self._add_entry(entry)
         if span_stopped is not None and span_stopped():
-            entry.reply_stopped = True
+            entry.control.reply_stopped = True
             await self._request_cancel(entry)
             return
         entry.task = asyncio.create_task(self._run(entry, operation), name=f"tool-job:{job.job_id}")
@@ -621,16 +615,9 @@ class ToolJobRuntime:
         return entry is not None and entry.job.adapter is adapter and entry.task is not None
 
     async def set_awaiting_approval(self, job_id: str, *, awaiting: bool) -> None:
-        """Publish whether a running job waits for human decisions on the approval cards it posted, or got them.
-
-        A job whose reply a Stop reached is cancelled instead, before it posts a card or acts on a decision.
-        """
+        """Publish whether a running job waits for decisions on its approval cards, or got them."""
         async with self._lock:
             entry = self._entries[job_id]
-            if entry.reply_stopped:
-                # Its cancel request denies the cards and cancels this task, which raises here.
-                await self._request_cancel(entry)
-                raise asyncio.CancelledError
             status = "awaiting_approval" if awaiting else "running"
             if entry.job.status in _RUNNING_STATUSES and entry.job.status != status:
                 await self._publish(entry, _updated(entry.job, status=status))
@@ -644,7 +631,7 @@ class ToolJobRuntime:
                 entry.job.adapter.update(changes)
                 await self._publish(entry, _updated(entry.job))
 
-    async def _run(self, entry: _Entry, operation: _Operation) -> None:
+    async def _run(self, entry: _Entry, operation: _Operation) -> None:  # noqa: C901
         outcome = None
         returned = False
         loop = asyncio.get_running_loop()
@@ -682,6 +669,9 @@ class ToolJobRuntime:
             except asyncio.CancelledError:
                 if (task := asyncio.current_task()) is not None and task.cancelling():
                     raise  # Requested cancellation: runtime-owned, or external teardown.
+                if entry.control.reply_stopped:
+                    await self.request_cancel(entry.job.job_id)
+                    raise
                 # The operation raised cancellation itself; settle it so waiters and delivery see an outcome.
                 outcome = BackgroundOutcome("cancelled", _CANCELLED_REASON)
             async with self._lock:
@@ -850,7 +840,7 @@ class ToolJobRuntime:
     async def cancel_revoked(self) -> None:
         """Withdraw execution whose grant is proven revoked, retaining owned cleanup; a failed job retries next pass.
 
-        It also retries a stopped reply's cancel that failed: of a job that waits on its cards, or never launched.
+        It also retries a stopped reply's failed cancel: while waiting on cards, unlaunched, or after refusing tool entry.
         """
         async with self._lock:
             self._ensure_open(accepting=True)
@@ -878,7 +868,7 @@ class ToolJobRuntime:
         stopped = [entry for entry in self._entries.values() if entry.reply_id == reply_id]
         # Before the lock, so a decision already waiting for it is refused too.
         for entry in stopped:
-            entry.reply_stopped = True
+            entry.control.reply_stopped = True
         async with self._lock:
             if self._closed or self._shutdown_task is not None:
                 return
