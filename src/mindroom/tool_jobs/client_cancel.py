@@ -103,11 +103,14 @@ async def cancel_room_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id:
         await runtime.request_cancel(job.job_id)
 
 
-async def cancel_stopped_reply_jobs(runtime_paths: RuntimePaths, reply_id: str) -> None:
-    """Cancel the jobs a stopped reply started that still await approval, so a later approval runs nothing."""
+async def cancel_stopped_reply_jobs(runtime_paths: RuntimePaths, reply_id: str, span_id: str | None) -> None:
+    """Cancel the jobs a stopped reply started that still await approval, so a later approval runs nothing.
+
+    ``span_id`` names the reply's span this instance runs, whose calls start no job from now on.
+    """
     runtime = get_background_runtime(runtime_paths)
     if runtime is not None:
-        await runtime.cancel_stopped_reply(reply_id)
+        await runtime.cancel_stopped_reply(reply_id, span_id)
 
 
 def conversation_jobs(runtime: ToolJobRuntime, *, room_id: str, thread_id: str | None) -> list[BackgroundJob]:

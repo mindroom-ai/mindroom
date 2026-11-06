@@ -58,9 +58,14 @@ class ApprovalEnded:
 
 @dataclass(frozen=True, slots=True)
 class ReplyStopped:
-    """After commit: a Stop reached this reply, so the jobs its calls started stop waiting for approval."""
+    """After commit: a Stop reached this reply, so the jobs its calls started stop waiting for approval.
+
+    ``span_id`` names the reply's span this bot instance runs, whose calls already on their way to start a job start
+    none; ``None`` when no span of the reply runs here.
+    """
 
     reply_id: str
+    span_id: str | None
 
 
 # Effects the caller runs after the transaction commits.
@@ -455,7 +460,8 @@ def _apply_stop(
     applied = apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
     if not applied.transition.applied:
         return applied
-    return replace(applied, post_commit=(ReplyStopped(reply.reply_id), *applied.post_commit))
+    stopped = ReplyStopped(reply.reply_id, span.span_id if span_live and span is not None else None)
+    return replace(applied, post_commit=(stopped, *applied.post_commit))
 
 
 def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:

@@ -281,8 +281,9 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Settles what the reply of an ended approval owes, given the reply's id.
     approval_ended: Callable[[str], None]
-    # Ends the jobs a stopped reply's calls started that await approval, given the reply's id.
-    reply_stopped: Callable[[str], Awaitable[None]]
+    # Ends the jobs a stopped reply's calls started that await approval, given the reply's id and the id of its span
+    # this instance runs, if any.
+    reply_stopped: Callable[[str, str | None], Awaitable[None]]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -305,7 +306,7 @@ class ReplyRuntime:
                 if isinstance(effect, WakeApproval):
                     await self._wake_fenced_approval(effect.approval_id)
                 elif isinstance(effect, ReplyStopped):
-                    await self.reply_stopped(effect.reply_id)
+                    await self.reply_stopped(effect.reply_id, effect.span_id)
         finally:
             for effect in effects:
                 if isinstance(effect, ApprovalEnded):

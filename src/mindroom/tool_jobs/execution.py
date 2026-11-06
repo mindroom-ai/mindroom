@@ -465,8 +465,10 @@ async def _run_managed_call(
             operation=partial(_releasing, reference, job.operation, function.name),
             cancel=job.cancel,
             reattach=True,
-            # A Stop of the reply making the call ends the job while it awaits approval.
+            # A Stop of the reply making the call ends the job while it awaits approval, and keeps a call whose job
+            # the Stop overtook from starting one.
             reply_id=None if span is None else span.reply_id,
+            span_id=None if span is None else span.span_id,
             asks_approval=job.asks_approval,
         )
         waited = await runtime.wait(

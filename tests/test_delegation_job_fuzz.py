@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,8 +14,12 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
+from mindroom.delegation import job_approvals
 from mindroom.event_journal import ToolJobStore
+from mindroom.reply_scope import ReplyRuntime
+from mindroom.tool_jobs.client_cancel import cancel_stopped_reply_jobs
 from tests.delegation_job_fuzz import ChildScript, DelegationFuzzRunner, Step
+from tests.reply_span_helpers import reply_span
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -204,4 +210,70 @@ async def test_subagent_fuzz_oracle_detects_corruption(
         with pytest.raises(AssertionError):
             await runner.step(Step("release"))
     finally:
+        await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_while", ["planning", "waiting"])
+async def test_a_stop_ends_a_subagent_job_whose_child_asks_for_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_while: str,
+) -> None:
+    """A Stop of the reply that started a subagent ends its job once its child paused for approval, card posted or not.
+
+    While the policy still decides the child's call, the job reads as running; approving the card it would post
+    afterwards must not run the call.
+    """
+    runner = await _runner(tmp_path, monkeypatch)
+    planning, release = asyncio.Event(), asyncio.Event()
+    original_plan = job_approvals.plan_approval_calls
+
+    async def slow_plan(*args: object, **kwargs: object) -> object:
+        planning.set()
+        if stop_while == "planning":
+            await release.wait()
+        return await original_plan(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(job_approvals, "plan_approval_calls", slow_plan)
+    principal = runner.runtime.journal.principal("leader@replies")
+    replies = ReplyRuntime(
+        store=principal,
+        entity_name="leader",
+        generation="gen-test",
+        retry_sources=lambda _room_id, _sources: None,
+        approval_ended=lambda _reply_id: None,
+        reply_stopped=partial(cancel_stopped_reply_jobs, runner.paths),
+    )
+    try:
+        async with reply_span(
+            principal,
+            source_event_id="$question",
+            room_id="!room:example.org",
+            placeholder_event_id="$answer",
+            runtime=replies,
+        ) as handle:
+            # The parent's turn runs in the reply's span, so its subagent call's job belongs to the reply.
+            await runner._delegate(Step("delegate", script=ChildScript(approvals=1)))
+            [parent] = runner.turns
+            replies.spans.register(handle.span_id, parent.task)
+            await asyncio.wait_for(planning.wait(), 10)
+            await runner._idle()
+            assert bool(await runner.approvals.pending()) is (stop_while == "waiting")
+            [job] = runner.runtime.retained_jobs()
+            assert runner.runtime._entries[job.job_id].reply_id == handle.reply_id
+
+            stopped = await principal.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns())
+            assert stopped is not None
+            await replies.run_effects(stopped.post_commit)
+            await asyncio.gather(parent.task, return_exceptions=True)
+            runner.turns.clear()
+            release.set()
+            await runner.step(Step("approve"))
+
+            assert not await runner.approvals.pending()
+            assert [job.status for job in runner.runtime.retained_jobs()] == ["cancelled"]
+            assert not runner.executed
+    finally:
+        release.set()
         await runner.close()
