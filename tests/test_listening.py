@@ -31,7 +31,7 @@ from mindroom.constants import (
     tracking_dir,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.event_journal import ConversationCursor, EventKind
+from mindroom.event_journal import ConversationCursor, EventKind, RefreshRequest
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.listening import service as service_module
 from mindroom.listening import turn as turn_module
@@ -66,7 +66,7 @@ from tests.journal_helpers import record_room_history_recovery
 from tests.test_event_journal_store import admit, edit, text
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -1128,6 +1128,28 @@ async def test_a_reply_still_being_written_is_heard_once_it_is_finished(listenin
     prompt = listening.turns.contexts[0].prompt
     assert ("The whole answer." if finished else "Half an ans") in prompt
     assert listening.marker_event() == "$reply"
+
+
+async def test_a_refetch_that_arrives_on_the_poll_due_to_give_up_on_it_is_heard(listening: _Listening) -> None:
+    """The room tries the refetch once more before it skips the message, which then arrives and is heard."""
+    await listening.service._poll_once(T0)
+    await _owe_refetch(listening, "$p", 20)
+    await listening.service._poll_once(T0 + 100)
+
+    async def arrives(requests: Sequence[RefreshRequest]) -> None:
+        await listening.journal.install_refetched_revision(
+            requests[0],
+            revision_event_id="$p",
+            revision_ts=_ms(20),
+            revision_sender=ALICE,
+            content=text("first"),
+        )
+
+    cast("AsyncMock", listening.bot.conversation_reader.hydrator.resolve_refreshes).side_effect = arrives
+    await listening.service._poll_once(T0 + 701)
+    await listening.service._poll_once(T0 + 800)
+
+    assert listening.turns.heard() == ["$p"]
 
 
 async def test_a_refetch_that_never_arrives_skips_its_message_after_ten_minutes(listening: _Listening) -> None:

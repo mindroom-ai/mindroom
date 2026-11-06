@@ -287,16 +287,20 @@ class ListeningService:
             # The page stops before the first message owing a refetch, and the marker waits for it, for a while. A
             # message stamped after now, as its sender's server may, waits until then, so it cannot pass others.
             page = await reader.read_room_after(room_id, marker, listen.max_messages, now_ms)
-        waited = self._waited(agent_name, room_id, page.stopped_at, now)
-        if page.last_cursor is None and page.stopped_at is not None and waited > _REFETCH_WAIT_SECONDS:
-            await self._skip_refetch(agent_name, room_id, page.stopped_at)
-            return
         if page.refresh_pending:
             # A refetch the server holds up leaves what came before it to be heard, so the room drains up to it, where
             # the 10-minute skip applies.
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
                     await reader.hydrator.resolve_refreshes(page.refresh_pending)
+        waited = self._waited(agent_name, room_id, page.stopped_at, now)
+        if page.last_cursor is None and page.stopped_at is not None and waited > _REFETCH_WAIT_SECONDS:
+            # Only a message whose refetch failed again just now is given up on.
+            async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+                retried = await reader.read_room_after(room_id, marker, 1, now_ms)
+            if retried.last_cursor is None and retried.stopped_at == page.stopped_at:
+                await self._skip_refetch(agent_name, room_id, page.stopped_at)
+            return
         messages = projected_visible_messages(page)
         try:
             waited_out_ms = now_ms - _MAX_WAIT_QUIET_WINDOWS * quiet_ms
