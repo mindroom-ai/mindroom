@@ -171,8 +171,8 @@ async def test_deduplicates_concurrent_and_unchanged_triggers(room_state: RoomSt
 
 
 @pytest.mark.asyncio
-async def test_invited_agents_do_not_contribute_and_empty_room_defaults_to_threads(room_state: RoomState) -> None:
-    """An invitation cannot answer yet; an empty roster has a deterministic view."""
+async def test_invited_agents_do_not_contribute_and_empty_room_keeps_state(room_state: RoomState) -> None:
+    """An invitation cannot answer yet; an empty roster leaves existing state unchanged."""
     config, paths, ids, events, client = room_state
     for agent in config.agents.values():
         agent.rooms = []
@@ -183,7 +183,7 @@ async def test_invited_agents_do_not_contribute_and_empty_room_defaults_to_threa
     events["m.room.member", ids["agent1"].full_id] = {"membership": "ban"}
     _sync_live_room(room_state)
     await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
-    assert events[EVENT_TYPE, ""] == {"mode": "thread"}
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
 
 @pytest.mark.asyncio
@@ -419,7 +419,10 @@ async def test_reloads_read_only_the_thread_mode_event(room_state: RoomState) ->
     config.agents["agent1"].role = "Updated role"
     await setup.publish_thread_modes()
     client.room_get_state.assert_not_awaited()
-    client.room_get_state_event.assert_awaited_once_with(ROOM_ID, EVENT_TYPE, state_key="")
+    mode_reads = [call for call in client.room_get_state_event.await_args_list if call.args[1] == EVENT_TYPE]
+    assert len(mode_reads) == 1
+    assert mode_reads[0].args == (ROOM_ID, EVENT_TYPE)
+    assert mode_reads[0].kwargs == {"state_key": ""}
     client.room_put_state.assert_not_awaited()
     config.agents["agent2"].thread_mode = "room"
     await setup.publish_thread_modes()
@@ -815,3 +818,96 @@ async def test_same_mode_membership_change_retries_failed_write(room_state: Room
         _membership_event(ids["agent2"].full_id, "join", "leave"),
     )
     assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("membership", ["invite", "leave", "ban"])
+async def test_configured_absent_responder_does_not_determine_view(
+    room_state: RoomState,
+    membership: str,
+) -> None:
+    """Configured entities that cannot reply do not affect the room view."""
+    config, paths, ids, events, client = room_state
+    events["m.room.member", ids["agent2"].full_id] = {"membership": membership}
+    _sync_live_room(room_state)
+    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_departing", [False, True])
+async def test_configured_departure_with_lazy_projection(
+    room_state: RoomState,
+    *,
+    project_departing: bool,
+) -> None:
+    """A live departure excludes the leaving entity without losing an unloaded responder."""
+    _, _, ids, events, client = room_state
+    events[EVENT_TYPE, ""] = {"mode": "mixed"}
+    room = nio.MatrixRoom(ROOM_ID, client.user_id)
+    if project_departing:
+        room.add_member(ids["agent2"].full_id, None, None)
+    client.rooms[ROOM_ID] = room
+    events["m.room.member", ids["agent2"].full_id] = {"membership": "leave"}
+    await _router_duties(room_state).member_event(
+        room,
+        _membership_event(ids["agent2"].full_id, "leave", "join"),
+    )
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+
+
+@pytest.mark.asyncio
+async def test_joined_team_excludes_departed_configured_individual(room_state: RoomState) -> None:
+    """A departed room-mode individual cannot change a joined thread-mode team's view."""
+    config, paths, ids, events, client = room_state
+    config.agents["agent2"].rooms = []
+    config.teams["team1"] = TeamConfig(
+        display_name="Team 1",
+        role="Test team",
+        agents=["agent1", "agent2"],
+        rooms=[ROOM_ID],
+    )
+    ids = entity_ids(config, paths)
+    events["m.room.member", ids["agent1"].full_id] = {"membership": "leave"}
+    events["m.room.member", ids["team1"].full_id] = {"membership": "join"}
+    _sync_live_room(room_state)
+    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+    assert events[EVENT_TYPE, ""] == {"mode": "thread"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [False, True])
+async def test_sweep_skips_rooms_without_joined_responders(room_state: RoomState, *, override: bool) -> None:
+    """Spaces and other rooms without responders do not receive presentation state or warnings."""
+    config, paths, ids, events, client = room_state
+    for name in ("agent1", "agent2"):
+        events["m.room.member", ids[name].full_id] = {"membership": "leave"}
+    if override:
+        set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="room")
+    _sync_live_room(room_state)
+    with capture_logs() as logs:
+        await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_thread_modes()
+    client.room_put_state.assert_not_awaited()
+    assert not any(log["log_level"] == "warning" for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_membership_lookup_race_logs_debug(room_state: RoomState) -> None:
+    """An invalidated lookup is observable and leaves publication to a later trigger."""
+    config, paths, _, _, client = room_state
+    for agent in config.agents.values():
+        agent.rooms = []
+    read = client.joined_members.side_effect
+
+    async def human_joins(room_id: str) -> nio.JoinedMembersResponse:
+        response = await read(room_id)
+        client.rooms[room_id].add_member("@human:localhost", None, None)
+        return response
+
+    client.joined_members.side_effect = human_joins
+    with capture_logs() as logs:
+        await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+    client.room_put_state.assert_not_awaited()
+    assert any(
+        log["event"] == "room_thread_mode_membership_unavailable" and log["log_level"] == "debug" for log in logs
+    )
