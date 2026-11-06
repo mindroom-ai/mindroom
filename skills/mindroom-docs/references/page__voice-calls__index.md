@@ -267,8 +267,7 @@ The agent gets the snapshot only when you are a member of the room the call came
 Otherwise, or when reading the conversation takes longer than 5 seconds, the call starts without it.
 
 When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
-The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, each turn labeled with the speaker's display name, so later replies in the thread know what was said.
-A caller whose name matches the agent's or another member's is labeled with their Matrix ID too, as Matrix clients do.
+The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, so later replies in the thread know what was said.
 The event also carries `io.mindroom.call_transcript`, `{"duration_seconds": <int>, "turns": [{"sender": <Matrix user ID>, "text": <spoken text>}]}`, so clients can show each turn with its speaker's avatar and name.
 When the message is too large for one event, that key is only in its sidecar, so clients read it from the full content once they load it.
 Calls shorter than 10 seconds, calls in which the caller said nothing, calls that started without a conversation snapshot, and calls cut off by a MindRoom restart post nothing.
