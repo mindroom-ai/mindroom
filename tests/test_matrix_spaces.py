@@ -56,6 +56,16 @@ def _router_created_space_state(config: Config) -> nio.RoomGetStateResponse:
     )
 
 
+def _space_member_state(memberships: dict[str, str]) -> nio.RoomGetStateResponse:
+    return nio.RoomGetStateResponse(
+        [
+            {"type": "m.room.member", "state_key": user_id, "sender": user_id, "content": {"membership": membership}}
+            for user_id, membership in memberships.items()
+        ],
+        "!space:localhost",
+    )
+
+
 def test_matrix_space_defaults() -> None:
     """Matrix Space config should default to enabled with the standard name."""
     config = Config()
@@ -634,6 +644,7 @@ async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(t
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
+    router_bot.client.room_get_state.return_value = _space_member_state({"@mindroom_router:localhost": "join"})
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
     with (
@@ -641,10 +652,6 @@ async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(t
             "mindroom.orchestration.rooms.ensure_root_space",
             new=AsyncMock(return_value="!space:localhost"),
         ) as mock_space,
-        patch(
-            "mindroom.orchestration.rooms.get_room_members",
-            new=AsyncMock(return_value={"@mindroom_router:localhost"}),
-        ),
         patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
     ):
         await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})
@@ -673,6 +680,7 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
+    router_bot.client.room_get_state.return_value = _space_member_state({"@mindroom_router:localhost": "join"})
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
     with (
@@ -680,10 +688,6 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
             "mindroom.orchestration.rooms.ensure_root_space",
             new=AsyncMock(return_value="!space:localhost"),
         ) as mock_space,
-        patch(
-            "mindroom.orchestration.rooms.get_room_members",
-            new=AsyncMock(return_value={"@mindroom_router:localhost"}),
-        ),
         patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
     ):
         await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})
@@ -704,7 +708,7 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
 
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -> None:  # noqa: ANN001
-    """Root Space invitations should skip users already in the Space."""
+    """Root Space invitations should skip users the Space already has, joined or invited."""
     orchestrator = _MultiAgentOrchestrator(
         runtime_paths=orchestrator_runtime_paths(tmp_path),
         config=_config_with_runtime_paths(
@@ -717,12 +721,40 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
-    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
     internal_user_id = mindroom_user_id(orchestrator.config, orchestrator.runtime_paths)
+    router_bot.client.room_get_state.return_value = _space_member_state(
+        {"@mindroom_router:localhost": "join", internal_user_id: "invite"},
+    )
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
     with (
         patch("mindroom.orchestration.rooms.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
-        patch("mindroom.orchestration.rooms.get_room_members", new=AsyncMock(return_value={internal_user_id})),
+        patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+    ):
+        await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})
+
+    mock_invite.assert_awaited_once_with(router_bot.client, "!space:localhost", "@owner:example.com")
+
+
+@pytest.mark.asyncio
+async def test_root_space_invites_survive_a_member_lookup_raced_by_a_membership_change(tmp_path) -> None:  # noqa: ANN001
+    """A sync that changes the new Space's membership during a member lookup must not cost anyone their invite."""
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=Config(
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+            room_defaults={"invite_users": ["@owner:example.com"]},
+        ),
+    )
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock()
+    router_bot.client.joined_members.side_effect = nio.LocalProtocolError("room membership changed during lookup")
+    router_bot.client.room_get_state.return_value = _space_member_state({"@mindroom_router:localhost": "join"})
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
+
+    with (
+        patch("mindroom.orchestration.rooms.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
         patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
     ):
         await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})

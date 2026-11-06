@@ -2544,6 +2544,7 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
         router_bot = MagicMock()
         router_bot.client = AsyncMock()
+        router_bot.client.room_get_state.return_value = nio.RoomGetStateResponse([], "!space:localhost")
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot})
 
         with (
@@ -2551,7 +2552,6 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestration.rooms.ensure_root_space",
                 new=AsyncMock(return_value="!space:localhost"),
             ) as ensure,
-            patch("mindroom.orchestration.rooms.get_room_members", new=AsyncMock(return_value=set())),
             patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as invite,
         ):
             await orchestrator._rooms.link_root_space({"one": "!one:localhost"})

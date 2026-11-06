@@ -3165,6 +3165,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
@@ -4003,6 +4004,7 @@ depends_on = ["mindroom.matrix.room_power"]
 visibility = [
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
+    "mindroom.orchestration.rooms",
     "mindroom.thread_tags",
     "mindroom.topic_generator",
 ]
