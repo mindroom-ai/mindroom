@@ -106,7 +106,7 @@ class VoiceIngress:
         target: MessageTarget,
         envelope: MessageEnvelope,
         reservation: QueuedHumanNoticeReservation | None,
-        not_for_me: bool,
+        may_be_for_me: bool,
     ) -> QueuedHumanNoticeReservation | None:
         """Keep the queued notice while a response still holds the voice's conversation once readiness ends.
 
@@ -114,7 +114,7 @@ class VoiceIngress:
         agent's to answer (it mentions only someone else, or the room's reply mode leaves it to nobody), or reserve one
         if it became busy.
         """
-        if not_for_me or not self.deps.response_runner.has_active_response_for_target(target):
+        if not may_be_for_me or not self.deps.response_runner.has_active_response_for_target(target):
             if reservation is not None:
                 reservation.release()
             return None
@@ -142,7 +142,8 @@ class VoiceIngress:
                 facts=facts,
                 target=voice_target,
             )
-            # The audio mentions no one, so a room whose reply mode needs a mention waits for the transcript instead.
+            # Until it is transcribed the audio mentions no one, so it counts as waiting for this agent unless the room's
+            # reply mode needs a mention; the transcript decides again below.
             if not self.deps.turn_policy.not_for_this_agent(room, event.source, voice_target, envelope):
                 queued_notice_reservation = queued_notice_reservation_if_busy(
                     self.deps.response_runner,
@@ -158,7 +159,7 @@ class VoiceIngress:
                 dispatch_timing=dispatch_timing,
             )
             envelope = self.deps.resolver.build_envelope(event=normalized_event, facts=facts, target=voice_target)
-            not_for_me = self.deps.turn_policy.not_for_this_agent(
+            may_be_for_me = not self.deps.turn_policy.not_for_this_agent(
                 room,
                 normalized_event.source,
                 voice_target,
@@ -168,7 +169,7 @@ class VoiceIngress:
                 target=voice_target,
                 envelope=envelope,
                 reservation=queued_notice_reservation,
-                not_for_me=not_for_me,
+                may_be_for_me=may_be_for_me,
             )
             ready = ReadyPendingEvent(
                 pending_event=PendingEvent(
@@ -200,7 +201,7 @@ class VoiceIngress:
         else:
             # The ready event owns its queued notice from here.
             queued_notice_reservation = None
-            if not not_for_me:
+            if may_be_for_me:
                 mark_waiting_for_approval(self.deps, voice_target, envelope)
             return ready
         finally:

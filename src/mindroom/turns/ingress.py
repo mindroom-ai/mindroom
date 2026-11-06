@@ -238,8 +238,8 @@ class TurnIngress:
         """Queue one prepared text or media event; the gate decides busy-conversation routing."""
         # A message for someone else, or one the room's reply mode leaves to nobody, must not cut this agent's running
         # response short or show that it waits for this agent.
-        not_for_me = self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope)
-        if not not_for_me:
+        may_be_for_me = not self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope)
+        if may_be_for_me:
             ticket.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
@@ -252,7 +252,7 @@ class TurnIngress:
             ticket=ticket,
             coalescing_key=requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id),
         )
-        if not not_for_me:
+        if may_be_for_me:
             mark_waiting_for_approval(self.deps, target, envelope)
 
     async def _should_skip_router_before_shared_ingress_work(
@@ -445,7 +445,7 @@ class TurnIngress:
         )
         if body is None or content is None:
             return False
-        return self.deps.coalescing_gate.apply_pending_edit(
+        edited = self.deps.coalescing_gate.apply_pending_edit(
             room_id=room.room_id,
             source_event_id=original_event_id,
             sender=event.sender,
@@ -453,6 +453,31 @@ class TurnIngress:
             new_content=content,
             for_another_participant=self._mentions_another_participant(room, {"content": content}),
         )
+        if edited is None:
+            return False
+        self._renew_queued_notice(room, *edited)
+        return True
+
+    def _renew_queued_notice(self, room: nio.MatrixRoom, key: CoalescingKey, pending_event: PendingEvent) -> None:
+        """Ask again whether an edited queued message waits for this agent's running response, as ingress asked."""
+        event = pending_event.event
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=key.thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        envelope = self.deps.resolver.build_envelope(event=event, facts=pending_event.facts, target=target)
+        if self.deps.turn_policy.not_for_this_agent(room, event.source, target, envelope):
+            if pending_event.notice is not None:
+                pending_event.notice.release()
+                pending_event.notice = None
+        elif pending_event.notice is None:
+            pending_event.notice = queued_notice_reservation_if_busy(
+                self.deps.response_runner,
+                target=target,
+                envelope=envelope,
+            )
 
     def _log_unplaceable_event(self, room: nio.MatrixRoom, event: DispatchEvent | MatrixMediaEvent) -> None:
         """Record an event left unanswered because its relation target cannot be read.

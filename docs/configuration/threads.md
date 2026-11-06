@@ -220,7 +220,8 @@ Missing credentials, a full limit, a timeout, a provider error, malformed output
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
 A "thanks" or "is this still running?" can therefore cut a long task short.
-A message the agent will not answer sends it no wrap-up notice and gets no ⏳ reaction from it: one that mentions only other agents or people, and one outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)).
+These messages send the agent no wrap-up notice and get no ⏳ reaction from it: one that mentions only other agents or people (unless it asks for a team the agent answers for), and one outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)).
+A person's edit of a message still waiting in the queue decides it again.
 Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
 The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 

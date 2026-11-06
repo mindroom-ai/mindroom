@@ -39,7 +39,6 @@ from mindroom.thread_utils import (
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
     is_router_only_agent_mention,
-    mentions_another_participant,
     thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import timed
@@ -337,9 +336,11 @@ class TurnPolicy:
             return False
         if form_team.outcome not in {TeamOutcome.TEAM, TeamOutcome.REJECT}:
             return False
+        return self._names_a_private_agent([*form_team.requested_members, *form_team.eligible_members])
 
+    def _names_a_private_agent(self, members: list[MatrixID]) -> bool:
+        """Return whether any of these members is a private agent."""
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        members = [*form_team.requested_members, *form_team.eligible_members]
         for member in members:
             entity_name = registry.current_entity_name_for_user_id(member.full_id, include_router=False)
             if entity_name is None:
@@ -716,15 +717,23 @@ class TurnPolicy:
         Ingress asks this so such a message neither asks this agent's running response to wrap up nor shows that it
         waits for this agent's approval.
         """
-        for_another = mentions_another_participant(
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
             source,
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
         )
-        if for_another is not None:
-            return for_another
+        if am_i_mentioned:
+            return False
+        if mentioned_agents or has_non_agent_mentions:
+            # Two or more mentioned agents ask for a team, and a team with a private agent in it is answered by a live
+            # shared agent (`_shared_owner_for_explicit_private_resolution`), which may be this one.
+            return not (
+                len(mentioned_agents) > 1
+                and self._names_a_private_agent(mentioned_agents)
+                and self._live_shared_agent_responders([self.deps.matrix_id])
+            )
         if target.source_thread_id is not None:
             return False
         return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=False)

@@ -269,12 +269,12 @@ class CoalescingGate:
         body: str,
         new_content: Mapping[str, Any],
         for_another_participant: bool | None,
-    ) -> bool:
-        """Give a text message still waiting in a queue the text its sender edited it to; return whether one did.
+    ) -> tuple[CoalescingKey, PendingEvent] | None:
+        """Give a text message still waiting in a queue the text its sender edited it to; return it and its queue's key.
 
         A message a flush already claimed answers the text it had then.
         """
-        for gate in self._gates.values():
+        for key, gate in self._gates.items():
             for queued in gate.queue:
                 pending_event = queued.pending_event
                 event = pending_event.event
@@ -296,8 +296,8 @@ class CoalescingGate:
                     source={**event.source, "content": content},
                     for_another_participant=for_another_participant,
                 )
-                return True
-        return False
+                return key, pending_event
+        return None
 
     def queued_pending_events(self, key: CoalescingKey) -> tuple[PendingEvent, ...]:
         """Return the unclaimed events still queued under one coalescing key."""

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -13,9 +15,11 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
+from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.coalescing.batch import active_follow_up_coalescing_key, requester_coalescing_key
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
-from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import ConversationResolver
@@ -60,12 +64,13 @@ from tests.runtime_fakes import ready_runtime
 from tests.test_turn_policy import _context, _dispatch, _entity_id, _policy_for, _room_with_members, _text_event
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
     from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
+    from mindroom.response_lifecycle import _QueuedMessageState
 
 ROOM_ID = "!test:localhost"
 SENDER = "@user:localhost"
@@ -502,6 +507,48 @@ async def _follow_up_in_room_mode(bot: AgentBot, room: nio.MatrixRoom, paths: Ru
     await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$follow-up", "and one more thing"))
 
 
+def _mention_id(paths: RuntimePaths, name: str) -> str:
+    """Return the Matrix ID a mention of ``name`` names: an entity's, or a person's own ID."""
+    return name if name.startswith("@") else current_entity_id(name, paths).full_id
+
+
+def _in_thread(
+    paths: RuntimePaths,
+    event_id: str,
+    body: str,
+    *mentions: str,
+    sender: str = SENDER,
+    **content: object,
+) -> nio.RoomMessageText:
+    """Return a message in THREAD_ID that mentions ``mentions``."""
+    content["m.relates_to"] = {"rel_type": "m.thread", "event_id": THREAD_ID}
+    if mentions:
+        content["m.mentions"] = {"user_ids": [_mention_id(paths, name) for name in mentions]}
+    return _text_message(paths, event_id, body, sender=sender, **content)
+
+
+@contextmanager
+def _reading_general_thread(paths: RuntimePaths) -> Iterator[None]:
+    """Read THREAD_ID in full: the person's message and general's reply."""
+    history = thread_history_result(
+        [
+            make_visible_message(sender=SENDER, body="hello", event_id=THREAD_ID),
+            make_visible_message(
+                sender=current_entity_id("general", paths).full_id,
+                body="Hi there",
+                event_id="$general-reply",
+                thread_id=THREAD_ID,
+            ),
+        ],
+        is_full_history=True,
+    )
+    with (
+        patch.object(ConversationResolver, "dispatch_thread_snapshot", new=AsyncMock(return_value=history)),
+        patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=history)),
+    ):
+        yield
+
+
 def _in_general_thread(
     body: str,
     *mentions: str,
@@ -509,36 +556,21 @@ def _in_general_thread(
 ) -> Callable[[AgentBot, nio.MatrixRoom, RuntimePaths], Awaitable[None]]:
     """Return a sender of ``body``, mentioning ``mentions``, in a thread general already replied in.
 
-    The thread's history reads in full. ``relayed`` sends it as the router's relay of the person's message.
+    A mentioned person joins the room first. ``relayed`` sends it as the router's relay of the person's message.
     """
 
     async def send(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
-        history = thread_history_result(
-            [
-                make_visible_message(sender=SENDER, body="hello", event_id=THREAD_ID),
-                make_visible_message(
-                    sender=current_entity_id("general", paths).full_id,
-                    body="Hi there",
-                    event_id="$general-reply",
-                    thread_id=THREAD_ID,
-                ),
-            ],
-            is_full_history=True,
-        )
-        content: dict[str, object] = {"m.relates_to": {"rel_type": "m.thread", "event_id": THREAD_ID}}
-        if mentions:
-            content["m.mentions"] = {"user_ids": [current_entity_id(name, paths).full_id for name in mentions]}
+        for person in (name for name in mentions if name.startswith("@")):
+            room.add_member(person, person, None)
+        content: dict[str, object] = {}
         sender = SENDER
         if relayed:
-            content |= {ORIGINAL_SENDER_KEY: SENDER, SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND}
+            content = {ORIGINAL_SENDER_KEY: SENDER, SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND}
             sender = current_entity_id(ROUTER_AGENT_NAME, paths).full_id
-        with (
-            patch.object(ConversationResolver, "dispatch_thread_snapshot", new=AsyncMock(return_value=history)),
-            patch.object(ConversationResolver, "fetch_thread_history", new=AsyncMock(return_value=history)),
-        ):
+        with _reading_general_thread(paths):
             await bot._turn_ingress.handle_text_event(
                 room,
-                _text_message(paths, "$follow-up", body, sender=sender, **content),
+                _in_thread(paths, "$follow-up", body, *mentions, sender=sender, **content),
             )
             await drain_coalescing(bot)
 
@@ -607,8 +639,8 @@ async def _who_acts(
     voice: dict[str, bool],
     transcript: str = "🎤 @general what is on today",
     room_mode: bool = False,
-) -> tuple[dict[str, int], AgentBot]:
-    """Send through the router's and each agent's ingress; return who acted, how many times, and the router."""
+) -> tuple[dict[str, int], dict[str, AgentBot]]:
+    """Send through the router's and each agent's ingress; return who acted, how many times, and every bot."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -670,7 +702,7 @@ async def _who_acts(
     acted = {name: generate.await_count for name, generate in generates.items() if generate.await_count}
     if relay.await_count:
         acted[_RELAY] = relay.await_count
-    return acted, bots[ROUTER_AGENT_NAME]
+    return acted, bots
 
 
 @pytest.mark.asyncio
@@ -683,7 +715,7 @@ async def test_each_ingress_path_reaches_whom_the_reply_mode_says(
     expected: dict[str, int],
 ) -> None:
     """Text, uploads, voice, captioned uploads, edits, and room-mode follow-ups reach the router and agents as the mode says."""
-    acted, _router = await _who_acts(
+    acted, _bots = await _who_acts(
         tmp_path,
         _PATHS[path],
         agents,
@@ -701,7 +733,7 @@ async def test_router_still_echoes_an_unanswered_voice_message_in_a_mentions_roo
 
     docs/configuration/threads.md and docs/voice.md say so.
     """
-    acted, router = await _who_acts(
+    acted, bots = await _who_acts(
         tmp_path,
         _send_voice,
         _BOTH,
@@ -711,7 +743,7 @@ async def test_router_still_echoes_an_unanswered_voice_message_in_a_mentions_roo
     )
 
     assert acted == {}
-    sent = [call.kwargs["content"] for call in router.client.room_send.await_args_list]
+    sent = [call.kwargs["content"] for call in bots[ROUTER_AGENT_NAME].client.room_send.await_args_list]
     assert [content.get("m.new_content", content)["body"] for content in sent] == [
         "Router agent is transcribing…",
         "🎤 what is on today",
@@ -738,14 +770,16 @@ async def _general_nudged_and_shown_waiting(
     transcript: str,
     room_mode: bool,
 ) -> tuple[bool, bool]:
-    """While general is still answering, send a message; return whether it nudged general and got general's ⏳."""
+    """While general is answering and an approval holds its conversation, send a message.
+
+    Return whether the message asked general's running response to wrap up, and whether general reacted ⏳ to it.
+    """
     with (
         patch.object(ResponseRunner, "has_active_response_for_target", return_value=True),
         patch.object(ResponseRunner, "reserve_waiting_human_message", autospec=True, return_value=None) as reserve,
-        patch("mindroom.turns.ingress.mark_waiting_for_approval") as text_waits,
-        patch("mindroom.voice.ingress.mark_waiting_for_approval") as voice_waits,
+        patch.object(ResponseRunner, "is_held_for_approval", return_value=True),
     ):
-        await _who_acts(
+        _acted, bots = await _who_acts(
             tmp_path,
             send,
             agents,
@@ -754,15 +788,16 @@ async def _general_nudged_and_shown_waiting(
             transcript=transcript,
             room_mode=room_mode,
         )
+        general = bots["general"]
+        assert await wait_for_background_tasks(5.0, owner=general._runtime_view)
 
-    general_id = current_entity_id("general", test_runtime_paths(tmp_path)).full_id
     nudged = [call for call in reserve.call_args_list if call.kwargs["response_envelope"].agent_name == "general"]
-    shown_waiting = [
-        call
-        for call in (*text_waits.call_args_list, *voice_waits.call_args_list)
-        if call.args[0].matrix_id.full_id == general_id
+    reactions = [
+        call.kwargs["content"]["m.relates_to"]["key"]
+        for call in general.client.room_send.await_args_list
+        if call.kwargs["message_type"] == "m.reaction"
     ]
-    return bool(nudged), bool(shown_waiting)
+    return bool(nudged), "⏳" in reactions
 
 
 @pytest.mark.asyncio
@@ -820,6 +855,7 @@ async def test_unanswered_chatter_does_not_nudge_a_running_response(
             id="router-relay-to-research",
         ),
         pytest.param(_mention_research, True, "", False, id="mentions-only-research-room-mode"),
+        pytest.param(_in_general_thread("@other look", OTHER_HUMAN), False, "", False, id="mentions-only-a-person"),
         pytest.param(_follow_up_in_general_thread, False, "", True, id="untagged-in-general-thread"),
         pytest.param(
             _in_general_thread("@general @research look", "general", "research"),
@@ -849,7 +885,7 @@ async def test_a_message_for_another_agent_does_not_nudge_a_running_response(
     """While general works through a long task, a message that mentions only research leaves general's response alone.
 
     It neither asks general to wrap up nor gets general's ⏳, typed or relayed by the router, in a thread or in a
-    `thread_mode: room` room. A message general would answer does both: an untagged follow-up in the thread only
+    `thread_mode: room` room, and neither does a message that mentions only another person in the room. A message general would answer does both: an untagged follow-up in the thread only
     general took part in, a message that mentions general and research, and the router's relay to general.
     """
     nudged, shown_waiting = await _general_nudged_and_shown_waiting(
@@ -862,3 +898,119 @@ async def test_a_message_for_another_agent_does_not_nudge_a_running_response(
     )
     assert nudged is nudges
     assert shown_waiting is nudges
+
+
+@asynccontextmanager
+async def _general_answering_in_its_thread(
+    tmp_path: Path,
+    **agents: AgentConfig,
+) -> AsyncIterator[tuple[AgentBot, nio.MatrixRoom, RuntimePaths, _QueuedMessageState]]:
+    """Run general's response in THREAD_ID while the body sends messages to general's ingress.
+
+    Yield general's bot, the room, the runtime paths, and the running response's queue of waiting messages. A message
+    waits in its queue until the body ends.
+    """
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", rooms=[ROOM_ID]), **agents}),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    bot = _ingress_bot(config, paths, ready_runtime(config, paths), "general")
+    install_generate_response_mock(bot, AsyncMock())
+    room = nio.MatrixRoom(ROOM_ID, bot.client.user_id)
+    for member in (SENDER, *(current_entity_id(name, paths).full_id for name in config.agents)):
+        room.add_member(member, member, None)
+    running = bot._response_runner.lifecycle_coordinator._get_or_create_queued_signal(
+        MessageTarget.resolve(ROOM_ID, THREAD_ID, "$running"),
+    )
+    running.begin_response_turn()
+    try:
+        with (
+            _reading_general_thread(paths),
+            patch.object(bot._turn_ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)),
+        ):
+            yield bot, room, paths, running
+    finally:
+        running.finish_response_turn()
+        await drain_coalescing(bot)
+
+
+async def _queued(bot: AgentBot, event_id: str) -> None:
+    """Wait until a message waits in general's queue for THREAD_ID."""
+    keys = (requester_coalescing_key(ROOM_ID, THREAD_ID, SENDER), active_follow_up_coalescing_key(ROOM_ID, THREAD_ID))
+
+    async def queued() -> None:
+        while not any(  # noqa: ASYNC110
+            pending.event.event_id == event_id
+            for key in keys
+            for pending in bot._coalescing_gate.queued_pending_events(key)
+        ):
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(queued(), timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mentions", "edited_mentions"),
+    [
+        pytest.param((), ("research",), id="untagged-edited-to-mention-research"),
+        pytest.param(("research",), ("general",), id="research-edited-to-mention-general"),
+    ],
+)
+async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
+    tmp_path: Path,
+    mentions: tuple[str, ...],
+    edited_mentions: tuple[str, ...],
+) -> None:
+    """While general is answering in a thread, a person's edit of their waiting message decides again.
+
+    An untagged follow-up asks general's running response to wrap up until it is edited to mention only research; a
+    message for research does not, until it is edited to mention general.
+    """
+    research = AgentConfig(display_name="Research", rooms=[ROOM_ID])
+    async with _general_answering_in_its_thread(tmp_path, research=research) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this", *mentions))
+        await _queued(bot, "$follow-up")
+        assert running.has_pending_human_messages() is (not mentions)
+
+        edit = {
+            "m.new_content": {
+                "body": "look at this",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_mention_id(paths, name) for name in edited_mentions]},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$follow-up"},
+        }
+        await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
+        assert running.has_pending_human_messages() is ("general" in edited_mentions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mentions", "waits"),
+    [
+        pytest.param(("private_one", "private_two"), True, id="team-of-private-agents"),
+        pytest.param(("research",), False, id="research"),
+    ],
+)
+async def test_a_team_of_private_agents_asks_its_busy_shared_owner_to_wrap_up(
+    tmp_path: Path,
+    mentions: tuple[str, ...],
+    *,
+    waits: bool,
+) -> None:
+    """A message that asks for a team of private agents waits for general, the shared agent that answers for it.
+
+    general mentions none of them, yet surfaces that team's answer, so its running response is asked to wrap up as it
+    is for a message for general; a message for research alone is not general's.
+    """
+    agents = {
+        name: AgentConfig(display_name=name.title(), rooms=[ROOM_ID], private=AgentPrivateConfig(per="user"))
+        for name in ("private_one", "private_two")
+    }
+    agents["research"] = AgentConfig(display_name="Research", rooms=[ROOM_ID])
+    async with _general_answering_in_its_thread(tmp_path, **agents) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this", *mentions))
+        await _queued(bot, "$follow-up")
+        assert running.has_pending_human_messages() is waits
