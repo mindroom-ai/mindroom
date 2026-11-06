@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -18,6 +19,7 @@ from structlog.testing import capture_logs
 from mindroom import ai as ai_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
+from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
@@ -64,7 +66,7 @@ from tests.journal_helpers import record_room_history_recovery
 from tests.test_event_journal_store import admit, edit, text
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -108,6 +110,16 @@ class _Bot:
     # The bot's real provenance classifier, which reads only the config, the paths, and the bot's own identity.
     ingress_validator: IngressValidator
     running: bool = True
+    accepting_work: bool = True
+
+    @contextlib.asynccontextmanager
+    async def admission_fence(self) -> AsyncIterator[None]:
+        """Admit work at once, as an open runtime does."""
+        yield
+
+    def create_owned_task(self, coro: Coroutine[object, object, None], *, name: str) -> asyncio.Task[None]:
+        """Run work in a task this bot owns, as the bot's stop finds them."""
+        return create_background_task(coro, name=name, owner=self, log_exceptions=False)
 
     @property
     def tool_runtime_support(self) -> _Bot:
@@ -259,8 +271,8 @@ def _service(config: Config, runtime_paths: RuntimePaths, bot: _Bot) -> Listenin
     )
 
 
-def _bot(config: Config, runtime_paths: RuntimePaths, journal: PrincipalStore) -> _Bot:
-    scribe = entity_ids(config, runtime_paths)["scribe"]
+def _bot(config: Config, runtime_paths: RuntimePaths, journal: PrincipalStore, agent_name: str = "scribe") -> _Bot:
+    scribe = entity_ids(config, runtime_paths)[agent_name]
     client = make_matrix_client_mock(user_id=scribe.full_id)
     client.room_send.return_value = nio.RoomSendResponse("$reaction", ROOM)
     hydrator = _Hydrator(journal)
@@ -269,14 +281,14 @@ def _bot(config: Config, runtime_paths: RuntimePaths, journal: PrincipalStore) -
         IngressValidatorDeps(
             runtime=cast("Any", SimpleNamespace(config=config)),
             runtime_paths=runtime_paths,
-            agent_name="scribe",
+            agent_name=agent_name,
             matrix_id=scribe,
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
             settle_ignored_sources=AsyncMock(),
         ),
     )
-    return _Bot("scribe", scribe, client, reader, config, runtime_paths, ingress)
+    return _Bot(agent_name, scribe, client, reader, config, runtime_paths, ingress)
 
 
 @pytest.fixture
@@ -724,6 +736,51 @@ async def test_a_turn_still_running_when_its_room_is_dropped_and_taken_up_again_
     await listening.service._poll_once(T0 + 300)
 
     assert listening.turns.heard_in(ROOM) == [["$a"], ["$back-on"]]
+
+
+async def test_an_agent_removed_mid_turn_stops_its_turn_while_another_keeps_listening(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent turn belongs to its bot, so the bot's stop cancels it, its marker kept, and the other listener goes on."""
+    listening = _listening(tmp_path, journal_store, monkeypatch)
+    helper_listen = listening.config.agents["scribe"].listen
+    assert helper_listen is not None
+    listening.config.agents["helper"].listen = helper_listen.model_copy()
+    with_responder_access(listening.config, "helper", users=[ALICE])
+    helper = _bot(listening.config, listening.runtime_paths, journal_store.principal("agent@helper"), "helper")
+    service = ListeningService(
+        runtime_paths=listening.runtime_paths,
+        config_provider=lambda: listening.config,
+        bots=lambda: {"scribe": cast("AgentBot", listening.bot), "helper": cast("AgentBot", helper)},
+        agent_reply_memberships=isolated_membership_index(),
+    )
+    await service._poll_once(T0)
+    await listening.say("$a", 10)
+    await admit(helper.conversation_reader.store, "$a", room_id=ROOM, sender=ALICE, ts=_ms(10))
+    released: list[str] = []
+    scribe_turn_started = asyncio.Event()
+
+    async def scribe_turn_hangs() -> None:
+        if len(listening.turns.contexts) == 1:
+            scribe_turn_started.set()
+            await asyncio.Event().wait()
+            released.append("scribe")
+
+    listening.turns.meanwhile = scribe_turn_hangs
+    before = listening.marker()
+    poll = asyncio.create_task(service._poll_once(T0 + 100))
+    await asyncio.wait_for(scribe_turn_started.wait(), 5)
+
+    # The scribe is removed: it stops taking work, and its stop cancels what it still owns.
+    listening.bot.running = listening.bot.accepting_work = False
+    assert await wait_for_background_tasks(timeout=0.1, owner=listening.bot) is False
+    await asyncio.wait_for(poll, 5)
+
+    assert released == []
+    assert listening.marker() == before
+    assert [ctx.entity_label for ctx in listening.turns.contexts] == ["scribe", "helper"]
 
 
 async def test_a_turn_still_running_when_listening_stops_keeps_no_marker(listening: _Listening) -> None:
@@ -1543,8 +1600,7 @@ async def test_a_silent_turn_reads_memory_an_earlier_one_saw_added(
 
     # The system prompt inlines MEMORY.md; a search may bring a memory in elsewhere, which is not what is checked.
     system_prompts = [
-        str([message.content for message in request.messages if message.role == "system"])
-        for request in model.requests
+        str([message.content for message in request.messages if message.role == "system"]) for request in model.requests
     ]
     assert ["Quokkas zephyr nine." in prompt for prompt in system_prompts] == [False, True]
 

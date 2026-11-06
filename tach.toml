@@ -3372,6 +3372,7 @@ visibility = [
     "mindroom.api.external_triggers",
     "mindroom.bot_runtime_view",
     "mindroom.edit_regenerator",
+    "mindroom.listening.service",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.orchestrator",
     "mindroom.reply_turn.inbox",
@@ -9213,6 +9214,7 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.state",
     "mindroom.matrix.transport_progress",
+    "mindroom.response_admission",
 ]
 visibility = ["mindroom.orchestrator"]
 

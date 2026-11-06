@@ -37,6 +37,7 @@ from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.conversation_reads import projected_visible_messages
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.transport_progress import is_unfinished_reply
+from mindroom.response_admission import ResponseAdmissionRefusedError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -313,8 +314,45 @@ class ListeningService:
             return
         # More after the page, or a message the page stops at, may be newer than any heard on it.
         busy = page.more or page.stopped_at is not None or len(kept) < len(messages)
-        if self._due(heard, busy, now_ms, quiet_ms) and self._start_run(agent_name, room_id, listen, clock()):
-            await self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, _cursor(kept[-1]), clock)
+        if self._due(heard, busy, now_ms, quiet_ms):
+            await self._admit_turn(bot, agent_name, listen, room_id, config, marker, heard, _cursor(kept[-1]), clock)
+
+    async def _admit_turn(
+        self,
+        bot: AgentBot,
+        agent_name: str,
+        listen: ListenConfig,
+        room_id: str,
+        config: Config,
+        marker: ConversationCursor,
+        heard: Sequence[ResolvedVisibleMessage],
+        page_end: ConversationCursor,
+        clock: Callable[[], float],
+    ) -> None:
+        """Run a due turn as work done as the bot, so the bot's lifecycle governs it as it governs a reply.
+
+        It waits out a runtime replacement, starts only while the bot takes work, and runs in a task the bot's stop
+        waits for and then cancels, so an agent removed or replaced mid-turn calls no tool afterwards. A turn cancelled
+        either way keeps the marker.
+        """
+        try:
+            async with bot.admission_fence():
+                if not bot.accepting_work or not self._start_run(agent_name, room_id, listen, clock()):
+                    return
+                turn = bot.create_owned_task(
+                    self._run_turn(bot, agent_name, listen, room_id, config, marker, heard, page_end, clock),
+                    name=f"listening_turn_{agent_name}",
+                )
+        except ResponseAdmissionRefusedError:
+            return
+        try:
+            await asyncio.wait({turn})
+        except asyncio.CancelledError:
+            # A poll stopped mid-turn stops its turn too.
+            turn.cancel()
+            raise
+        if not turn.cancelled():
+            turn.result()
 
     async def _run_turn(
         self,

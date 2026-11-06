@@ -126,7 +126,7 @@ from .voice.readiness import VoiceReadiness
 from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
     from datetime import datetime
     from pathlib import Path
@@ -917,6 +917,18 @@ class AgentBot:
     def _accepting_work(self) -> bool:
         """Return whether this generation accepts new work, which a sync or process shutdown stops."""
         return self._runtime_view.phase is RunPhase.ACCEPTING
+
+    @property
+    def accepting_work(self) -> bool:
+        """Return whether this generation still takes new work, which its removal, replacement, or shutdown ends."""
+        return self._accepting_work and not self.ingestion_quiesced
+
+    def create_owned_task(self, coro: Coroutine[object, object, None], *, name: str) -> asyncio.Task[None]:
+        """Run work done as this bot outside its responses, in a task its stop waits for and then cancels.
+
+        The task logs nothing of its own; whoever awaits it hears how it ended.
+        """
+        return create_background_task(coro, name=name, owner=self._runtime_view, log_exceptions=False)
 
     @property
     def in_flight_response_count(self) -> int:
