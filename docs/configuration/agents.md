@@ -270,8 +270,9 @@ MindRoom holds a silent turn to a few lines of its own:
 Everyone in a listened room whom the agent may answer is heard, including people who never addressed it.
 Heard text is not extracted into memory automatically, and a silent turn stores no run in session history, so a heard message that is later redacted does not linger in a stored run.
 What a silent turn writes with its `memory` tool, though, is the agent's shared memory: heard text can resurface in the agent's replies in other rooms and to other users.
+So is what it writes with `knowledge_graph`, which an agent with `knowledge_graph` has on its own and which writes the shared graph when `knowledge_graph_edits` is on.
 A listed tool that writes files can write heard text into `MEMORY.md` as well (see [What listed tools can do](#what-listed-tools-can-do)).
-Leave `memory` and such tools out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
+Leave `memory`, `knowledge_graph`, and such tools out of `listen.tools`, or don't listen, in rooms whose talk must stay there.
 
 A silent turn records its usage under the kind `listening` (see [Usage](../usage.md)).
 [Budgets](../budgets.md) do not apply, because no requester asked for the turn.

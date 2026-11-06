@@ -177,9 +177,9 @@ What `listen.tools` names is the operator's choice, and the rest only narrows wh
 
 Keep `listen.tools` narrow: injected text can use any listed tool.
 
-Heard text also crosses rooms and users through memory.
-A silent turn with `memory` can store what anyone it may answer said in a listened room, including people who never addressed the agent, and the agent's memory is shared, so that text can resurface in its replies in other rooms and to other users.
-This is intended: an operator who lists `memory` chooses to let the agent learn from the room.
+Heard text also crosses rooms and users through memory and the knowledge graph.
+A silent turn with `memory`, or with `knowledge_graph` when `knowledge_graph_edits` is on, can store what anyone it may answer said in a listened room, including people who never addressed the agent, and both are shared, so that text can resurface in the agent's replies in other rooms and to other users ([Privacy and cost](../configuration/agents.md#privacy-and-cost)).
+This is intended: an operator who lists either chooses to let the agent learn from the room.
 
 ## Hosted tenant isolation
 
