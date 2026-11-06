@@ -45,9 +45,11 @@ async def ask_job_approvals(
     owner: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
+    response_event_id: str | None,
 ) -> tuple[tuple[bool, str | None], ...]:
     """Ask the requester about each planned call through cards the job owns, and wait for every decision.
 
+    ``response_event_id`` names the reply event whose tool calls these are, which each card then names.
     Returns each call's decision and denial reason, in order. Any exit before then, a cancellation or a failure,
     stops the card requests still open; the saves of the job's cancel request and end deny the cards already posted.
     """
@@ -55,7 +57,17 @@ async def ask_job_approvals(
     if gated:
         await runtime.set_awaiting_approval(job_id, awaiting=True)
     decisions = [
-        asyncio.ensure_future(_decide(job_id, tool, call, owner=owner, config=config, runtime_paths=runtime_paths))
+        asyncio.ensure_future(
+            _decide(
+                job_id,
+                tool,
+                call,
+                owner=owner,
+                config=config,
+                runtime_paths=runtime_paths,
+                response_event_id=response_event_id,
+            ),
+        )
         for tool, call in zip(tools, calls, strict=True)
     ]
     try:
@@ -77,10 +89,12 @@ async def ask_tool_call_approval(
     owner: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
+    response_event_id: str | None,
 ) -> tuple[bool, str | None]:
     """Decide one gated tool call that runs as a job, from policy or the requester's answer on the job's card.
 
-    The policy, the card, and the execution all read the same frozen arguments.
+    The policy, the card, and the execution all read the same frozen arguments. ``response_event_id`` names the event
+    of the reply that made the call, for the card to name.
     """
     call_id = call.context.call_id
     assert call_id is not None, "a managed call has its exact call identity"
@@ -109,6 +123,7 @@ async def ask_tool_call_approval(
         owner=owner,
         config=config,
         runtime_paths=runtime_paths,
+        response_event_id=response_event_id,
     )
     return decision
 
@@ -121,6 +136,7 @@ async def _decide(
     owner: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
+    response_event_id: str | None,
 ) -> tuple[bool, str | None]:
     """Return a policy decision as is, or post one card into the thread and wait for the requester's decision."""
     if call.decision is not None:
@@ -150,6 +166,7 @@ async def _decide(
         # Timed approvals bind to the conversation the job's reply answered, exactly as a paused reply's do.
         entity_name=owner.recipient,
         grant_operation=timed_grant_operation(config, tool, call),
+        response_event_id=response_event_id,
     )
     return decision.status == "approved", decision.reason
 

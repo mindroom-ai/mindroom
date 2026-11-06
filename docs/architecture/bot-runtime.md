@@ -165,7 +165,10 @@ Clients consume approval events under these rules, which this repository's code 
 
 - Policy approval events eligible for timed grants expose a canonical `approval_scope` with an opaque scope ID, entity, invoking agent, and concrete operation, including the MCP server and remote tool when applicable; one-shot-only approvals omit it and stay individually reviewable.
 - Approved calls carry immutable `approval_provenance`: `kind: once`, or `kind: timed_grant` with grant ID, originating card, granting user, decision time, duration, and fixed expiry.
-- Clients associate approval history with the paused response through `response_event_id`, never by tool names or argument similarity.
+- Clients associate approval history with the response through `response_event_id`, never by tool names or argument similarity.
+  A paused reply's cards always carry it.
+  A background job's card for the reply's own tool call carries it when that reply showed an event before making the call, and names the job in `background_run_id` as `tool-job:<job_id>`, the `job_id` of the call's job handle.
+  A job card without it names no reply: a background subagent's card, whose call is the child's, or a card for a call made before its reply showed an event, as every card of a silent schedule or contact turn is, since those replies show no progress.
 - Clients render compact history from the original event plus its latest same-sender terminal edit, taking complete argument evidence from the original, inline or as its Matrix attachment, because terminal edits omit it.
 - Only the originating grant card carries mutable auto-approval controls, and revocation or expiry never changes the historical authorization of calls the grant covered.
 - After a device change, a missing terminal receipt may be republished because it offers no action, so clients deduplicate receipts by exact approval and tool-call identity, scoped to the event sender.

@@ -181,6 +181,12 @@ def current_span() -> SpanHandle | None:
     return None if slot is None else slot.handle
 
 
+def current_reply_event_id() -> str | None:
+    """Return the event the current span's reply shows, if any."""
+    handle = current_span()
+    return None if handle is None else handle.reply.event_id
+
+
 def current_slot() -> SpanSlot | None:
     """Return the slot of the span scope the current task runs in, if any."""
     return _current_slot.get()

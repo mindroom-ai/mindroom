@@ -24,6 +24,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
+from mindroom.reply_scope import current_reply_event_id
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.shell.execution import shell_job_wait_seconds
 from mindroom.tool_jobs.approvals import ask_tool_call_approval
@@ -379,6 +380,8 @@ async def _call_job(
     # The job's state changes are read against the copy it starts from, so a key a sibling adds to the live state
     # after that copy never reads as deleted by this job.
     baseline = deepcopy(detached.context.session_state)
+    # The reply making the call, so the job's card names it; a reply that shows no event yet has none to name.
+    response_event_id = current_reply_event_id()
 
     async def ask_approval() -> tuple[bool, str | None]:
         # The policy and approver current when the job asks decide, as for a paused reply.
@@ -389,6 +392,7 @@ async def _call_job(
             owner=owner,
             config=scope.context.current_config,
             runtime_paths=scope.context.runtime_paths,
+            response_event_id=response_event_id,
         )
 
     approval = ask_approval if function.gate is ToolGate.JOB else None
