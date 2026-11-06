@@ -723,7 +723,10 @@ async def _mention_general(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePa
 
 
 async def _mention_research(bot: AgentBot, room: nio.MatrixRoom, paths: RuntimePaths) -> None:
-    await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$event", "@research hello", mention="research"))
+    await bot._turn_ingress.handle_text_event(
+        room,
+        _text_message(paths, "$event", "@research hello", mention="research"),
+    )
 
 
 async def _general_nudged_and_shown_waiting(
