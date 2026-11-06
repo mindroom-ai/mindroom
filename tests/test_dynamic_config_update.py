@@ -510,6 +510,7 @@ class TestDynamicConfigUpdate:
         state.add_room("lobby", room_id, "#lobby:example.com", "Lobby")
         save_matrix_state(state, orchestrator.runtime_paths)
         membership_client = AsyncMock(spec=nio.AsyncClient)
+        membership_client.rooms = {}
         membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
         membership_client.joined_members.return_value = nio.JoinedMembersResponse(
             members=[nio.RoomMember("@alice:example.com", None, None)],

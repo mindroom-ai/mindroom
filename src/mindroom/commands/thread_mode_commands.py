@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from mindroom.matrix.client_room_admin import room_admin_power_user
+from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.room_thread_modes import (
     RoomThreadMode,
     clear_room_thread_mode_override,
@@ -15,6 +16,7 @@ from mindroom.room_thread_modes import (
 if TYPE_CHECKING:
     import nio
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
@@ -38,6 +40,7 @@ async def handle_thread_mode_command(
     args_text: str,
     *,
     client: nio.AsyncClient,
+    config: Config,
     runtime_paths: RuntimePaths,
     room_id: str,
     requester_user_id: str,
@@ -55,12 +58,15 @@ async def handle_thread_mode_command(
         return "❌ Room admin only."
 
     if requested in _RESET_ARGUMENTS:
-        if clear_room_thread_mode_override(runtime_paths, room_id):
+        removed = clear_room_thread_mode_override(runtime_paths, room_id)
+        await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
+        if removed:
             return "✅ Room thread mode override removed. Agents use their configured modes again."
         return "This room has no thread mode override."
 
     mode = cast("RoomThreadMode", requested)
     set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=mode)
+    await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
     return (
         f"✅ This room now uses `{mode}` thread mode for future agent replies.\n\n"
         "Use `!thread_mode reset` to restore configured modes."

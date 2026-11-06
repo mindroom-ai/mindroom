@@ -3162,6 +3162,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestration.rooms"
 depends_on = [
+    "mindroom.matrix.room_thread_mode",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
@@ -5163,6 +5164,7 @@ visibility = ["mindroom.commands.handler"]
 [[modules]]
 path = "mindroom.commands.thread_mode_commands"
 depends_on = [
+    "mindroom.matrix.room_thread_mode",
     "mindroom.matrix.client_room_admin",
     "mindroom.room_thread_modes",
 ]
@@ -9733,4 +9735,13 @@ depends_on = [
     "mindroom.contacts.store",
     "mindroom.hooks",
     "mindroom.tool_system.plugins",
+]
+
+[[modules]]
+path = "mindroom.matrix.room_thread_mode"
+depends_on = [
+    "mindroom.matrix.room_membership",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.room_thread_modes",
 ]

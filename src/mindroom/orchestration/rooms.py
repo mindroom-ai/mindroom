@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom import constants
@@ -15,6 +15,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.identity import managed_account_user_id
 from mindroom.matrix.room_reconciliation import read_room_state
+from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.rooms import (
     ensure_all_rooms_exist,
     ensure_root_space,
@@ -111,6 +112,7 @@ class RoomSetup:
     # The router's client when it runs; managed room work runs through its account.
     router_client: Callable[[], nio.AsyncClient | None]
     refresh_agent_reply_memberships: Callable[[], Awaitable[None]]
+    publication_allowed: Callable[[], bool] = field(default=lambda: True)
 
     async def setup(self, bots: list[AgentBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.
@@ -145,8 +147,22 @@ class RoomSetup:
         await asyncio.gather(*(bot.ensure_rooms() for bot in bots if bot.agent_name != ROUTER_AGENT_NAME))
 
         await self.refresh_agent_reply_memberships()
+        await self.publish_thread_modes()
 
         logger.info("All agents have joined their configured rooms")
+
+    async def publish_thread_modes(self) -> None:
+        """Reconcile all router rooms after reply admission reopens, including retained invited rooms."""
+        try:
+            if self.publication_allowed() and (client := self.router_client()) is not None:
+                await asyncio.gather(
+                    *(
+                        reconcile_room_thread_mode(client, self.config_provider(), self.runtime_paths, room_id)
+                        for room_id in client.rooms
+                    ),
+                )
+        except Exception:
+            logger.warning("room_thread_mode_reconcile_failed", exc_info=True)
 
     async def ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.

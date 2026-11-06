@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.commands import config_confirmation
+from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.hooks import (
     EVENT_ROOM_MEMBER_JOINED,
     EVENT_ROOM_MEMBER_LEFT,
@@ -21,6 +22,7 @@ from mindroom.matrix.room_member_joins import (
     emit_room_member_join_at_least_once,
     room_member_left_from_event,
 )
+from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 
 if TYPE_CHECKING:
     import nio
@@ -82,6 +84,7 @@ class RouterDuties:
                 room_id=room_id,
                 restored_config_count=restored_configs,
             )
+        await reconcile_room_thread_mode(client, self.deps.runtime.config, self.deps.runtime.runtime_paths, room_id)
         await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
 
     def invalidate_memberships(self, *, reason: str) -> None:
@@ -112,9 +115,15 @@ class RouterDuties:
         )
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
-        """Emit the room-membership hooks of one live human join or self-leave."""
+        """Refresh responder presentation and emit human membership hooks."""
         registry = self.deps.hook_context.registry
         runtime = self.deps.runtime
+        if (
+            event.membership != event.prev_membership
+            and runtime.client is not None
+            and event.state_key in prepared_entity_names_by_user_id(runtime.config, runtime.runtime_paths)
+        ):
+            await reconcile_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room.room_id)
         if registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
             leave = room_member_left_from_event(room, event, config=runtime.config, runtime_paths=runtime.runtime_paths)
             if leave is not None:

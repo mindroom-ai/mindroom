@@ -425,6 +425,13 @@ class _MultiAgentOrchestrator:
             ),
             api_enabled=self.api_enabled,
         )
+        self._rooms = RoomSetup(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            router_client=self._router_client,
+            refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
+            publication_allowed=lambda: not self.response_admission_gate.closed,
+        )
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
             is_running=lambda: self.running,
@@ -436,6 +443,7 @@ class _MultiAgentOrchestrator:
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
             rebind_published_config_consumers=lambda: self._bind_trigger_runtimes(),
             finish_reload=self._script_runtime.finish_reload,
+            after_reload=self._rooms.publish_thread_modes,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -453,12 +461,6 @@ class _MultiAgentOrchestrator:
                 runtime_paths=self.runtime_paths,
                 reason=reason,
             ),
-        )
-        self._rooms = RoomSetup(
-            runtime_paths=self.runtime_paths,
-            config_provider=lambda: self.config,
-            router_client=self._router_client,
-            refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
         )
         self._startup_maintenance = StartupMaintenanceController(
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
