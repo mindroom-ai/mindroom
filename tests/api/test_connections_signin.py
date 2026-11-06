@@ -585,23 +585,6 @@ def test_admin_dashboard_session_reaches_dashboard_api(signin: dict[str, Any]) -
     assert client.get(_DASHBOARD_ROUTE).status_code == 200
 
 
-def test_admin_dashboard_session_loads_dashboard_page(
-    signin: dict[str, Any],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The dashboard shell loads instead of redirecting the administrator to the API-key login."""
-    dist = tmp_path / "dist"
-    dist.mkdir()
-    (dist / "index.html").write_text("administrator dashboard")
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
-    client = _admin_dashboard_client(signin)
-
-    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
-    assert response.status_code == 200
-    assert response.text == "administrator dashboard"
-
-
 @pytest.fixture
 def dashboard_dist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Serve a stand-in dashboard bundle."""
@@ -609,6 +592,16 @@ def dashboard_dist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dist.mkdir()
     (dist / "index.html").write_text("administrator dashboard")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
+
+
+@pytest.mark.usefixtures("dashboard_dist")
+def test_admin_dashboard_session_loads_dashboard_page(signin: dict[str, Any]) -> None:
+    """The dashboard shell loads instead of redirecting the administrator to the API-key login."""
+    client = _admin_dashboard_client(signin)
+
+    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 200
+    assert response.text == "administrator dashboard"
 
 
 @pytest.mark.usefixtures("dashboard_dist")
@@ -627,6 +620,18 @@ def test_signed_in_non_administrator_opening_the_dashboard_goes_back_to_chat(sig
 def test_signed_in_administrator_without_dashboard_bit_still_gets_the_login(signin: dict[str, Any]) -> None:
     """An administrator whose sign-in the dashboard does not accept can still sign in there with the API key."""
     _with_admin(signin)
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+
+    response = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+    assert response.status_code == 307
+    assert urlparse(response.headers["location"]).path == "/login"
+
+
+@pytest.mark.usefixtures("dashboard_dist")
+def test_signed_in_owner_who_is_no_administrator_still_gets_the_login(signin: dict[str, Any]) -> None:
+    """The deployment's owner may hold the API key without being listed as an administrator, so keeps the login."""
+    _serve(signin, MINDROOM_OWNER_USER_ID="@alice:example.org")
     client = signin["client"]
     assert sign_in(client, "alice").status_code == 200
 

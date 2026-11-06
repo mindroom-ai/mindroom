@@ -816,7 +816,7 @@ def _connections_session_path_honored(request: Request) -> bool:
 
 
 def _read_request_connections_session(request: Request) -> ConnectionsSession | None:
-    """Return the valid Connections session this request's cookie carries, wherever it is honored."""
+    """Return the valid Connections session this request's cookie carries, on any path; callers decide where it counts."""
     settings = _request_auth_state(request).settings
     token = request.cookies.get(
         connections_session_cookie(deployment_origin(settings.public_url, str(request.base_url))),
@@ -828,14 +828,16 @@ def non_administrator_chat_redirect(request: Request) -> RedirectResponse | None
     """Send someone signed in to Connections who is no administrator back to MindRoom Chat, the first listed web one.
 
     The dashboard is for administrators, so its login is a dead end for them, as when they trim `/connections` off the
-    portal's address. An administrator whose sign-in the dashboard does not accept keeps the login.
+    portal's address. An administrator whose sign-in the dashboard does not accept keeps the login, and so does the
+    owner, who may hold the API key without being listed in `administrators`.
     """
     session = _read_request_connections_session(request)
     if session is None:
         return None
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     chat_origin = connections_chat_origin(snapshot.runtime_paths)
-    if chat_origin is None or is_administrator(session.matrix_user_id, snapshot):
+    owner = snapshot.runtime_paths.env_value("MINDROOM_OWNER_USER_ID")
+    if chat_origin is None or session.matrix_user_id == owner or is_administrator(session.matrix_user_id, snapshot):
         return None
     return RedirectResponse(f"{chat_origin}/")
 
