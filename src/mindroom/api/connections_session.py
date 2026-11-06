@@ -170,6 +170,7 @@ async def _start_session(
         matrix_user_id,
         now=time.time(),
         dashboard=await _dashboard_allowed(openid_token, matrix_user_id, snapshot),
+        chat_origin=client_origin,
     )
     response.headers.update(CONNECTIONS_HEADERS)
     set_portal_cookie(response, connections_session_cookie(origin), token, max_age=CONNECTIONS_SESSION_SECONDS)

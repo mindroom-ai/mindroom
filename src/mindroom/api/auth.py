@@ -35,7 +35,7 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import dashboard_origin, deployment_origin, normalized_origin
+from mindroom.origins import connections_chat_origin, dashboard_origin, deployment_origin, normalized_origin
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
@@ -45,6 +45,7 @@ from mindroom.tool_system.dependencies import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.api.connections_session_cookie import ConnectionsSession
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(tags=["auth"])
@@ -814,6 +815,33 @@ def _connections_session_path_honored(request: Request) -> bool:
     return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
 
 
+def _read_request_connections_session(request: Request) -> ConnectionsSession | None:
+    """Return the valid Connections session this request's cookie carries, on any path; callers decide where it counts."""
+    settings = _request_auth_state(request).settings
+    token = request.cookies.get(
+        connections_session_cookie(deployment_origin(settings.public_url, str(request.base_url))),
+    )
+    return read_connections_session(token, now=time.time()) if token else None
+
+
+def non_administrator_chat_redirect(request: Request) -> RedirectResponse | None:
+    """Send someone signed in to Connections who is no administrator back to the MindRoom Chat that signed them in.
+
+    The dashboard is for administrators, so its login is a dead end for them, as when they trim `/connections` off the
+    portal's address. An administrator whose sign-in the dashboard does not accept keeps the login, and so does the
+    owner, who may hold the API key without being listed in `administrators`.
+    """
+    session = _read_request_connections_session(request)
+    if session is None:
+        return None
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    chat_origin = connections_chat_origin(snapshot.runtime_paths, session.chat_origin)
+    owner = snapshot.runtime_paths.env_value("MINDROOM_OWNER_USER_ID")
+    if chat_origin is None or session.matrix_user_id == owner or is_administrator(session.matrix_user_id, snapshot):
+        return None
+    return RedirectResponse(f"{chat_origin}/")
+
+
 def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
     """Return the Connections session identity.
 
@@ -822,9 +850,7 @@ def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
     platform mode and never on OAuth callbacks without that grant.
     """
     auth_state = _request_auth_state(request)
-    cookie = connections_session_cookie(deployment_origin(auth_state.settings.public_url, str(request.base_url)))
-    token = request.cookies.get(cookie)
-    session = read_connections_session(token, now=time.time()) if token else None
+    session = _read_request_connections_session(request)
     if session is None:
         return None
     if not _connections_session_path_honored(request) and not (

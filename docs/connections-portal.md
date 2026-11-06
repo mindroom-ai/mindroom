@@ -103,6 +103,7 @@ Without binding, a token could have been replayed from another deployment on the
 So the session reaches the dashboard only when it was started while the homeserver bound tokens, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
 The Connections header links the dashboard for administrators only, at `MINDROOM_DASHBOARD_URL` when it is set.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
+Someone signed in to Connections who is neither in `administrators` nor `MINDROOM_OWNER_USER_ID` and opens a dashboard page goes back to the Chat origin they signed in from instead of the login, while `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` still lists it, else to the first web Chat origin listed there; `/login` still answers.
 Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 
 ## Token Binding
@@ -137,6 +138,7 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, or remove an `[]` value; fix any invalid entry because one disables the whole list; the iOS app gets it only from an `[]` or invalid list |
 | `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
 | An administrator's Dashboard link from Connections asks for the API key | Check that `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true` and `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when unset, is the origin Chat opens; the warning `Could not check whether the homeserver binds OpenID tokens` means MindRoom could not read `/versions`, and `Dashboard access check failed after the binding probe` means the second token check failed. Open Connections from Chat again afterwards, because the session records dashboard access at sign-in |
+| Opening the dashboard sends me to Chat | Your Connections session is not an administrator's: sign in at `/login` with `MINDROOM_API_KEY`, or add yourself to `administrators` and open Connections from Chat again |
 | `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
 | `403 MINDROOM_CONNECTIONS_AGENT must name a private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent`, or unset it |
 | `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |

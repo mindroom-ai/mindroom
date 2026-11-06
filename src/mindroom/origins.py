@@ -139,17 +139,28 @@ def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, s
     return client_origin == _HOSTED_CHAT_ORIGIN or (is_local_origin(server_origin) and is_local_origin(client_origin))
 
 
-def connections_sign_in_page(paths: RuntimePaths) -> str | None:
-    """Return MindRoom Chat's Connections page on the first web origin the operator lists, or `None` without one.
+def connections_chat_origin(paths: RuntimePaths, signed_in_from: str | None = None) -> str | None:
+    """Return a web MindRoom Chat origin the operator lists for Connections, or `None` without one.
 
-    That page signs the browser in to the portal, so the portal sends signed-out visitors there.
+    That is `signed_in_from` while the list still names it, else the first listed one.
     """
     web_origins = [
         origin
         for origin in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV)
         if origin != "capacitor://localhost"
     ]
-    return f"{web_origins[0]}/connections" if web_origins else None
+    if signed_in_from in web_origins:
+        return signed_in_from
+    return web_origins[0] if web_origins else None
+
+
+def connections_sign_in_page(paths: RuntimePaths) -> str | None:
+    """Return MindRoom Chat's Connections page on the first web origin the operator lists, or `None` without one.
+
+    That page signs the browser in to the portal, so the portal sends signed-out visitors there.
+    """
+    chat_origin = connections_chat_origin(paths)
+    return f"{chat_origin}/connections" if chat_origin else None
 
 
 def connections_sign_in_enabled(paths: RuntimePaths) -> bool:
