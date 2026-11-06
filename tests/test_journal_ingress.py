@@ -934,6 +934,50 @@ class TestStreamingProgressIsTransport:
         # Admitted, projected, and never work.
         assert await alice.pending() == ()
 
+    async def test_another_agents_text_placeholder_is_conversation_and_only_its_answer_is_work(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An unfinished `m.text` reply is projected but never queued; its terminal edit is.
+
+        The runtime sends an answer's placeholder as `m.text` with a `pending`
+        status, and every agent in the room receives every agent's placeholder.
+        No turn ever answers an unfinished reply, so admitting each one as work
+        only held every agent's room lane, ahead of the prompts behind it.
+        """
+        other_agent = "@mindroom_other:example.org"
+        placeholder = nio.Event.parse_event(
+            {
+                "event_id": "$their_placeholder",
+                "sender": other_agent,
+                "origin_server_ts": 1_000,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": PLACEHOLDER_BODY, STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            },
+        )
+        assert isinstance(placeholder, nio.Event)
+
+        await self._admit_live(alice, placeholder)
+
+        assert _event_class_for(nio.TimelineEventProvenance.LIVE, placeholder) is EventClass.CONTEXT_ONLY
+        assert (await self._one_visible(alice)).logical_event_id == "$their_placeholder"
+        assert await alice.pending() == ()
+
+        await self._admit_live(
+            alice,
+            stream_event(
+                "$their_answer",
+                "the whole answer",
+                STREAM_STATUS_COMPLETED,
+                replaces="$their_placeholder",
+                sender=other_agent,
+                ts=1_200,
+            ),
+        )
+
+        assert (await self._one_visible(alice)).content["body"] == "the whole answer"
+        assert [event.event_id for event in await alice.pending()] == ["$their_answer"]
+
     async def test_the_production_stream_sequence_leaves_one_visible_answer(
         self,
         alice: PrincipalStore,
