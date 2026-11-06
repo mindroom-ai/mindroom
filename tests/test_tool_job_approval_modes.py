@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Literal
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,7 +31,7 @@ from mindroom.event_journal import (
     tool_job_run_id,
 )
 from mindroom.llm.runs import RunStatus, ToolExecution
-from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_scope import ReplyRuntime, SpanHandle, SpanSlot, _current_slot
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
 from mindroom.tool_jobs import approvals as approvals_module
 from mindroom.tool_jobs.approvals import ask_job_approvals, end_tool_call_approval
@@ -215,6 +216,8 @@ class _Cards:
     grants: list[tuple[str | None, ApprovalOperation | None]] = field(default_factory=list)
     # Each posted card's run and call.
     calls: list[tuple[str, str]] = field(default_factory=list)
+    # The reply event each card names as the one whose call started its job.
+    reply_events: list[str | None] = field(default_factory=list)
     transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(
@@ -226,11 +229,13 @@ class _Cards:
         arguments: dict[str, object],
         entity_name: str | None = None,
         grant_operation: ApprovalOperation | None = None,
+        response_event_id: str | None = None,
         **_kwargs: object,
     ) -> BackgroundApprovalDecision:
         assert owner_kind == "job"
         await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
         self.calls.append((origin.run_id, origin.call_id))
+        self.reply_events.append(response_event_id)
         self.requested.append((origin.run_id, tool_name, arguments))
         self.toolkits.append(origin.toolkit_name)
         self.grants.append((entity_name, grant_operation))
@@ -326,6 +331,36 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
         else:
             assert "No." in _tool_result(response)
             assert run.effects == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_reply", "reply_event_id"),
+    [(True, "$reply"), (True, None), (False, None)],
+    ids=["shown-reply", "unshown-reply", "no-reply"],
+)
+async def test_a_job_card_names_the_reply_whose_call_started_the_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    in_reply: bool,
+    reply_event_id: str | None,
+) -> None:
+    """A gated call's card names the event of the reply that made the call, when that reply already shows one."""
+    handle = MagicMock(spec=SpanHandle)
+    handle.reply = MagicMock(event_id=reply_event_id)
+    token = _current_slot.set(SpanSlot(handle=handle) if in_reply else None)
+    try:
+        async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+            with tool_runtime_context(run.context):
+                reply = asyncio.create_task(run.turn())
+                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+                run.decide("approved")
+                response = await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
+    finally:
+        _current_slot.reset(token)
+    assert response.status is RunStatus.completed
+    assert run.cards.reply_events == [reply_event_id]
 
 
 @pytest.mark.asyncio
@@ -888,6 +923,7 @@ async def test_job_cards_offer_timed_approval_only_for_calls_the_policy_gated(
                 owner=owner,
                 config=config,
                 runtime_paths=_runtime_paths(tmp_path),
+                response_event_id=None,
             ),
         )
         return BackgroundOutcome("completed", "ok")

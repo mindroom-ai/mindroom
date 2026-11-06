@@ -125,6 +125,7 @@ async def _approval_manager(
     fail_final: bool = False,
     unique_event_ids: bool = False,
     expected_initial_count: int = 1,
+    sent: list[MatrixDelivery] | None = None,
 ) -> tuple[ApprovalManager, EventJournalStore, asyncio.Event]:
     journal = EventJournalStore.open_sqlite(tmp_path / database_name)
     cards = journal.principal("router@shared")
@@ -140,6 +141,8 @@ async def _approval_manager(
 
     async def send(delivery: MatrixDelivery) -> str:
         nonlocal initial_count
+        if sent is not None:
+            sent.append(delivery)
         if delivery.stage is DeliveryStage.INITIAL:
             initial_count += 1
             if initial_count >= expected_initial_count:
@@ -333,6 +336,40 @@ async def test_background_script_approval_expires_and_retires_without_a_response
     finally:
         await manager.shutdown()
         await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_event_id", ["$reply", None])
+async def test_a_job_card_names_the_reply_whose_call_started_the_job(
+    tmp_path: Path,
+    response_event_id: str | None,
+) -> None:
+    """A job's card and its terminal edit name the reply that made the job's call, and omit it when none is known."""
+    sent: list[MatrixDelivery] = []
+    manager, journal, _initial_sent = await _approval_manager(tmp_path, sent=sent)
+    try:
+        decision = await manager.request_background_approval(
+            owner_kind="job",
+            origin=_origin(run_id=tool_job_run_id("job-1")),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=0.01,
+            response_event_id=response_event_id,
+        )
+        assert decision.status == "expired"
+    finally:
+        await manager.shutdown()
+        await journal.close()
+    assert [delivery.stage for delivery in sent] == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
+    for delivery in sent:
+        assert delivery.payload["background_run_id"] == tool_job_run_id("job-1")
+        assert delivery.payload.get("response_event_id") == response_event_id
+        assert ("response_event_id" in delivery.payload) is (response_event_id is not None)
 
 
 @pytest.mark.asyncio

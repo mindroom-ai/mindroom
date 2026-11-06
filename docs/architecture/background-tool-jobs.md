@@ -13,7 +13,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   An edit that regenerates a reply still answering stops it the same way first, so the old question's waiting calls end too.
   The reply's jobs that already run keep running, as do all jobs after a deletion or an edit of a finished reply, because each job stays visible and cancellable on its own and a finished reply's jobs are independent work; a job otherwise ends only through its own cancel, revoked access, or the bot leaving the room.
   The Stop cancels such jobs instead of only denying their cards, because a subagent job told its child's call was denied would resume the child and keep working.
-  Jobs are found by the reply record whose call started them, not by the reply's event, because a reply may not show an event yet when its call starts a job; the link lives only in memory, because a restart interrupts every job that awaits approval.
+  Jobs are found by the reply record whose call started them, not by the reply event their cards name, because a reply may not show an event yet when its call starts a job; the link lives only in memory, because a restart interrupts every job that awaits approval.
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
   A follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
@@ -21,6 +21,8 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
   They bind timed approvals to the same scope as a paused reply's cards, so one grant covers a conversation's gated calls whether they run as jobs or pause the reply.
+  A card for the reply's own call names that reply's event, as a paused reply's card does, so a client links it to the reply that made the call; the reply's trace does not name the job instead, because its public entries carry no call identity and show a call as started before its job exists.
+  A card for a call made before its reply showed an event names none, because waiting for that event could hold the card as long as the reply waits for its decision.
 - Jobs are the only way long work runs in the background, so the shell stops a command at its `timeout` instead of handing back a handle of its own.
   A job's command has no default limit and any other command has 120 seconds, so a command outside a job always stops by its timeout; Desktop shell keeps its handles because each request crosses the Desktop bridge under its own deadline, and script runs keep the engine to host processes that outlive replies and restarts.
 - A shell call that sets no `background_after` waits as long as a command outside a job may run, 120 seconds, and then continues as its job.

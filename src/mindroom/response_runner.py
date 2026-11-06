@@ -60,6 +60,7 @@ from mindroom.reply_scope import (
     ClaimRefused,
     ReplyWriteRefusedError,
     SpanHandle,
+    current_reply_event_id,
     current_slot,
     current_span,
     initial_write,
@@ -195,12 +196,6 @@ def _resumed_reply() -> UnfinishedStreamedReply | None:
     """Return what the stopped attempt at the current span's reply showed, which this attempt streams below."""
     handle = current_span()
     return None if handle is None else handle.resumed
-
-
-def _reply_event_id() -> str | None:
-    """Return the event the current span's reply shows, if any."""
-    handle = current_span()
-    return None if handle is None else handle.reply.event_id
 
 
 def _shows_placeholder(request: ResponseRequest) -> bool:
@@ -1844,7 +1839,7 @@ class ResponseRunner:
         sinks = TurnSinks(
             turn_recorder=recorder,
             run_metadata_collector=run_metadata_content,
-            response_event_id=_reply_event_id,
+            response_event_id=current_reply_event_id,
         )
 
         def response_stream() -> AsyncIterator[StreamInputChunk]:
