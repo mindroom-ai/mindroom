@@ -1064,6 +1064,8 @@ COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
+# A finished call's duration and spoken turns by sender ID, on its transcript message.
+CALL_TRANSCRIPT_CONTENT_KEY = "io.mindroom.call_transcript"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 # The model reasoning a streamed reply showed, with how long it was observed, on the reply's terminal update.
 REASONING_CONTENT_KEY = "io.mindroom.reasoning"

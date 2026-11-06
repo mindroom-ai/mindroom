@@ -11,6 +11,7 @@ from nio.crypto.attachments import decrypt_attachment
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
+    CALL_TRANSCRIPT_CONTENT_KEY,
     CONFIG_CONFIRMATION_REACTION_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
@@ -1328,6 +1329,19 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() 
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
     assert _TOOL_TRACE_KEY in uploaded_payload
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_message_moves_call_transcript_to_json_sidecar() -> None:
+    """A long call's structured transcript stays in the sidecar, so the preview still fits one event."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/call"))
+    transcript = {"duration_seconds": 3600, "turns": [{"sender": "@alice:server", "text": "w" * 100000}]}
+    content = {"body": "w" * 100000, "msgtype": "m.text", CALL_TRANSCRIPT_CONTENT_KEY: transcript}
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+    assert CALL_TRANSCRIPT_CONTENT_KEY not in result
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8"))[CALL_TRANSCRIPT_CONTENT_KEY] == transcript
 
 
 @pytest.mark.asyncio
