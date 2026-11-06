@@ -12,7 +12,6 @@ import yaml
 from mindroom import constants
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path
-from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix import client_room_admin
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -708,22 +707,32 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
 
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -> None:  # noqa: ANN001
-    """Root Space invitations should skip users the Space already has, joined or invited."""
+    """Root Space invitations skip users the Space has joined or invited, and invite again users who left."""
     orchestrator = _MultiAgentOrchestrator(
         runtime_paths=orchestrator_runtime_paths(tmp_path),
         config=_config_with_runtime_paths(
             tmp_path,
             agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
             matrix_space={"enabled": True},
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-            room_defaults={"invite_users": ["@owner:example.com"]},
+            room_defaults={
+                "invite_users": [
+                    "@owner:example.com",
+                    "@joined:example.com",
+                    "@pending:example.com",
+                    "@left:example.com",
+                ],
+            },
         ),
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
-    internal_user_id = mindroom_user_id(orchestrator.config, orchestrator.runtime_paths)
     router_bot.client.room_get_state.return_value = _space_member_state(
-        {"@mindroom_router:localhost": "join", internal_user_id: "invite"},
+        {
+            "@mindroom_router:localhost": "join",
+            "@joined:example.com": "join",
+            "@pending:example.com": "invite",
+            "@left:example.com": "leave",
+        },
     )
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
@@ -733,7 +742,7 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
     ):
         await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})
 
-    mock_invite.assert_awaited_once_with(router_bot.client, "!space:localhost", "@owner:example.com")
+    assert {call.args[2] for call in mock_invite.await_args_list} == {"@owner:example.com", "@left:example.com"}
 
 
 @pytest.mark.asyncio
