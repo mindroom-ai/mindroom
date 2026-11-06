@@ -50,7 +50,7 @@ def mark_waiting_for_approval(
 ) -> None:
     """React ⏳ to a human message that waits because a pending approval holds its conversation.
 
-    Ingress calls it only for a message this agent would answer (`TurnPolicy.not_for_this_agent`).
+    Ingress calls it only for a message this agent may answer (`TurnPolicy.not_for_this_agent`).
     """
     if not envelope.origin.may_answer_interactive_prompt or not support.response_runner.is_held_for_approval(target):
         return

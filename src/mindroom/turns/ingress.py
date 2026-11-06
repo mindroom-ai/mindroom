@@ -472,12 +472,15 @@ class TurnIngress:
             if pending_event.notice is not None:
                 pending_event.notice.release()
                 pending_event.notice = None
-        elif pending_event.notice is None:
+            return
+        if pending_event.notice is None:
             pending_event.notice = queued_notice_reservation_if_busy(
                 self.deps.response_runner,
                 target=target,
                 envelope=envelope,
             )
+        # The reaction's transaction ID is stable, so a message that already shows ⏳ gets no second one.
+        mark_waiting_for_approval(self.deps, target, envelope)
 
     def _log_unplaceable_event(self, room: nio.MatrixRoom, event: DispatchEvent | MatrixMediaEvent) -> None:
         """Record an event left unanswered because its relation target cannot be read.

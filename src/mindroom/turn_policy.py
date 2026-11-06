@@ -336,11 +336,9 @@ class TurnPolicy:
             return False
         if form_team.outcome not in {TeamOutcome.TEAM, TeamOutcome.REJECT}:
             return False
-        return self._names_a_private_agent([*form_team.requested_members, *form_team.eligible_members])
 
-    def _names_a_private_agent(self, members: list[MatrixID]) -> bool:
-        """Return whether any of these members is a private agent."""
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        members = [*form_team.requested_members, *form_team.eligible_members]
         for member in members:
             entity_name = registry.current_entity_name_for_user_id(member.full_id, include_router=False)
             if entity_name is None:
@@ -727,16 +725,42 @@ class TurnPolicy:
         if am_i_mentioned:
             return False
         if mentioned_agents or has_non_agent_mentions:
-            # Two or more mentioned agents ask for a team, and a team with a private agent in it is answered by a live
-            # shared agent (`_shared_owner_for_explicit_private_resolution`), which may be this one.
-            return not (
-                len(mentioned_agents) > 1
-                and self._names_a_private_agent(mentioned_agents)
-                and self._live_shared_agent_responders([self.deps.matrix_id])
-            )
+            # Two or more mentioned agents ask for a team, whose answer one agent surfaces, possibly an unmentioned one.
+            return len(mentioned_agents) < 2 or not self._surfaces_requested_team(room, envelope, mentioned_agents)
         if target.source_thread_id is not None:
             return False
         return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=False)
+
+    def _surfaces_requested_team(
+        self,
+        room: nio.MatrixRoom,
+        envelope: MessageEnvelope,
+        mentioned_agents: list[MatrixID],
+    ) -> bool:
+        """Return whether this agent surfaces the team these mentioned agents ask for, picked as a turn picks it."""
+        availability = self._responder_availability()
+        candidates = classify_responder_candidates_from_cached_room(
+            room,
+            envelope.requester_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+        )
+        sender_visible_responders = [*candidates.allowed, *candidates.pending]
+        # Two or more tagged agents ask for the same team in any thread or room.
+        form_team = decide_team_formation(
+            mentioned_agents,
+            [],
+            [],
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            is_dm_room=False,
+            is_thread=False,
+            available_responders_in_room=sender_visible_responders,
+            materializable_agent_names=availability.materializable_agent_names,
+        )
+        responder_pool = self._filter_materializable_responders(sender_visible_responders, availability)
+        return self._response_owner_for_team_resolution(form_team, responder_pool) == self.deps.matrix_id
 
     def _reply_mode_requires_mention(self, room_id: str, envelope: MessageEnvelope, *, mentions_an_agent: bool) -> bool:
         """Return whether this is a person's message that mentions no agent or team in a `mentions` room."""

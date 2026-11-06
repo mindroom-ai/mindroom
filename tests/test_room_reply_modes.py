@@ -885,8 +885,9 @@ async def test_a_message_for_another_agent_does_not_nudge_a_running_response(
     """While general works through a long task, a message that mentions only research leaves general's response alone.
 
     It neither asks general to wrap up nor gets general's ⏳, typed or relayed by the router, in a thread or in a
-    `thread_mode: room` room, and neither does a message that mentions only another person in the room. A message general would answer does both: an untagged follow-up in the thread only
-    general took part in, a message that mentions general and research, and the router's relay to general.
+    `thread_mode: room` room, and neither does a message that mentions only another person in the room. A message
+    general would answer does both: an untagged follow-up in the thread only general took part in, a message that
+    mentions general and research, and the router's relay to general.
     """
     nudged, shown_waiting = await _general_nudged_and_shown_waiting(
         tmp_path,
@@ -905,7 +906,7 @@ async def _general_answering_in_its_thread(
     tmp_path: Path,
     **agents: AgentConfig,
 ) -> AsyncIterator[tuple[AgentBot, nio.MatrixRoom, RuntimePaths, _QueuedMessageState]]:
-    """Run general's response in THREAD_ID while the body sends messages to general's ingress.
+    """Run general's response in THREAD_ID, held by an approval, while the body sends messages to general's ingress.
 
     Yield general's bot, the room, the runtime paths, and the running response's queue of waiting messages. A message
     waits in its queue until the body ends.
@@ -928,6 +929,7 @@ async def _general_answering_in_its_thread(
         with (
             _reading_general_thread(paths),
             patch.object(bot._turn_ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)),
+            patch.object(bot._response_runner, "is_held_for_approval", return_value=True),
         ):
             yield bot, room, paths, running
     finally:
@@ -950,6 +952,19 @@ async def _queued(bot: AgentBot, event_id: str) -> None:
     await asyncio.wait_for(queued(), timeout=5)
 
 
+async def _shows_waiting(bot: AgentBot, event_id: str) -> bool:
+    """Return whether general reacted ⏳ to this message, once any reaction it started is sent."""
+    for task in asyncio.all_tasks():
+        if task.get_name() == f"approval_wait_reaction_{event_id}":
+            await task
+    return any(
+        call.kwargs["message_type"] == "m.reaction"
+        and call.kwargs["content"]["m.relates_to"]["event_id"] == event_id
+        and call.kwargs["content"]["m.relates_to"]["key"] == "⏳"
+        for call in bot.client.room_send.await_args_list
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mentions", "edited_mentions"),
@@ -966,13 +981,15 @@ async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
     """While general is answering in a thread, a person's edit of their waiting message decides again.
 
     An untagged follow-up asks general's running response to wrap up until it is edited to mention only research; a
-    message for research does not, until it is edited to mention general.
+    message for research does not, until it is edited to mention general, and then shows ⏳ as it waits. A ⏳ the
+    message already shows stays when an edit takes it away from general.
     """
     research = AgentConfig(display_name="Research", rooms=[ROOM_ID])
     async with _general_answering_in_its_thread(tmp_path, research=research) as (bot, room, paths, running):
         await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this", *mentions))
         await _queued(bot, "$follow-up")
         assert running.has_pending_human_messages() is (not mentions)
+        assert await _shows_waiting(bot, "$follow-up") is (not mentions)
 
         edit = {
             "m.new_content": {
@@ -984,6 +1001,7 @@ async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
         }
         await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* look at this", **edit))
         assert running.has_pending_human_messages() is ("general" in edited_mentions)
+        assert await _shows_waiting(bot, "$follow-up")
 
 
 @pytest.mark.asyncio
@@ -991,6 +1009,7 @@ async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
     ("mentions", "waits"),
     [
         pytest.param(("private_one", "private_two"), True, id="team-of-private-agents"),
+        pytest.param(("private_one", "research"), False, id="team-research-answers-for"),
         pytest.param(("research",), False, id="research"),
     ],
 )
@@ -1002,8 +1021,9 @@ async def test_a_team_of_private_agents_asks_its_busy_shared_owner_to_wrap_up(
 ) -> None:
     """A message that asks for a team of private agents waits for general, the shared agent that answers for it.
 
-    general mentions none of them, yet surfaces that team's answer, so its running response is asked to wrap up as it
-    is for a message for general; a message for research alone is not general's.
+    general mentions none of them, yet surfaces that team's answer, so its running response is asked to wrap up and
+    the message shows ⏳, as for a message for general. A team that research is in is research's to answer, and a
+    message for research alone is not general's either.
     """
     agents = {
         name: AgentConfig(display_name=name.title(), rooms=[ROOM_ID], private=AgentPrivateConfig(per="user"))
@@ -1014,3 +1034,4 @@ async def test_a_team_of_private_agents_asks_its_busy_shared_owner_to_wrap_up(
         await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$follow-up", "look at this", *mentions))
         await _queued(bot, "$follow-up")
         assert running.has_pending_human_messages() is waits
+        assert await _shows_waiting(bot, "$follow-up") is waits
