@@ -6,12 +6,10 @@ JSON and send a compact preview event with a pointer to that sidecar.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
 import nio
 
 from mindroom.constants import (
@@ -83,7 +81,6 @@ _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_S
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _PREVIEW_SHRINK_MARGIN = 0.9
 _MATRIX_EVENT_HARD_LIMIT = 64000
-_DURABLE_SIDECAR_RETRY_SECONDS = 10.0
 _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
 _MEGOLM_BASE64_KEY_LENGTH = 43
@@ -670,38 +667,6 @@ def fit_reasoning_to_ordinary_event(
     return with_text(f"{full_text[:kept]}…") if kept else base
 
 
-async def _upload_sidecar_bytes(
-    client: nio.AsyncClient,
-    data: bytes,
-    *,
-    content_type: str,
-    filename: str,
-    room_id: str,
-    durable: bool,
-) -> nio.UploadResponse | nio.UploadError:
-    """Upload once, or for a durable caller until the homeserver takes it after nio's retry bound gave up."""
-    while True:
-        try:
-            # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
-            upload_result, _encryption_dict = await upload_media_bytes(
-                client,
-                data,
-                content_type=content_type,
-                filename=filename,
-            )
-        except (aiohttp.ClientConnectionError, TimeoutError):
-            if not durable:
-                raise
-        else:
-            rate_limited = (
-                isinstance(upload_result, nio.UploadError) and upload_result.status_code == "M_LIMIT_EXCEEDED"
-            )
-            if not (durable and rate_limited):
-                return upload_result
-        logger.warning("large_message_sidecar_upload_waiting_for_homeserver", room_id=room_id)
-        await asyncio.sleep(_DURABLE_SIDECAR_RETRY_SECONDS)
-
-
 async def upload_json_sidecar(
     client: nio.AsyncClient,
     room_id: str,
@@ -730,12 +695,12 @@ async def upload_json_sidecar(
         return None, None
 
     try:
-        upload_result = await _upload_sidecar_bytes(
+        # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
+        upload_result, _encryption_dict = await upload_media_bytes(
             client,
             prepared.data,
             content_type=prepared.content_type,
             filename=prepared.filename,
-            room_id=room_id,
             durable=durable,
         )
 

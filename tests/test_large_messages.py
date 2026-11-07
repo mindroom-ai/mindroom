@@ -477,7 +477,7 @@ async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_tru
     durable: bool,
 ) -> None:
     """A payload frozen for later delivery keeps its sidecar when uploads fail past nio's retry bound, then recover."""
-    monkeypatch.setattr("mindroom.matrix.large_messages._DURABLE_SIDECAR_RETRY_SECONDS", 0)
+    monkeypatch.setattr("mindroom.matrix.media._DURABLE_UPLOAD_RETRY_SECONDS", 0)
     client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
     recovered_upload = client.upload
     attempts = 0
