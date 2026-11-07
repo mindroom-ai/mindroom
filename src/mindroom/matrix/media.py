@@ -40,6 +40,8 @@ _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VID
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
 _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
 _DURABLE_UPLOAD_RETRY_SECONDS = 10.0
+# A rate limit, or a gateway that cannot reach the homeserver while it restarts.
+_DURABLE_UPLOAD_RETRY_STATUSES = frozenset({429, 502, 503, 504})
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
@@ -291,11 +293,12 @@ async def upload_media_bytes(
     content_type: str,
     filename: str,
     durable: bool = False,
+    room_id: str | None = None,
 ) -> tuple[nio.UploadResponse | nio.UploadError, dict[str, object] | None]:
     """Upload an in-memory byte payload through nio's callback-based upload API.
 
-    A ``durable`` caller freezes what the upload produced, so a homeserver that stays down or rate limiting
-    past nio's retry bound is waited out instead of failing the upload.
+    A ``durable`` caller freezes what the upload produced, so a homeserver that stays unreachable or rate limiting
+    past nio's retry bound is waited out instead of failing the upload. ``room_id`` names the room in its log.
     """
 
     def data_provider(_monitor: object, _data: object) -> io.BytesIO:
@@ -309,13 +312,22 @@ async def upload_media_bytes(
                 filename=filename,
                 filesize=len(upload_bytes),
             )
-        except (ClientConnectionError, TimeoutError):
+        except (ClientConnectionError, TimeoutError) as error:
             if not durable:
                 raise
+            error_type = type(error).__name__
         else:
-            if not (durable and isinstance(result[0], nio.UploadError) and result[0].status_code == "M_LIMIT_EXCEEDED"):
+            if not durable:
                 return result
-        logger.warning("matrix_upload_waiting_for_homeserver", filename=filename)
+            response = result[0]
+            status = getattr(response.transport_response, "status", None)
+            if not (
+                isinstance(response, nio.UploadError)
+                and (response.status_code == "M_LIMIT_EXCEEDED" or status in _DURABLE_UPLOAD_RETRY_STATUSES)
+            ):
+                return result
+            error_type = response.status_code or f"HTTP {status}"
+        logger.warning("matrix_upload_waiting_for_homeserver", room_id=room_id, error_type=error_type)
         await asyncio.sleep(_DURABLE_UPLOAD_RETRY_SECONDS)
 
 
