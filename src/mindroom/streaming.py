@@ -915,6 +915,7 @@ class StreamingResponse:
                 exc_info=not current_task_is_process_shutdown(),
             )
             # The span exit notes the cancellation; whatever this update did is in the reply's records.
+            await self.record_live_presentation()
             raise
         except Exception as exc:
             logger.warning(
@@ -1208,6 +1209,28 @@ class StreamingResponse:
             or not _tool_traces_match(self.tool_trace, self._last_delivered_tool_trace)
             or self.presentation_state != self._last_delivered_presentation_state
         )
+
+    async def record_live_presentation(self) -> None:
+        """Record what live frames showed past the last progress edit, once a stream that ends early stopped them.
+
+        Frames record nothing as they go, so a Stop, failure, or interruption, whose note the reply's span exit writes
+        below what the reply's records say it shows, would drop what readers saw since the last edit. Called once
+        every progress task has exited, so no edit's write-ahead races this one. Best effort: records that defer,
+        refuse, or fail it leave the note below the last edit.
+        """
+        if self.live is None or self.live.seq < 0 or not self.has_uncommitted_presentation():
+            return
+        try:
+            prepared = await self._prepare_delivery_async(is_final=False, allow_empty_progress=False)
+            if prepared is not None:
+                await self.progress_write_ahead(_progress_state(prepared.committed_state))
+        except Exception:
+            logger.warning(
+                "live_presentation_not_recorded",
+                event_id=self.event_id,
+                room_id=self.room_id,
+                exc_info=True,
+            )
 
     def require_committed_presentation(self) -> None:
         """Raise unless the current ordered presentation was acknowledged."""
@@ -2198,6 +2221,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             )
             # The stream writes no ending of its own: the reply's span exit notes the cancellation below what the
             # reply's records say it shows.
+            await streaming.record_live_presentation()
             raise
         except StreamingLifecycleSuspensionError as exc:
             _log_progress_task_errors(task_errors, event_id=streaming.event_id, room_id=target.room_id)
@@ -2221,6 +2245,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             logger.exception("Streaming response failed", error=str(error))
             _log_progress_task_errors(task_errors, event_id=streaming.event_id, room_id=target.room_id, reported=error)
             # The stream writes no ending of its own: the reply's span exit notes the failure.
+            await streaming.record_live_presentation()
             raise StreamingDeliveryError(error) from error
         else:
             transport_outcome = await streaming.finalize(client)
@@ -2320,8 +2345,10 @@ async def stream_progress_edits(
                     boundary_refresh=trace_changed and streaming.show_tool_calls,
                 )
 
+        ended_early = True
         try:
             yield publish
+            ended_early = False
         finally:
             task_errors = await _stop_progress_tasks(
                 delivery_queue,
@@ -2333,3 +2360,5 @@ async def stream_progress_edits(
                 room_id=target.room_id,
             )
             _log_progress_task_errors(task_errors, event_id=event_id, room_id=target.room_id)
+            if ended_early:
+                await streaming.record_live_presentation()
