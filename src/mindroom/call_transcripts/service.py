@@ -50,7 +50,6 @@ _NO_SUCH_CALL = "This call does not exist."
 _NOT_IN_ROOM = "You are not in this room."
 _NOT_IN_CALL = "You are not in this call; join it first."
 _TOO_LATE = "It is too late to add to this call's transcript."
-_ENDED = "This call has ended."
 
 type RefusalCode = Literal[
     "forbidden",
@@ -234,21 +233,14 @@ class CallTranscriptService:
     async def join(self, room_id: str, user_id: str) -> Call:
         """Join the room's live call, starting it if there is none; from someone already in it, this is the heartbeat.
 
-        Coming into the call needs permission to post in the room; a heartbeat does not check it again. A heartbeat
-        the person's leave of the call overtook while it was on its way ends with that call, so it neither starts a
-        new one nor puts them back in.
+        Coming into the call needs permission to post in the room; a heartbeat does not check it again.
         """
-        arrived_at = self._clock()
-        arrived_to = await asyncio.to_thread(self._store.live_call, room_id)
-        await self._require_member(room_id, user_id, _NOT_IN_ROOM, call=arrived_to)
+        live = await asyncio.to_thread(self._store.live_call, room_id)
+        await self._require_member(room_id, user_id, _NOT_IN_ROOM, call=live)
         # The room side is read before taking the room's lock and never under it, so a slow homeserver cannot hold
         # up heartbeats. Whether posting is needed is decided under the lock, with the call being joined.
         may_post = await self._room.may_post(room_id, user_id)
         async with self._room_lock(room_id):
-            if arrived_to is not None:
-                app = (await asyncio.to_thread(self._store.presence, arrived_to.id)).get(user_id)
-                if app is not None and app.left and app.present_at >= arrived_at:
-                    raise CallRefusedError(code="not-found", message=_ENDED)
             now = self._clock()
             live = await asyncio.to_thread(self._store.live_call, room_id)
             if live is None or user_id not in await self._present(live, now):
@@ -279,7 +271,7 @@ class CallTranscriptService:
         async with self._room_lock(call.room_id):
             call = await self._fresh(call_id)
             if call.ended_at is not None:
-                raise CallRefusedError(code="forbidden", message=_ENDED)
+                raise CallRefusedError(code="forbidden", message="This call has ended.")
             now = self._clock()
             members = await self._present(call, now)
             if user_id not in members:
