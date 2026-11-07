@@ -60,6 +60,9 @@ _INBOUND_KEY_TIMEOUT_S = 15.0
 #: How long the agent stays in the SFU room while nobody in the Matrix call roster is connected to it.
 #: It outlasts an SFU reconnect and a caller who publishes membership before connecting media.
 _CALLER_ABSENT_TIMEOUT_S = 60.0
+#: The same wait once the Matrix call roster has emptied: a caller who hung up leaves the SFU
+#: right after their membership, while one whose membership merely lapsed stays connected.
+_VACATED_ROSTER_ABSENT_TIMEOUT_S = 2.0
 _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
@@ -456,16 +459,28 @@ class RealtimeVoiceBridge:
         self._on_callers_absent: Callable[[], None] | None = None
         self._caller_presence_listener: Callable[[rtc.RemoteParticipant], None] | None = None
         self._caller_absent_timer: asyncio.TimerHandle | None = None
+        self._roster_vacated = False
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
         """Restrict SFU subscriptions and published output to the Matrix roster."""
         self._participant_identities = participant_identities
+        self._roster_vacated = False
         # A departed caller's timer must not report on, or block, a later rejoin.
         for identity in self._inbound_key_timers.keys() - participant_identities:
             self._inbound_key_timers.pop(identity).cancel()
         if self._audio_input is not None:
             self._audio_input.set_participant_identities(participant_identities)
         self._apply_output_permissions()
+        self._watch_caller_presence(restart=True)
+
+    def vacate_roster(self) -> None:
+        """Keep the last roster's devices after the Matrix roster emptied, but end once none is in the SFU.
+
+        A membership lapses while its media stays connected when the client stops refreshing
+        its delayed leave event (MSC4140) for a while, as an app in the background does; the
+        client publishes a new membership as soon as it runs again.
+        """
+        self._roster_vacated = True
         self._watch_caller_presence(restart=True)
 
     async def connect(self, grant: SfuGrant) -> None:
@@ -608,10 +623,13 @@ class RealtimeVoiceBridge:
             self._caller_absent_timer = None
             # Losing our own SFU connection also empties the room; a fresh session can rejoin the caller.
             sfu_connected = room.isconnected()
-            logger.warning(
+            # After the roster emptied this is how an ordinary hang-up ends the call.
+            log = logger.info if self._roster_vacated else logger.warning
+            log(
                 "call_roster_absent_from_sfu",
                 roster=sorted(self._participant_identities),
-                timeout_s=_CALLER_ABSENT_TIMEOUT_S,
+                timeout_s=self._caller_absent_timeout_s(),
+                roster_vacated=self._roster_vacated,
                 sfu_connected=sfu_connected,
             )
             on_terminated(not sfu_connected)
@@ -646,7 +664,13 @@ class RealtimeVoiceBridge:
             self._caller_absent_timer.cancel()
             self._caller_absent_timer = None
         if not present and self._caller_absent_timer is None:
-            self._caller_absent_timer = asyncio.get_running_loop().call_later(_CALLER_ABSENT_TIMEOUT_S, on_absent)
+            self._caller_absent_timer = asyncio.get_running_loop().call_later(
+                self._caller_absent_timeout_s(),
+                on_absent,
+            )
+
+    def _caller_absent_timeout_s(self) -> float:
+        return _VACATED_ROSTER_ABSENT_TIMEOUT_S if self._roster_vacated else _CALLER_ABSENT_TIMEOUT_S
 
     def _stop_caller_presence_watch(self) -> None:
         """Cancel the absence timer and stop following SFU participants."""
