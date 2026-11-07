@@ -8,11 +8,10 @@ from typing import Annotated
 from fastapi import HTTPException, Path, Request
 
 from mindroom.api.app_state import ensure_app_state
+from mindroom.api.client_sessions import presented_session
 
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = ["ClientUser", "require_client_user", "require_room_member"]
-
-_BEARER_PREFIX = "bearer "
 
 
 @dataclass(frozen=True)
@@ -24,16 +23,7 @@ class ClientUser:
 
 async def require_client_user(request: Request) -> ClientUser:
     """Resolve ``Authorization: Bearer <session_token>`` to its user, or answer 401."""
-    header = request.headers.get("Authorization", "")
-    store = ensure_app_state(request.app).client_sessions
-    session = (
-        store.lookup(header[len(_BEARER_PREFIX) :].strip())
-        if store is not None and header.lower().startswith(_BEARER_PREFIX)
-        else None
-    )
-    if session is None:
-        raise HTTPException(401, "Missing, invalid or expired client session.", headers={"WWW-Authenticate": "Bearer"})
-    return ClientUser(session.user_id)
+    return ClientUser(presented_session(request).user_id)
 
 
 async def require_room_member(request: Request, room_id: Annotated[str, Path()]) -> ClientUser:
