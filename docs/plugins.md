@@ -1075,6 +1075,13 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
+A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
+The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
+
+```json
+{"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
+```
+
 ## Plugin skills
 
 Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
