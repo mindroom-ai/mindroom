@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import sys
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
+from rich.markup import escape
 
 from .config import CONFIG_PATH_OPTION, activate_cli_runtime, console
 
@@ -27,16 +31,33 @@ def plugin_check(
         ...,
         help="Plugin directory or Python package spec, in any form a config.yaml plugins entry takes.",
     ),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
     """Strictly validate one plugin against this MindRoom version."""
     from mindroom.plugin_check import check_plugin  # noqa: PLC0415
 
     try:
-        result = check_plugin(path)
+        # With --json, logs and anything the plugin prints go to stderr, so stdout carries only the JSON document.
+        with redirect_stdout(sys.stderr) if json_output else nullcontext():
+            result = check_plugin(path)
     except Exception as exc:
-        console.print(f"[red]Plugin check failed:[/red] {exc}")
+        if json_output:
+            typer.echo(json.dumps({"status": "failed", "detail": str(exc)}))
+        else:
+            console.print(f"[red]Plugin check failed:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from None
 
+    if json_output:
+        summary = {
+            "status": "compatible",
+            "name": result.name,
+            "tools": result.tool_names,
+            "hooks": result.hook_names,
+            "automations": result.automation_names,
+            "skills": result.skill_directories,
+        }
+        typer.echo(json.dumps(summary))
+        return
     console.print(f"[green]Plugin is compatible:[/green] {result.name}")
     console.print(f"  Tools:       {', '.join(result.tool_names) or 'none'}")
     console.print(f"  Hooks:       {', '.join(result.hook_names) or 'none'}")
