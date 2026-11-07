@@ -889,7 +889,7 @@ def config_path_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _call_quietly[T](call: Callable[[], T]) -> T:
+def call_quietly[T](call: Callable[[], T]) -> T:
     """Call one config loader or check while temporarily suppressing structlog output below warnings.
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
@@ -923,7 +923,7 @@ def load_config_quiet(
     """Load config while temporarily suppressing structlog output."""
     from mindroom.config.main import load_config  # noqa: PLC0415
 
-    return _call_quietly(
+    return call_quietly(
         lambda: load_config(
             runtime_paths,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
@@ -944,7 +944,7 @@ def automation_reference_issues(config: Config, runtime_paths: RuntimePaths) -> 
             dispose_plugins(generation)
         return automation_reference_errors(config, automations)
 
-    return _call_quietly(check)
+    return call_quietly(check)
 
 
 @config_app.command("use-local-model", rich_help_panel="Create and edit")
