@@ -776,19 +776,8 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("reply", "expected"),
-    [
-        ("shows_calls", [(True, "path=notes.txt"), (True, "path=notes.txt")]),
-        ("default", [(False, None), (False, None)]),
-        ("detached", [(False, None), (False, None)]),
-    ],
-)
-async def test_a_call_tells_its_hooks_whether_its_reply_shows_it(
-    tmp_path: Path,
-    reply: str,
-    expected: list[tuple[bool, str | None]],
-) -> None:
+@pytest.mark.parametrize(("reply", "shown"), [("shows_calls", True), ("default", False), ("detached", False)])
+async def test_a_call_tells_its_hooks_whether_its_reply_shows_it(tmp_path: Path, reply: str, shown: bool) -> None:
     """Both hooks of a call read whether its reply shows it, and what the reply shows of its arguments.
 
     A context that does not say its reply shows tool calls, and a call outside any conversation, read as hidden.
@@ -818,14 +807,29 @@ async def test_a_call_tells_its_hooks_whether_its_reply_shows_it(
     with scope():
         assert await bridge("read_file", next_func, {"path": "notes.txt"}) == "read notes.txt"
 
-    assert seen == expected
+    # The before-call and the after-call hook read the same.
+    assert seen == [(shown, "path=notes.txt" if shown else None)] * 2
 
 
 @pytest.mark.asyncio
-async def test_a_shown_call_s_chat_preview_hides_secrets_and_cuts_long_values_as_the_reply_does(
+@pytest.mark.parametrize(
+    ("arguments", "preview"),
+    [
+        (
+            {"api_key": "sk-live-123", "body": "first line\nsecond " + "x" * 300},
+            "api_key=***redacted***, body=first line second " + "x" * 231 + "…",
+        ),
+        ({"sk-abcdefghijklmnopqrstuvwxyz0123": 1}, "***redacted***=1"),
+        ({"cmd": "export TOKEN=abc123\necho"}, "cmd=export TOKEN=***redacted***"),
+    ],
+    ids=["secret-value-and-long-value", "secret-key", "secret-assignment"],
+)
+async def test_a_shown_call_s_chat_preview_is_what_the_reply_s_tool_trace_shows(
     tmp_path: Path,
+    arguments: dict[str, object],
+    preview: str,
 ) -> None:
-    """The preview is the reply's tool-trace preview of the arguments: secrets redacted, values on one line, cut at 250."""
+    """The preview redacts secrets as the trace a reply carries does, keeps values on one line, and cuts them at 250."""
     previews: list[str | None] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -835,15 +839,11 @@ async def test_a_shown_call_s_chat_preview_hides_secrets_and_cuts_long_values_as
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
     bridge = tool_policy(registry)
 
-    async def next_func(**kwargs: object) -> str:
-        del kwargs
-        return "ok"
-
     context = replace(_tool_runtime_context(tmp_path, hook_registry=registry), tool_calls_shown=True)
     with tool_runtime_context(context):
-        await bridge("post", next_func, {"api_key": "sk-live-123", "body": "first line\nsecond " + "x" * 300})
+        await bridge("post", AsyncMock(return_value="ok"), arguments)
 
-    assert previews == ["api_key=***redacted***, body=first line second " + "x" * 231 + "…"]
+    assert previews == [preview]
 
 
 @pytest.mark.asyncio

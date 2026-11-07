@@ -741,8 +741,7 @@ def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool
     return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
 
 
-def format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
-    """Return a call's arguments as a reply's tool trace previews them, and whether the preview cut any of them."""
+def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     parts: list[str] = []
     truncated = False
     redacted_args = redact_sensitive_data(tool_args)
@@ -761,13 +760,18 @@ def format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     return args_preview, truncated or args_truncated
 
 
+def tool_args_chat_preview(tool_args: dict[str, object]) -> str:
+    """Return a call's arguments as a reply's tool trace shows them: redacted, values cut at 250 and the whole at 1200."""
+    return redact_sensitive_text(_format_tool_args(tool_args)[0])
+
+
 def _format_tool_started(
     tool_name: str,
     tool_args: dict[str, object],
     tool_index: int | None = None,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a tool-call start marker and return associated trace metadata."""
-    args_preview, truncated = format_tool_args(tool_args)
+    args_preview, truncated = _format_tool_args(tool_args)
     trace = ToolTraceEntry(
         type="tool_call_started",
         tool_name=tool_name,
@@ -786,7 +790,7 @@ def format_tool_combined(
     is_error: bool = False,
 ) -> tuple[str, ToolTraceEntry]:
     """Format a complete tool call marker and associated trace metadata, marked failed when ``is_error``."""
-    args_preview, truncated = format_tool_args(tool_args)
+    args_preview, truncated = _format_tool_args(tool_args)
     result_display = ""
     if result is not None and result != "":
         result_display, result_truncated = _format_tool_result_preview(result)

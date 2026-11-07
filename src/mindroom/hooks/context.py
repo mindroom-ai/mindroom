@@ -11,7 +11,7 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
-from mindroom.tool_system.events import format_tool_args
+from mindroom.tool_system.events import tool_args_chat_preview
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.tool_environment import ToolEnvironment
 
@@ -704,7 +704,7 @@ class ToolBeforeCallContext(HookContext):
 
     def chat_preview(self) -> str | None:
         """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
-        return format_tool_args(self.arguments)[0] if self.shown else None
+        return tool_args_chat_preview(self.arguments) if self.shown else None
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
@@ -734,7 +734,7 @@ class ToolAfterCallContext(HookContext):
 
     def chat_preview(self) -> str | None:
         """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
-        return format_tool_args(self.arguments)[0] if self.shown else None
+        return tool_args_chat_preview(self.arguments) if self.shown else None
 
 
 @dataclass(slots=True, kw_only=True)
