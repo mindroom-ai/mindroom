@@ -480,6 +480,8 @@ def _bare_upload_error(status: int) -> nio.UploadError:
         (nio.UploadError("Too many requests", "M_LIMIT_EXCEEDED"), "M_LIMIT_EXCEEDED", True),
         (_bare_upload_error(429), "HTTP 429", True),
         (_bare_upload_error(502), "HTTP 502", True),
+        (_bare_upload_error(503), "HTTP 503", True),
+        (_bare_upload_error(504), "HTTP 504", True),
         (_bare_upload_error(500), None, False),
         (_MatrixTransportShutdownError(), None, False),
     ],
@@ -496,7 +498,12 @@ async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_tru
 
     A server error and the shutdown fence end the wait at once.
     """
-    monkeypatch.setattr("mindroom.matrix.media._DURABLE_UPLOAD_RETRY_SECONDS", 0)
+    waits: list[float] = []
+
+    async def record_wait(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr("mindroom.matrix.media.asyncio.sleep", record_wait)
     client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
     recovered_upload = client.upload
     attempts = 0
@@ -522,17 +529,21 @@ async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_tru
             prepare_for_encrypted_delivery=durable,
         )
 
-    waits = [log for log in logs if log["event"] == "matrix_upload_waiting_for_homeserver"]
+    wait_logs = [log for log in logs if log["event"] == "matrix_upload_waiting_for_homeserver"]
     if durable and waited_out:
         assert attempts == 4
         assert result["msgtype"] == "m.file"
         assert result["file"]["url"] == "mxc://server/sidecar"
         assert _SIDECAR_UPLOAD_FALLBACK_TEXT not in result["body"]
-        assert [(wait["room_id"], wait["error_type"]) for wait in waits] == [("!room:server", error_type)] * 3
+        assert waits == [10.0] * 3
+        assert [(log["log_level"], log["room_id"], log["error_type"]) for log in wait_logs] == [
+            ("warning", "!room:server", error_type),
+        ] * 3
     else:
         assert attempts == 1
         _assert_text_sidecar_fallback(result, "durable ")
         assert waits == []
+        assert wait_logs == []
 
 
 @pytest.mark.asyncio

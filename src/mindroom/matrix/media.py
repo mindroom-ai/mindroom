@@ -317,11 +317,12 @@ async def upload_media_bytes(
                 raise
             error_type = type(error).__name__
         else:
+            if not durable:
+                return result
             response = result[0]
             status = getattr(response.transport_response, "status", None)
             if not (
-                durable
-                and isinstance(response, nio.UploadError)
+                isinstance(response, nio.UploadError)
                 and (response.status_code == "M_LIMIT_EXCEEDED" or status in _DURABLE_UPLOAD_RETRY_STATUSES)
             ):
                 return result
