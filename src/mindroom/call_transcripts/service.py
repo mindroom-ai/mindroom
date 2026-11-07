@@ -241,7 +241,8 @@ class CallTranscriptService:
         self._transcriber = transcriber
         self._notes = notes
         self._clock = clock
-        self._started_at = clock()
+        self._answered_since: dict[str, float] = {}
+        """When the room side last began answering for each room; a room it has not answered for since is absent."""
         self._room_locks: dict[str, asyncio.Lock] = {}
         self._listeners: dict[str, list[Callable[[CallEvent], None]]] = {}
         self._announced: dict[str, Call] = {}
@@ -262,7 +263,7 @@ class CallTranscriptService:
         # The room side is read before taking the room's lock and never under it, so a slow homeserver cannot hold
         # up heartbeats. Whether posting is needed is decided under the lock, with the call being joined.
         may_post = await self._room.may_post(room_id, user_id)
-        state = await self._room.call_members(room_id)
+        state = await self._call_members(room_id)
         async with self._room_lock(room_id):
             now = self._clock()
             live = await asyncio.to_thread(self._store.live_call, room_id)
@@ -285,7 +286,7 @@ class CallTranscriptService:
         Someone whose app was never in the call records nothing.
         """
         call = await self._call_for(call_id, user_id)
-        state = await self._room.call_members(call.room_id)
+        state = await self._call_members(call.room_id)
         async with self._room_lock(call.room_id):
             call = await self._fresh(call_id)
             if call.ended_at is not None or user_id not in await asyncio.to_thread(self._store.call_apps, call.id):
@@ -300,7 +301,7 @@ class CallTranscriptService:
     async def pause(self, call_id: str, user_id: str, *, holding: bool) -> Call:
         """Take or release the person's hold on Pause; only someone in the call can take one."""
         call = await self._call_for(call_id, user_id)
-        state = await self._room.call_members(call.room_id)
+        state = await self._call_members(call.room_id)
         async with self._room_lock(call.room_id):
             call = await self._fresh(call_id)
             if call.ended_at is not None:
@@ -375,7 +376,7 @@ class CallTranscriptService:
         call = await asyncio.to_thread(self._store.live_call, room_id)
         if call is None:
             return LiveCall(call=None, lines=(), names={})
-        state = await self._room.call_members(room_id)
+        state = await self._call_members(room_id)
         presence, apps = await self._apps(call, self._clock())
         holds = await asyncio.to_thread(self._store.holds, call.id)
         view = _call_view(
@@ -438,7 +439,7 @@ class CallTranscriptService:
 
     async def _check(self, call: StoredCall) -> None:
         """Settle who is in a live call, and post its row if it is still missing."""
-        state = await self._room.call_members(call.room_id)
+        state = await self._call_members(call.room_id)
         async with self._room_lock(call.room_id):
             fresh = await asyncio.to_thread(self._store.call, call.id)
             if fresh is None or fresh.ended_at is not None:
@@ -495,17 +496,19 @@ class CallTranscriptService:
     async def _apps(self, call: StoredCall, now: float) -> tuple[Mapping[str, AppPresence], frozenset[str]]:
         """Return the room's app check-ins and whose apps are in the call now.
 
-        An app is in while it was in this call, checked in within the last 60 seconds, and has not left since. It
-        gets a full 60 seconds after this process started to check in again, so a restart ends no call.
+        An app is in while it was in this call, checked in within the last 60 seconds, and has not left since. Apps
+        cannot check in while the room side cannot answer for the room, so from when it answers again, as after a
+        restart, a router replacement or a homeserver outage, each gets a full 60 seconds to.
         """
         presence = await asyncio.to_thread(self._store.app_presence, call.room_id)
         joined = await asyncio.to_thread(self._store.call_apps, call.id)
+        answered_since = self._answered_since.get(call.room_id, now)
         return presence, frozenset(
             user_id
             for user_id in joined
             if (app := presence.get(user_id)) is not None
             and not app.left
-            and now - max(app.present_at, self._started_at) <= _PRESENCE_SECONDS
+            and now - max(app.present_at, answered_since) <= _PRESENCE_SECONDS
         )
 
     async def _admit(self, call: StoredCall, user_id: str, *, said_at: float, seconds: float, now: float) -> None:
@@ -731,12 +734,26 @@ class CallTranscriptService:
             raise CallRefusedError(code="not-found", message=_NO_SUCH_CALL)
         return call
 
+    async def _call_members(self, room_id: str) -> Mapping[str, float] | None:
+        """Read who is in the room's MatrixRTC call, noting whether the room side answered."""
+        state = await self._room.call_members(room_id)
+        self._note_answer(room_id, answered=state is not None)
+        return state
+
     async def _require_member(self, room_id: str, user_id: str, not_found: str) -> None:
         member = await self._room.is_member(room_id, user_id)
+        self._note_answer(room_id, answered=member is not None)
         if member is None:
             raise CallRefusedError(code="unavailable", message="The room cannot be checked right now.")
         if not member:
             raise CallRefusedError(code="not-found", message=not_found)
+
+    def _note_answer(self, room_id: str, *, answered: bool) -> None:
+        """Note whether the room side answered for the room: its first answer after none starts the apps' grace."""
+        if not answered:
+            self._answered_since.pop(room_id, None)
+        elif room_id not in self._answered_since:
+            self._answered_since[room_id] = self._clock()
 
     def _room_lock(self, room_id: str) -> asyncio.Lock:
         return self._room_locks.setdefault(room_id, asyncio.Lock())

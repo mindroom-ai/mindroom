@@ -163,6 +163,41 @@ async def test_binding_waits_for_a_running_router_and_for_call_transcripts_to_be
     await coordinator.stop()
 
 
+@pytest.mark.asyncio
+async def test_a_router_replacement_ends_no_call(tmp_path: Path) -> None:
+    """While the next router syncs, apps cannot check in; once it can read the room, they get a full 60 seconds to."""
+    now = [1_000.0]
+
+    async def wait(_seconds: float) -> None:
+        await asyncio.Event().wait()
+
+    config = _config(enabled=True)
+    coordinator = CallTranscriptsRuntimeCoordinator(
+        runtime_paths=test_runtime_paths(tmp_path),
+        config_provider=lambda: config,
+        sleep=wait,
+        clock=lambda: now[0],
+    )
+    coordinator.bind_if_ready(config, _bots(_router()))
+    service = coordinator.service()
+    assert service is not None
+    call = await service.join(ROOM, ANN)
+
+    coordinator.unbind()
+    replacement = _router(synced=False)
+    coordinator.bind_if_ready(config, _bots(replacement))
+    for _ in range(6):
+        now[0] += 15
+        await service.tick()
+    assert await _room_cannot_be_checked(service)
+
+    replacement.first_sync_complete = True
+    await service.tick()
+    now[0] += 20
+    assert (await service.join(ROOM, ANN)).id == call.id
+    await coordinator.stop()
+
+
 # The loop
 
 

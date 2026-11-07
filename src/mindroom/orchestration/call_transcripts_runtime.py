@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,8 @@ class CallTranscriptsRuntimeCoordinator:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config]
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    clock: Callable[[], float] = time.time
+    """Wall-clock time, which calls are kept by."""
     _router: AgentBot | None = field(default=None, init=False)
     _service: CallTranscriptService | None = field(default=None, init=False)
     _loop: SupervisedLoop = field(init=False)
@@ -77,6 +80,7 @@ class CallTranscriptsRuntimeCoordinator:
                 ),
                 SpeechTranscriber(self.config_provider, self.runtime_paths),
                 ModelNotesWriter(self.config_provider, self.runtime_paths),
+                clock=self.clock,
             )
         return self._service
 

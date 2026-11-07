@@ -105,10 +105,10 @@ class FakeRoom:
         return user_id in self.posters if self.readable else None
 
     async def call_members(self, room_id: str) -> Mapping[str, float] | None:
-        """Return the MatrixRTC memberships, None while the state cannot be read."""
+        """Return the MatrixRTC memberships, None while the state or the room cannot be read."""
         del room_id
         self._read()
-        return None if self.rtc is None else dict(self.rtc)
+        return None if self.rtc is None or not self.readable else dict(self.rtc)
 
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> dict[str, str | None] | None:
         """Return the names known for ``user_ids``, or nothing while the room cannot be read or the router is away."""
@@ -420,6 +420,35 @@ async def test_a_restart_does_not_end_a_call_whose_apps_check_in_again(world: Wo
     world.clock.advance(61)
     await world.service.tick()
     assert (await world.service.live(ROOM, ANN)).call is None
+
+
+@pytest.mark.parametrize("restarted", [True, False], ids=["after-a-restart", "while-running"])
+@pytest.mark.asyncio
+async def test_a_room_that_cannot_be_read_for_a_while_ends_no_call(world: World, *, restarted: bool) -> None:
+    """Apps cannot check in while the room cannot be read; once it can, they get a full 60 seconds to check in again."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    if restarted:
+        world.restart()
+    world.room.readable = False
+    for _ in range(6):
+        world.clock.advance(15)
+        await world.service.tick()
+    await _refused("unavailable", lambda: world.service.join(ROOM, ANN))
+
+    world.room.readable = True
+    with world.service.listen(ROOM, world.events.append):
+        await world.service.tick()
+        world.clock.advance(20)
+        again = await world.service.join(ROOM, ANN)
+
+    assert not any(isinstance(event, CallEnded) for event in world.events)
+    assert (again.id, again.members) == (call.id, (ANN, BOB))
+    world.clock.advance(41)
+    await world.service.tick()
+    live = (await world.service.live(ROOM, ANN)).call
+    assert live is not None
+    assert (live.id, live.members) == (call.id, (ANN,))
 
 
 # Ending
