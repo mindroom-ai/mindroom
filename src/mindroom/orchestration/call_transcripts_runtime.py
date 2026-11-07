@@ -116,9 +116,10 @@ class CallTranscriptsRuntimeCoordinator:
         try:
             enabled = self.config_provider().calls.transcripts.enabled
             if self._switched_off or not enabled:
-                self._switched_off = False
                 if self._service is not None or database_path(self.runtime_paths.storage_root).exists():
                     await self._made_service().tick_while_off()
+                # Only once the off pass went through: one that fails is tried again at the next pass.
+                self._switched_off = False
             if enabled:
                 return await self._made_service().tick()
         except Exception:

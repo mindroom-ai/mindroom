@@ -447,3 +447,59 @@ def test_the_api_reaches_the_running_service_through_what_the_runtime_lends_it(t
     service = lent.call_transcripts()
     assert isinstance(service, CallTranscriptService)
     assert lent.call_transcripts() is service
+
+
+@pytest.mark.asyncio
+async def test_an_off_pass_that_fails_is_tried_again_at_the_next_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turned off and on again, an off pass that raises still holds the store to having been off at the next pass."""
+    paths = test_runtime_paths(tmp_path)
+    config = _config(enabled=True)
+    passes = 0
+    slept = asyncio.Event()
+    woken = asyncio.Event()
+
+    async def sleep(_seconds: float) -> None:
+        slept.set()
+        await woken.wait()
+        woken.clear()
+
+    real_tick_while_off = CallTranscriptService.tick_while_off
+
+    async def tick_while_off_failing_once(service: CallTranscriptService) -> None:
+        nonlocal passes
+        passes += 1
+        if passes == 1:
+            msg = "the store could not be read"
+            raise OSError(msg)
+        await real_tick_while_off(service)
+
+    monkeypatch.setattr(CallTranscriptService, "tick_while_off", tick_while_off_failing_once)
+    coordinator = CallTranscriptsRuntimeCoordinator(runtime_paths=paths, config_provider=lambda: config, sleep=sleep)
+    store = CallTranscriptStore(paths.storage_root)
+    heard_at = time.time() - 5
+    call, _ = store.ensure_live_call(ROOM, at=heard_at)
+    store.record_presence(call.id, ANN, at=heard_at)
+    store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
+    coordinator.bind_if_ready(config, {})
+    async with asyncio.timeout(5):
+        await slept.wait()
+
+    config = _config(enabled=False)
+    coordinator.bind_if_ready(config, {})
+    config = _config(enabled=True)
+    coordinator.bind_if_ready(config, {})
+    for _ in range(2):
+        slept.clear()
+        woken.set()
+        async with asyncio.timeout(5):
+            await slept.wait()
+    await coordinator.stop()
+
+    assert passes == 2
+    ended = store.call(call.id)
+    assert ended is not None
+    assert ended.transcript_done_at is not None
+    assert store.lines(call.id) == []
