@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.matrix_rtc import transcript as transcript_module
+from mindroom.matrix_rtc.call_writeback import format_call_writeback
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
@@ -133,11 +135,47 @@ async def test_same_speaker_fragments_continue_one_transcript_line(tmp_path: Pat
         "**user**: Great!",
     ]
     assert transcript.spoken_turns == (
-        ("user", "Wait, can you check. Can you check whether the bakery opens early tomorrow?"),
-        ("assistant", "Let me look that up. one moment"),
-        ("assistant", "It opens at seven."),
-        ("user", "Great!"),
+        ("user", "Wait, can you check. Can you check whether the bakery opens early tomorrow?", 0),
+        ("assistant", "Let me look that up. one moment", 0),
+        ("assistant", "It opens at seven.", 0),
+        ("user", "Great!", 0),
     )
+
+
+def test_posted_turns_carry_non_decreasing_offsets_within_the_call(tmp_path: Path) -> None:
+    """Each posted turn carries whole seconds from the call start, taken from its first words, inside the call."""
+    transcript = _transcript(tmp_path)
+    for elapsed, speaker, text in (
+        (3, "user", "Book the train"),
+        (5, "user", "for tomorrow"),
+        (9, "assistant", "Which time?"),
+        (61, "user", "Nine"),
+        (75, "assistant", "Booked"),
+    ):
+        transcript._started_monotonic = time.monotonic() - elapsed
+        transcript.record(speaker, text)
+    transcript._started_monotonic = time.monotonic() - 80.4
+
+    writeback = format_call_writeback(
+        turns=transcript.spoken_turns,
+        duration_seconds=transcript.elapsed_seconds(),
+        caller_id="@alice:example.org",
+        caller_label="Alice",
+        agent_id="@mindroom_helper:example.org",
+        agent_label="Helper",
+    )
+
+    assert writeback is not None
+    offsets = [turn["offset_seconds"] for turn in writeback.transcript["turns"]]
+    assert offsets == [3, 9, 61, 75]
+    assert offsets == sorted(offsets)
+    assert offsets[-1] <= writeback.transcript["duration_seconds"] == 80
+    assert writeback.body.split("\n\n")[2:] == [
+        "[0:03] Alice: Book the train for tomorrow",
+        "[0:09] Helper: Which time?",
+        "[1:01] Alice: Nine",
+        "[1:15] Helper: Booked",
+    ]
 
 
 def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:
@@ -148,7 +186,7 @@ def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:
     transcript.record_tool_use(["web"])
     transcript.record("user", "  ")
 
-    assert transcript.spoken_turns == (("user", "hi"), ("assistant", "hello"))
+    assert transcript.spoken_turns == (("user", "hi", 0), ("assistant", "hello", 0))
 
 
 @pytest.mark.asyncio

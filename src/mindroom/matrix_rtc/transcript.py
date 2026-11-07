@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -85,7 +86,8 @@ class CallTranscript:
     started_at: datetime
     reference_root: Path
     execution_identity: ToolExecutionIdentity | None
-    _spoken: list[tuple[str, str]] = field(default_factory=list, init=False)
+    _started_monotonic: float = field(default_factory=time.monotonic, init=False)
+    _spoken: list[tuple[str, str, int]] = field(default_factory=list, init=False)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
     _header_written: bool = field(default=False, init=False)
@@ -132,20 +134,24 @@ class CallTranscript:
             return
         if self._open_speaker == speaker:
             continuation = spoken_continuation(text)
-            self._spoken[-1] = (speaker, self._spoken[-1][1] + continuation)
+            self._spoken[-1] = (speaker, self._spoken[-1][1] + continuation, self._spoken[-1][2])
             self._pending.append(continuation)
         else:
             self._end_open_line()
-            self._spoken.append((speaker, text))
+            self._spoken.append((speaker, text, int(self.elapsed_seconds())))
             stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
             self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
             self._open_speaker = speaker
         self._schedule_flush()
 
     @property
-    def spoken_turns(self) -> tuple[tuple[str, str], ...]:
-        """Return the finalized spoken turns recorded so far, oldest first."""
+    def spoken_turns(self) -> tuple[tuple[str, str, int], ...]:
+        """Return the finalized spoken turns so far, oldest first, each with its whole seconds from the call start."""
         return tuple(self._spoken)
+
+    def elapsed_seconds(self) -> float:
+        """Return the seconds since the call started, on a clock that never goes back."""
+        return time.monotonic() - self._started_monotonic
 
     def record_tool_use(self, tool_names: list[str]) -> None:
         """Record one realtime tool-execution round without counting it as speech."""
@@ -214,8 +220,7 @@ class CallTranscript:
 
     async def finalize(self, *, config: Config, runtime_paths: RuntimePaths) -> None:
         """Flush remaining turns and store a memory reference for the call."""
-        ended_at = datetime.now(tz=UTC)
-        duration_minutes = max(1, round((ended_at - self.started_at).total_seconds() / 60))
+        duration_minutes = max(1, round(self.elapsed_seconds() / 60))
         self._end_open_line()
         try:
             await self._flush()

@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -3315,7 +3314,7 @@ def _record_two_minute_exchange(bridge: FakeBridge) -> None:
     assert isinstance(transcript, CallTranscript)
     on_turn("user", "Book the train")
     on_turn("assistant", "Booked")
-    transcript.started_at -= timedelta(minutes=2)
+    transcript._started_monotonic -= 120
 
 
 async def _drain_background_tasks(manager: CallManager) -> None:

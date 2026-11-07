@@ -16,7 +16,6 @@ import asyncio
 import time
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -1418,7 +1417,7 @@ class CallManager:
         Teardown runs under the room lock, sometimes while a config reload keeps
         response admission closed, so it must never wait for the post.
         """
-        ended_at = datetime.now(UTC)
+        duration_seconds = transcript.elapsed_seconds()
         with call_helper_usage(execution_identity, config=self._config, runtime_paths=self._runtime_paths):
             await transcript.finalize(config=self._config, runtime_paths=self._runtime_paths)
         if origin_context is None or self._shutting_down:
@@ -1426,7 +1425,7 @@ class CallManager:
         task = asyncio.create_task(
             self._post_call_transcript(
                 transcript.spoken_turns,
-                duration_seconds=(ended_at - transcript.started_at).total_seconds(),
+                duration_seconds=duration_seconds,
                 room_id=room_id,
                 requester_id=requester_id,
                 origin=origin_context.origin,
@@ -1436,7 +1435,7 @@ class CallManager:
 
     async def _post_call_transcript(
         self,
-        turns: tuple[tuple[str, str], ...],
+        turns: tuple[tuple[str, str, int], ...],
         *,
         duration_seconds: float,
         room_id: str,
