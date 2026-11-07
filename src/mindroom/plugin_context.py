@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_system.plugins import PluginInactiveError, config_plugins
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -82,9 +82,10 @@ def build_plugin_context(
 
 
 def current_plugin_context(plugin_name: str) -> PluginContext:
-    """Return ``plugin_name``'s context under the config of the current tool call's turn."""
-    runtime = get_tool_runtime_context()
-    if runtime is None:
-        msg = "current_plugin_context() needs an active tool call in an agent run"
-        raise RuntimeError(msg)
-    return build_plugin_context(plugin_name, runtime.config, runtime.runtime_paths, lambda: runtime.current_config)
+    """Return ``plugin_name``'s context under the config of the current conversation or OpenAI-compatible API request."""
+    if (runtime := get_tool_runtime_context()) is not None:
+        return build_plugin_context(plugin_name, runtime.config, runtime.runtime_paths, lambda: runtime.current_config)
+    if (detached := get_detached_requester_context()) is not None:
+        return build_plugin_context(plugin_name, detached.config, detached.runtime_paths, detached.config_provider)
+    msg = "current_plugin_context() needs a tool call in a Matrix conversation or an OpenAI-compatible API request"
+    raise RuntimeError(msg)

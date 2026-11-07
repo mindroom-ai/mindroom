@@ -18,7 +18,13 @@ from mindroom.message_target import MessageTarget
 from mindroom.plugin_api import PluginContext, current_plugin_context
 from mindroom.plugin_http import plugin_context
 from mindroom.tool_system.plugins import PluginInactiveError
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    ToolRuntimeContext,
+    detached_requester_context,
+    tool_runtime_context,
+)
+from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, publish_test_plugins
 from tests.test_plugin_routes import _app, _write_plugin
 
@@ -66,6 +72,13 @@ def state(ctx: Context) -> dict:
 def reload_then_read(request: Request, ctx: Context) -> dict:
     request.app.state.reload()
     return {"active": ctx.is_active(), "settings": dict(ctx.settings)}
+
+
+@router.websocket("/live-dependency")
+async def live_dependency(websocket: WebSocket, ctx: Context) -> None:
+    await websocket.accept()
+    await websocket.send_json(dict(ctx.settings))
+    await websocket.close()
 
 
 @router.websocket("/live")
@@ -195,6 +208,8 @@ def test_a_websocket_reads_its_plugins_settings_again_after_a_reload(tmp_path: P
     """A connected websocket that asks for its context again sees a reload's settings, and is closed once disabled."""
     app, client, runtime_paths = _client(tmp_path, {"name": "demo", "settings": {"key": "old"}})
 
+    with client.websocket_connect("/api/plugins/demo/live-dependency") as websocket:
+        assert websocket.receive_json() == {"key": "old"}
     with client.websocket_connect("/api/plugins/demo/live") as websocket:
         assert websocket.receive_json() == {"key": "old"}
         _reload(app, _bound(runtime_paths, {"name": "demo", "settings": {"key": "new"}}))
@@ -258,5 +273,29 @@ def test_a_plugin_tool_reads_its_plugins_context_until_a_reload_disables_it(tmp_
         with pytest.raises(PluginInactiveError, match="Plugin 'demo' is not active"):
             getattr(ctx, member)
     assert not (runtime_paths.storage_root / "plugins" / "demo").exists()
-    with pytest.raises(RuntimeError, match="needs an active tool call"):
+    with pytest.raises(RuntimeError, match="needs a tool call in a Matrix conversation or an OpenAI-compatible API"):
         current_plugin_context("demo")
+
+
+def test_a_plugin_tool_reads_its_plugins_context_in_an_openai_compatible_request(tmp_path: Path) -> None:
+    """A tool call without a Matrix conversation, as for an OpenAI-compatible API request, reads its plugin's context."""
+    _write_plugin(tmp_path, None, name="demo")
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bound(runtime_paths, {"name": "demo", "settings": {"key": "value"}})
+    publish_test_plugins(config, runtime_paths)
+    current: list[Config | None] = [config]
+    authority = DetachedRequesterContext(
+        requester_id="@alice:example.org",
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_reply_memberships=isolated_membership_index(),
+        config_provider=lambda: current[0],
+        budget_monitor=None,
+    )
+
+    with detached_requester_context(authority):
+        ctx = current_plugin_context("demo")
+
+    assert (dict(ctx.settings), ctx.config, ctx.is_active()) == ({"key": "value"}, config, True)
+    current[0] = None
+    assert not ctx.is_active()
