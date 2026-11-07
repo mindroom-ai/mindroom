@@ -429,11 +429,13 @@ class CallTranscriptService:
                 return None
             if fresh.ended_at is None:
                 fresh = await self._end_if_empty(fresh, now)
-            if (reason := self._lost_cause(fresh, now)) is not None:
-                if (task := self._settling.get(fresh.id)) is not None:
-                    # A write still under way, such as a stalled upload, is stopped before the message is given up.
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
+            reason = self._lost_cause(fresh, now)
+            if (reason is not None or _past_a_day(fresh, now)) and (task := self._settling.get(fresh.id)) is not None:
+                # A write still under way, such as a stalled upload or row edit, is stopped before the message is given
+                # up, and at the day's end whatever it is.
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if reason is not None:
                 await self._finish(fresh, given_up=reason)
                 fresh = await self._fresh(fresh.id)
             self._settle(fresh, now)

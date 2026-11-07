@@ -1183,6 +1183,27 @@ async def test_a_post_still_under_way_a_day_after_the_end_is_stopped_and_its_mes
 
 
 @pytest.mark.asyncio
+async def test_a_row_edit_still_under_way_a_day_after_the_end_is_stopped_though_the_message_was_posted(
+    world: World,
+) -> None:
+    """The day's cutoff stops every write still under way, the row's edit for a posted message too, so none lands later."""
+    await world.end_by_leaving(ANN)
+    world.room.edit_gate = asyncio.Event()
+    world.room.edit_started = asyncio.Event()
+    world.clock.advance(20)
+    await world.service.tick()
+    await world.room.edit_started.wait()
+    world.clock.advance(86_400)
+
+    await world.service.tick()
+    world.room.edit_gate.set()
+    await world.settled()
+
+    assert len(world.room.transcripts) == 1
+    assert [edit.transcript_event_id for edit in world.room.row_edits] == [None]
+
+
+@pytest.mark.asyncio
 async def test_notes_written_after_the_day_is_up_are_not_posted(world: World) -> None:
     """Each write checks the day first: notes that come back after it leave the message to be given up, not posted."""
     world.notes.gate = asyncio.Event()
