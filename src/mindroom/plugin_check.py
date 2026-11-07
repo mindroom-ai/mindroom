@@ -152,11 +152,11 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
 
 def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
     """Statically list each import from ``mindroom`` outside the plugin API in the plugin's Python files, by file and line."""
-    found: list[OutsideImport] = []
     manifest = plugin_imports._PLUGIN_MANIFEST
     if not (plugin_root / manifest).exists():
         # Not a plugin, such as an installed package a mistyped name resolved to: `check_plugin` fails on it at once.
-        return found
+        return []
+    found: list[OutsideImport] = []
     for directory, subdirectories, file_names in plugin_root.walk():
         # MindRoom never loads these as this plugin: installed packages, such as a virtual environment's copy of MindRoom,
         # hidden directories, the plugin's tests, and the separate plugins nested in it, each with its own manifest.

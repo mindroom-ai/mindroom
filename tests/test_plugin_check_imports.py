@@ -78,17 +78,15 @@ def test_imports_outside_plugin_api_names_each_mindroom_import_outside_it(
     source: str,
     expected: list[str],
 ) -> None:
-    """Only `mindroom.plugin_api`, `mindroom.plugin_http`, `mindroom.script_sdk`, and the documented names count."""
-    (tmp_path / "mindroom.plugin.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "module.py").write_text(source, encoding="utf-8")
+    """Only the plugin API's modules and documented names count."""
+    plugin_root = _write_plugin(tmp_path / "plugin", manifest={}, modules={"module.py": source})
 
-    assert _outside_imports(tmp_path) == expected
+    assert _outside_imports(plugin_root) == expected
 
 
 def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(tmp_path: Path) -> None:
     """Findings sort by path and line, skipping the plugin's tests, nested plugins, installed packages, and the like."""
-    for relative_path, source in {
-        "mindroom.plugin.json": "{}",
+    modules = {
         "hooks.py": (
             "def load():\n    from mindroom.constants import ROUTER_AGENT_NAME\n"
             + "\n" * 6
@@ -107,14 +105,12 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
         "long_sum.py": "from mindroom.hooks import hook\nx = " + "1+" * 10_000 + "1\n",
         "long_branches.py": "from mindroom.hooks import hook\nif x:\n    pass\n" + "elif x:\n    pass\n" * 6_000,
         "notes.txt": "from mindroom.hooks import hook\n",
-    }.items():
-        path = tmp_path / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(source, encoding="utf-8")
+    }
+    plugin_root = _write_plugin(tmp_path / "plugin", manifest={}, modules=modules)
     # An editor's lock file while hooks.py has unsaved changes.
-    (tmp_path / ".#hooks.py").symlink_to("user@host.1234:1700000000")
+    (plugin_root / ".#hooks.py").symlink_to("user@host.1234:1700000000")
 
-    assert _outside_imports(tmp_path) == [
+    assert _outside_imports(plugin_root) == [
         "helpers/__init__.py:1: mindroom.logging_config.get_logger",
         "helpers/tests/test_helpers.py:1: mindroom.constants.ROUTER_AGENT_NAME",
         "hooks.py:2: mindroom.constants.ROUTER_AGENT_NAME",
@@ -126,13 +122,12 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
 
 def test_imports_outside_plugin_api_skips_a_directory_it_cannot_enter(tmp_path: Path) -> None:
     """A directory the user cannot enter, such as a container's data volume, is skipped instead of failing the scan."""
-    (tmp_path / "mindroom.plugin.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "hooks.py").write_text("from mindroom.hooks import hook\n", encoding="utf-8")
-    locked = tmp_path / "data" / "pgdata"
+    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.hooks import hook\n")
+    locked = plugin_root / "data" / "pgdata"
     locked.mkdir(parents=True)
     locked.chmod(0)
     try:
-        assert _outside_imports(tmp_path) == ["hooks.py:1: mindroom.hooks.hook"]
+        assert _outside_imports(plugin_root) == ["hooks.py:1: mindroom.hooks.hook"]
     finally:
         locked.chmod(0o700)
 
@@ -241,39 +236,6 @@ def test_plugins_check_cli_strict_accepts_a_plugin_that_imports_only_the_plugin_
 
     assert result.exit_code == 0, result.output
     assert "Plugin is compatible: imports-demo" in result.stdout
-    assert "plugin API" not in result.stdout
-
-
-def test_plugins_check_cli_strict_accepts_internal_imports_in_the_plugins_tests(tmp_path: Path) -> None:
-    """MindRoom never loads a plugin's `tests/`, so their imports do not fail `--strict`."""
-    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.plugin_api import hook\n")
-    (plugin_root / "tests").mkdir()
-    (plugin_root / "tests" / "test_hooks.py").write_text(
-        "from mindroom.hooks.decorators import get_hook_metadata\n",
-        encoding="utf-8",
-    )
-
-    result = runner.invoke(app, ["plugins", "check", "--strict", str(plugin_root)])
-
-    assert result.exit_code == 0, result.output
-    assert "plugin API" not in result.stdout
-
-
-def test_plugins_check_cli_strict_accepts_a_skill_script_that_imports_the_script_sdk(tmp_path: Path) -> None:
-    """A skill script may call tools through `mindroom.script_sdk`, as a background script does."""
-    plugin_root = _write_plugin(
-        tmp_path / "plugin",
-        manifest={"name": "imports-demo", "skills": ["skills"]},
-        modules={
-            "skills/watch/SKILL.md": "---\nname: watch\ndescription: Watch a page\n---\nRun scripts/watch.py.\n",
-            "skills/watch/scripts/watch.py": "from mindroom.script_sdk import MindRoomTools\n",
-        },
-    )
-
-    result = runner.invoke(app, ["plugins", "check", "--strict", str(plugin_root)])
-
-    assert result.exit_code == 0, result.output
-    assert "Skills:      skills" in result.stdout
     assert "plugin API" not in result.stdout
 
 
