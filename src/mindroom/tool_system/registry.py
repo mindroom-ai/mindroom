@@ -25,7 +25,7 @@ CANDIDATE_PLUGIN_MODULE_PREFIX = "mindroom_candidate_"
 
 _BUILTIN_TOOLS: dict[str, ToolMetadata] = {}
 _REGISTRATION_SCOPE = threading.local()
-# The directories this process loaded plugins from.
+# The plugin directories the configs of this process named.
 _PLUGIN_ROOTS: set[Path] = set()
 
 
@@ -34,7 +34,7 @@ class ToolMetadataValidationError(ValueError):
 
 
 def record_plugin_root(root: Path) -> None:
-    """Remember that a plugin loads from ``root``: a module there registers tools only inside a plugin load."""
+    """Remember that a config names a plugin at ``root``: a module there registers tools only inside a plugin load."""
     _PLUGIN_ROOTS.add(root)
 
 

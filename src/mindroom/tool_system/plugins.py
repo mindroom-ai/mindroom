@@ -36,7 +36,6 @@ from mindroom.tool_system.registry import (
     ToolRegistry,
     compose_tool_registry,
     plugin_module_registrations,
-    record_plugin_root,
 )
 
 if TYPE_CHECKING:
@@ -919,7 +918,6 @@ def _load_plugin_module(
         raise plugin_imports.PluginValidationError(msg)
     module, previous_packages = prepared_module
 
-    record_plugin_root(plugin_root)
     try:
         # A module may provide several capabilities; whatever it registers belongs to this module.
         with plugin_module_registrations(module_name) as registrations:
