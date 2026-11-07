@@ -39,7 +39,7 @@ async def test_timed_card_offloads_complete_arguments_before_receipt_enrichment(
     prepared = await _offload_oversized_full_arguments(client, "!room:example.org", content)
 
     # Encrypted in every room: the card is sent later, perhaps after the room turned encrypted.
-    upload.assert_awaited_once_with(client, "!room:example.org", arguments, room_encrypted=True)
+    upload.assert_awaited_once_with(client, "!room:example.org", arguments, room_encrypted=True, durable=True)
     assert "full_arguments" not in prepared
     assert prepared["full_arguments_file"] == encrypted_file
     assert "full_arguments_url" not in prepared

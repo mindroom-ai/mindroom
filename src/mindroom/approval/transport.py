@@ -80,7 +80,7 @@ async def _offload_oversized_full_arguments(
     # restart, by which time the room may have turned encrypted. So the
     # arguments are always encrypted, as every deferred delivery's sidecars are;
     # clients read an encrypted file in any room.
-    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments, room_encrypted=True)
+    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments, room_encrypted=True, durable=True)
     if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=True):
         logger.warning(
             "approval_full_arguments_sidecar_unavailable",
