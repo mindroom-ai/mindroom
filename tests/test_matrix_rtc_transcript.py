@@ -163,6 +163,9 @@ def test_posted_turns_carry_their_speech_start_in_spoken_order(tmp_path: Path) -
         ("assistant", "Booked", 17.5),
         # The caller spoke over the reply; a provider can withhold that transcript until the reply is done.
         ("user", "in first class", 16.5),
+        # The caller's next words started after the reply, so they follow it as their own turn.
+        ("user", "with a window seat", 18.5),
+        ("user", "and a quiet car", 20.5),
         # A start after now (a clock step) still lands inside the call.
         ("assistant", "Anything else?", 300.5),
     ):
@@ -179,7 +182,7 @@ def test_posted_turns_carry_their_speech_start_in_spoken_order(tmp_path: Path) -
 
     assert writeback is not None
     offsets = [turn["offset_seconds"] for turn in writeback.transcript["turns"]]
-    assert offsets == [0, 5, 11, 14, 16, 17, 80]
+    assert offsets == [0, 5, 11, 14, 16, 17, 18, 80]
     assert offsets[-1] <= writeback.transcript["duration_seconds"] == 80
     assert writeback.body.split("\n\n")[2:] == [
         "[0:00] Helper: Hello",
@@ -188,21 +191,71 @@ def test_posted_turns_carry_their_speech_start_in_spoken_order(tmp_path: Path) -
         "[0:14] Alice: Nine",
         "[0:16] Alice: in first class",
         "[0:17] Helper: Booked",
+        "[0:18] Alice: with a window seat and a quiet car",
         "[1:20] Helper: Anything else?",
     ]
 
 
 def test_turns_recorded_before_the_clock_starts_post_at_zero(tmp_path: Path) -> None:
-    """A turn recorded while joining started before the call's clock, so it stays at 0 and inside the call."""
+    """Turns recorded while joining started before the call's clock, so they stay at 0 and inside the call."""
     transcript = _transcript(tmp_path)
     transcript.started_at -= timedelta(seconds=30)
     transcript._started_monotonic -= 30
-    transcript.record("user", "Hello?", transcript.started_at.timestamp() + 28.5)
+    transcript.record("user", "Hello?", transcript.started_at.timestamp() + 27.5)
+    transcript.record("assistant", "Hi there", transcript.started_at.timestamp() + 28.5)
     transcript.mark_call_active()
     transcript._started_monotonic -= 15
-    transcript.record("assistant", "Hi", transcript.started_at.timestamp() + 3.5)
+    transcript.record("user", "Can you hear me?", transcript.started_at.timestamp() + 3.5)
 
-    assert transcript.spoken_turns == (("user", "Hello?", 0), ("assistant", "Hi", 3))
+    assert transcript.spoken_turns == (
+        ("user", "Hello?", 0),
+        ("assistant", "Hi there", 0),
+        ("user", "Can you hear me?", 3),
+    )
+
+
+@pytest.mark.parametrize(
+    ("items", "expected"),
+    [
+        pytest.param(
+            # The agent speaks over the caller, whose turn is recorded only once they pause.
+            [("assistant", "What would you like?", 2.0), ("assistant", "Mm-hmm.", 7.0), ("user", "A train", 5.0)],
+            [("assistant", "What would you like?", 2), ("user", "A train", 5), ("assistant", "Mm-hmm.", 7)],
+            id="speech-over-the-caller",
+        ),
+        pytest.param(
+            # The caller's transcript is withheld until after the reply it prompted.
+            [("assistant", "Which time?", 8.0), ("assistant", "Booked for nine.", 12.0), ("user", "Nine", 11.2)],
+            [("assistant", "Which time?", 8), ("user", "Nine", 11), ("assistant", "Booked for nine.", 12)],
+            id="withheld-caller-turn",
+        ),
+        pytest.param(
+            # Within one second, the earlier start still comes first.
+            [("user", "Nine", 9.0), ("assistant", "Booked", 12.9), ("user", "in first class", 12.2)],
+            [("user", "Nine", 9), ("user", "in first class", 12), ("assistant", "Booked", 12)],
+            id="same-second",
+        ),
+        pytest.param(
+            [("user", "Book a train", 1.0), ("user", "for tomorrow", 2.5), ("assistant", "Which time?", 4.0)],
+            [("user", "Book a train for tomorrow", 1), ("assistant", "Which time?", 4)],
+            id="in-order",
+        ),
+    ],
+)
+def test_turns_list_in_spoken_order(
+    tmp_path: Path,
+    items: list[tuple[str, str, float]],
+    expected: list[tuple[str, str, int]],
+) -> None:
+    """Items recorded out of spoken order list by their starts, and a speaker's items join only when adjacent."""
+    transcript = _transcript(tmp_path)
+    transcript.mark_call_active()
+    started = transcript.started_at.timestamp()
+    transcript._started_monotonic -= 20
+    for speaker, text, spoken_after in items:
+        transcript.record(speaker, text, started + spoken_after)
+
+    assert transcript.spoken_turns == tuple(expected)
 
 
 def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:
@@ -228,12 +281,15 @@ async def test_finalize_stores_relative_transcript_memory_reference(
     runtime_paths = test_runtime_paths(tmp_path)
     transcript = _transcript(tmp_path)
     transcript.record("user", "Ping", time.time())
+    transcript.record("user", "again", time.time())
+    transcript.record("assistant", "Pong", time.time())
 
     await transcript.finalize(config=config, runtime_paths=runtime_paths)
 
     add_memory.assert_awaited_once()
     memory_content = add_memory.await_args.args[0]
     assert "voice call in Lobby" in memory_content
+    assert "2 spoken turns" in memory_content
     assert f"Transcript: calls/{AGENT}/{transcript.path.name}" in memory_content
     assert "**user**: Ping" in memory_content
     assert str(tmp_path) not in memory_content

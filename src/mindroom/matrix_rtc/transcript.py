@@ -88,7 +88,8 @@ class CallTranscript:
     reference_root: Path
     execution_identity: ToolExecutionIdentity | None
     _started_monotonic: float = field(default_factory=time.monotonic, init=False)
-    _spoken: list[tuple[str, str, int]] = field(default_factory=list, init=False)
+    #: Spoken items in arrival order: speaker, text, seconds from the call start, and whether it continued a turn.
+    _spoken: list[tuple[str, str, float, bool]] = field(default_factory=list, init=False)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
     _header_written: bool = field(default=False, init=False)
@@ -129,19 +130,18 @@ class CallTranscript:
         """Record one finalized item whose speech started at Unix time ``spoken_at`` (safe from sync callbacks).
 
         Consecutive items from the same speaker extend one turn, and its line stays open in the file until the turn ends.
-        A turn keeps its first item's start, held between the call's start and now.
+        An item's start is held between the call's start and now.
         """
         text = " ".join(text.split())
         if not text:
             return
-        if self._open_speaker == speaker:
-            continuation = spoken_continuation(text)
-            self._spoken[-1] = (speaker, self._spoken[-1][1] + continuation, self._spoken[-1][2])
-            self._pending.append(continuation)
+        continues = self._open_speaker == speaker
+        since_start = max(0.0, spoken_at - self.started_at.timestamp())
+        self._spoken.append((speaker, text, min(since_start, self.elapsed_seconds()), continues))
+        if continues:
+            self._pending.append(spoken_continuation(text))
         else:
             self._end_open_line()
-            since_start = max(0, math.floor(spoken_at - self.started_at.timestamp()))
-            self._spoken.append((speaker, text, min(since_start, int(self.elapsed_seconds()))))
             stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
             self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
             self._open_speaker = speaker
@@ -149,8 +149,18 @@ class CallTranscript:
 
     @property
     def spoken_turns(self) -> tuple[tuple[str, str, int], ...]:
-        """Return the finalized spoken turns so far in spoken order, each with its start in whole seconds."""
-        return tuple(sorted(self._spoken, key=lambda turn: turn[2]))
+        """Return the finalized spoken turns so far in spoken order, each with its start in whole seconds.
+
+        Items are ordered by start first, so an item that continued its speaker's turn on arrival joins it only if
+        nobody else started speaking in between.
+        """
+        turns: list[tuple[str, str, int]] = []
+        for speaker, text, since_start, continues in sorted(self._spoken, key=lambda item: item[2]):
+            if continues and turns and turns[-1][0] == speaker:
+                turns[-1] = (speaker, turns[-1][1] + spoken_continuation(text), turns[-1][2])
+            else:
+                turns.append((speaker, text, math.floor(since_start)))
+        return tuple(turns)
 
     def mark_call_active(self) -> None:
         """Start the call's clock now, when the agent can hear the caller, so joining time is not part of the call.
@@ -159,7 +169,7 @@ class CallTranscript:
         """
         self.started_at = datetime.now(tz=UTC)
         self._started_monotonic = time.monotonic()
-        self._spoken = [(speaker, text, 0) for speaker, text, _ in self._spoken]
+        self._spoken = [(speaker, text, 0.0, continues) for speaker, text, _, continues in self._spoken]
 
     def elapsed_seconds(self) -> float:
         """Return the seconds since the call started, on a clock that never goes back."""
@@ -252,7 +262,7 @@ class CallTranscript:
         transcript_path = self.path.relative_to(self.reference_root).as_posix()
         summary = (
             f"Joined a voice call in {self.room_display_name} ({self.room_id}): "
-            f"{len(self._spoken)} spoken turns over ~{duration_minutes} min. "
+            f"{len(self.spoken_turns)} spoken turns over ~{duration_minutes} min. "
             f"Transcript: {transcript_path}"
         )
         try:

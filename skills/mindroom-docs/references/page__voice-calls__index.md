@@ -303,6 +303,7 @@ Write `origin` before each call, because the agent reads it when it joins.
 ## Transcripts and memory
 
 Every call writes a markdown transcript as it goes.
+The file, and the copy Mem0 stores, keep the order in which speech arrived, each line stamped with the time it arrived.
 
 | Agent | Transcript location |
 |-------|---------------------|
