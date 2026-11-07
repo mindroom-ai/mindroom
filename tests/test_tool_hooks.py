@@ -43,6 +43,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
+from mindroom.llm.events import ReportedCall
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -55,6 +56,7 @@ from mindroom.tool_jobs.runtime import JobAccessError, register_background_runti
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import Function
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.events import build_tool_trace_content, format_tool_started_event
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
@@ -843,7 +845,10 @@ async def test_a_shown_call_s_chat_preview_is_what_the_reply_s_tool_trace_shows(
     with tool_runtime_context(context):
         await bridge("post", AsyncMock(return_value="ok"), arguments)
 
-    assert previews == [preview]
+    _text, entry = format_tool_started_event(ReportedCall(tool_call_id="call-1", tool_name="post", tool_args=arguments))
+    trace = build_tool_trace_content([entry])
+    assert trace is not None
+    assert previews == [preview] == [trace["io.mindroom.tool_trace"]["events"][0]["args_preview"]]
 
 
 @pytest.mark.asyncio
