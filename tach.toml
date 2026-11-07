@@ -5245,6 +5245,7 @@ depends_on = [
     "mindroom.hooks.types",
     "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
+    "mindroom.tool_system.events",
     "mindroom.tool_system.plugin_identity",
     "mindroom.tool_system.tool_environment",
 ]
@@ -7228,6 +7229,7 @@ expose = [
     "render_tool_trace_for_context",
     "serialize_tool_trace",
     "strip_visible_tool_markers",
+    "tool_args_chat_preview",
     "tool_marker_text",
     "tool_markers_match_trace",
     "with_stored_calls",
