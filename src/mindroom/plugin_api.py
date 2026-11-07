@@ -11,7 +11,7 @@ from __future__ import annotations
 from mindroom.agent_loop.helper import HelperResult, complete_prompt
 from mindroom.automations import Ask, AutomationContext, Done, automation, automation_threads
 from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, resolve_config_relative_path
-from mindroom.file_access import resolve_agent_file
+from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.hooks import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EVENT_AGENT_STARTED,
@@ -221,5 +221,6 @@ __all__ = [
     "resolve_turn_model",
     "tool",
     "toolkit_functions",
+    "write_agent_file",
     "write_file_within_root",
 ]

@@ -6833,6 +6833,7 @@ expose = [
     "open_upload_source",
     "read_upload_source",
     "resolve_agent_file",
+    "write_agent_file",
 ]
 from = ["mindroom.file_access"]
 
