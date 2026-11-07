@@ -226,7 +226,7 @@ Matrix sync callback
 | `custom_tools/job.py` | Reserved job discovery and control tool |
 | `orchestration/server_state.py` | Each entity's runtime origin and worker computer, published per room as state so MindRoom Chat finds its server |
 | `orchestration/services.py` | `RuntimeService`, the sync-and-stop shape of the long-running services that follow the active config |
-| `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds, and the service the API routes reach |
+| `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the router it reads and posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only ending calls and dropping unposted lines), and the service the API routes reach |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
@@ -475,7 +475,7 @@ Matrix sync callback
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, the speech-to-text call transcripts share |
 | `voice/openai_realtime_speech.py` | OpenAI text-to-speech through the Realtime API, shared by voice messages, the `openai` toolkit, and cascaded calls |
-| `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, the one transcript message it leaves, and its row's edits for the end and that message |
+| `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, and each call's one task posting its row, its transcript message and the row's edits for the end and that message |
 | `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, who paused each call, and when each person's app last checked in to each call |
 | `call_transcripts/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
 | `call_transcripts/router_room.py` | The router's side of calls between people: who is in a room, who may post there, display names, and the row, its edits and the transcript message it posts, each at most once per call |

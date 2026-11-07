@@ -341,6 +341,7 @@ calls:
 
 Speech-to-text uses the voice-message settings under [`voice.stt`](voice.md#configuration-reference), by default OpenAI's `gpt-transcribe` with the `openai` credential, whether or not `voice.enabled` is on.
 Changes to these settings apply to the next stretch of speech or call, without a restart.
+Turning `calls.transcripts.enabled` off ends calls in progress and drops the lines of every call whose message is not yet posted; while it is off, MindRoom reads and posts nothing in Matrix for calls.
 Configuration loading fails with `calls.transcripts.notes_model references unknown model: <name>` when the notes model is not in `models`.
 MindRoom Chat finds MindRoom as it does for [worker computers](tools/worker-computer.md) and signs in with a client session, so the homeserver must bind OpenID tokens to this deployment (see [Token Binding](connections-portal.md#token-binding)), and Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`; otherwise calls go on without transcripts.
 
@@ -365,7 +366,7 @@ The rules:
 - A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
 - A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB; each person has one stretch at a time at speech-to-text, and at most 240 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
-- A stretch said before the call ended that arrives late is still added until MindRoom starts writing the message; once the notes are written, later stretches are refused, so the posted notes always cover the posted transcript.
+- A stretch said before the call ended that arrives late is still added if it arrives within 20 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
 - Notes that fail are tried once more a minute later; after that, the message is posted without notes.
 - A message that cannot be posted is tried again every minute, with any notes already written, for up to a day after the call.
 - A call in which nobody spoke posts no message; one in which people spoke but nothing could be transcribed posts `Call · N min. Nothing could be transcribed.` without a transcript.
@@ -374,7 +375,7 @@ Privacy:
 
 - Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
 - MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
-- A message that cannot be posted, because the router has left the room or for a day after the call, is dropped along with the call's lines.
+- A message that cannot be posted, because the router has left the room or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
 - Speech-to-text and notes count as internal AI work under `call_transcript` in [usage](usage.md#token-usage).
 
 ### Routes for clients
