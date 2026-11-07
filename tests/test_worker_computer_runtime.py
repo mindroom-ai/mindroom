@@ -16,6 +16,10 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
 
+async def unused(*_args: object, **_kwargs: object) -> None:
+    """Stand in for a browser entrypoint or closer the test never calls."""
+
+
 class FakeDisplay:
     """Display adapter without external processes."""
 
@@ -145,15 +149,11 @@ async def test_agent_page_is_the_running_browser_page_until_the_computer_stops()
     runtime = WorkerComputerRuntime(display)
     page = cast("Page", object())
 
-    async def unused(*_args: object, **_kwargs: object) -> None:
-        return None
-
     assert runtime.agent_page() is None
     await runtime.run_browser_call("browser", lambda _display: BrowserSession(unused, unused, lambda: page), [], {})
     assert runtime.agent_page() is page
     display.alive = False
     assert runtime.agent_page() is None
-    display.alive = True
     await runtime.stop()
     assert runtime.agent_page() is None
     await runtime.run_browser_call("browser_mcp", lambda _display: BrowserSession(unused, unused), [], {})

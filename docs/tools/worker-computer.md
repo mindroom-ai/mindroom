@@ -173,8 +173,9 @@ Instead of the whole desktop, a client can show just the agent's browser page as
 The stream shows the tab the agent's `browser` tool works in, and moves within about a second when the agent switches tabs or profiles, without reconnecting.
 Until the agent's browser starts, and after it closes, the stream has no page and sends no frames.
 A tab or window that a page opens itself, such as a sign-in popup, appears in the stream only once the agent switches to it; until then, use the desktop stream to work in it.
+The open list of a `<select>` element does not show in the stream either; choose an option with the arrow keys and Enter, or use the desktop stream.
 `browser_mcp` runs its browser in another process, so its page cannot be streamed; use the desktop stream with it.
-Watching needs no control; input needs **Take control**, which pauses the agent's browser calls as it does for the desktop.
+Watching needs no control; input needs **Take control**, which pauses the agent's browser calls as it does for the desktop, and input sent without it is dropped.
 
 Open the WebSocket `GET /api/computers/sessions/{session_id}/screencast` with the subprotocols `mindroom-screencast` and `mindroom-ticket.<ticket>`, where the ticket comes from `POST /api/computers/sessions/{session_id}/stream-ticket`.
 As for the desktop stream, the `Origin` must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, each ticket opens one stream, and room access is rechecked while it runs.
@@ -194,14 +195,13 @@ The client sends JSON text messages of at most 64 KiB; a binary message closes t
 
 | Message | Effect |
 | --- | --- |
-| `{"type": "mouse", "event": "down" \| "up" \| "move", "x", "y", "button", "buttons", "clicks", "modifiers"}` | A pointer event at CSS pixel `x`, `y`. `button` is `none`, `left`, `middle`, `right`, `back` or `forward`; `buttons` is the DOM bitmask. |
+| `{"type": "mouse", "event": "down" \| "up" \| "move", "x", "y", "button", "buttons", "clicks", "modifiers"}` | A pointer event at CSS pixel `x`, `y`, which may lie outside the page, as when a drag leaves the panel. `button` is `none`, `left`, `middle`, `right`, `back` or `forward`; `buttons` is the DOM bitmask; `clicks` is the click count, 2 on the second press of a double click. |
 | `{"type": "wheel", "x", "y", "dx", "dy", "modifiers"}` | Scrolls by `dx`, `dy` CSS pixels. |
 | `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "text", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held; set `text` to type a character anyway, such as one typed with AltGr. |
-| `{"type": "text", "text"}` | Inserts up to 16384 characters of text, such as a paste or an IME composition. |
+| `{"type": "text", "text"}` | Inserts text, such as a paste or an IME composition. |
 
 `modifiers` is a bitmask: Alt 1, Control 2, Meta 4, Shift 8.
 The browser runs on Linux, so editing shortcuts use Control; a client on macOS sends Control for Command.
-Input from a viewer without control is dropped silently.
 When a viewer disconnects, buttons and keys it still held are released.
 
 ## Native Playwright MCP provider

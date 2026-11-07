@@ -323,27 +323,17 @@ def test_screencast_relays_text_input_and_replaces_the_desktop_stream(gateway: G
                 screencast.receive_text()
 
 
-class _WorkerMessages:
-    """A worker stream that sends fixed messages, then ends."""
-
-    def __init__(self, *messages: aiohttp.WSMessage) -> None:
-        self._messages = messages
-
-    async def __aiter__(self) -> AsyncIterator[aiohttp.WSMessage]:
-        for message in self._messages:
-            yield message
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["binary", SCREENCAST_PROTOCOL])
 async def test_worker_text_reaches_only_a_screencast_viewer(protocol: str) -> None:
     """A screencast relays the worker's text between frames; the desktop stream, which is all RFB, ends at text."""
     websocket = AsyncMock()
-    upstream = _WorkerMessages(
-        aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "status", None),
-        aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"frame", None),
-    )
-    await computers._downstream(websocket, cast("aiohttp.ClientWebSocketResponse", upstream), protocol)
+
+    async def worker() -> AsyncIterator[aiohttp.WSMessage]:
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "status", None)
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"frame", None)
+
+    await computers._downstream(websocket, cast("aiohttp.ClientWebSocketResponse", worker()), protocol)
     relayed = [call("status"), call(b"frame")] if protocol == SCREENCAST_PROTOCOL else []
     assert [*websocket.send_text.await_args_list, *websocket.send_bytes.await_args_list] == relayed
 

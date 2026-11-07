@@ -1,4 +1,4 @@
-"""Backend-only authenticated HTTP and binary websocket worker transport."""
+"""Backend-only authenticated HTTP and WebSocket stream transport to a worker computer."""
 
 from __future__ import annotations
 
@@ -75,11 +75,10 @@ async def computer_stream(
     protocol: str,
 ) -> AsyncIterator[aiohttp.ClientWebSocketResponse]:
     """Connect only to a manager-issued worker's desktop or screencast stream; URL carries no credential."""
-    screencast = protocol == SCREENCAST_PROTOCOL
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as client:  # noqa: SIM117 - own the client until response cleanup completes
             async with client.ws_connect(
-                _worker_url(handle) + ("/screencast" if screencast else "/stream"),
+                _worker_url(handle) + ("/screencast" if protocol == SCREENCAST_PROTOCOL else "/stream"),
                 headers=_headers(handle),
                 params={"session_id": session_id, "generation": generation},
                 protocols=(protocol,),

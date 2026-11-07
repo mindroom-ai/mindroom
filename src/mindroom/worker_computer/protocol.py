@@ -1,4 +1,4 @@
-"""Narrow interfaces for worker computer resource ownership."""
+"""Narrow interfaces for worker computer resource ownership, and the limits of its streams."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass

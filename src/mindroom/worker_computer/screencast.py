@@ -3,7 +3,8 @@
 The agent's ``browser`` tool runs Chromium in this worker process through Playwright, which speaks CDP to it over a
 pipe, so a viewer reaches the page without any debugging port.
 Each viewer opens its own CDP session on the page the tool shows and moves to another page when the agent does.
-A frame is acknowledged only after it is sent, so a slow viewer gets fewer frames instead of a queue.
+A frame is acknowledged once it is sent, skipped, or replaced by a newer one, so a slow viewer gets the newest frame
+instead of a queue.
 The wire protocol is described in docs/tools/worker-computer.md#page-stream.
 """
 
@@ -30,12 +31,14 @@ _POLL_SECONDS = 1.0
 # A page its script froze never answers input, so input, and releasing what a leaving viewer holds, give up after this.
 _INPUT_SECONDS = 2.0
 _JPEG_QUALITY = 80
-# Chromium scales frames down to fit, which keeps every frame below MAX_WORKER_STREAM_MESSAGE_BYTES.
+# Chromium scales frames down to fit, which keeps them well below MAX_WORKER_STREAM_MESSAGE_BYTES.
 _MAX_FRAME_WIDTH = 1920
 _MAX_FRAME_HEIGHT = 1200
-_MAX_COORDINATE = 16384
 _CTRL_OR_META = 2 | 4
 _MOUSE_EVENTS = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
+# A pointer may lie outside the page, as when a drag leaves the viewer's panel.
+_Coordinate = Annotated[float, Field(ge=-16384, le=16384)]
+_Modifiers = Annotated[int, Field(ge=0, le=15)]
 
 
 class _Message(BaseModel):
@@ -45,21 +48,21 @@ class _Message(BaseModel):
 class _Mouse(_Message):
     type: Literal["mouse"]
     event: Literal["down", "up", "move"]
-    x: float = Field(ge=0, le=_MAX_COORDINATE)
-    y: float = Field(ge=0, le=_MAX_COORDINATE)
+    x: _Coordinate
+    y: _Coordinate
     button: Literal["none", "left", "middle", "right", "back", "forward"] = "none"
     buttons: int = Field(default=0, ge=0, le=31)
     clicks: int = Field(default=1, ge=0, le=3)
-    modifiers: int = Field(default=0, ge=0, le=15)
+    modifiers: _Modifiers = 0
 
 
 class _Wheel(_Message):
     type: Literal["wheel"]
-    x: float = Field(ge=0, le=_MAX_COORDINATE)
-    y: float = Field(ge=0, le=_MAX_COORDINATE)
+    x: _Coordinate
+    y: _Coordinate
     dx: float = Field(default=0, ge=-10000, le=10000)
     dy: float = Field(default=0, ge=-10000, le=10000)
-    modifiers: int = Field(default=0, ge=0, le=15)
+    modifiers: _Modifiers = 0
 
 
 class _Key(_Message):
@@ -69,17 +72,18 @@ class _Key(_Message):
     code: str = Field(default="", max_length=32)
     key_code: int = Field(default=0, ge=0, le=255, alias="keyCode")
     text: str | None = Field(default=None, max_length=4)
-    modifiers: int = Field(default=0, ge=0, le=15)
+    modifiers: _Modifiers = 0
     repeat: bool = False
     location: int = Field(default=0, ge=0, le=3)
 
 
 class _Text(_Message):
     type: Literal["text"]
-    text: str = Field(min_length=1, max_length=16384)
+    text: str = Field(min_length=1)
 
 
-_ViewerMessage = TypeAdapter(Annotated[_Mouse | _Wheel | _Key | _Text, Field(discriminator="type")])
+_ViewerInput = _Mouse | _Wheel | _Key | _Text
+_ViewerMessage = TypeAdapter(Annotated[_ViewerInput, Field(discriminator="type")])
 
 
 def _key_event(message: _Key) -> dict[str, Any]:
@@ -194,7 +198,7 @@ class ScreencastViewer:
         self._wake.set()
 
     async def send(self) -> None:
-        """Send what changed and the newest frame until cancelled, acknowledging each frame once sent."""
+        """Send what changed and the newest frame until cancelled."""
         while True:
             await self._wake.wait()
             self._wake.clear()
@@ -242,7 +246,7 @@ class ScreencastViewer:
             async with asyncio.timeout(_INPUT_SECONDS):
                 await self._dispatch(cdp, message)
 
-    async def _dispatch(self, cdp: CDPSession, message: _Mouse | _Wheel | _Key | _Text) -> None:
+    async def _dispatch(self, cdp: CDPSession, message: _ViewerInput) -> None:
         if isinstance(message, _Mouse):
             if message.event == "down" and message.button != "none":
                 self._buttons.add(message.button)
@@ -284,19 +288,15 @@ class ScreencastViewer:
 
     async def close(self) -> None:
         """Release the buttons and keys this viewer still holds, so the page does not see them stuck, and detach."""
-        cdp, self._cdp, self._page = self._cdp, None, None
-        if cdp is None:
-            return
-        buttons, keys = self._buttons, self._keys
-        self._buttons, self._keys = set(), {}
-        with suppress(PlaywrightError, TimeoutError):
-            async with asyncio.timeout(_INPUT_SECONDS):
-                for button in buttons:
-                    await cdp.send(
-                        "Input.dispatchMouseEvent",
-                        {"type": "mouseReleased", "x": self._pointer[0], "y": self._pointer[1], "button": button},
-                    )
-                for key in keys.values():
-                    await cdp.send("Input.dispatchKeyEvent", _key_event(key.model_copy(update={"event": "up"})))
-        with suppress(PlaywrightError):
-            await cdp.detach()
+        cdp = self._cdp
+        if cdp is not None:
+            with suppress(PlaywrightError, TimeoutError):
+                async with asyncio.timeout(_INPUT_SECONDS):
+                    for button in self._buttons:
+                        await cdp.send(
+                            "Input.dispatchMouseEvent",
+                            {"type": "mouseReleased", "x": self._pointer[0], "y": self._pointer[1], "button": button},
+                        )
+                    for key in self._keys.values():
+                        await cdp.send("Input.dispatchKeyEvent", _key_event(key.model_copy(update={"event": "up"})))
+        await self._show(None)

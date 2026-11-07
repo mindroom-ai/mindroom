@@ -29,7 +29,7 @@ from mindroom.worker_computer.protocol import (
 )
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.worker_computer.screencast import ScreencastViewer
-from tests.test_worker_computer_runtime import FakeDisplay
+from tests.test_worker_computer_runtime import FakeDisplay, unused
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -116,11 +116,14 @@ async def _click(viewer: ScreencastViewer, page: Page, selector: str) -> None:
     await viewer.receive(json.dumps({**point, "event": "up"}))
 
 
+async def _press(viewer: ScreencastViewer, key: dict[str, Any]) -> None:
+    await viewer.receive(json.dumps({"type": "key", **key, "event": "down"}))
+    await viewer.receive(json.dumps({"type": "key", **key, "event": "up"}))
+
+
 async def _type(viewer: ScreencastViewer, text: str) -> None:
     for character in text:
-        key = {"type": "key", "key": character, "code": "Key" + character.upper(), "keyCode": ord(character.upper())}
-        await viewer.receive(json.dumps({**key, "event": "down"}))
-        await viewer.receive(json.dumps({**key, "event": "up"}))
+        await _press(viewer, {"key": character, "code": "Key" + character.upper(), "keyCode": ord(character.upper())})
 
 
 @pytest.mark.asyncio
@@ -146,22 +149,21 @@ async def test_screencast_shows_the_page_and_applies_input_only_while_the_viewer
         await _click(viewer, page, "#field")
         await _type(viewer, "hi")
         await viewer.receive(json.dumps({"type": "text", "text": " ünï"}))
-        backspace = {"type": "key", "key": "Backspace", "code": "Backspace", "keyCode": 8}
-        await viewer.receive(json.dumps({**backspace, "event": "down"}))
-        await viewer.receive(json.dumps({**backspace, "event": "up"}))
+        await _press(viewer, {"key": "Backspace", "code": "Backspace", "keyCode": 8})
         assert await page.input_value("#field") == "hi ün"
         # Chromium would insert the text of a key held with Meta, which is a shortcut, not typing.
-        meta_q = {"type": "key", "key": "q", "code": "KeyQ", "keyCode": 81, "modifiers": 4}
-        await viewer.receive(json.dumps({**meta_q, "event": "down"}))
-        await viewer.receive(json.dumps({**meta_q, "event": "up"}))
+        await _press(viewer, {"key": "q", "code": "KeyQ", "keyCode": 81, "modifiers": 4})
         assert await page.input_value("#field") == "hi ün"
         await _click(viewer, page, "#notes")
-        enter = {"type": "key", "key": "Enter", "code": "Enter", "keyCode": 13}
-        await viewer.receive(json.dumps({**enter, "event": "down"}))
-        await viewer.receive(json.dumps({**enter, "event": "up"}))
+        await _press(viewer, {"key": "Enter", "code": "Enter", "keyCode": 13})
         assert await page.input_value("#notes") == "\n"
         await viewer.receive(json.dumps({"type": "wheel", "x": 10, "y": 10, "dy": 120}))
         await page.wait_for_function("window.wheeled === 120", timeout=_TIMEOUT * 1000)
+        # A drag that leaves the viewer's panel ends outside the page, which still sees the button go up.
+        await page.evaluate("released.length = 0")
+        await viewer.receive(json.dumps({"type": "mouse", "event": "down", "x": 5, "y": 5, "button": "left"}))
+        await viewer.receive(json.dumps({"type": "mouse", "event": "up", "x": -20, "y": 5, "button": "left"}))
+        assert await page.evaluate("released") == ["button 0"]
 
         await viewer.receive("{}")
         assert await sent.message("error") == {"type": "error", "detail": "Invalid screencast message."}
@@ -237,9 +239,6 @@ class _FakeSession:
     def frame(self, frame_id: int, data: bytes) -> None:
         metadata = {"deviceWidth": 1280, "deviceHeight": 800}
         self.on_frame({"data": base64.b64encode(data).decode(), "metadata": metadata, "sessionId": frame_id})
-
-    def calls(self, method: str) -> list[dict[str, Any] | None]:
-        return [params for name, params in self.sent if name == method]
 
 
 class _FakePage:
@@ -327,9 +326,6 @@ def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control
     fake = _FakePage()
     runtime = WorkerComputerRuntime(FakeDisplay())
 
-    async def unused(*_args: object, **_kwargs: object) -> None:
-        return None
-
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         session = BrowserSession(execute=unused, close=unused, page=lambda: cast("Page", fake))
@@ -363,8 +359,12 @@ def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control
             assert client.post("/computer/control", headers=headers, json=release).status_code == 200
             with pytest.raises(WebSocketDisconnect):
                 websocket.receive_text()
-        keys = fake.session.calls("Input.dispatchKeyEvent")
-        assert [(params["type"], params["key"]) for params in keys if params] == [("keyDown", "a"), ("keyUp", "a")]
+        keys = [
+            (params["type"], params["key"])
+            for name, params in fake.session.sent
+            if name == "Input.dispatchKeyEvent" and params
+        ]
+        assert keys == [("keyDown", "a"), ("keyUp", "a")]
         assert fake.session.sent[-1] == ("detach", None)
         assert runtime.status()["controller_session_id"] is None
         with client.websocket_connect(url, headers=dict(headers), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:

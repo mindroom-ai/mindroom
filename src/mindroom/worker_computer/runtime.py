@@ -148,7 +148,7 @@ class WorkerComputerRuntime:
             if self._controller == session_id:
                 self._controller = None
                 self._epoch += 1
-                # RFB disconnect resets keys/buttons held by this controller.
+                # Closing the stream releases keys and buttons this controller held.
                 # The same viewer can reconnect in watch mode immediately.
                 stream = self._streams.pop(session_id, None)
                 if stream is not None:
