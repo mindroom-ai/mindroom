@@ -1068,6 +1068,52 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
+## Plugin context
+
+A plugin's HTTP routes and tools read their own plugin's settings, state directory, and config from a `PluginContext`.
+A route gets it from `plugin_context` in `mindroom.plugin_http`, as a FastAPI dependency or by calling it with the request or websocket:
+
+```python
+# routes.py
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, WebSocket
+
+from mindroom.plugin_api import PluginContext
+from mindroom.plugin_http import plugin_context
+
+router = APIRouter()
+
+
+@router.get("/greeting")
+async def greeting(ctx: Annotated[PluginContext, Depends(plugin_context)]) -> dict[str, str]:
+    return {"greeting": ctx.settings.get("greeting", "hello")}
+
+
+@router.websocket("/greetings")
+async def greetings(websocket: WebSocket) -> None:
+    await websocket.accept()
+    while True:
+        await websocket.receive_text()
+        ctx = plugin_context(websocket)  # Called again, it sees the settings of a config reload since.
+        await websocket.send_json({"greeting": ctx.settings.get("greeting", "hello")})
+```
+
+A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call of an agent run on the primary; anywhere else it raises `RuntimeError`.
+
+| Member | Value |
+|--------|-------|
+| `plugin_name` | The plugin's manifest `name` |
+| `settings` | The `settings` of the plugin's entry in `config`, as a read-only mapping |
+| `config` | The config the request or tool call runs under |
+| `runtime_paths` | The runtime's paths |
+| `state_root` | `<storage root>/plugins/<plugin name>/`, the same directory as a hook's `ctx.state_root`, created on first use and kept at mode 0700 |
+| `is_active()` | Whether the config MindRoom runs now still loads the plugin |
+
+A context keeps the settings of the config it was made under, so a long-lived websocket or task gets a new context to see a later reload's settings.
+Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error, so nothing keeps using the plugin's settings.
+A route that meets that error answers 503 with `Plugin '<name>' is no longer active: a config reload disabled or removed it.`, and a websocket closes with code 1013 and that reason.
+
 ## Plugin skills
 
 Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
