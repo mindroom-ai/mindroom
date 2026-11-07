@@ -723,11 +723,7 @@ async def test_unchanged_reload_retries_failed_write(room_state: RoomState) -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trigger", ["startup", "router_join"])
-async def test_retained_ad_hoc_room_is_reconciled(
-    room_state: RoomState,
-    monkeypatch: pytest.MonkeyPatch,
-    trigger: str,
-) -> None:
+async def test_retained_ad_hoc_room_is_reconciled(room_state: RoomState, trigger: str) -> None:
     """Retained invited rooms receive state on startup and on router rejoin."""
     config, paths, _, events, client = room_state
     for agent in config.agents.values():
@@ -737,11 +733,9 @@ async def test_retained_ad_hoc_room_is_reconciled(
     if trigger == "startup":
         await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_thread_modes()
     else:
-        monkeypatch.setattr(
-            "mindroom.router.duties.config_confirmation.restore_pending_changes",
-            AsyncMock(return_value=0),
-        )
-        await _router_duties(room_state).room_joined(ROOM_ID)
+        duties = _router_duties(room_state)
+        duties.joined(ROOM_ID)
+        await duties.publish_joined_room_thread_modes()
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
 

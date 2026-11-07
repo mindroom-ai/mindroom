@@ -86,7 +86,6 @@ class RouterDuties:
                 room_id=room_id,
                 restored_config_count=restored_configs,
             )
-        await reconcile_room_thread_mode(client, self.deps.runtime.config, self.deps.runtime.runtime_paths, room_id)
         await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
 
     def joined(self, room_id: str) -> None:
