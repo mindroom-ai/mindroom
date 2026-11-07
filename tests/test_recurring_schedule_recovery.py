@@ -10,11 +10,13 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
+import aiohttp
 import nio
 import pytest
 
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, HookRegistryState, ScheduleFiredContext, hook
 from mindroom.matrix import client_delivery
 from mindroom.matrix.large_messages import MatrixEventTooLargeError
@@ -24,7 +26,13 @@ from mindroom.scheduling import runtime as scheduling
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
-from tests.scheduling_helpers import persist_schedule_writer, run_cron_task, serve_task_state_events
+from tests.scheduling_helpers import (
+    persist_schedule_writer,
+    run_cron_task,
+    scheduled_task_runtime,
+    scheduling_bot,
+    serve_task_state_events,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -522,6 +530,51 @@ async def test_retry_keeps_prepared_transport_payload(
     first, retry = client.room_send.await_args_list
     assert first.kwargs["content"] == retry.kwargs["content"]
     assert preparations == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_stopped_during_a_durable_wait_leaves_the_full_trigger_to_its_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trigger whose owner stops while its sidecar upload waits is prepared again by the replacement, not truncated.
+
+    The stopped bot's ingestion session disposes its client, so the upload's next try fails for good.
+    """
+    monkeypatch.setattr("mindroom.matrix.media._DURABLE_UPLOAD_RETRY_SECONDS", 0)
+    monkeypatch.setattr(scheduling, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    task = workflow()
+    task.message = "full trigger " + ("x" * 100_000)
+    paths = runtime_paths(tmp_path)
+    old_client = client_for(task)
+    disposed = nio.LocalProtocolError("durable sync session is poisoned; reopen with a fresh client")
+    old_client.room_send.side_effect = disposed
+    runtime = scheduled_task_runtime(paths, scheduling_bot(old_client), config=Config())
+    runner = scheduling._TaskRunner(runtime, ROUTER_AGENT_NAME, "!room:example.org", "daily")
+    outage = aiohttp.ClientConnectionError("Connection refused")
+
+    async def upload_until_the_owner_stops(**_kwargs: object) -> object:
+        if old_client.upload.await_count == 1:
+            await runtime.release({ROUTER_AGENT_NAME})
+            raise outage
+        raise disposed
+
+    old_client.upload.side_effect = upload_until_the_owner_stops
+    due = datetime(2026, 1, 15, 7, 0, 5, tzinfo=UTC)
+
+    stopped = await runner._execute(task, await plan_at(tmp_path, task, due))
+
+    new_client = client_for(task)
+    new_client.upload.return_value = (nio.UploadResponse("mxc://example.org/sidecar"), None)
+    new_client.room_send.return_value = nio.RoomSendResponse("$trigger", "!room:example.org")
+    runtime.bots()[ROUTER_AGENT_NAME] = scheduling_bot(new_client)
+    resumed = await runner._execute(task, await plan_at(tmp_path, task, due))
+
+    assert stopped.status == "retry"
+    assert resumed.status == "delivered"
+    sent = new_client.room_send.await_args.kwargs["content"]
+    assert sent["file"]["url"] == "mxc://example.org/sidecar"
+    assert "truncated" not in sent["body"]
 
 
 @pytest.mark.asyncio
