@@ -360,12 +360,10 @@ async def test_later_passes_do_not_recheck_access_for_jobs_already_followed_up(
     coordinator = job_coordinator(tmp_path, runtime, bot)
     try:
         await _ended(runtime, "job_a", BackgroundOutcome("completed", "a"))
-        await _ended(
-            runtime,
-            "job_b",
-            BackgroundOutcome("cancelled"),
-            owner=replace(job_owner(), requester_id="@bob:test"),
-        )
+        bobs = replace(job_owner(), requester_id="@bob:test")
+        # A job past the follow-up limit waits for a human message, not for a follow-up.
+        capped = _follow_up_event_id(_key(bobs), [], _FOLLOW_UP_LIMIT)
+        await _ended(runtime, "job_b", BackgroundOutcome("completed", "b"), owner=bobs, source_event_id=capped)
         await coordinator._admit_follow_ups(runtime)
         checks = AsyncMock(wraps=runtime.ended_jobs)
         monkeypatch.setattr(runtime, "ended_jobs", checks)
