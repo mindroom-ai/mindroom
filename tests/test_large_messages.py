@@ -483,6 +483,7 @@ def _bare_upload_error(status: int) -> nio.UploadError:
         (_bare_upload_error(503), "HTTP 503", True),
         (_bare_upload_error(504), "HTTP 504", True),
         (_bare_upload_error(500), None, False),
+        (_bare_upload_error(507), None, False),
         (_MatrixTransportShutdownError(), None, False),
     ],
 )
@@ -544,6 +545,24 @@ async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_tru
         _assert_text_sidecar_fallback(result, "durable ")
         assert waits == []
         assert wait_logs == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("disposed", "log_level"), [(True, "warning"), (False, "error")])
+async def test_sidecar_upload_refused_by_a_disposed_client_logs_at_warning(disposed: bool, log_level: str) -> None:
+    """A stopping bot's closed sync session disposes its client; any other upload failure still logs at error.
+
+    Both clients refuse the upload with nio's ``LocalProtocolError``: one is disposed, the other never logged in.
+    """
+    client = nio.AsyncClient("https://server", "@bot:server", device_id="DEVICE")
+    if disposed:
+        client._dispose()
+
+    with capture_logs() as logs:
+        result = await upload_json_sidecar(client, "!room:server", {"body": "full"}, room_encrypted=False, durable=True)
+
+    assert result == (None, None)
+    assert [(log["event"], log["log_level"]) for log in logs] == [("Failed to upload text", log_level)]
 
 
 @pytest.mark.asyncio

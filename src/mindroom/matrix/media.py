@@ -286,6 +286,14 @@ def prepare_media_upload(
     )
 
 
+def client_disposed(client: nio.AsyncClient) -> bool:
+    """Return whether nio disposed ``client``, as closing a stopping bot's ingestion session does.
+
+    nio then refuses every request, so a failure on that client is its bot stopping, not Matrix failing.
+    """
+    return getattr(client, "_disposed", False) is True
+
+
 async def upload_media_bytes(
     client: nio.AsyncClient,
     upload_bytes: bytes,

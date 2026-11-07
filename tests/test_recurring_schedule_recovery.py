@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -556,13 +557,16 @@ async def test_owner_stopped_during_a_durable_wait_leaves_the_full_trigger_to_it
     async def upload_until_the_owner_stops(**_kwargs: object) -> object:
         if old_client.upload.await_count == 1:
             await runtime.release({ROUTER_AGENT_NAME})
+            old_client._disposed = True
             raise outage
         raise disposed
 
     old_client.upload.side_effect = upload_until_the_owner_stops
     due = datetime(2026, 1, 15, 7, 0, 5, tzinfo=UTC)
+    occurrence = await plan_at(tmp_path, task, due)
 
-    stopped = await runner._execute(task, await plan_at(tmp_path, task, due))
+    with capture_logs() as logs:
+        stopped = await runner._execute(task, occurrence)
 
     new_client = client_for(task)
     new_client.upload.return_value = (nio.UploadResponse("mxc://example.org/sidecar"), None)
@@ -571,10 +575,48 @@ async def test_owner_stopped_during_a_durable_wait_leaves_the_full_trigger_to_it
     resumed = await runner._execute(task, await plan_at(tmp_path, task, due))
 
     assert stopped.status == "retry"
+    levels = [(log["event"], log["log_level"]) for log in logs]
+    assert ("Failed to upload text", "warning") in levels
+    assert [entry for entry in levels if entry[1] == "error"] == []
     assert resumed.status == "delivered"
-    sent = new_client.room_send.await_args.kwargs["content"]
-    assert sent["file"]["url"] == "mxc://example.org/sidecar"
-    assert "truncated" not in sent["body"]
+    sent = new_client.room_send.await_args.kwargs
+    assert sent["tx_id"] == occurrence.transaction_id
+    assert sent["content"]["file"]["url"] == "mxc://example.org/sidecar"
+    assert "truncated" not in sent["content"]["body"]
+
+
+@pytest.mark.asyncio
+async def test_owner_stopped_after_the_freeze_leaves_the_frozen_trigger_without_an_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send its stopped owner's disposed client refuses after the freeze is a retry, logged at warning."""
+    monkeypatch.setattr(scheduling, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    task = workflow()
+    old_client = client_for(task)
+    old_client.room_send.side_effect = nio.LocalProtocolError(
+        "durable sync session is poisoned; reopen with a fresh client",
+    )
+    runtime = scheduled_task_runtime(runtime_paths(tmp_path), scheduling_bot(old_client), config=Config())
+    runner = scheduling._TaskRunner(runtime, ROUTER_AGENT_NAME, "!room:example.org", "daily")
+    freeze = scheduling_executor.prepare_recurring_delivery
+
+    async def freeze_then_stop(*args: object) -> RecurringOccurrence:
+        frozen = await freeze(*args)
+        await runtime.release({ROUTER_AGENT_NAME})
+        old_client._disposed = True
+        return frozen
+
+    monkeypatch.setattr(scheduling_executor, "prepare_recurring_delivery", freeze_then_stop)
+    occurrence = await plan_at(tmp_path, task, datetime(2026, 1, 15, 7, 0, 5, tzinfo=UTC))
+
+    with capture_logs() as logs:
+        stopped = await runner._execute(task, occurrence)
+
+    assert stopped.status == "retry"
+    levels = [(log["event"], log["log_level"]) for log in logs]
+    assert ("matrix_message_delivery_exception", "warning") in levels
+    assert [entry for entry in levels if entry[1] == "error"] == []
 
 
 @pytest.mark.asyncio
