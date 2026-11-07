@@ -90,6 +90,7 @@ plugins:
 | --- | --- | --- | --- |
 | `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
 | `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
+| `required` | bool | `false` | Set to `true` to make startup fail, and a reload be refused, when the plugin is skipped for any reason, instead of running without it; see [Broken plugins](#broken-plugins) |
 | `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module; masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
@@ -122,6 +123,8 @@ plugins:
 ```
 
 The `python:`, `pkg:`, and `module:` prefixes always resolve a package, and `:sub/path` after the package name points to a subdirectory inside it.
+In a dotted name such as `python:my_skill_pack.plugins.demo`, each part after the first must be a package directory, or a namespace package directory, inside the one before.
+MindRoom finds those parts on disk without running any `__init__.py`, so it does not find a part that only a `pkgutil.extend_path` call or a custom import hook would provide.
 The resolved directory must contain `mindroom.plugin.json`.
 
 ## Live development (hot reload)
@@ -149,15 +152,17 @@ Keep in mind:
 
 ### Broken plugins
 
-`mindroom run` startup does not crash on a broken plugin.
+`mindroom run` startup does not crash on a broken plugin unless its entry sets `required: true`, which stops startup with `Required plugin <path> failed to load: <reason>`.
 It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
+Only the primary process enforces `required`; a worker that cannot load the plugin skips it like any other.
 If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
 Agents keep a disabled tool in their config, including the tools a generated agent's owner chose, and offer it again once the plugin loads.
 Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.
 `mindroom config validate` and `mindroom plugins check` report the same problems as errors instead.
 
 When a save breaks a plugin during hot reload, MindRoom skips that plugin the same way and keeps the other plugins active.
-When the configured plugins cannot load together, such as two plugins sharing a `name`, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
+When the configured plugins cannot load together, such as two plugins sharing a `name`, or a required plugin would be skipped, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
+A config change that would leave a required plugin skipped is refused, and the running config stays.
 The next valid save reloads normally.
 For hooks that raise while handling an event, see [Errors and timeouts](https://docs.mindroom.chat/hooks/#errors-and-timeouts).
 
@@ -178,7 +183,7 @@ The reply lists the active plugins, the number of cancelled background tasks, an
 ```
 
 Only users listed in `administrators` in `config.yaml` may run it; others get `❌ Admin only.`
-A reload whose plugins cannot load together keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
+A reload whose plugins cannot load together, or that would skip a required plugin, keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
 `!reload_plugins` is an alias.
 
 ## Compatibility checks
@@ -198,6 +203,18 @@ Pass `--strict` to make these warnings errors that fail the check, for example i
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
 The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
+
+## Plugin API versions
+
+`PLUGIN_API_VERSION` in `mindroom.plugin_api` is the version, as `(major, minor)`, of what this page and [Hooks](https://docs.mindroom.chat/hooks/) let plugins use: the manifest format, and the names they say to import from `mindroom.plugin_api` and the other modules they name.
+A change that only adds to the API bumps the minor version, so a plugin written for an earlier minor of the same major keeps working.
+A breaking change, one that removes or changes anything a plugin uses, bumps the major version.
+Anything a major bump removes or changes is first deprecated for at least 30 days.
+
+A plugin states the version it needs as `mindroom_plugin_api` in its manifest, such as `"1.2"` for major 1 at minor 2 or later.
+MindRoom checks it before running any of the plugin's code and skips a plugin that needs another major or a later minor, logging `Failed to load plugin, skipping` with a reason such as `Plugin 'my-plugin' needs plugin API 1.3, but this MindRoom provides 1.2: upgrade MindRoom`.
+`mindroom plugins check` fails with the same reason, so `mindroom plugins install` and `mindroom plugins update` refuse such a plugin too.
+A plugin without `mindroom_plugin_api` loads on every version.
 
 ## Plugin structure
 
@@ -222,6 +239,7 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
+  "mindroom_plugin_api": "1.0",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
@@ -234,6 +252,7 @@ Other `mindroom` modules can change in any release.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | string | **yes** | Plugin identifier using only lowercase ASCII letters, digits, `-`, and `_`; must be unique among configured plugins |
+| `mindroom_plugin_api` | string | no | Plugin API version the plugin needs, as `"MAJOR.MINOR"`; see [Plugin API versions](#plugin-api-versions) |
 | `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
