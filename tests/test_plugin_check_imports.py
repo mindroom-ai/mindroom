@@ -124,6 +124,19 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
     ]
 
 
+def test_imports_outside_plugin_api_skips_a_directory_it_cannot_enter(tmp_path: Path) -> None:
+    """A directory the user cannot enter, such as a container's data volume, is skipped instead of failing the scan."""
+    (tmp_path / "mindroom.plugin.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "hooks.py").write_text("from mindroom.hooks import hook\n", encoding="utf-8")
+    locked = tmp_path / "data" / "pgdata"
+    locked.mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        assert _outside_imports(tmp_path) == ["hooks.py:1: mindroom.hooks.hook"]
+    finally:
+        locked.chmod(0o700)
+
+
 @pytest.mark.parametrize(("options", "exit_code", "label"), [([], 0, "Warning"), (["--strict"], 1, "Error")])
 def test_plugins_check_cli_lists_each_import_outside_the_plugin_api_whole_on_its_own_line(
     tmp_path: Path,

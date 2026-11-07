@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,7 +24,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 # The plugin API, as docs/plugins.md documents it: the modules a plugin may import whole, and the names it may import
-# from other modules. Every other `mindroom` module can change in any release.
+# from other modules, plus the client docs/tools/background-scripts.md offers to scripts, such as a skill's. Every other
+# `mindroom` module can change in any release.
 _PLUGIN_API = (
     "mindroom.custom_tools.google_service.GoogleCloudToolkit",
     "mindroom.memory.refresh_agent_memory_search",
@@ -158,13 +160,15 @@ def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
     for directory, subdirectories, file_names in plugin_root.walk():
         # MindRoom never loads these as this plugin: installed packages, such as a virtual environment's copy of MindRoom,
         # hidden directories, the plugin's tests, and the separate plugins nested in it, each with its own manifest.
+        # Unlike `Path.exists` on Python 3.13, `os.path.exists` is False inside a directory the user cannot enter, which
+        # the walk then skips.
         subdirectories[:] = [
             name
             for name in subdirectories
             if name != "site-packages"
             and not name.startswith(".")
             and not (directory == plugin_root and name == "tests")
-            and not (directory / name / manifest).exists()
+            and not os.path.exists(directory / name / manifest)  # noqa: PTH110
         ]
         for path in (directory / name for name in file_names if name.endswith(".py")):
             try:
