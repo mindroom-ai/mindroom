@@ -12,6 +12,7 @@ import pytest
 from mindroom.agents import build_agent_toolkit
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 _TOKEN = "proxy-token"  # noqa: S105
 _IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
@@ -35,18 +37,23 @@ def _paths(tmp_path: Path, env: dict[str, str]) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN, **env},
+        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN, "MY_SERVICE_URL": "http://service.example", **env},
     )
 
 
-def _shell(paths: RuntimePaths) -> AnyToolkit:
-    """Build the agent's shell toolkit as a reply to ``_IDENTITY`` builds it."""
-    config = Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])})
+def _shell(paths: RuntimePaths, worker_scope: WorkerScope | None = None) -> AnyToolkit:
+    """Build the agent's shell toolkit, with its own settings, as a reply to ``_IDENTITY`` builds it."""
+    entry = ToolConfigEntry(
+        name="shell",
+        overrides={"extra_env_passthrough": ["MY_SERVICE_URL"], "shell_path_prepend": ["/opt/tools/bin"]},
+    )
+    config = Config(agents={"code": AgentConfig(display_name="Code", tools=[entry], worker_scope=worker_scope)})
     toolkit = build_agent_toolkit(
         "shell",
         agent_tools=resolve_agent_tools(config, "code", builtin_tool_registry()),
         placement=tool_placement(paths, builtin_tool_registry()),
         runtime_paths=paths,
+        tool_config_overrides=config.resolve_agent("code").tools.authored[0].tool_config_overrides,
         execution_identity=_IDENTITY,
     )
     assert toolkit is not None
@@ -132,9 +139,11 @@ def _unsent(sent: httpx.Request) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("current_static_runner")
+@pytest.mark.parametrize("worker_scope", [None, "user"])
 async def test_a_call_built_unsent_is_the_one_its_toolkit_sends_to_the_shared_runner(
     tmp_path: Path,
     executed: list[httpx.Request],
+    worker_scope: WorkerScope | None,
 ) -> None:
     """A toolkit's unsent call is built exactly as its sent calls are, and the shared runner needs no start."""
     paths = _paths(
@@ -145,7 +154,7 @@ async def test_a_call_built_unsent_is_the_one_its_toolkit_sends_to_the_shared_ru
             "MINDROOM_SANDBOX_PROXY_TOOLS": "shell",
         },
     )
-    toolkit = _shell(paths)
+    toolkit = _shell(paths, worker_scope)
     stand_ins = toolkit_worker_stand_ins(toolkit)
     assert stand_ins is not None
 
@@ -157,6 +166,10 @@ async def test_a_call_built_unsent_is_the_one_its_toolkit_sends_to_the_shared_ru
     assert call == looked_up
     assert call is not None
     assert call.request.model_dump(mode="json") == _unsent(sent)
+    assert call.request.extra_env_passthrough == "MY_SERVICE_URL"
+    assert call.request.execution_env["MY_SERVICE_URL"] == "http://service.example"
+    assert call.request.tool_init_overrides == {"shell_path_prepend": "/opt/tools/bin"}
+    assert call.request.base_dir is not None
     assert str(sent.url) == f"{call.api_root}/execute" == "http://runner:8765/api/sandbox-runner/execute"
     assert sent.headers["x-mindroom-sandbox-token"] == _TOKEN
     assert call.headers == {"x-mindroom-sandbox-token": _TOKEN}
@@ -204,3 +217,14 @@ def test_a_toolkit_whose_calls_run_here_has_no_worker_stand_ins(tmp_path: Path) 
     """Only a toolkit built to run in a worker has stand-ins to build its calls with."""
     paths = _paths(tmp_path, {"MINDROOM_SANDBOX_EXECUTION_MODE": "off"})
     assert toolkit_worker_stand_ins(_shell(paths)) is None
+
+
+@pytest.mark.parametrize("start", [True, False])
+def test_a_call_to_the_shared_runner_needs_its_proxy_url(tmp_path: Path, start: bool) -> None:
+    """Without a proxy URL a call has no runner to go to, whether or not the lookup starts anything."""
+    paths = _paths(tmp_path, {"MINDROOM_SANDBOX_EXECUTION_MODE": "all"})
+    stand_ins = toolkit_worker_stand_ins(_shell(paths, "user"))
+    assert stand_ins is not None
+
+    with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_URL must be set"):
+        worker_call(stand_ins, "run_shell_command", start=start)

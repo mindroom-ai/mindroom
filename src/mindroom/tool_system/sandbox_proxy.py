@@ -311,7 +311,7 @@ def _worker_route(
 
     ``base_dir`` is the calling agent's tool workspace in this primary's paths; a request that names a worker
     carries it relative to the shared storage root, which the worker mounts at its own path.
-    Without ``start``, a dedicated worker is only looked up, never started: its handle, None while it is unknown.
+    Without ``start``, the worker is only looked up, never started: its handle, None while its backend knows none.
     """
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
@@ -363,7 +363,7 @@ def _worker_route(
     worker_key = spec.worker_key if spec is not None else None
     if spec is None:
         worker_handle = None
-    elif start or not worker_backend_kind(runtime_paths).dedicated:
+    elif start:
         worker_handle = worker_manager.ensure_worker(spec, progress_sink=progress_sink)
     else:
         worker_handle = worker_manager.touch_worker(spec.worker_key)
@@ -1060,11 +1060,7 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
             runtime_config=stand_ins.runtime_config,
             start=start,
         )
-    if (
-        not start
-        and worker_backend_kind(runtime_paths).dedicated
-        and (worker_handle is None or worker_handle.status != "ready")
-    ):
+    if worker_backend_kind(runtime_paths).dedicated and (worker_handle is None or worker_handle.status != "ready"):
         return None
     if worker_handle is None and proxy_config.proxy_url is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
