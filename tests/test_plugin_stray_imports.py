@@ -141,26 +141,20 @@ def test_stray_import_of_a_module_registering_through_a_plugin_helper_registers_
 
 
 @pytest.mark.usefixtures("restored_builtin_tools")
-def test_a_plugin_imported_while_a_later_plugin_entry_resolves_registers_nothing(
+def test_stray_import_from_a_plugin_whose_manifest_fails_registers_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later entry's package that imports an earlier plugin's tools module as it resolves registers nothing."""
+    """A configured plugin skipped for its manifest still keeps its tools module out of the built-in tools."""
     site_packages = tmp_path / "site-packages"
-    _write_working_tool_plugin(site_packages / "first_pkg", plugin_name="first-pkg", tool_name="first_pkg_tool")
-    (site_packages / "first_pkg" / "__init__.py").write_text("", encoding="utf-8")
-    # Resolving python:second_ns.plugin imports second_ns, which imports the first plugin's tools module.
-    (site_packages / "second_ns" / "plugin").mkdir(parents=True)
-    (site_packages / "second_ns" / "__init__.py").write_text("import first_pkg.tools\n", encoding="utf-8")
-    (site_packages / "second_ns" / "plugin" / "mindroom.plugin.json").write_text('{"name": "second"}', encoding="utf-8")
+    plugin_root = site_packages / "broken_pkg"
+    _write_working_tool_plugin(plugin_root, plugin_name="broken-pkg", tool_name="broken_pkg_tool")
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text('{"tools_module": "tools.py"}', encoding="utf-8")
     monkeypatch.syspath_prepend(str(site_packages))
-    config = Config(plugins=["first_pkg", "python:second_ns.plugin"])
-    runtime_paths = _minimal_runtime_paths(tmp_path)
 
-    with _forgetting_modules("first_pkg", "second_ns"):
-        plugins = _load(config, runtime_paths)
-
-    assert [plugin.name for plugin in plugins.loaded_plugins] == ["first-pkg", "second"]
-    assert plugins.generation.skipped == ()
-    assert "first_pkg_tool" in plugins.tools
-    assert "first_pkg_tool" not in builtin_tool_registry()
+    with _forgetting_modules("broken_pkg"):
+        plugins = _load(Config(plugins=["broken_pkg"]), _minimal_runtime_paths(tmp_path))
+        assert [skipped.path for skipped in plugins.generation.skipped] == ["broken_pkg"]
+        importlib.import_module("broken_pkg.tools")
+    assert "broken_pkg_tool" not in builtin_tool_registry()

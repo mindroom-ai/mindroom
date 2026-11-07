@@ -120,7 +120,7 @@ def _collect_plugin_bases(
         root: Path | None = None
         try:
             root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
-            # Before the next entry resolves, which can import this plugin's modules.
+            # Before its manifest loads, so a plugin whose manifest fails still adds no built-in tools.
             record_plugin_root(root)
             plugin_base = _load_plugin_base(root)
         except Exception as exc:
