@@ -43,9 +43,7 @@ def _plugin_root(module_name: str) -> Path | None:
     module_file = getattr(sys.modules.get(module_name), "__file__", None)
     if not isinstance(module_file, str):
         return None
-    module_path = Path(module_file).resolve()
-    # A copy: another thread may record a plugin directory meanwhile.
-    return next((root for root in tuple(_PLUGIN_ROOTS) if module_path.is_relative_to(root)), None)
+    return next((parent for parent in Path(module_file).resolve().parents if parent in _PLUGIN_ROOTS), None)
 
 
 def register_tool(metadata: ToolMetadata) -> None:
