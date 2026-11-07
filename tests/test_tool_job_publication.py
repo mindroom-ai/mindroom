@@ -82,27 +82,34 @@ def test_a_subagent_job_is_published_under_its_agents_name() -> None:
     assert (jobs[0]["kind"], jobs[0]["tool"]) == ("subagent", "worker")
 
 
-def test_hundreds_of_live_jobs_fit_in_one_state_event_listing_the_newest() -> None:
-    """A room with 300 live jobs keeps its state under the homeserver's 64 KiB event limit, with the newest listed."""
+def test_hundreds_of_live_jobs_with_the_longest_ids_fit_in_a_state_update_listing_the_newest() -> None:
+    """300 live jobs with maximum-length fields still make a state update the homeserver accepts, listing the newest.
+
+    Tuwunel counts the replaced state's content (``unsigned.prev_content``) toward the 65,535-byte event limit, and
+    reserves 10,240 bytes for the rest of an event, so two contents and that reserve must fit together.
+    """
     owner = replace(
         job_owner(),
-        requester_id="@person.name:example.org",
+        requester_id="@" + "p" * 242 + ":example.org",
         resolved_thread_id="$" + "e" * 43,
     )
     jobs = [
         replace(
-            _job("job_0"),
+            _job("job_0", status="awaiting_approval"),
             job_id=hashlib.sha256(str(index).encode()).hexdigest(),
             owner=owner,
-            created_at=f"2026-10-11T00:{index // 60:02d}:{index % 60:02d}+00:00",
+            tool_name="t" * 64,
+            created_at=f"2026-10-11T00:{index // 60:02d}:{index % 60:02d}.123456+00:00",
         )
         for index in range(300)
     ]
     content = _jobs_state_content(jobs)
-    assert len(json.dumps(content).encode()) < 64 * 1024
+    assert 2 * len(json.dumps(content, separators=(",", ":"))) + 10_240 <= 65_535
     assert content["total"] == 300
     listed = content["jobs"]
     assert isinstance(listed, list)
+    # Dozens of jobs still show at these lengths, and about twice as many at typical ones.
+    assert len(listed) >= 40
     assert [job["job_id"] for job in listed] == [job.job_id for job in jobs[-len(listed) :]]
 
 

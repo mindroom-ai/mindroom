@@ -15108,7 +15108,7 @@ Scheduled turns and other agents' messages queued behind the reply wait for it i
 
 MindRoom Chat shows a jobs bar in the room or thread with each running job, a ✕ to cancel it, and **Stop all**.
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
-With more than 100 running jobs in a room, the bar lists only each agent's 100 newest there; `!jobs` lists them all, and **Stop all** still stops every job of the room or thread.
+With about 80 or more running jobs of one agent in a room, the bar lists only that agent's newest jobs there; `!jobs` lists them all, and **Stop all** still stops every job of the room or thread.
 In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
 After **Stop** on a reply that is still running, or an edit that regenerates a reply that is still answering, no job of that reply gets a new approval; a call approved before the Stop finishes, like a command already executing.

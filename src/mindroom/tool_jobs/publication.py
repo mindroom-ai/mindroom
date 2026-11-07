@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -20,8 +21,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 # Agents meet new rooms without limit, so once the set is full, rooms outside it warn on every refused write.
 _MAX_REFUSED_ROOMS = 4096
-# A state event must stay under the homeserver's 64 KiB event limit, and a listed job takes about 300 bytes.
-_MAX_LISTED_JOBS = 100
+# Tuwunel counts the replaced state's content toward the 65,535-byte event limit and keeps 10,240 bytes for the rest
+# of an event, so each write lists jobs in under half of what remains; a typical job takes about 300 bytes.
+_MAX_LISTED_BYTES = 27_000
 # Refusals the same content meets again: the room does not let the bot write this state, or the event is too large.
 _FINAL_REFUSALS = frozenset({"M_FORBIDDEN", "M_TOO_LARGE"})
 
@@ -50,12 +52,20 @@ def _job_state(job: BackgroundJob) -> dict[str, object]:
 
 
 def _jobs_state_content(jobs: Sequence[BackgroundJob]) -> dict[str, object]:
-    """Return the state content listing the newest live jobs among ``jobs``, oldest first, with how many are live."""
+    """Return the state content listing the newest live jobs among ``jobs`` that fit, oldest first, and their total."""
     live = sorted(
         (job for job in jobs if job.status not in TERMINAL_STATUSES),
         key=lambda job: (job.created_at, job.job_id),
     )
-    return {"jobs": [_job_state(job) for job in live[-_MAX_LISTED_JOBS:]], "total": len(live)}
+    listed: list[dict[str, object]] = []
+    size = 0
+    for job in reversed(live):
+        state = _job_state(job)
+        size += len(json.dumps(state, separators=(",", ":"))) + 1
+        if size > _MAX_LISTED_BYTES:
+            break
+        listed.append(state)
+    return {"jobs": listed[::-1], "total": len(live)}
 
 
 @dataclass
