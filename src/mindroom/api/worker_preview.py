@@ -9,6 +9,7 @@ The runner's own token never reaches an app.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import sys
 from contextlib import suppress
@@ -54,16 +55,15 @@ _HOP_HEADERS = frozenset(
 _WEBSOCKET_HEADERS = frozenset({"accept-language", "authorization", "cookie", "origin", "user-agent"})
 # uvicorn's limit on the messages the relay receives from the primary, applied to the app's messages too.
 _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
-# The addresses a socket listening at loopback is bound to, each with the loopback host in a URL that reaches it.
-_LOOPBACK_HOSTS = {
-    ipaddress.ip_address("127.0.0.1"): "127.0.0.1",
-    ipaddress.ip_address("0.0.0.0"): "127.0.0.1",  # noqa: S104 - every address, loopback included
-    ipaddress.ip_address("::1"): "[::1]",
-    ipaddress.ip_address("::"): "[::1]",
-}
+# The addresses a socket listening at loopback is bound to: loopback itself, or every address.
+_LOOPBACK_ADDRESSES = frozenset(
+    ipaddress.ip_address(address)
+    for address in ("127.0.0.1", "0.0.0.0", "::1", "::")  # noqa: S104 - every address, loopback included
+)
 _TCP_LISTEN = "0A"
-# Reach an app within 10 seconds, then wait on it as long as the stream lasts.
-_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10)
+# The relay reaches an app within this long, then waits on it as long as the stream lasts.
+_CONNECT_SECONDS = 10
+_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=_CONNECT_SECONDS)
 
 
 def _refused(status_code: int, detail: str) -> HTTPException:
@@ -78,9 +78,9 @@ def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     return (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
 
 
-def _loopback_ports() -> dict[int, str]:
-    """Return each port a TCP socket listens on at loopback or every address, with the loopback host that reaches it."""
-    ports: dict[int, str] = {}
+def _loopback_ports() -> set[int]:
+    """Return each port a TCP socket listens on at loopback or every address."""
+    ports: set[int] = set()
     for table in ("tcp", "tcp6"):
         try:
             lines = Path("/proc/net", table).read_text(encoding="ascii").splitlines()[1:]
@@ -89,24 +89,39 @@ def _loopback_ports() -> dict[int, str]:
         for line in lines:
             _, local, _, state, *_ = line.split()
             hex_address, _, hex_port = local.partition(":")
-            host = _LOOPBACK_HOSTS.get(_address(hex_address))
-            if state == _TCP_LISTEN and host is not None:
-                ports.setdefault(int(hex_port, 16), host)
+            if state == _TCP_LISTEN and _address(hex_address) in _LOOPBACK_ADDRESSES:
+                ports.add(int(hex_port, 16))
     return ports
 
 
-def _relay_ports(connection: HTTPConnection) -> dict[int, str]:
-    """Return the ports the relay reaches, every loopback port but the runner's own, with their hosts."""
+def _require_dedicated_worker(connection: HTTPConnection) -> None:
     if not runner_uses_dedicated_worker(app_runtime_paths(connection.app)):
         raise _refused(403, "Only a dedicated worker's runner relays to its ports.")
-    ports = _loopback_ports()
-    ports.pop(connection.scope["server"][1], None)
-    return ports
 
 
-def _upstream_url(connection: HTTPConnection, port: int) -> URL:
+async def _loopback_host(port: int) -> str | None:
+    """Return the loopback host in a URL that an app listening on ``port`` answers at, or None when none answers.
+
+    Connecting costs far less than reading /proc/net, whose size grows with every connection the relay closes.
+    """
+    for host in ("127.0.0.1", "::1"):
+        try:
+            async with asyncio.timeout(_CONNECT_SECONDS):
+                _, writer = await asyncio.open_connection(host, port)
+        except (OSError, TimeoutError):
+            continue
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+        return f"[{host}]" if ":" in host else host
+    return None
+
+
+async def _upstream_url(connection: HTTPConnection, port: int) -> URL:
     """Return the URL of the app on ``port`` that ``connection`` asks for."""
-    host = _relay_ports(connection).get(port)
+    _require_dedicated_worker(connection)
+    own = port == connection.scope["server"][1]
+    host = None if own or not 0 < port < 65536 else await _loopback_host(port)
     if host is None:
         raise _refused(502, f"No app listens on port {port} at this worker's loopback.")
     # The path below the port as the primary sent it, still percent-encoded.
@@ -150,14 +165,15 @@ class _AppResponse(StreamingResponse):
 
 @router.get("", dependencies=[Depends(validate_runner_token)])
 async def listening_ports(request: Request) -> list[int]:
-    """List the ports apps listen on at this worker's loopback, which the relay reaches."""
-    return sorted(_relay_ports(request))
+    """List the ports apps listen on at this worker's loopback, which the relay reaches; the runner's own is not one."""
+    _require_dedicated_worker(request)
+    return sorted(_loopback_ports() - {request.scope["server"][1]})
 
 
 @router.api_route("/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])
 async def relay(request: Request, port: int) -> StreamingResponse:
     """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
-    url = _upstream_url(request, port)
+    url = await _upstream_url(request, port)
     has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
     session = aiohttp.ClientSession(auto_decompress=False, timeout=_TIMEOUT)
     try:
@@ -180,7 +196,7 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
     """Pass one WebSocket to the app on ``port`` at this worker's loopback, message by message."""
     try:
         await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
-        url = _upstream_url(websocket, port)
+        url = await _upstream_url(websocket, port)
     except HTTPException:
         await websocket.close(code=1008)
         return

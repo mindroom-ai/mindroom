@@ -105,7 +105,7 @@ async def _echo(request: web.Request) -> web.Response:
 
 
 async def _socket(request: web.Request) -> web.WebSocketResponse:  # noqa: C901 - one branch per scripted command
-    """Greet with the handshake headers the app received and echo each message.
+    """Greet with the path and handshake headers the app received, and echo each message.
 
     "big" asks for a 5 MiB message, "flood" for messages until the socket closes, "bye" closes with 4001, "restart"
     with 1012, "quiet" without a code, "crash" drops the connection without closing, and the client's own close code
@@ -113,7 +113,9 @@ async def _socket(request: web.Request) -> web.WebSocketResponse:  # noqa: C901 
     """
     websocket = web.WebSocketResponse(protocols=("chat",))
     await websocket.prepare(request)
-    await websocket.send_json({name.lower(): value for name, value in request.headers.items()})
+    await websocket.send_json(
+        {"path": request.raw_path, "headers": {name.lower(): value for name, value in request.headers.items()}},
+    )
     flooding: list[asyncio.Task[None]] = []
 
     async def flood() -> None:
@@ -310,9 +312,9 @@ async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other
 
 @pytest.mark.asyncio
 async def test_relay_refuses_a_port_no_app_listens_on_at_loopback(tmp_path: Path, unused_tcp_port: int) -> None:
-    """A closed port, the runner's own, and a server only on another address are marked refusals."""
+    """A closed port, the runner's own, a server only on another address, and no port at all are marked refusals."""
     async with _app("127.0.0.2") as elsewhere, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for port in (unused_tcp_port, runner.port, elsewhere):
+        for port in (unused_tcp_port, runner.port, elsewhere, 0, 70000):
             async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
                 assert response.status == 502
                 assert response.headers[_REFUSED] == "1"
@@ -366,7 +368,7 @@ async def test_relay_requires_the_runner_token(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_relay_passes_a_websocket_both_ways_without_the_runner_token(tmp_path: Path) -> None:
-    """Messages up to 16 MiB, the subprotocol, and the app's close code pass; the token does not."""
+    """The path and query, messages up to 16 MiB, the subprotocol, and the app's close code pass; the token does not."""
     async with (
         _app() as port,
         _runner(tmp_path) as runner,
@@ -379,7 +381,9 @@ async def test_relay_passes_a_websocket_both_ways_without_the_runner_token(tmp_p
         ) as websocket,
     ):
         assert websocket.protocol == "chat"
-        handshake = await websocket.receive_json()
+        greeting = await websocket.receive_json()
+        assert greeting["path"] == "/socket?room=1"
+        handshake = greeting["headers"]
         assert handshake["cookie"] == "session=app"
         assert handshake["host"] == f"127.0.0.1:{port}"
         assert "x-mindroom-sandbox-token" not in handshake
