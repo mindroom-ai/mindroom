@@ -195,20 +195,25 @@ class CallTranscriptStore:
             (until, int(failed), call_id),
         )
 
-    def finish_transcript(self, call_id: str, *, at: float, event_id: str | None = None) -> bool:
+    def finish_transcript(self, call_id: str, *, at: float, event_id: str | None = None) -> float | None:
         """Mark an ended call's transcript message done at ``at``, posted as ``event_id``, and delete its lines.
 
-        ``event_id`` is None when there was nothing to post. Returns False if the message was not pending.
+        ``event_id`` is None when nothing was posted. Returns the seconds people spoke in the call, by its lines but
+        its pauses, or None if the message was not pending.
         """
         with self._transaction() as connection:
-            finished = connection.execute(
+            if not connection.execute(
                 "UPDATE calls SET transcript_done_at = ?, transcript_event_id = ?"
                 " WHERE id = ? AND ended_at IS NOT NULL AND transcript_done_at IS NULL",
                 (at, event_id, call_id),
-            ).rowcount
-            if finished:
-                connection.execute("DELETE FROM lines WHERE call_id = ?", (call_id,))
-        return finished == 1
+            ).rowcount:
+                return None
+            (speech_seconds,) = connection.execute(
+                "SELECT coalesce(sum(seconds), 0.0) FROM lines WHERE call_id = ? AND reason IS NOT 'paused'",
+                (call_id,),
+            ).fetchone()
+            connection.execute("DELETE FROM lines WHERE call_id = ?", (call_id,))
+            return speech_seconds
 
     def record_row_edit(self, call_id: str, edit: RowEdit) -> None:
         """Record what the call's row was edited to say; an edit for the end never replaces one for the transcript."""

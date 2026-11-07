@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.call_transcripts import service as service_module
 from mindroom.call_transcripts.service import (
@@ -1135,6 +1136,31 @@ async def test_the_message_of_a_call_in_a_room_the_router_left_is_given_up(world
     assert stored is not None
     assert stored.transcript_done_at is not None
     assert stored.transcript_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_every_call_logs_how_long_people_spoke_once_its_lines_are_deleted(world: World) -> None:
+    """Posted, with nothing to post, or given up, each call logs its seconds of speech once, as its lines go."""
+    with capture_logs() as logs:
+        posted = await world.end_by_leaving(ANN)
+        world.clock.advance(20)
+        await world.tick()
+        silent = await world.service.join(ROOM, BOB)
+        await world.service.pause(silent.id, BOB, paused=True)
+        world.clock.advance(5)
+        await world.service.leave(silent.id, BOB)
+        world.clock.advance(20)
+        await world.tick()
+        world.room.router_in_room = False
+        given_up = await world.end_by_leaving(ANN, BOB)
+        world.clock.advance(20)
+        await world.tick()
+
+    assert [(log["event"], log["call_id"], log["speech_seconds"]) for log in logs if "speech_seconds" in log] == [
+        ("call_transcript_finished", posted, 2.0),
+        ("call_transcript_finished", silent.id, 0.0),
+        ("call_transcript_given_up", given_up, 4.0),
+    ]
 
 
 @pytest.mark.asyncio

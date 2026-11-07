@@ -140,7 +140,7 @@ def test_posting_the_transcript_deletes_the_lines_and_closes_the_call(tmp_path: 
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
     store.add_speech(call.id, user_id=ANN, said_at=150.0, seconds=2.0, text="Before the end")
-    assert not store.finish_transcript(call.id, at=160.0)
+    assert store.finish_transcript(call.id, at=160.0) is None
     assert len(store.lines(call.id)) == 1
     store.end_call(call.id, at=200.0)
     late = store.add_speech(call.id, user_id=BOB, said_at=198.0, seconds=1.5, text="Arrived late")
@@ -148,8 +148,8 @@ def test_posting_the_transcript_deletes_the_lines_and_closes_the_call(tmp_path: 
     assert late is not None
     assert [line.text for line in store.lines(call.id)] == ["Before the end", "Arrived late"]
 
-    assert store.finish_transcript(call.id, at=225.0)
-    assert not store.finish_transcript(call.id, at=230.0)
+    assert store.finish_transcript(call.id, at=225.0) == 3.5
+    assert store.finish_transcript(call.id, at=230.0) is None
 
     assert store.lines(call.id) == []
     finished = store.call(call.id)

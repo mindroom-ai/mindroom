@@ -379,7 +379,7 @@ class CallTranscriptService:
                 if fresh is not None and fresh.ended_at is None:
                     fresh = await self._end(fresh)
                 if fresh is not None and fresh.transcript_done_at is None:
-                    await self._give_up(fresh, reason="call-transcripts-off")
+                    await self._finish(fresh, given_up="call-transcripts-off")
         await self._forget_finished_calls(self._clock())
 
     async def _forget_finished_calls(self, now: float) -> None:
@@ -409,7 +409,7 @@ class CallTranscriptService:
             if fresh.ended_at is None:
                 fresh = await self._end_if_empty(fresh, now)
             if fresh.id not in self._settling and (reason := self._lost_cause(fresh, now)) is not None:
-                await self._give_up(fresh, reason=reason)
+                await self._finish(fresh, given_up=reason)
                 fresh = await self._fresh(fresh.id)
             self._settle(fresh, now)
             return fresh
@@ -626,8 +626,7 @@ class CallTranscriptService:
         lines = await asyncio.to_thread(self._store.lines, call.id)
         turns = _turns(lines)
         if not turns and all(line.reason != "not-transcribed" for line in lines):
-            await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock())
-            logger.info("call_transcript_had_no_speech", room_id=call.room_id, call_id=call.id)
+            await self._finish(call)
             return
         notes = self._written_notes.get(call.id)
         writes_notes = (
@@ -667,28 +666,40 @@ class CallTranscriptService:
         if event_id is None:
             await self._postpone(call, reason="transcript-not-posted")
             return
-        await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock(), event_id=event_id)
-        self._written_notes.pop(call.id, None)
-        logger.info(
-            "call_transcript_posted",
-            room_id=call.room_id,
-            call_id=call.id,
-            event_id=event_id,
-            with_notes=notes is not None,
-            turns=len(turns),
-            speech_seconds=sum(line.seconds for line in lines if line.reason != "paused"),
-        )
+        await self._finish(call, event_id=event_id, with_notes=notes is not None, turns=len(turns))
 
     async def _postpone(self, call: StoredCall, *, reason: str, failed: bool = True) -> None:
         """Hold the call's Matrix writes a minute, counting a failed message attempt unless ``failed`` is False."""
         await asyncio.to_thread(self._store.postpone, call.id, until=self._clock() + _RETRY_SECONDS, failed=failed)
         logger.warning("call_transcript_postponed", room_id=call.room_id, call_id=call.id, reason=reason)
 
-    async def _give_up(self, call: StoredCall, *, reason: str) -> None:
-        """Finish an ended call without its transcript message, deleting its lines."""
-        await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock())
+    async def _finish(
+        self,
+        call: StoredCall,
+        *,
+        event_id: str | None = None,
+        given_up: str | None = None,
+        **details: object,
+    ) -> None:
+        """Finish the ended call's transcript message, deleting its lines, and log it once with how long people spoke.
+
+        ``event_id`` is the posted message, None when there was nothing to post or the message was given up, which
+        ``given_up`` says why.
+        """
+        speech_seconds = await asyncio.to_thread(
+            self._store.finish_transcript,
+            call.id,
+            at=self._clock(),
+            event_id=event_id,
+        )
         self._written_notes.pop(call.id, None)
-        logger.warning("call_transcript_given_up", room_id=call.room_id, call_id=call.id, reason=reason)
+        if speech_seconds is None:
+            return
+        fields = {"room_id": call.room_id, "call_id": call.id, "speech_seconds": speech_seconds, **details}
+        if given_up is None:
+            logger.info("call_transcript_finished", event_id=event_id, **fields)
+        else:
+            logger.warning("call_transcript_given_up", reason=given_up, **fields)
 
     async def _call_for(self, call_id: str, user_id: str) -> StoredCall:
         """Return the call, taking its room from the call itself; to anyone outside that room it does not exist."""
