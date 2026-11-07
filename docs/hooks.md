@@ -543,7 +543,7 @@ ResponseResult(
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `@name` mentions of agents and teams in `text` mention them, unless `mentions` lists the Matrix user IDs of everyone the message mentions.
   Names in `text` then still show as links, but only the listed users are mentioned, so an agent named only in `text` is not woken by the name and does not count as [mentioned earlier](configuration/teams.md#ad-hoc-teams) in its thread; `mentions=[]` mentions nobody.
-- `extra_content` can set standard fields of the message content, such as `"msgtype": "m.notice"` for a notice, which agents never answer, or a `formatted_body` of your own in place of the HTML rendered from `text`; an `m.mentions` in it only adds to the mentions found in `text`.
+- `extra_content` can set standard fields of the message content, such as `"msgtype": "m.notice"` for a notice, which agents never answer, or a `formatted_body` of your own in place of the HTML rendered from `text`; without `mentions`, an `m.mentions` in it only adds to the mentions found in `text`.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
 - Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
 - A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.

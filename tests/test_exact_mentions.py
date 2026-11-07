@@ -1,4 +1,4 @@
-"""Hooks and tools can name a message's exact mentions, so agents its text only quotes neither answer nor form a team."""
+"""Hooks and tools can name a message's exact mentions, so agents its text only quotes are not mentioned and form no team."""
 
 from __future__ import annotations
 
