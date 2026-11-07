@@ -697,7 +697,7 @@ async def test_unconfigured_leave_uses_durable_gateway_without_direct_http(
         rooms=[],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = AsyncMock(rooms={})
     principal = MagicMock()
     principal.ingestion_membership_position = AsyncMock(
         return_value=RoomMembershipPosition("join", 4),
@@ -1329,7 +1329,7 @@ async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
         runtime_paths=runtime_paths_for(config),
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = AsyncMock(rooms={})
 
     creator_client = AsyncMock(spec=nio.AsyncClient)
     creator_client.homeserver = "http://localhost:8008"
@@ -2250,7 +2250,7 @@ async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
         rooms=["!configured-room:localhost"],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = AsyncMock(rooms={})
 
     left_room_ids: list[str] = []
 
@@ -2344,7 +2344,7 @@ async def test_agent_leaves_unconfigured_rooms(tmp_path: Path) -> None:
     )
 
     # Mock the client
-    mock_client = AsyncMock()
+    mock_client = AsyncMock(rooms={})
     bot.client = mock_client
 
     # Mock joined_rooms to return both room1 and room2 (agent is in both)
@@ -2389,7 +2389,7 @@ async def test_router_preserves_root_space_and_server_emoji_room_when_leaving_un
     )
     install_runtime_journal_support(bot)
 
-    mock_client = AsyncMock()
+    mock_client = AsyncMock(rooms={})
     bot.client = mock_client
 
     left_room_ids: list[str] = []
@@ -2917,7 +2917,7 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
         rooms=["!configured-room:localhost"],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = AsyncMock(rooms={})
 
     left_room_ids: list[str] = []
 

@@ -2952,7 +2952,7 @@ async def test_extra_router_member_does_not_grant_cleanup_retention(
     )
     write_personal_room(path, record)
     router.config.personal_rooms = None
-    router.client = SimpleNamespace(user_id="@mindroom_router:localhost")
+    router.client = SimpleNamespace(user_id="@mindroom_router:localhost", rooms={})
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[room_id]))
     assert await router._room_lifecycle._rooms_to_leave() == [room_id]
 
