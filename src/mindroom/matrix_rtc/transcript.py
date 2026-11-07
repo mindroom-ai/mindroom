@@ -124,10 +124,11 @@ class CallTranscript:
             execution_identity=execution_identity,
         )
 
-    def record(self, speaker: str, text: str) -> None:
-        """Record one finalized transcript item (safe from sync callbacks).
+    def record(self, speaker: str, text: str, spoken_at: float) -> None:
+        """Record one finalized item whose speech started at Unix time ``spoken_at`` (safe from sync callbacks).
 
         Consecutive items from the same speaker extend one turn, and its line stays open in the file until the turn ends.
+        A turn keeps its first item's start, held between the previous turn's start and now, so turns stay in order.
         """
         text = " ".join(text.split())
         if not text:
@@ -138,7 +139,9 @@ class CallTranscript:
             self._pending.append(continuation)
         else:
             self._end_open_line()
-            self._spoken.append((speaker, text, int(self.elapsed_seconds())))
+            since_start = int(spoken_at - self.started_at.timestamp())
+            previous = self._spoken[-1][2] if self._spoken else 0
+            self._spoken.append((speaker, text, min(max(previous, since_start), int(self.elapsed_seconds()))))
             stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
             self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
             self._open_speaker = speaker
@@ -146,7 +149,7 @@ class CallTranscript:
 
     @property
     def spoken_turns(self) -> tuple[tuple[str, str, int], ...]:
-        """Return the finalized spoken turns so far, oldest first, each with its whole seconds from the call start."""
+        """Return the finalized spoken turns so far, oldest first, each with its start in whole seconds."""
         return tuple(self._spoken)
 
     def elapsed_seconds(self) -> float:

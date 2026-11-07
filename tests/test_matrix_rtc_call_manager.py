@@ -3312,9 +3312,10 @@ def _record_two_minute_exchange(bridge: FakeBridge) -> None:
     assert isinstance(on_turn, MethodType)
     transcript = on_turn.__self__
     assert isinstance(transcript, CallTranscript)
-    on_turn("user", "Book the train")
-    on_turn("assistant", "Booked")
     transcript._started_monotonic -= 120
+    started = transcript.started_at.timestamp()
+    on_turn("user", "Book the train", started + 5.5)
+    on_turn("assistant", "Booked", started + 11.5)
 
 
 async def _drain_background_tasks(manager: CallManager) -> None:
@@ -3354,10 +3355,10 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
     body = post.await_args.kwargs["writeback"].body
     assert body.startswith("📞 Voice call · 2 min")
-    assert "@alice:example.org (Alice): Book the train" in body
-    assert "Helper: Booked" in body
-    senders = [turn["sender"] for turn in post.await_args.kwargs["writeback"].transcript["turns"]]
-    assert senders == ["@alice:example.org", BOT_USER]
+    assert "[0:05] @alice:example.org (Alice): Book the train" in body
+    assert "[0:11] Helper: Booked" in body
+    turns = post.await_args.kwargs["writeback"].transcript["turns"]
+    assert [(turn["sender"], turn["offset_seconds"]) for turn in turns] == [("@alice:example.org", 5), (BOT_USER, 11)]
     await manager.shutdown()
 
 

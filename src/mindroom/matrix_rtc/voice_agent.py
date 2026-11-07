@@ -344,8 +344,8 @@ class VoiceAgentOptions:
     greeting_instructions: str | None = None
     #: LiveKit function tools exposed to the realtime model.
     tools: tuple[Any, ...] = ()
-    #: Called with (speaker, text) for every finalized conversation turn.
-    on_conversation_turn: Callable[[str, str], None] | None = None
+    #: Called with (speaker, text, Unix time its speech started) for every finalized conversation turn.
+    on_conversation_turn: Callable[[str, str, float], None] | None = None
     #: Called with executed tool names after each tool round.
     on_tools_executed: Callable[[list[str]], None] | None = None
     #: Called after an unexpected terminal SDK close; bool means retryable.
@@ -379,7 +379,7 @@ class CascadedVoiceAgentOptions:
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
     close_responder: Callable[[], Awaitable[None]] | None = None
     greeting_text: str | None = None
-    on_conversation_turn: Callable[[str, str], None] | None = None
+    on_conversation_turn: Callable[[str, str, float], None] | None = None
     on_tools_executed: Callable[[list[str]], None] | None = None
     on_session_terminated: Callable[[bool], None] | None = None
     on_session_error: Callable[[str], None] | None = None
@@ -426,7 +426,7 @@ class LiveVoiceAgentOptions:
     record_usage: Callable[[LiveVoiceUsage], Awaitable[None]] | None = None
     close_responder: Callable[[], Awaitable[None]] | None = None
     greeting_instructions: str | None = None
-    on_conversation_turn: Callable[[str, str], None] | None = None
+    on_conversation_turn: Callable[[str, str, float], None] | None = None
     on_tools_executed: Callable[[list[str]], None] | None = None
     on_session_terminated: Callable[[bool], None] | None = None
     on_session_error: Callable[[str], None] | None = None
@@ -831,7 +831,7 @@ class RealtimeVoiceBridge:
                 text = item.text_content
                 if text:
                     if on_turn is not None:
-                        on_turn(str(item.role), text)
+                        on_turn(str(item.role), text, item.metrics.get("started_speaking_at", item.created_at))
                     if item.role == "assistant" and finalize_spoken_response is not None:
                         correlation_id = item.extra.get(_CALL_TURN_CORRELATION_KEY)
                         self._schedule_session_event(

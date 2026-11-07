@@ -273,8 +273,8 @@ Otherwise, or when reading the conversation takes longer than 5 seconds, the cal
 When you hang up, the agent posts the call back into that conversation: as a reply in the same thread, or as a new room message for a call started from the main timeline.
 The message reads `📞 Voice call · N min` with the spoken transcript collapsed underneath, each turn prefixed with its time in the call as `[m:ss]`, so later replies in the thread know what was said.
 The event also carries `io.mindroom.call_transcript`, `{"duration_seconds": <int>, "turns": [{"sender": <Matrix user ID>, "text": <spoken text>, "offset_seconds": <int>}]}`, so clients can show each turn with its speaker's avatar and name.
-`offset_seconds` is when MindRoom recorded the turn's first finished piece of transcript, in whole seconds from the start of the call, so it can trail the start of the speech by a few seconds; it never decreases from one turn to the next and never exceeds `duration_seconds`.
-The message is posted after the call ends, so the call started about `duration_seconds` before it.
+`offset_seconds` is when the speaker started the turn, in whole seconds from the start of the call, rounded down; it never decreases from one turn to the next and never exceeds `duration_seconds`.
+The message is posted after the call ends, and later while a config reload holds replies back, so the call started at least `duration_seconds` before the message, usually about that much.
 Transcripts posted before turns had times carry no `offset_seconds`.
 When the message is too large for one event, that key is only in its sidecar, so clients read it from the full content once they load it.
 Calls shorter than 10 seconds, calls in which the caller said nothing, calls that started without a conversation snapshot, and calls cut off by a MindRoom restart post nothing.

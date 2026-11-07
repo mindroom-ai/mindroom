@@ -92,9 +92,9 @@ def _transcript(
 async def test_transcript_writes_turns_incrementally(tmp_path: Path) -> None:
     """Turns are flushed to the markdown file as they happen."""
     transcript = _transcript(tmp_path)
-    transcript.record("user", "Hello agent")
+    transcript.record("user", "Hello agent", time.time())
     flush_task = transcript._flush_task
-    transcript.record("assistant", "Hi! How can I help?")
+    transcript.record("assistant", "Hi! How can I help?", time.time())
     assert transcript._flush_task is flush_task
     assert flush_task is not None
     await flush_task
@@ -110,18 +110,18 @@ async def test_transcript_writes_turns_incrementally(tmp_path: Path) -> None:
 async def test_same_speaker_fragments_continue_one_transcript_line(tmp_path: Path) -> None:
     """Speech the provider splits mid-sentence reads as one line per speaker turn, written as it arrives."""
     transcript = _transcript(tmp_path, _config(memory_backend="none"))
-    transcript.record("user", " Wait")
+    transcript.record("user", " Wait", time.time())
     await transcript._flush()
     assert transcript.path.read_text().endswith("**user**: Wait")
 
-    transcript.record("user", ", can you check")
-    transcript.record("user", ". Can you check whether  the bakery\nopens early tomorrow?")
-    transcript.record("assistant", "Let me look that up.")
-    transcript.record("assistant", " one moment")
+    transcript.record("user", ", can you check", time.time())
+    transcript.record("user", ". Can you check whether  the bakery\nopens early tomorrow?", time.time())
+    transcript.record("assistant", "Let me look that up.", time.time())
+    transcript.record("assistant", " one moment", time.time())
     transcript.record_tool_use(["web"])
-    transcript.record("assistant", "It opens at seven.")
-    transcript.record("user", "Great")
-    transcript.record("user", "!")
+    transcript.record("assistant", "It opens at seven.", time.time())
+    transcript.record("user", "Great", time.time())
+    transcript.record("user", "!", time.time())
     await transcript.finalize(config=_config(memory_backend="none"), runtime_paths=test_runtime_paths(tmp_path))
 
     content = transcript.path.read_text()
@@ -142,19 +142,22 @@ async def test_same_speaker_fragments_continue_one_transcript_line(tmp_path: Pat
     )
 
 
-def test_posted_turns_carry_non_decreasing_offsets_within_the_call(tmp_path: Path) -> None:
-    """Each posted turn carries whole seconds from the call start, taken from its first words, inside the call."""
+def test_posted_turns_carry_their_speech_start_within_the_call(tmp_path: Path) -> None:
+    """Each posted turn carries whole seconds from the call start to when its speech started, inside the call."""
     transcript = _transcript(tmp_path)
-    for elapsed, speaker, text in (
-        (3, "user", "Book the train"),
-        (5, "user", "for tomorrow"),
-        (9, "assistant", "Which time?"),
-        (61, "user", "Nine"),
-        (75, "assistant", "Booked"),
-    ):
-        transcript._started_monotonic = time.monotonic() - elapsed
-        transcript.record(speaker, text)
+    started = transcript.started_at.timestamp()
+    # Turns arrive after they were spoken: here all of them once the call has run 80.4 seconds.
     transcript._started_monotonic = time.monotonic() - 80.4
+    for speaker, text, spoken_after in (
+        ("user", "Book the train", 5.9),
+        ("user", "for tomorrow", 9.5),
+        ("assistant", "Which time?", 11.5),
+        # A provider can withhold a caller's transcript until after the reply it prompted.
+        ("user", "Nine", 8.5),
+        # A start after now (a clock step) still lands inside the call.
+        ("assistant", "Booked", 300.5),
+    ):
+        transcript.record(speaker, text, started + spoken_after)
 
     writeback = format_call_writeback(
         turns=transcript.spoken_turns,
@@ -167,24 +170,24 @@ def test_posted_turns_carry_non_decreasing_offsets_within_the_call(tmp_path: Pat
 
     assert writeback is not None
     offsets = [turn["offset_seconds"] for turn in writeback.transcript["turns"]]
-    assert offsets == [3, 9, 61, 75]
+    assert offsets == [5, 11, 11, 80]
     assert offsets == sorted(offsets)
     assert offsets[-1] <= writeback.transcript["duration_seconds"] == 80
     assert writeback.body.split("\n\n")[2:] == [
-        "[0:03] Alice: Book the train for tomorrow",
-        "[0:09] Helper: Which time?",
-        "[1:01] Alice: Nine",
-        "[1:15] Helper: Booked",
+        "[0:05] Alice: Book the train for tomorrow",
+        "[0:11] Helper: Which time?",
+        "[0:11] Alice: Nine",
+        "[1:20] Helper: Booked",
     ]
 
 
 def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:
     """Spoken turns exclude tool-use rounds and blank text, and are stripped."""
     transcript = _transcript(tmp_path)
-    transcript.record("user", " hi ")
-    transcript.record("assistant", "hello")
+    transcript.record("user", " hi ", time.time())
+    transcript.record("assistant", "hello", time.time())
     transcript.record_tool_use(["web"])
-    transcript.record("user", "  ")
+    transcript.record("user", "  ", time.time())
 
     assert transcript.spoken_turns == (("user", "hi", 0), ("assistant", "hello", 0))
 
@@ -200,7 +203,7 @@ async def test_finalize_stores_relative_transcript_memory_reference(
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     transcript = _transcript(tmp_path)
-    transcript.record("user", "Ping")
+    transcript.record("user", "Ping", time.time())
 
     await transcript.finalize(config=config, runtime_paths=runtime_paths)
 
@@ -221,7 +224,7 @@ async def test_finalize_removes_credentials_from_the_transcript_sent_to_mem0(
     add_memory = AsyncMock()
     monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", add_memory)
     transcript = _transcript(tmp_path)
-    transcript.record("user", "the password=hunter2 and the launch is Friday")
+    transcript.record("user", "the password=hunter2 and the launch is Friday", time.time())
 
     await transcript.finalize(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
 
@@ -241,7 +244,7 @@ async def test_file_memory_stores_workspace_relative_reference(
     monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", add_memory)
     config = _config(memory_backend="file")
     transcript = _transcript(tmp_path, config)
-    transcript.record("user", "Ping")
+    transcript.record("user", "Ping", time.time())
 
     await transcript.finalize(config=config, runtime_paths=test_runtime_paths(tmp_path))
 
@@ -274,7 +277,7 @@ async def test_disabled_memory_keeps_transcript_without_memory_entry(
     monkeypatch.setattr("mindroom.matrix_rtc.transcript.add_agent_memory", add_memory)
     config = _config(memory_backend="none")
     transcript = _transcript(tmp_path, config)
-    transcript.record("user", "Ping")
+    transcript.record("user", "Ping", time.time())
 
     await transcript.finalize(config=config, runtime_paths=test_runtime_paths(tmp_path))
 
@@ -310,7 +313,7 @@ def test_sync_record_contains_flush_failure(tmp_path: Path) -> None:
     blocker.write_text("block")
     transcript.path = blocker / "transcript.md"
 
-    transcript.record("user", "keep me")
+    transcript.record("user", "keep me", time.time())
 
     assert transcript._pending
 
@@ -331,7 +334,7 @@ async def test_background_flush_observes_and_logs_failure(
     monkeypatch.setattr(transcript, "_flush", fail_flush)
     monkeypatch.setattr("mindroom.matrix_rtc.transcript.logger.warning", logged)
 
-    transcript.record("user", "keep me")
+    transcript.record("user", "keep me", time.time())
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
@@ -429,7 +432,7 @@ async def test_private_transcripts_and_memory_are_requester_scoped(
     assert alice.path.parent != bob.path.parent
     assert alice.path.is_relative_to(alice_runtime.state_root)
     assert bob.path.is_relative_to(bob_runtime.state_root)
-    alice.record("user", "private ping")
+    alice.record("user", "private ping", time.time())
     await alice.finalize(config=config, runtime_paths=runtime_paths)
 
     assert add_memory.await_args.kwargs["execution_identity"] is alice_identity
@@ -452,7 +455,7 @@ async def test_finalize_keeps_the_memory_of_a_transcript_above_the_read_cap(
         lambda *args, **kwargs: read(*args, **{**kwargs, "max_bytes": 32}),
     )
     transcript = _transcript(tmp_path)
-    transcript.record("user", "Ping " * 100)
+    transcript.record("user", "Ping " * 100, time.time())
 
     await transcript.finalize(config=_config(), runtime_paths=test_runtime_paths(tmp_path))
 

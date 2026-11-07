@@ -679,7 +679,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
 ) -> None:
     """The cascaded bridge gives LiveKit speech legs and the MindRoom LLM adapter."""
     built: dict[str, object] = {}
-    turns: list[tuple[str, str]] = []
+    turns: list[tuple[str, str, float]] = []
     tool_uses: list[list[str]] = []
     finalized: list[tuple[str | None, str, bool]] = []
     responder_inputs: list[str] = []
@@ -805,7 +805,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         finalize_spoken_response=finalize_spoken_response,
         close_responder=close_responder,
         greeting_text="Hello.",
-        on_conversation_turn=lambda role, text: turns.append((role, text)),
+        on_conversation_turn=lambda role, text, spoken_at: turns.append((role, text, spoken_at)),
         on_tools_executed=tool_uses.append,
     )
 
@@ -844,10 +844,16 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     assert fake_session.output.audio is transcript_synchronizer.audio_output
     assert fake_session.output.transcription is transcript_synchronizer.text_output
 
-    user_message = llm.ChatContext.empty().add_message(role="user", content="hello")
+    # A turn's time is when its speech started, not when LiveKit finished the item.
+    user_message = llm.ChatContext.empty().add_message(
+        role="user",
+        content="hello",
+        created_at=1050.0,
+        metrics={"started_speaking_at": 1042.0},
+    )
     callback = cast("Callable[[object], None]", fake_session.handlers["conversation_item_added"])
     callback(SimpleNamespace(item=user_message))
-    assert turns == [("user", "hello")]
+    assert turns == [("user", "hello", 1042.0)]
 
     # An interrupted response can leave consecutive user items in LiveKit's
     # context; replaying the first one could repeat side effects or tools.
@@ -866,11 +872,14 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         role="assistant",
         content="heard sta",
         interrupted=True,
+        created_at=1060.0,
         extra={"mindroom_call_turn_id": "turn-1"},
     )
     callback(SimpleNamespace(item=assistant_message))
     await asyncio.sleep(0)
     assert finalized == [("turn-1", "heard sta", True)]
+    # Without speaking metrics, the item's own time (LiveKit's speech start for replies) stands in.
+    assert turns[-1] == ("assistant", "heard sta", 1060.0)
 
     class UnforwardedSpeech:
         def __init__(self) -> None:
