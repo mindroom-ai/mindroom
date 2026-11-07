@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.call_transcripts import store as call_transcript_store
 from mindroom.call_transcripts.store import CallTranscriptStore, StoredCall, StoredLine, _AppPresence
 
 if TYPE_CHECKING:
@@ -29,60 +28,6 @@ def test_the_store_keeps_its_database_private_under_the_storage_root(tmp_path: P
     assert store.path == tmp_path / "call_transcripts" / "calls.db"
     assert stat.S_IMODE(store.path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
-
-
-def _schema_version(path: Path) -> int:
-    with closing(sqlite3.connect(path)) as connection:
-        return connection.execute("PRAGMA user_version").fetchone()[0]
-
-
-def test_a_new_database_is_at_the_latest_schema_version(tmp_path: Path) -> None:
-    """A fresh database records the version of the schema it was created with."""
-    store = CallTranscriptStore(tmp_path)
-
-    assert _schema_version(store.path) == len(call_transcript_store._UPGRADES) == 1
-
-
-def test_reopening_a_database_from_before_a_schema_change_upgrades_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A database at the previous version gets only the new step, once, and keeps its calls and presence."""
-    store = CallTranscriptStore(tmp_path)
-    call, _ = store.ensure_live_call(ROOM, at=100.0)
-    store.record_presence(call.id, ANN, at=100.0)
-    monkeypatch.setattr(
-        call_transcript_store,
-        "_UPGRADES",
-        (
-            *call_transcript_store._UPGRADES,
-            (
-                "CREATE TABLE notes (call_id TEXT NOT NULL PRIMARY KEY)",
-                "ALTER TABLE calls ADD COLUMN topic TEXT",
-            ),
-        ),
-    )
-
-    upgraded = CallTranscriptStore(tmp_path)
-    CallTranscriptStore(tmp_path)  # A step that ran again would fail on its duplicate table and column.
-
-    assert _schema_version(upgraded.path) == 2
-    with closing(sqlite3.connect(upgraded.path)) as connection:
-        assert "topic" in {row[1] for row in connection.execute("PRAGMA table_info(calls)")}
-        assert connection.execute("SELECT count(*) FROM notes").fetchone() == (0,)
-    assert upgraded.call(call.id) == call
-    assert upgraded.presence(call.id) == {ANN: _AppPresence(present_at=100.0, left=False)}
-
-
-def test_a_database_from_a_newer_mindroom_is_refused(tmp_path: Path) -> None:
-    """A schema this code does not know is never opened, so it cannot be written in an old shape."""
-    store = CallTranscriptStore(tmp_path)
-    with closing(sqlite3.connect(store.path)) as connection:
-        connection.execute("PRAGMA user_version = 2")
-
-    with pytest.raises(RuntimeError, match="has schema version 2, newer than this MindRoom's 1"):
-        CallTranscriptStore(tmp_path)
-    assert _schema_version(store.path) == 2
 
 
 def test_a_room_has_at_most_one_live_call(tmp_path: Path) -> None:

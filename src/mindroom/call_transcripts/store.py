@@ -22,54 +22,50 @@ type _GapReason = Literal["paused", "not-transcribed"]
 # What an ended call's row was last edited to say: that the call ended, then also where its transcript message is.
 type RowEdit = Literal["ended", "transcript"]
 
-# Each step upgrades the database from the version that is its index to the next; ``PRAGMA user_version`` records the
-# version a database is at. A schema change appends a step and never edits one a released database may have run.
-_UPGRADES: tuple[tuple[str, ...], ...] = (
-    (
-        """
-        CREATE TABLE calls (
-            id TEXT PRIMARY KEY,
-            room_id TEXT NOT NULL,
-            started_at REAL NOT NULL,
-            ended_at REAL,
-            row_event_id TEXT,
-            transcript_due_at REAL,
-            transcript_attempts INTEGER NOT NULL DEFAULT 0,
-            transcript_done_at REAL,
-            transcript_event_id TEXT,
-            row_edit TEXT,
-            paused_since REAL,
-            paused_by TEXT
+_SCHEMA = (
+    """
+    CREATE TABLE IF NOT EXISTS calls (
+        id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL,
+        started_at REAL NOT NULL,
+        ended_at REAL,
+        row_event_id TEXT,
+        transcript_due_at REAL,
+        transcript_attempts INTEGER NOT NULL DEFAULT 0,
+        transcript_done_at REAL,
+        transcript_event_id TEXT,
+        row_edit TEXT,
+        paused_since REAL,
+        paused_by TEXT
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS calls_one_live_call_per_room ON calls(room_id) WHERE ended_at IS NULL",
+    """
+    CREATE TABLE IF NOT EXISTS lines (
+        id TEXT PRIMARY KEY,
+        call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        said_at REAL NOT NULL,
+        seconds REAL NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT,
+        reason TEXT,
+        CHECK (
+            (kind = 'speech' AND text IS NOT NULL AND reason IS NULL)
+            OR (kind = 'gap' AND text IS NULL AND reason IN ('paused', 'not-transcribed'))
         )
-        """,
-        "CREATE UNIQUE INDEX calls_one_live_call_per_room ON calls(room_id) WHERE ended_at IS NULL",
-        """
-        CREATE TABLE lines (
-            id TEXT PRIMARY KEY,
-            call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
-            user_id TEXT NOT NULL,
-            said_at REAL NOT NULL,
-            seconds REAL NOT NULL,
-            kind TEXT NOT NULL,
-            text TEXT,
-            reason TEXT,
-            CHECK (
-                (kind = 'speech' AND text IS NOT NULL AND reason IS NULL)
-                OR (kind = 'gap' AND text IS NULL AND reason IN ('paused', 'not-transcribed'))
-            )
-        )
-        """,
-        "CREATE INDEX lines_by_call ON lines(call_id, said_at)",
-        """
-        CREATE TABLE presence (
-            call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
-            user_id TEXT NOT NULL,
-            present_at REAL NOT NULL,
-            has_left INTEGER NOT NULL,
-            PRIMARY KEY (call_id, user_id)
-        )
-        """,
-    ),
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS lines_by_call ON lines(call_id, said_at)",
+    """
+    CREATE TABLE IF NOT EXISTS presence (
+        call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        present_at REAL NOT NULL,
+        has_left INTEGER NOT NULL,
+        PRIMARY KEY (call_id, user_id)
+    )
+    """,
 )
 
 
@@ -132,7 +128,8 @@ class CallTranscriptStore:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path.parent.chmod(0o700)
         with self._transaction() as connection:
-            _upgrade(connection, self.path)
+            for statement in _SCHEMA:
+                connection.execute(statement)
         self.path.chmod(0o600)
 
     def ensure_live_call(self, room_id: str, *, at: float) -> tuple[StoredCall, bool]:
@@ -391,18 +388,6 @@ class CallTranscriptStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
-
-
-def _upgrade(connection: sqlite3.Connection, path: Path) -> None:
-    """Bring the database to the latest schema, refusing one a newer MindRoom wrote."""
-    (version,) = connection.execute("PRAGMA user_version").fetchone()
-    if version > len(_UPGRADES):
-        msg = f"{path} has schema version {version}, newer than this MindRoom's {len(_UPGRADES)}."
-        raise RuntimeError(msg)
-    for statements in _UPGRADES[version:]:
-        for statement in statements:
-            connection.execute(statement)
-    connection.execute(f"PRAGMA user_version = {len(_UPGRADES)}")
 
 
 def _end_pause(connection: sqlite3.Connection, call_id: str, *, at: float) -> None:
