@@ -1550,6 +1550,36 @@ async def test_requester_admin_is_explicit(tmp_path: Path, monkeypatch: pytest.M
     assert power["users"]["@alice:localhost"] == 100
 
 
+class RouterAccount(MatrixServer):
+    """The router's account on the same homeserver, whose state writes need the room's power level."""
+
+    def __init__(self, server: MatrixServer, *room_ids: str) -> None:
+        super().__init__()
+        self.user_id = "@mindroom_router:localhost"
+        self.state = server.state
+        self.rooms = {room_id: nio.MatrixRoom(room_id, self.user_id) for room_id in room_ids}
+        self.member_reads: list[str] = []
+
+    async def joined_members(self, room_id: str) -> object:
+        """Record which room's members were read before answering like the shared server."""
+        self.member_reads.append(room_id)
+        return await super().joined_members(room_id)
+
+    async def room_put_state(
+        self,
+        room_id: str,
+        event_type: str,
+        content: dict[str, Any],
+        state_key: str = "",
+    ) -> object:
+        """Refuse a write the router's power level does not allow."""
+        power = next(event["content"] for event in self.state[room_id] if event["type"] == "m.room.power_levels")
+        required = power.get("events", {}).get(event_type, power.get("state_default", 50))
+        if power.get("users", {}).get(self.user_id, power.get("users_default", 0)) < required:
+            return nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+        return await super().room_put_state(room_id, event_type, content, state_key)
+
+
 @pytest.mark.asyncio
 async def test_reconciliation_gives_an_older_room_the_managed_state_power_levels(
     tmp_path: Path,
@@ -1561,12 +1591,27 @@ async def test_reconciliation_gives_an_older_room_the_managed_state_power_levels
     power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
     del power["events"]["io.mindroom.accounts"]
     server.state[room_id] = [event for event in server.state[room_id] if event["type"] != "io.mindroom.accounts"]
-    await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
+    router = RouterAccount(server, room_id, "!lobby:localhost")
+    server.set_member(room_id, router.user_id, "join")
+    await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", router)
     power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
     assert power["events"]["io.mindroom.accounts"] == 0
     accounts = next(event for event in server.state[room_id] if event["type"] == "io.mindroom.accounts")
-    assert accounts["state_key"] == server.user_id
-    assert accounts["content"] == {"accounts": [server.user_id]}
+    assert (accounts["sender"], accounts["state_key"]) == (router.user_id, router.user_id)
+    assert accounts["content"] == {"accounts": sorted([server.user_id, router.user_id])}
+
+
+@pytest.mark.asyncio
+async def test_a_new_personal_room_does_not_ask_a_router_that_is_not_in_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router publishes a personal room's accounts only once it is in the room, so creation reads no members."""
+    server = MatrixServer()
+    router = RouterAccount(server, "!lobby:localhost")
+    room_id = await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", router)
+    assert room_id not in router.member_reads
+    assert not any(event["type"] == "io.mindroom.accounts" for event in server.state[room_id])
 
 
 @pytest.mark.asyncio

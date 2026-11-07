@@ -267,10 +267,16 @@ class PersonalRoomService:
                     source_room_id,
                     reinvite_departed_owner,
                 )
-                # A room created before a state type joined the managed power levels gains it once it is validated,
-                # and the router, whose client observed the trigger, then publishes the accounts it could not before.
+                # Keep the validated room's MindRoom state power levels current, then let the router, whose client
+                # observed the trigger, publish the room's accounts if it is already in the room.
                 await ensure_managed_room_power_levels(self._client(), record.room_id)
-                await reconcile_room_accounts(source_client, self.runtime.config, self.runtime_paths, record.room_id)
+                if record.room_id in source_client.rooms:
+                    await reconcile_room_accounts(
+                        source_client,
+                        self.runtime.config,
+                        self.runtime_paths,
+                        record.room_id,
+                    )
                 if human_joined is None:
                     return record.room_id
                 await self._finish(record, path, source_room_id, human_joined=human_joined)
