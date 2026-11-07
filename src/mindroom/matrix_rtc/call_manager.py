@@ -130,6 +130,10 @@ _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0)
 # A voice session that stays up this long proves the call works, so its failure retries from the first delay.
 _STABLE_CALL_SESSION_MS = 60_000
+# How long an active call outlasts an empty Matrix call roster while the caller's media stays in the SFU.
+# A client that stops refreshing its delayed leave event (MSC4140) for a while, as an app in the background
+# does, loses its membership and publishes a new one when it runs again; leaving would drop its frame keys.
+_ROSTER_GAP_GRACE_MS = 60_000
 _RECONCILE_MIN_INTERVAL_S = 1.0
 # Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
 _ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
@@ -217,6 +221,8 @@ class _LogicalCallState:
     reported_failures: set[str] = field(default_factory=set)
     #: Memberships of the roster a non-retryable session end blocked; only a membership outside them rejoins.
     blocked_memberships: _MembershipIdentities | None = None
+    #: When the active session stops waiting for an emptied Matrix roster to return.
+    roster_gap_deadline_ms: int | None = None
 
 
 def _membership_identities(members: Iterable[CallMember]) -> _MembershipIdentities:
@@ -236,10 +242,11 @@ def _rejoined_since_block(logical_call: _LogicalCallState, members: Iterable[Cal
 
 @dataclass(frozen=True)
 class _RoomCallState:
-    """One room-state read: current remote call members and the agent-call state events."""
+    """One room-state read: current remote call members, joined room members, and the agent-call state events."""
 
     members: list[CallMember]
     agent_call_events: tuple[dict[str, Any], ...]
+    joined_user_ids: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -751,6 +758,7 @@ class CallManager:
                         members,
                         retrying=retrying,
                         agent_call_events=state.agent_call_events,
+                        joined_user_ids=state.joined_user_ids,
                     )
         except ResponseAdmissionRefusedError:
             logger.info(
@@ -767,9 +775,12 @@ class CallManager:
         *,
         retrying: bool = False,
         agent_call_events: tuple[dict[str, Any], ...],
+        joined_user_ids: AbstractSet[str],
     ) -> None:
         """Apply one authoritative room/call roster to the active session."""
-        if not self._members_are_authorized(members, room.room_id) or not members:
+        if not members and self._hold_through_roster_gap(room, room_call, joined_user_ids):
+            return
+        if not members or not self._members_are_authorized(members, room.room_id):
             room_call.clear_logical_call()
             room_call.pending_keys.clear()
             await room_call.stop_session()
@@ -783,6 +794,9 @@ class CallManager:
         ):
             room_call.clear_logical_call()
             logical_call = room_call.start_logical_call(requester_id)
+        elif logical_call.roster_gap_deadline_ms is not None:
+            logical_call.roster_gap_deadline_ms = None
+            logger.info("call_roster_gap_closed", room_id=room.room_id, agent=self._agent_name)
         session = room_call.session
         if session is not None and session.requester_id == requester_id:
             await self._update_session_members(room, room_call, session, members)
@@ -845,6 +859,38 @@ class CallManager:
         else:
             self._replay_pending_keys(room_call, session)
             room_call.clear_reconcile_retry()
+
+    def _hold_through_roster_gap(
+        self,
+        room: nio.MatrixRoom,
+        room_call: _RoomCall,
+        joined_user_ids: AbstractSet[str],
+    ) -> bool:
+        """Keep an active call whose Matrix roster emptied, and return whether it is held.
+
+        Only a caller still in the room keeps the call: their membership lapsed. The session
+        keeps its roster, so frame keys the caller rotates meanwhile still install, and its
+        bridge ends it once that roster's devices leave the SFU, as when the caller hung up.
+        A roster that stays empty past the grace ends the call at the next reconcile.
+        """
+        session, logical_call = room_call.session, room_call.logical_call
+        if session is None or logical_call is None or session.requester_id not in joined_user_ids:
+            return False
+        now_ms = self._clock_ms()
+        if logical_call.roster_gap_deadline_ms is None:
+            logical_call.roster_gap_deadline_ms = now_ms + _ROSTER_GAP_GRACE_MS
+            session.vacate_roster()
+            logger.info("call_roster_gap_held", room_id=room.room_id, agent=self._agent_name)
+        elif now_ms >= logical_call.roster_gap_deadline_ms:
+            logger.info("call_roster_gap_expired", room_id=room.room_id, agent=self._agent_name)
+            return False
+        room_call.cancel_expiry()
+        room_call.expiry_handle = asyncio.get_running_loop().call_later(
+            (logical_call.roster_gap_deadline_ms - now_ms) / 1000,
+            self._start_expiry_reconcile,
+            room,
+        )
+        return True
 
     def _call_room_owners(self) -> _CallRoomOwners:
         return _CallRoomOwners(
@@ -972,14 +1018,14 @@ class CallManager:
         if isinstance(response, nio.RoomGetStateError):
             logger.warning("call_state_fetch_failed", room_id=room_id, error=response.message)
             return None
-        joined_user_ids = {
+        joined_user_ids = frozenset(
             raw_event["state_key"]
             for raw_event in response.events
             if raw_event.get("type") == "m.room.member"
             and isinstance(raw_event.get("state_key"), str)
             and isinstance(raw_event.get("content"), dict)
             and raw_event["content"].get("membership") == "join"
-        }
+        )
         now_ms = self._clock_ms()
         members = []
         for raw_event in response.events:
@@ -994,7 +1040,7 @@ class CallManager:
         agent_call_events = tuple(
             event for event in response.events if event.get("type") == AGENT_CALL_STATE_EVENT_TYPE
         )
-        return _RoomCallState(members=members, agent_call_events=agent_call_events)
+        return _RoomCallState(members=members, agent_call_events=agent_call_events, joined_user_ids=joined_user_ids)
 
     async def _join(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
