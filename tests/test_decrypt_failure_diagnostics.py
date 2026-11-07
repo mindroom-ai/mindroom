@@ -50,7 +50,7 @@ async def test_waiting_diagnostic_cannot_settle_a_decrypted_request(
     async def request(event: nio.MegolmEvent) -> None:
         requests.append((event.room_id, event.event_id))
 
-    async def notify(_client: nio.AsyncClient, room_id: str) -> bool:
+    async def notify(_client: nio.AsyncClient, room_id: str, _event: nio.MegolmEvent) -> bool:
         notices.append(room_id)
         return True
 
@@ -108,7 +108,7 @@ async def test_diagnostic_uses_current_access_and_original_tenure(
     async def request(event: nio.MegolmEvent) -> None:
         requests.append(event.event_id)
 
-    async def notify(_client: nio.AsyncClient, room_id: str) -> bool:
+    async def notify(_client: nio.AsyncClient, room_id: str, _event: nio.MegolmEvent) -> bool:
         notices.append(room_id)
         return True
 
@@ -152,7 +152,7 @@ async def test_diagnostic_rechecks_access_after_requesting_key(
         started.set()
         await release.wait()
 
-    async def notify(_client: nio.AsyncClient, room_id: str) -> bool:
+    async def notify(_client: nio.AsyncClient, room_id: str, _event: nio.MegolmEvent) -> bool:
         notices.append(room_id)
         return True
 

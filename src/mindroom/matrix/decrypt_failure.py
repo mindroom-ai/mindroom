@@ -23,6 +23,8 @@ from nio.exceptions import LocalProtocolError
 
 from mindroom.constants import tracking_dir
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.message_builder import build_message_content
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -132,14 +134,22 @@ def _forget_notice_sent(runtime_paths: RuntimePaths, room_id: str, session_id: s
         _write_notice_ledger(ledger_path, entries)
 
 
-async def _send_decrypt_failure_notice(client: nio.AsyncClient, room_id: str) -> bool:
+async def _send_decrypt_failure_notice(client: nio.AsyncClient, room_id: str, event: nio.MegolmEvent) -> bool:
     # why-lazy: client_delivery imports Matrix formatting helpers that import config at module import time.
     from mindroom.matrix.client_delivery import send_message_result  # noqa: PLC0415
 
+    # Reply where an agent reply would go: clients that list threads hide room-level notices.
+    event_info = EventInfo.from_event(event.source)
+    thread_id = event_info.thread_id or (event.event_id if event_info.can_be_thread_root else None)
     delivered = await send_message_result(
         client,
         room_id,
-        {"msgtype": "m.notice", "body": _DECRYPT_FAILURE_NOTICE_BODY},
+        build_message_content(
+            _DECRYPT_FAILURE_NOTICE_BODY,
+            thread_event_id=thread_id,
+            reply_to_event_id=event.event_id,
+            extra_content={"msgtype": "m.notice"},
+        ),
         operation="decrypt_failure_notice",
     )
     return delivered is not None
@@ -199,7 +209,7 @@ async def handle_decrypt_failure(
     _record_notice_sent(runtime_paths, room.room_id, session_id)
     delivered = False
     try:
-        delivered = await _send_decrypt_failure_notice(client, room.room_id)
+        delivered = await _send_decrypt_failure_notice(client, room.room_id, event)
     finally:
         if not delivered:
             _forget_notice_sent(runtime_paths, room.room_id, session_id)
