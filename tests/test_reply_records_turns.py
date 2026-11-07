@@ -316,6 +316,48 @@ async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: 
     assert not await bot._reply_runtime.store.is_pending("$event")
 
 
+async def test_a_progress_edit_written_ahead_after_a_stop_commits_is_never_sent(tmp_path: Path) -> None:
+    """Only the Stop's note follows a committed Stop: an edit prepared before it is refused, not sent."""
+    bot = await _streaming_bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    write_ahead = ReplyStore.write_ahead
+    hold = _FirstCallHold()
+
+    async def held_write_ahead(self: ReplyStore, **kwargs: object) -> object:
+        # The edit carrying the later words reaches the records only once the Stop committed.
+        if "words after it" in str(kwargs["shown"]):
+            await hold.wait_if_first()
+        return await write_ahead(self, **kwargs)  # type: ignore[arg-type]
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Partial"
+        await _wait_until_sent(bot, "Partial")
+        yield " and the words after it"
+        await asyncio.Event().wait()
+        yield "never"
+
+    with (
+        patch.object(ReplyStore, "write_ahead", new=held_write_ahead),
+        patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(hold.holding.wait(), timeout=5)
+        reply = await _reply(bot)
+        assert reply.event_id is not None
+        stop = await _stop(bot, reply.event_id, 7)
+        hold.release.set()
+        await asyncio.wait_for(response, timeout=5)
+        assert await asyncio.wait_for(stop, timeout=5)
+
+    assert not any("words after it" in body for body in _sent_bodies(bot))
+    assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
+    assert (await _reply(bot)).state is rl.ReplyState.CANCELLED
+
+
 @pytest.mark.parametrize(
     ("ending", "note"),
     [
