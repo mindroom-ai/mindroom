@@ -1362,7 +1362,10 @@ class _MultiAgentOrchestrator:
                     await self._reconcile_post_update_rooms(plan, changed_entities)
                 except Exception:
                     # The new config is published, so what serves it still binds when its rooms could not be settled.
-                    await self._finalize_config_reload(current_config, plan, changed_entities | plan.live_updated)
+                    try:
+                        await self._finalize_config_reload(current_config, plan, changed_entities | plan.live_updated)
+                    except Exception:
+                        logger.exception("config_reload_finalize_failed_after_room_setup_failed")
                     raise
                 if start_results.permanently_failed_entities:
                     logger.warning(

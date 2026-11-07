@@ -482,6 +482,7 @@ class _TaskRunner:
                 self.task_id,
                 bot.hook_context.matrix_admin(),
                 occurrence=occurrence,
+                owner_stopped=lambda: bot in self.runtime._fenced,
             )
 
     async def _send_failure_notice(self, target: MessageTarget, message: str) -> None:
@@ -575,43 +576,48 @@ class _TaskRunner:
         approval_state: ScheduledApprovalArmState = "none"
         try:
             while True:
-                latest_task = await self._runnable_task()
-                if not latest_task:
-                    with bound_log_context(**current_target.log_context):
-                        logger.info("One-time task is no longer pending, stopping", task_id=task_id)
-                    return
-
-                workflow = latest_task.workflow
-                current_target = MessageTarget.for_scheduled_task(workflow)
-                with bound_log_context(**current_target.log_context):
-                    execute_at = workflow.execute_at
-                    if not execute_at:
-                        logger.error("No execution time provided for one-time task", task_id=task_id)
+                while True:
+                    latest_task = await self._runnable_task()
+                    if not latest_task:
+                        with bound_log_context(**current_target.log_context):
+                            logger.info("One-time task is no longer pending, stopping", task_id=task_id)
                         return
 
-                    delay = (execute_at - datetime.now(UTC)).total_seconds()
-                    if delay <= 0:
-                        break
-                    await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
+                    workflow = latest_task.workflow
+                    current_target = MessageTarget.for_scheduled_task(workflow)
+                    with bound_log_context(**current_target.log_context):
+                        execute_at = workflow.execute_at
+                        if not execute_at:
+                            logger.error("No execution time provided for one-time task", task_id=task_id)
+                            return
 
-            latest_pending_task = latest_task
-            with bound_log_context(**current_target.log_context):
-                approval_state = (
-                    await _arm_scheduled_call(task_id, workflow, self.runtime.config_provider())
-                    if workflow.pre_approved_call
-                    else "none"
-                )
-                if approval_state == "denied":
-                    logger.info("scheduled_tool_call_skipped_after_denial", task_id=task_id)
-                    final_status = "cancelled"
-                else:
-                    outcome = await self._execute(workflow)
-                    if approval_state == "armed" and outcome.status != "delivered":
-                        await _withdraw_unsent_scheduled_call(task_id)
-                    final_status = "completed" if outcome.status == "delivered" else "failed"
+                        delay = (execute_at - datetime.now(UTC)).total_seconds()
+                        if delay <= 0:
+                            break
+                        await asyncio.sleep(min(delay, _TASK_STATE_POLL_INTERVAL_SECONDS))
 
-                # After a send, only the status write is retried; the send never repeats.
-                await self._save_status(latest_pending_task, final_status)
+                latest_pending_task = latest_task
+                with bound_log_context(**current_target.log_context):
+                    approval_state = (
+                        await _arm_scheduled_call(task_id, workflow, self.runtime.config_provider())
+                        if workflow.pre_approved_call
+                        else "none"
+                    )
+                    if approval_state == "denied":
+                        logger.info("scheduled_tool_call_skipped_after_denial", task_id=task_id)
+                        final_status = "cancelled"
+                    else:
+                        outcome = await self._execute(workflow)
+                        if outcome.status == "retry":
+                            # Its owner stopped under the send; the replacement sends it under the same transaction ID.
+                            continue
+                        if approval_state == "armed" and outcome.status != "delivered":
+                            await _withdraw_unsent_scheduled_call(task_id)
+                        final_status = "completed" if outcome.status == "delivered" else "failed"
+
+                    # After a delivered or failed send, only the status write is retried; the send never repeats.
+                    await self._save_status(latest_pending_task, final_status)
+                return
         except asyncio.CancelledError:
             with bound_log_context(**current_target.log_context):
                 logger.info("one_time_task_cancelled", task_id=task_id)

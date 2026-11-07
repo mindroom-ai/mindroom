@@ -60,6 +60,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_presentation, render_body
 from mindroom.response_sources import Owned, SourceFate
+from mindroom.streaming import _flush_phase_boundary_if_needed
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
@@ -807,10 +808,13 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
     tool, which never runs. The flush reaches the reply's records only after the
     Stop committed, so it is not sent and the note goes below what the room showed.
     """
-    turn_requested_tool = asyncio.Event()
+    flushing = asyncio.Event()
 
-    async def tool_requested() -> None:
-        turn_requested_tool.set()
+    async def flush_behind_hold(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        flushing.set()
+        await _flush_phase_boundary_if_needed(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.streaming._flush_phase_boundary_if_needed", flush_behind_hold)
 
     async def wait_for_hold() -> None:
         await turn.homeserver.held.wait()
@@ -819,7 +823,6 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
         TextDelta("Partial "),
         Await(wait_for_hold),
         *calls(tool_call("echo", "call-1", text="hi"), content="answer"),
-        Await(tool_requested),
     ]
     turn = await _turn(
         tmp_path,
@@ -831,7 +834,8 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
     )
     turn.homeserver.hold_text = "Partial"
     response = asyncio.create_task(turn.runner.generate_response(_plain_request(_target())))
-    await asyncio.wait_for(turn_requested_tool.wait(), timeout=10)
+    # The Stop must land once the tool start reached the stream consumer, not merely once the model asked for the tool.
+    await asyncio.wait_for(flushing.wait(), timeout=10)
 
     assert await _stop(turn)
     turn.homeserver.release.set()

@@ -4085,29 +4085,17 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
             lease_active = False
             events.append("exit")
 
-    def _fake_worker_route(
-        *,
-        runtime_paths: RuntimePaths,
-        runtime_config: Config | None,
-        tool_name: str,
-        function_name: str,
-        worker_target: ResolvedWorkerTarget | None,
-        worker_manager: object | None = None,
-        base_dir: str | None,
-        progress_sink: object = None,
-    ) -> tuple[WorkerRoute, WorkerHandle | None]:
-        _ = runtime_config, worker_target, base_dir, progress_sink
-        assert runtime_paths is not None
-        assert tool_name == "calculator"
-        assert function_name == "add"
-        assert worker_manager is worker_manager_ref
+    def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None]:  # noqa: ANN401
+        assert route["runtime_paths"] is not None
+        assert route["tool_name"] == "calculator"
+        assert route["function_name"] == "add"
+        assert route["worker_manager"] is worker_manager
         events.append("build")
         return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle
 
     def _fake_lease_primary_worker_manager(*_args: object, **_kwargs: object) -> _FakeLease:
         return _FakeLease()
 
-    worker_manager_ref = worker_manager
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
     monkeypatch.setattr(sandbox_proxy_module, "_worker_route", _fake_worker_route)
     monkeypatch.setattr(
@@ -4191,28 +4179,16 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
             lease_active = False
             events.append("exit")
 
-    def _fake_worker_route(
-        *,
-        runtime_paths: RuntimePaths,
-        runtime_config: Config | None,
-        tool_name: str,
-        function_name: str,
-        worker_target: ResolvedWorkerTarget | None,
-        worker_manager: object | None = None,
-        base_dir: str | None,
-        progress_sink: object = None,
-    ) -> tuple[WorkerRoute, WorkerHandle | None]:
-        _ = runtime_paths, runtime_config, worker_target, base_dir, progress_sink
-        assert tool_name == "calculator"
-        assert function_name == "add"
-        assert worker_manager is worker_manager_ref
+    def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None]:  # noqa: ANN401
+        assert route["tool_name"] == "calculator"
+        assert route["function_name"] == "add"
+        assert route["worker_manager"] is worker_manager
         events.append("build")
         return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle
 
     def _fake_lease_primary_worker_manager(*_args: object, **_kwargs: object) -> _FakeLease:
         return _FakeLease()
 
-    worker_manager_ref = worker_manager
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
     monkeypatch.setattr(sandbox_proxy_module, "_worker_route", _fake_worker_route)
     monkeypatch.setattr(
