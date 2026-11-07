@@ -337,7 +337,8 @@ calls:
 
 Speech-to-text uses the voice-message settings under [`voice.stt`](https://docs.mindroom.chat/voice/#configuration-reference), by default OpenAI's `gpt-transcribe` with the `openai` credential, whether or not `voice.enabled` is on.
 Changes to these settings apply to the next stretch of speech or call, without a restart.
-Turning `calls.transcripts.enabled` off ends calls in progress and drops the lines of every call whose message is not yet posted; while it is off, MindRoom reads and posts nothing in Matrix for calls.
+Turning `calls.transcripts.enabled` off stops all reading and posting in Matrix for calls at once and changes nothing else, except that a call not heard from for a day ends then, and a message still not posted a day after its call's end is dropped along with the call's lines.
+Turned back on within that day, calls carry on as usual: a call nobody checked in to for a minute, as nobody can while it is off, ends at its last check-in and posts its message.
 Configuration loading fails with `calls.transcripts.notes_model references unknown model: <name>` when the notes model is not in `models`.
 MindRoom Chat finds MindRoom as it does for [worker computers](https://docs.mindroom.chat/tools/worker-computer/) and signs in with a client session, so the homeserver must bind OpenID tokens to this deployment (see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)), and Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`; otherwise calls go on without transcripts.
 
@@ -358,22 +359,22 @@ The rules:
 - A check-in from someone already in the call counts even while MindRoom cannot read the room and answers 503, so a router restart or a homeserver outage ends no call; someone who has left the room is out of the call at their first request once it can be read.
 - Leaving from one device takes the person out of the call; their other device in the call rejoins with its next check-in.
 - Only people whose MindRoom Chat takes part are in the call: people in it from other Matrix apps are neither listed nor transcribed.
-- A call ends when nobody is in it, checked when someone leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
-- A call's length runs to the last check-in or leave of anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down still shows how long it really lasted.
+- A call ends when nobody is in it, checked when someone joins or leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
+- A call's length runs to the last check-in or leave MindRoom recorded from anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down shows as shorter than it really was.
 - A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
 - A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed, and at most 240 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
 - A stretch said before the call ended that arrives late is still added if it arrives within 20 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
 - Notes that fail are tried once more a minute later; after that, the message is posted without notes.
-- A message that cannot be posted is tried again every minute, with any notes already written, for up to a day after the call.
-- A call in which nobody spoke posts no message; one in which people spoke but nothing could be transcribed posts `Call · N min. Nothing could be transcribed.` without a transcript.
+- A message that cannot be posted is tried again every minute for up to a day after the call, with any notes already written until MindRoom restarts; after a restart, new notes may be written, or the message posted without notes.
+- A call in which nobody spoke, or speech-to-text heard no words, posts no message; one without words but with a stretch that failed to transcribe posts `Call · N min. Nothing could be transcribed.` without a transcript.
 
 Privacy:
 
 - Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
 - MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
 - Redacting the message removes it from the room, but a transcript too large for one event leaves its sidecar file in the homeserver's media store until the homeserver's operator purges it, and clients may keep copies they already loaded.
-- A message that cannot be posted, because the router has left the room or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
+- A message that cannot be posted, because the router has left the room or may not post in it, or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
 - Speech-to-text and notes count as internal AI work under `call_transcript` in [usage](https://docs.mindroom.chat/usage/#token-usage).
 
 ### Routes for clients
