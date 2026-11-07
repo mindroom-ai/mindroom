@@ -170,8 +170,9 @@ The `browser` provider identifies tabs by stable target IDs, while `browser_mcp`
 ## Page stream
 
 Instead of the whole desktop, a client can show just the agent's browser page as a stream of JPEG frames, which is lighter and fits a side panel.
-The stream shows the active tab of the `browser` tool's browser in the Computer, and moves to another tab within about a second when the agent does, without reconnecting.
-Until that browser starts, and after it closes, the stream has no page and sends no frames.
+The stream shows the tab the agent's `browser` tool works in, and moves within about a second when the agent switches tabs or profiles, without reconnecting.
+Until the agent's browser starts, and after it closes, the stream has no page and sends no frames.
+A tab or window that a page opens itself, such as a sign-in popup, appears in the stream only once the agent switches to it; until then, use the desktop stream to work in it.
 `browser_mcp` runs its browser in another process, so its page cannot be streamed; use the desktop stream with it.
 Watching needs no control; input needs **Take control**, which pauses the agent's browser calls as it does for the desktop.
 
@@ -195,8 +196,8 @@ The client sends JSON text messages of at most 64 KiB; a binary message closes t
 | --- | --- |
 | `{"type": "mouse", "event": "down" \| "up" \| "move", "x", "y", "button", "buttons", "clicks", "modifiers"}` | A pointer event at CSS pixel `x`, `y`. `button` is `none`, `left`, `middle`, `right`, `back` or `forward`; `buttons` is the DOM bitmask. |
 | `{"type": "wheel", "x", "y", "dx", "dy", "modifiers"}` | Scrolls by `dx`, `dy` CSS pixels. |
-| `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "text", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held. |
-| `{"type": "text", "text"}` | Inserts text, such as a paste or an IME composition. |
+| `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "text", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held; set `text` to type a character anyway, such as one typed with AltGr. |
+| `{"type": "text", "text"}` | Inserts up to 16384 characters of text, such as a paste or an IME composition. |
 
 `modifiers` is a bitmask: Alt 1, Control 2, Meta 4, Shift 8.
 The browser runs on Linux, so editing shortcuts use Control; a client on macOS sends Control for Command.

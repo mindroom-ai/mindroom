@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from playwright.async_api import Error as PlaywrightError
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from mindroom.worker_computer.protocol import MAX_SCREENCAST_FRAME_BYTES
+from mindroom.worker_computer.protocol import MAX_WORKER_STREAM_MESSAGE_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -27,8 +27,10 @@ if TYPE_CHECKING:
     from playwright.async_api import CDPSession, Page
 
 _POLL_SECONDS = 1.0
+# A page its script froze never answers input, so releasing what a leaving viewer holds gives up after this.
+_RELEASE_SECONDS = 2.0
 _JPEG_QUALITY = 80
-# Chromium scales frames down to fit, which keeps every frame below MAX_SCREENCAST_FRAME_BYTES.
+# Chromium scales frames down to fit, which keeps every frame below MAX_WORKER_STREAM_MESSAGE_BYTES.
 _MAX_FRAME_WIDTH = 1920
 _MAX_FRAME_HEIGHT = 1200
 _MAX_COORDINATE = 16384
@@ -212,7 +214,7 @@ class ScreencastViewer:
             cdp, params = frame
             jpeg = base64.b64decode(params["data"])
             viewport = (round(params["metadata"]["deviceWidth"]), round(params["metadata"]["deviceHeight"]))
-            if len(jpeg) <= MAX_SCREENCAST_FRAME_BYTES:
+            if len(jpeg) <= MAX_WORKER_STREAM_MESSAGE_BYTES:
                 if viewport != self._viewport:
                     self._viewport = viewport
                     await self._send_text(json.dumps({"type": "viewport", "width": viewport[0], "height": viewport[1]}))
@@ -286,13 +288,14 @@ class ScreencastViewer:
             return
         buttons, keys = self._buttons, self._keys
         self._buttons, self._keys = set(), {}
-        with suppress(PlaywrightError):
-            for button in buttons:
-                await cdp.send(
-                    "Input.dispatchMouseEvent",
-                    {"type": "mouseReleased", "x": self._pointer[0], "y": self._pointer[1], "button": button},
-                )
-            for key in keys.values():
-                await cdp.send("Input.dispatchKeyEvent", _key_event(key.model_copy(update={"event": "up"})))
+        with suppress(PlaywrightError, TimeoutError):
+            async with asyncio.timeout(_RELEASE_SECONDS):
+                for button in buttons:
+                    await cdp.send(
+                        "Input.dispatchMouseEvent",
+                        {"type": "mouseReleased", "x": self._pointer[0], "y": self._pointer[1], "button": button},
+                    )
+                for key in keys.values():
+                    await cdp.send("Input.dispatchKeyEvent", _key_event(key.model_copy(update={"event": "up"})))
         with suppress(PlaywrightError):
             await cdp.detach()

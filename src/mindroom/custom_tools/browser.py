@@ -340,6 +340,8 @@ class _BrowserSession:
     """
 
     profiles: dict[str, _BrowserProfileState] = field(default_factory=dict)
+    # The profile whose tab a worker display shows in front, which the agent used last.
+    front: _BrowserProfileState | None = None
     startup_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -712,9 +714,11 @@ class BrowserTools(Toolkit):
         self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
 
     def worker_active_page(self) -> Page | None:
-        """Return the page a worker computer's browser shows: the active tab of the profile started last."""
-        for state in reversed(self._worker_session.profiles.values()):
-            tab = state.tabs.get(state.active_target_id or "")
+        """Return the page a worker computer's browser shows: the active tab of the profile the agent used last."""
+        session = self._worker_session
+        # A stopped profile has no tabs, so the active tab of the profile started last stands in for it.
+        for state in (session.front, *reversed(session.profiles.values())):
+            tab = None if state is None else state.tabs.get(state.active_target_id or "")
             if tab is not None:
                 return tab.page
         return None
@@ -1281,6 +1285,7 @@ class BrowserTools(Toolkit):
         # The new tab is current before it loads, so a later call without targetId reaches it even if loading fails.
         if self._worker_display is not None:
             await page.bring_to_front()
+            self._session.front = state
         state.active_target_id = target_id
         if html is not None:
             # Content on about:blank, unlike a file:// page, cannot load or navigate to other local files.
@@ -1900,6 +1905,7 @@ class BrowserTools(Toolkit):
             tab = state.tabs[self._register_tab(state, await state.context.new_page())]
         if self._worker_display is not None:
             await tab.page.bring_to_front()
+            self._session.front = state
         state.active_target_id = tab.target_id
         return tab.target_id, tab
 

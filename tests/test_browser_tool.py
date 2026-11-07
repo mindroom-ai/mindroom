@@ -3236,11 +3236,11 @@ async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_h
 
 
 @pytest.mark.asyncio
-async def test_worker_active_page_is_the_active_tab_of_the_last_started_profile(
+async def test_worker_active_page_is_the_active_tab_of_the_profile_the_agent_used_last(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A computer's screencast shows the tab the agent made active, in the profile it started last, while it is open."""
+    """A computer's screencast shows the tab the agent made active, in the profile it used last, while it is open."""
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     browser = BrowserTools(paths)
     browser.bind_worker_display(":99", tmp_path / "workspace")
@@ -3252,7 +3252,11 @@ async def test_worker_active_page_is_the_active_tab_of_the_last_started_profile(
     assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/second"
     await browser.browser("focus", targetId=first["targetId"])
     assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/first"
-    await browser.browser("open", profile="work", targetUrl="https://example.org/work")
+    work = json.loads(await browser.browser("open", profile="work", targetUrl="https://example.org/work"))
+    assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/work"
+    await browser.browser("focus", targetId=first["targetId"])
+    assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/first"
+    await browser.browser("focus", profile="work", targetId=work["targetId"])
     assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/work"
     await browser.browser("stop", profile="work")
     assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/first"

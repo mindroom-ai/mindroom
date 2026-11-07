@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 
 # The WebSocket subprotocol of a screencast of the agent's browser page, on both the public and the worker hop.
 SCREENCAST_PROTOCOL = "mindroom-screencast"
-# A screencast frame is one JPEG of the page, scaled to fit 1920x1200 pixels.
-MAX_SCREENCAST_FRAME_BYTES = 4 * 1024 * 1024
+# A worker stream message is a chunk of the desktop's RFB stream or one JPEG frame of a screencast.
+MAX_WORKER_STREAM_MESSAGE_BYTES = 4 * 1024 * 1024
 # Viewer messages are JSON input events; inserted text is the largest.
 MAX_SCREENCAST_MESSAGE_BYTES = 64 * 1024
 

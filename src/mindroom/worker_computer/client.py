@@ -10,7 +10,7 @@ import aiohttp
 from pydantic import TypeAdapter, ValidationError
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
-from mindroom.worker_computer.protocol import MAX_SCREENCAST_FRAME_BYTES, SCREENCAST_PROTOCOL, ComputerStatus
+from mindroom.worker_computer.protocol import MAX_WORKER_STREAM_MESSAGE_BYTES, SCREENCAST_PROTOCOL, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ async def computer_stream(
                 headers=_headers(handle),
                 params={"session_id": session_id, "generation": generation},
                 protocols=(protocol,),
-                max_msg_size=MAX_SCREENCAST_FRAME_BYTES if screencast else 4 * 1024 * 1024,
+                max_msg_size=MAX_WORKER_STREAM_MESSAGE_BYTES,
                 autoclose=True,
             ) as websocket:
                 yield websocket

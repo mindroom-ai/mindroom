@@ -22,8 +22,8 @@ from mindroom.api.worker_computer import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.worker_computer.protocol import (
-    MAX_SCREENCAST_FRAME_BYTES,
     MAX_SCREENCAST_MESSAGE_BYTES,
+    MAX_WORKER_STREAM_MESSAGE_BYTES,
     SCREENCAST_PROTOCOL,
     BrowserSession,
 )
@@ -209,6 +209,8 @@ class _FakeSession:
         self.acknowledged: asyncio.Queue[int] = asyncio.Queue()
         # A frame Chromium had in flight when the viewer detached, delivered during the detach.
         self.frame_on_detach: bytes | None = None
+        # A page its script froze, whose input calls never return.
+        self.frozen = False
 
     def on(self, event: str, handler: object) -> None:
         assert event == "Page.screencastFrame"
@@ -216,6 +218,8 @@ class _FakeSession:
 
     async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.sent.append((method, params))
+        if self.frozen and method.startswith("Input."):
+            await asyncio.Event().wait()
         if method == "Page.startScreencast":
             self.screencasting.set()
         if method == "Page.screencastFrameAck":
@@ -265,7 +269,7 @@ async def test_slow_viewer_gets_the_newest_frame_and_chromium_every_acknowledgem
         fake.session.frame(2, b"second")
         assert await sent.frame() == b"second"
         assert [await acknowledged(), await acknowledged()] == [1, 2]
-        fake.session.frame(3, b"x" * (MAX_SCREENCAST_FRAME_BYTES + 1))
+        fake.session.frame(3, b"x" * (MAX_WORKER_STREAM_MESSAGE_BYTES + 1))
         assert await acknowledged() == 3
         fake.session.frame(4, b"fourth")
         assert await sent.frame() == b"fourth"
@@ -294,6 +298,24 @@ async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() 
         assert ("detach", None) in old.session.sent
         new.session.frame(1, b"new")
         assert await sent.frame() == b"new"
+
+
+@pytest.mark.asyncio
+async def test_a_page_frozen_by_its_script_cannot_hold_a_leaving_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Releasing what a leaving viewer holds gives up on a page that never answers, and the viewer still detaches."""
+    monkeypatch.setattr("mindroom.worker_computer.screencast._RELEASE_SECONDS", 0.05)
+    fake = _FakePage()
+    sent = _Viewer()
+    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: True, sent.send_text, sent.send_bytes)
+    follow = asyncio.create_task(viewer.follow())
+    await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
+    await viewer.receive(json.dumps({"type": "mouse", "event": "down", "x": 1, "y": 1, "button": "left"}))
+    fake.session.frozen = True
+    follow.cancel()
+    await asyncio.gather(follow, return_exceptions=True)
+    await asyncio.wait_for(viewer.close(), _TIMEOUT)
+    assert fake.session.sent[-2][0] == "Input.dispatchMouseEvent"
+    assert fake.session.sent[-1] == ("detach", None)
 
 
 def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control_lease(tmp_path: Path) -> None:
