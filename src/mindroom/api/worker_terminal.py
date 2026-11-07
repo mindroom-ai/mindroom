@@ -72,11 +72,7 @@ def _terminals(app: FastAPI) -> TerminalManager:
 
 async def close_worker_terminals(app: FastAPI) -> None:
     """End this runner's terminals as it stops."""
-    try:
-        manager: TerminalManager = app.state.worker_terminals
-    except AttributeError:
-        return
-    await manager.close_all()
+    await _terminals(app).close_all()
 
 
 def _refusal(error: TerminalError) -> HTTPException:
@@ -126,16 +122,11 @@ async def _viewer_input(websocket: WebSocket, session: TerminalSession) -> None:
 async def _viewer_output(websocket: WebSocket, scrollback: bytes, viewer: TerminalViewer) -> None:
     if scrollback:
         await websocket.send_bytes(scrollback)
-    while True:
-        event = await viewer.next()
-        if event.type == "output":
-            await websocket.send_bytes(event.data)
-        elif event.type == "exit":
-            await websocket.send_json({"type": "exit", "code": event.code})
-            return
-        else:
-            # Dropped: closing without an exit frame tells the viewer to attach again.
-            return
+    while (event := await viewer.next()).type == "output":
+        await websocket.send_bytes(event.data)
+    # A dropped viewer gets no exit frame, which tells it to attach again.
+    if event.type == "exit":
+        await websocket.send_json({"type": "exit", "code": event.code})
 
 
 @router.websocket("/sessions/{session_id}/io")

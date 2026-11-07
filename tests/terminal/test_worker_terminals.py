@@ -102,12 +102,12 @@ def _primary_paths(tmp_path: Path, runner_url: str) -> RuntimePaths:
     )
 
 
-def _shell(paths: RuntimePaths, agent_name: str = "code") -> AnyToolkit:
+def _shell(paths: RuntimePaths) -> AnyToolkit:
     """Build the agent's worker-routed shell toolkit as a reply to ``_IDENTITY`` builds it."""
-    config = Config(agents={agent_name: AgentConfig(display_name=agent_name.title(), tools=["shell"])})
+    config = Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])})
     toolkit = build_agent_toolkit(
         "shell",
-        agent_tools=resolve_agent_tools(config, agent_name, builtin_tool_registry()),
+        agent_tools=resolve_agent_tools(config, "code", builtin_tool_registry()),
         placement=tool_placement(paths, builtin_tool_registry()),
         runtime_paths=paths,
         execution_identity=_IDENTITY,
@@ -130,8 +130,9 @@ async def _run_shell_command(toolkit: AnyToolkit, command: str) -> str:
     return result
 
 
-async def _read_until(stream: TerminalStream, marker: bytes, seen: bytes = b"") -> bytes:
-    """Return ``seen`` and the output until ``marker``, which a command's echo never holds."""
+async def _read_until(stream: TerminalStream, marker: bytes) -> bytes:
+    """Return the output until ``marker``, which a command's echo never holds."""
+    seen = b""
     async with asyncio.timeout(20):
         while marker not in seen:
             event = await stream.receive()
@@ -252,10 +253,14 @@ async def test_a_viewer_that_falls_too_far_behind_is_told_to_attach_again(
 
 
 async def test_a_terminal_answers_only_the_agent_and_workspace_it_serves(tmp_path: Path, runner: str) -> None:
-    """Another agent's terminals are its own; a session ID names only a session; a terminal starts in the workspace."""
-    paths = _primary_paths(tmp_path, runner)
-    terminals = _terminals(_shell(paths))
-    other = _terminals(_shell(paths, "other"))
+    """Another agent's terminals are its own, even where its calls reach the same worker and workspace.
+
+    A session ID names only a session, a terminal starts in the workspace, and a request the runner refuses says why.
+    """
+    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    target = terminals.stand_ins.worker_target
+    assert target is not None
+    other = WorkerTerminals(replace(terminals.stand_ins, worker_target=replace(target, routing_agent_name="other")))
     info = await terminals.open()
 
     assert await other.sessions() == []
@@ -272,6 +277,10 @@ async def test_a_terminal_answers_only_the_agent_and_workspace_it_serves(tmp_pat
         with pytest.raises(TerminalError) as outside:
             await terminals.open(cwd=cwd)
         assert outside.value.status_code == 400
+    with pytest.raises(TerminalError) as invalid:
+        await terminals.open(cols=0)
+    assert invalid.value.status_code == 422
+    assert invalid.value.detail.startswith("body.cols: ")
 
     (agent_workspace_root_path(tmp_path / "storage", "code") / "sub").mkdir()
     inside = await terminals.open(cwd="sub")
@@ -287,9 +296,6 @@ async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str)
     async with aiohttp.ClientSession() as client:
         async with client.get(sessions, params={"owner": "x"}) as response:
             assert response.status == 401
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            await client.ws_connect(f"{sessions}/abc/io", params={"owner": "x"})
-        assert refused.value.status == 403
         body = {"request": {"protocol": 1, "tool_name": "python", "function_name": "run_python_code"}}
         async with client.post(
             sessions,
@@ -303,10 +309,9 @@ async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str)
 
 async def test_a_terminal_s_stream_needs_the_runner_token_even_with_its_owner(tmp_path: Path, runner: str) -> None:
     """Knowing a terminal's ID and owner is not enough to attach to it without the runner token."""
-    stand_ins = toolkit_worker_stand_ins(_shell(_primary_paths(tmp_path, runner)))
-    assert stand_ins is not None
-    info = await WorkerTerminals(stand_ins).open()
-    call = worker_call(stand_ins, "run_shell_command", start=False)
+    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    info = await terminals.open()
+    call = worker_call(terminals.stand_ins, "run_shell_command", start=False)
     assert call is not None
     stream = f"{call.api_root}/terminal/sessions/{info.id}/io"
     params = {"owner": client_module._owner(call.request)}
@@ -316,17 +321,6 @@ async def test_a_terminal_s_stream_needs_the_runner_token_even_with_its_owner(tm
         assert refused.value.status == 403
         async with client.ws_connect(stream, params=params, headers=call.headers) as websocket:
             assert (await websocket.receive()).type == aiohttp.WSMsgType.BINARY
-
-
-async def test_two_agents_in_one_workspace_keep_their_own_terminals(tmp_path: Path, runner: str) -> None:
-    """An agent's terminals are its own even where another agent's calls reach the same worker and workspace."""
-    stand_ins = toolkit_worker_stand_ins(_shell(_primary_paths(tmp_path, runner)))
-    assert stand_ins is not None
-    assert stand_ins.worker_target is not None
-    other = replace(stand_ins, worker_target=replace(stand_ins.worker_target, routing_agent_name="other"))
-    await WorkerTerminals(stand_ins).open()
-
-    assert await WorkerTerminals(other).sessions() == []
 
 
 async def test_a_stopping_runner_hangs_up_its_terminals(tmp_path: Path) -> None:
@@ -376,8 +370,6 @@ async def test_an_attached_viewer_keeps_marking_the_worker_used(
 
 class _StoppedDedicatedWorkers:
     """A dedicated backend whose worker is not running: a lookup finds nothing, and nothing may start one."""
-
-    cleanup_locator = None
 
     def __init__(self) -> None:
         self.touched: list[str] = []

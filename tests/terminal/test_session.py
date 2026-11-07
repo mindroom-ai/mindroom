@@ -148,7 +148,7 @@ async def test_without_pidfds_a_session_still_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Where the platform has no pidfds, the shell's exit is still noticed."""
-    monkeypatch.delattr(os, "pidfd_open")
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
     monkeypatch.setattr(session_module, "_EXIT_POLL_SECONDS", 0.01)
     session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
     _, viewer = session.attach()

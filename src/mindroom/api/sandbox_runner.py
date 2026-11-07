@@ -1112,27 +1112,14 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
     try:
         request = _validated_execute_request(payload, tool_metadata=tools.entries)
         prepared = _prepare_execute_request(_ExecuteCall(request=request, route=route, tools=tools))
-    except HTTPException as exc:
-        raise TerminalError(400, str(exc.detail)) from None
-    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
-        raise TerminalError(400, str(exc)) from None
-    # Where /execute runs a shell call in a subprocess, the command sees that subprocess's environment.
-    in_subprocess = sandbox_exec.runner_uses_subprocess(route.runtime_paths) or route.worker_key is not None
-    process_environ = _prepare_subprocess_context(prepared).subprocess_env if in_subprocess else None
-    shell = prepared.request
-    identity = (
-        parse_tool_execution_identity_payload(shell.execution_identity)
-        if shell.execution_identity is not None
-        else None
-    )
-    try:
+        shell = prepared.request
         toolkit, _ = _resolve_entrypoint(
             runtime_paths=prepared.runtime_paths,
             config=route.config,
             tools=tools,
             tool_name=shell.tool_name,
             function_name=shell.function_name,
-            execution_identity=identity,
+            execution_identity=route.identity,
             credential_overrides=shell.credential_overrides or None,
             tool_config_overrides=shell.tool_config_overrides or None,
             tool_init_overrides=shell.tool_init_overrides or None,
@@ -1140,14 +1127,17 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
             worker_scope=shell.worker_scope,
             routing_agent_name=shell.routing_agent_name,
             private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
-            tool_output_workspace_root=(
-                Path(shell.tool_output_workspace_root) if shell.tool_output_workspace_root is not None else None
-            ),
+            tool_output_workspace_root=route.workspace,
         )
     except HTTPException as exc:
         raise TerminalError(400, str(exc.detail)) from None
+    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+        raise TerminalError(400, str(exc)) from None
     if not isinstance(toolkit, SupportsTerminalLaunch):
         raise TerminalError(400, "This shell cannot start a terminal.")
+    # Where /execute runs a shell call in a subprocess, the command sees that subprocess's environment.
+    in_subprocess = sandbox_exec.runner_uses_subprocess(route.runtime_paths) or route.worker_key is not None
+    process_environ = _prepare_subprocess_context(prepared).subprocess_env if in_subprocess else None
     call_environment = ToolEnvironment(values=shell.call_environment, path_prepend=tuple(shell.call_path_prepend))
     with collected_tool_environment(call_environment):
         return toolkit.terminal_launch(cwd, process_environ=process_environ)

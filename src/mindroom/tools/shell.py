@@ -18,6 +18,7 @@ from mindroom.constants import (
     subprocess_path_with_prepends,
     workspace_home_identity_env,
 )
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.shell.execution import run_command, shell_call_timeout
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
@@ -219,11 +220,13 @@ def _terminal_cwd(base_dir: Path | None, cwd: str | None) -> str | None:
         if cwd:
             raise TerminalError(400, "This shell has no workspace to start a terminal in.")
         return None
-    root = base_dir.expanduser().resolve()
-    resolved = (root / (cwd or "")).resolve()
-    if not resolved.is_relative_to(root) or not resolved.is_dir():
+    try:
+        folder = resolve_path_within_root(base_dir, cwd or "", symlinks="internal", strict=True)
+    except (OSError, ValueError):
+        folder = None
+    if folder is None or not folder.is_dir():
         raise TerminalError(400, "A terminal starts only in a folder inside the workspace.")
-    return str(resolved)
+    return str(folder)
 
 
 def _login_bash_command_index(args: list[str]) -> int | None:
@@ -410,6 +413,18 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 parameters=closed_parameters(self.run_shell_command, function.parameters),
             )
 
+        def _command_env(self, process_environ: Mapping[str, str] | None = None) -> dict[str, str]:
+            """Return the environment a command runs with, from ``process_environ`` (by default this process's)."""
+            return _shell_subprocess_env(
+                self._runtime_env,
+                # The call's own environment: plugin hooks' changes and the response's CLI grant.
+                call_environment=current_tool_environment(),
+                base_process_env=self._base_process_env,
+                shell_path_prepend=self._shell_path_prepend,
+                workspace_dir=self.base_dir,
+                process_environ=process_environ,
+            )
+
         def terminal_launch(
             self,
             cwd: str | None,
@@ -422,14 +437,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             reads no startup files, so it starts with exactly that environment. ``process_environ`` is the
             environment of the process a command runs from there, None for this one's.
             """
-            env = _shell_subprocess_env(
-                self._runtime_env,
-                call_environment=current_tool_environment(),
-                base_process_env=self._base_process_env,
-                shell_path_prepend=self._shell_path_prepend,
-                workspace_dir=self.base_dir,
-                process_environ=process_environ,
-            )
+            env = self._command_env(process_environ)
             env["TERM"] = "xterm-256color"
             return TerminalLaunch(
                 argv=("bash", "--noprofile", "--norc", "-i"),
@@ -484,14 +492,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
                 return "Error: timeout must be a positive number of seconds; omit it for the default limit."
-            subprocess_env = _shell_subprocess_env(
-                self._runtime_env,
-                # The call's own environment: plugin hooks' changes and the response's CLI grant.
-                call_environment=current_tool_environment(),
-                base_process_env=self._base_process_env,
-                shell_path_prepend=self._shell_path_prepend,
-                workspace_dir=self.base_dir,
-            )
+            subprocess_env = self._command_env()
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
             output_request = current_tool_output_file_request()

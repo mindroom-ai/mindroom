@@ -133,8 +133,6 @@ class TerminalViewer:
 
     def put(self, event: TerminalEvent) -> None:
         """Queue ``event``, or drop this viewer when it has fallen too far behind."""
-        if self.dropped:
-            return
         self._backlog += len(event.data)
         if self._backlog > _MAX_VIEWER_BACKLOG_BYTES:
             self.dropped = True
@@ -157,7 +155,6 @@ class TerminalSession:
         self.cols = cols
         self.rows = rows
         self.created_at = time.time()
-        self.alive = True
         self.exit_code: int | None = None
         self._process = process
         self._master_fd: int | None = master_fd
@@ -169,6 +166,11 @@ class TerminalSession:
         self._last_active = self._loop.time()
         self._loop.add_reader(master_fd, self._on_readable)
         self._exit_task = asyncio.create_task(self._wait_exit(), name=f"terminal-exit-{self.id}")
+
+    @property
+    def alive(self) -> bool:
+        """Whether the shell still runs."""
+        return self.exit_code is None
 
     @property
     def pid(self) -> int:
@@ -250,14 +252,9 @@ class TerminalSession:
     def _finish(self, code: int) -> None:
         if self._master_fd is not None:
             # What the shell wrote before it exited.
-            while True:
-                try:
-                    chunk = os.read(self._master_fd, _READ_CHUNK)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                self._on_output(chunk)
+            with contextlib.suppress(OSError):
+                while chunk := os.read(self._master_fd, _READ_CHUNK):
+                    self._on_output(chunk)
             self._loop.remove_reader(self._master_fd)
             self._loop.remove_writer(self._master_fd)
             with contextlib.suppress(OSError):
@@ -265,7 +262,6 @@ class TerminalSession:
             self._master_fd = None
         self._pending_input.clear()
         self.exit_code = code
-        self.alive = False
         self._publish(TerminalEvent("exit", code=code))
         self._viewers.clear()
 
@@ -331,21 +327,20 @@ def _spawn(launch: TerminalLaunch, *, owner: str, cols: int, rows: int) -> Termi
     try:
         _set_size(slave_fd, cols, rows)
         os.set_blocking(master_fd, False)
-        try:
-            # The shell leads a new session, and interactive Bash takes the pty as its controlling terminal.
-            process = subprocess.Popen(
-                launch.argv,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                cwd=launch.cwd,
-                env=launch.env,
-                close_fds=True,
-                start_new_session=True,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            os.close(master_fd)
-            raise TerminalError(500, f"The terminal could not start: {error}") from None
+        # The shell leads a new session, and interactive Bash takes the pty as its controlling terminal.
+        process = subprocess.Popen(
+            launch.argv,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=launch.cwd,
+            env=launch.env,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        os.close(master_fd)
+        raise TerminalError(500, f"The terminal could not start: {error}") from None
     finally:
         os.close(slave_fd)
     return TerminalSession(owner=owner, cols=cols, rows=rows, process=process, master_fd=master_fd)
