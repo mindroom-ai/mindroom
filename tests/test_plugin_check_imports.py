@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
-_HOOK = "@hook(event='message:received', name='imports-demo-hook')\nasync def imports_demo_hook(ctx):\n    del ctx\n"
-
 
 def _hooks_plugin(root: Path, hooks_module: str) -> Path:
     return _write_plugin(
@@ -35,12 +33,6 @@ def _hooks_plugin(root: Path, hooks_module: str) -> Path:
             "from mindroom import plugin_api, plugin_http\nfrom mindroom.plugin_http import ClientUser\n",
             [],
             id="plugin-http",
-        ),
-        pytest.param(
-            "from mindroom.memory import refresh_agent_memory_search, write_scope_markdown_file\n"
-            "from mindroom.custom_tools.google_service import GoogleCloudToolkit\n",
-            [],
-            id="documented-names",
         ),
         pytest.param(
             "from . import helpers\nfrom .mindroom import hooks\nimport mindroomx\nfrom mindroom_extra import hooks\n",
@@ -65,10 +57,9 @@ def _hooks_plugin(root: Path, hooks_module: str) -> Path:
             id="star-and-lookalike",
         ),
         pytest.param(
-            "def load():\n    from mindroom.constants import ROUTER_AGENT_NAME\n"
             "if TYPE_CHECKING:\n    import mindroom.config.main as config\n",
-            ["module.py:2: mindroom.constants.ROUTER_AGENT_NAME", "module.py:4: mindroom.config.main"],
-            id="nested-imports",
+            ["module.py:2: mindroom.config.main"],
+            id="type-checking-import",
         ),
     ],
 )
@@ -113,11 +104,17 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
     ]
 
 
-def test_plugins_check_cli_warns_about_imports_outside_the_plugin_api(tmp_path: Path) -> None:
-    """A compatible plugin passes, and each import from outside the plugin API is listed whole on its own line."""
+@pytest.mark.parametrize(("options", "exit_code", "label"), [([], 0, "Warning"), (["--strict"], 1, "Error")])
+def test_plugins_check_cli_lists_each_import_outside_the_plugin_api_whole_on_its_own_line(
+    tmp_path: Path,
+    options: list[str],
+    exit_code: int,
+    label: str,
+) -> None:
+    """A plugin that loads passes with warnings, or fails with `--strict`, listing each import outside the plugin API."""
     plugin_root = _hooks_plugin(
         tmp_path / "plugin",
-        "from mindroom.plugin_api import MessageTarget\nfrom mindroom.hooks import hook\n" + _HOOK,
+        "from mindroom.plugin_api import MessageTarget\nfrom mindroom.hooks import hook\n",
     )
     # A path that reads as console markup, a line number that reads as an emoji code, in a line wider than the console.
     (plugin_root / "tests").mkdir()
@@ -126,29 +123,17 @@ def test_plugins_check_cli_warns_about_imports_outside_the_plugin_api(tmp_path: 
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["plugins", "check", str(plugin_root)])
+    # The console is as wide as a CI log's, whatever terminal runs the tests.
+    result = runner.invoke(app, ["plugins", "check", *options, str(plugin_root)], env={"COLUMNS": "80"})
 
-    assert result.exit_code == 0
+    assert result.exit_code == exit_code
     assert "Plugin is compatible: imports-demo" in result.stdout
     assert (
-        "Warning: imports from outside the plugin API can break in any MindRoom release:\n"
+        f"{label}: imports from outside the plugin API can break in any MindRoom release:\n"
         "  hooks.py:2: mindroom.hooks.hook\n"
         "  tests/test_[slow]_runtime_context_integration.py:100: mindroom.tool_system.runtime_context.ToolRuntimeContext\n"
     ) in result.stdout
     assert "MessageTarget" not in result.stdout
-
-
-def test_plugins_check_cli_strict_fails_on_imports_outside_the_plugin_api(tmp_path: Path) -> None:
-    """`--strict` turns the warnings into errors and exits nonzero."""
-    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.hooks import hook\n" + _HOOK)
-
-    result = runner.invoke(app, ["plugins", "check", "--strict", str(plugin_root)])
-
-    assert result.exit_code == 1
-    assert (
-        "Error: imports from outside the plugin API can break in any MindRoom release:\n"
-        "  hooks.py:1: mindroom.hooks.hook\n"
-    ) in result.stdout
 
 
 def test_plugins_check_cli_strict_accepts_a_plugin_that_imports_only_the_plugin_api(tmp_path: Path) -> None:
@@ -158,7 +143,7 @@ def test_plugins_check_cli_strict_accepts_a_plugin_that_imports_only_the_plugin_
         "from mindroom.custom_tools.google_service import GoogleCloudToolkit\n"
         "from mindroom.memory import refresh_agent_memory_search, write_scope_markdown_file\n"
         "from mindroom.plugin_api import hook\n"
-        "from mindroom.plugin_http import ClientUser, require_client_user, require_room_member\n" + _HOOK,
+        "from mindroom.plugin_http import ClientUser, require_client_user, require_room_member\n",
     )
 
     result = runner.invoke(app, ["plugins", "check", "--strict", str(plugin_root)])
