@@ -286,27 +286,14 @@ async def test_a_turn_whose_reply_still_owes_a_row_is_ready_for_shutdown(tmp_pat
 async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: Path) -> None:
     """A Stop recorded on the reply cancels exactly its span, which writes the cancelled terminal row."""
     bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    streaming = asyncio.Event()
-
-    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        yield "Partial"
-        streaming.set()
-        await asyncio.Event().wait()
-        yield "never"
-
-    with patch_response_runner_module(
-        stream_agent_response=stream,
-        should_use_streaming=AsyncMock(return_value=True),
-        typing_indicator=_noop_typing,
-    ):
-        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
-        await asyncio.wait_for(streaming.wait(), timeout=5)
-        reply = await _reply(bot)
-        assert reply.event_id is not None
-        stop = await _stop(bot, reply.event_id, 7)
-        await asyncio.wait_for(response, timeout=5)
-        assert await asyncio.wait_for(stop, timeout=5)
+    response = await _blocked_stream(bot)
+    # A Stop keeps only what the reply already showed, so it waits for the edit that shows "Partial".
+    await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
+    reply = await _reply(bot)
+    assert reply.event_id is not None
+    stop = await _stop(bot, reply.event_id, 7)
+    await asyncio.wait_for(response, timeout=5)
+    assert await asyncio.wait_for(stop, timeout=5)
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.CANCELLED
@@ -1531,6 +1518,8 @@ async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_
     """The reply's records take the Stop at once, without waiting for the conversation or naming it on the turn."""
     bot = await _streaming_bot(tmp_path)
     response = await _blocked_stream(bot)
+    # A Stop keeps only what the reply already showed, so it waits for the edit that shows "Partial".
+    await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
     reply = await _reply(bot)
     assert reply.event_id is not None
     await _pending_turn(bot)
