@@ -200,13 +200,14 @@ async def test_a_paused_call_is_judged_by_the_alias_its_toolkit_declares(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the toolkit that declares the alias has its calls judged by the shell's rules."""
+    """Only the function the toolkit declares the alias for has its calls judged by the shell's rules."""
     register_test_tool(monkeypatch, _lines_tool())
     register_test_tool(monkeypatch, _lines_tool("other_lines", aliases={}))
     config, runtime_paths = _config(tmp_path, _shell_review())
 
     rm, ls = _paused_line("rm -rf build"), _paused_line("ls", call_id="call-2")
-    assert await _planned_asks(config, runtime_paths, "lines", rm, ls) == [True, False]
+    show_rm = _paused_line("rm -rf build", call_id="call-3", tool_name="show_line")
+    assert await _planned_asks(config, runtime_paths, "lines", rm, ls, show_rm) == [True, False, False]
     assert await _planned_asks(config, runtime_paths, "other_lines", rm) == [False]
 
 
