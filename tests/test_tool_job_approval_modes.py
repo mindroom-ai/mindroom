@@ -415,8 +415,11 @@ async def test_a_reply_told_to_pause_asks_for_no_more_approvals(
                     run_built_turn(build, config=run.config, runtime_paths=run.paths),
                     JOB_TEST_TIMEOUT,
                 )
+                jobs = await run.runtime.list_jobs(owner=run.owner, depth=0)
+                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
     assert response.status is RunStatus.completed
-    # The first call's job asks once; the call the model made after the notice runs nothing and ends the reply.
+    # The first call's job asks once; the call the model made after the notice starts no job and ends the reply.
+    assert len(jobs) == 1
     assert len(run.cards.requested) == 1
     assert len(model.requests) == 2
     assert response.tools is not None
