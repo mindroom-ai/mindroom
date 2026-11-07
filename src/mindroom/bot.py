@@ -619,6 +619,7 @@ class AgentBot:
             read_position=principal.ingestion_membership_position,
             admit_response=self._runtime_view.admission_fence,
             notice_is_fenced=self._room_lifecycle.decrypt_notice_is_fenced,
+            resolve_related_thread=self._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort,
         )
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(

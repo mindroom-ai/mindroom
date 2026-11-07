@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ from nio.durable import SyncBatch
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
-from mindroom.matrix import decrypt_failure
+from mindroom.matrix import client_delivery, decrypt_failure
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from tests.access_schema_support import with_responder_access
 from tests.journal_membership_helpers import admit_room_membership
@@ -50,7 +51,7 @@ async def test_waiting_diagnostic_cannot_settle_a_decrypted_request(
     async def request(event: nio.MegolmEvent) -> None:
         requests.append((event.room_id, event.event_id))
 
-    async def notify(_client: nio.AsyncClient, room_id: str) -> bool:
+    async def notify(_client: nio.AsyncClient, room_id: str, _event: nio.MegolmEvent, _resolve: object) -> bool:
         notices.append(room_id)
         return True
 
@@ -108,7 +109,7 @@ async def test_diagnostic_uses_current_access_and_original_tenure(
     async def request(event: nio.MegolmEvent) -> None:
         requests.append(event.event_id)
 
-    async def notify(_client: nio.AsyncClient, room_id: str) -> bool:
+    async def notify(_client: nio.AsyncClient, room_id: str, _event: nio.MegolmEvent, _resolve: object) -> bool:
         notices.append(room_id)
         return True
 
@@ -152,7 +153,7 @@ async def test_diagnostic_rechecks_access_after_requesting_key(
         started.set()
         await release.wait()
 
-    async def notify(_client: nio.AsyncClient, room_id: str) -> bool:
+    async def notify(_client: nio.AsyncClient, room_id: str, _event: nio.MegolmEvent, _resolve: object) -> bool:
         notices.append(room_id)
         return True
 
@@ -199,6 +200,75 @@ async def test_runtime_shutdown_drains_its_diagnostic(tmp_path: Path, monkeypatc
         assert not await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
         assert cleaned.is_set()
         assert await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
+    finally:
+        await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
+        await bot._journal_store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original", ["known", "unknown", "unavailable"])
+async def test_edit_notice_joins_the_edited_message_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    original: str,
+) -> None:
+    """An undecryptable edit's notice joins the edited message's thread, else falls back to a plain reply."""
+    bot = await _bot(tmp_path)
+    sent: list[dict[str, object]] = []
+    original_source = {
+        "type": "m.room.message",
+        "event_id": "$original",
+        "room_id": ROOM,
+        "sender": SENDER,
+        "origin_server_ts": 5,
+        "content": {"msgtype": "m.text", "body": "hi", "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"}},
+    }
+
+    async def request(_event: nio.MegolmEvent) -> None:
+        return None
+
+    async def send(_client: nio.AsyncClient, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+        sent.append(content)
+        return object()
+
+    async def get_event(_room_id: str, event_id: str) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
+        if original == "known" and event_id == "$original":
+            return nio.RoomGetEventResponse.from_dict(original_source)
+        return nio.RoomGetEventError("not found", "M_NOT_FOUND")
+
+    monkeypatch.setattr(bot.client, "request_room_key", request)
+    monkeypatch.setattr(bot.client, "room_get_event", get_event)
+    monkeypatch.setattr(client_delivery, "send_message_result", send)
+    if original != "unknown":
+        # "unavailable": the journal names the thread, but the homeserver cannot confirm it, so the resolver raises.
+        await bot.journal_principal().admit(
+            InboundEvent(
+                "$original",
+                ROOM,
+                "$thread",
+                EventKind.MESSAGE,
+                EventClass.ACTIONABLE,
+                SENDER,
+                5,
+                original_source,
+            ),
+        )
+    record = _ciphertext(nio.TimelineEventProvenance.LIVE)
+    edit_content = {**record.source["content"], "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"}}
+    try:
+        bot._decryption_diagnostics.schedule(replace(record, source={**record.source, "content": edit_content}))
+        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        expected = (
+            {
+                "rel_type": "m.thread",
+                "event_id": "$thread",
+                "is_falling_back": False,
+                "m.in_reply_to": {"event_id": "$cipher"},
+            }
+            if original == "known"
+            else {"io.mindroom.in_reply_to": {"event_id": "$cipher"}}
+        )
+        assert [message["m.relates_to"] for message in sent] == [expected]
     finally:
         await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
         await bot._journal_store.close()
