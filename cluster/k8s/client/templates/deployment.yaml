@@ -113,8 +113,8 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            # The image serves its build from /usr/share/nginx/html. Images that
-            # link that path to /app (v2026.11.0 does) still get these mounts.
+            # The chart's nginx config reads these files from /usr/share/nginx/html.
+            # Images that link that path to /app still get these mounts.
             - name: config
               mountPath: /usr/share/nginx/html/config.json
               subPath: {{ .Values.config.key }}
