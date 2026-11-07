@@ -161,9 +161,9 @@ class IngressHookRunner:
 
     async def apply_system_enrichment(
         self,
-        dispatch: PreparedDispatch,
         envelope: MessageEnvelope,
         *,
+        correlation_id: str,
         target_entity_name: str,
         target_member_names: tuple[str, ...] | None,
     ) -> list[EnrichmentItem]:
@@ -175,7 +175,7 @@ class IngressHookRunner:
             emit_elapsed_timing(
                 "response_payload.apply_system_enrichment",
                 started,
-                room_id=dispatch.envelope.room_id,
+                room_id=envelope.room_id,
                 target_entity_name=target_entity_name,
                 hook_registered=hook_registered,
                 enrichment_item_count=len(items),
@@ -185,7 +185,7 @@ class IngressHookRunner:
         if not hook_registered:
             return finish([])
         context = SystemEnrichContext(
-            **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
+            **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, correlation_id),
             envelope=envelope,
             target_entity_name=target_entity_name,
             target_member_names=target_member_names,
