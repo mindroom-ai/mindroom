@@ -2,8 +2,8 @@ name: Plugin fleet
 
 on:
   pull_request:
-    # Modules that define what fleet plugins import, directly or through mindroom.plugin_api, and files this workflow runs.
-    # Extend the list when a fleet plugin imports another module; pushes to main and the nightly run test every change.
+    # Modules that a fleet plugin, mindroom.plugin_api, mindroom.hooks, or mindroom.plugin_check import from, and files this workflow runs.
+    # Extend the list when one of them imports another module; pushes to main and the nightly run test every change.
     paths:
       - ".github/plugin-fleet.json"
       - ".github/workflows/plugin-ci.yml"
@@ -12,18 +12,24 @@ on:
       - "uv.lock"
       - "src/mindroom/agent_loop/helper.py"
       - "src/mindroom/attachments/**"
+      - "src/mindroom/automations/**"
       - "src/mindroom/cli/plugins.py"
       - "src/mindroom/config/**"
       - "src/mindroom/constants.py"
+      - "src/mindroom/dispatch_source.py"
+      - "src/mindroom/file_access.py"
       - "src/mindroom/history/**"
       - "src/mindroom/hooks/**"
       - "src/mindroom/judgment/**"
       - "src/mindroom/llm/provider.py"
       - "src/mindroom/logging_config.py"
       - "src/mindroom/message_target.py"
+      - "src/mindroom/oauth/**"
+      - "src/mindroom/path_confinement.py"
       - "src/mindroom/plugin_api.py"
       - "src/mindroom/plugin_check.py"
       - "src/mindroom/providers/registry.py"
+      - "src/mindroom/public_fetch.py"
       - "src/mindroom/thread_tags.py"
       - "src/mindroom/tool_system/**"
       - "src/mindroom/turn_model.py"
