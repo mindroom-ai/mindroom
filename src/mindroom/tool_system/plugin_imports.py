@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
-PLUGIN_API_VERSION = (1, 1)
+PLUGIN_API_VERSION = (1, 2)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
