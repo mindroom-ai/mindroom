@@ -15,14 +15,14 @@ from starlette.testclient import WebSocketDenialResponse
 
 from mindroom.api import config_lifecycle, main
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import _client_session_store
+from mindroom.api.client_sessions import ClientSessionStore, _client_session_store
 from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.plugin_check import check_plugin
-from mindroom.tool_system.plugin_imports import PluginValidationError
-from mindroom.tool_system.plugins import dispose_plugins, prepare_plugins, refresh_plugins
+from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION, PluginValidationError
+from mindroom.tool_system.plugins import dispose_plugins, prepare_plugins, publish_plugins, refresh_plugins
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 
 if TYPE_CHECKING:
@@ -136,11 +136,12 @@ def _write_plugin(
     *,
     name: str = "demo",
     tools_source: str | None = None,
+    **manifest_fields: object,
 ) -> Path:
-    """Write plugin ``name`` under ``tmp_path/plugins`` with the routes and tools modules given; return its root."""
+    """Write plugin ``name`` under ``tmp_path/plugins`` with the modules and manifest fields given; return its root."""
     root = tmp_path / "plugins" / name
     root.mkdir(parents=True, exist_ok=True)
-    manifest: dict[str, str] = {"name": name}
+    manifest: dict[str, object] = {"name": name, **manifest_fields}
     for kind, source in (("routes", routes_source), ("tools", tools_source)):
         if source is not None:
             manifest[f"{kind}_module"] = f"{kind}.py"
@@ -243,6 +244,102 @@ def test_unknown_plugin_404(tmp_path: Path) -> None:
     assert denied.value.json() == {"detail": "Not Found"}
 
 
+def _signed_in(app: FastAPI) -> dict[str, str]:
+    return {"Authorization": f"Bearer {_client_session_store(app).create(ALICE).token}"}
+
+
+def _server_plugin_api() -> str:
+    major, minor = PLUGIN_API_VERSION
+    return f"{major}.{minor}"
+
+
+def test_plugin_list_names_each_enabled_plugin_that_loaded_with_its_versions(tmp_path: Path) -> None:
+    """A signed-in client gets the enabled plugins that loaded, in config order, with their manifest versions only.
+
+    A disabled plugin and one that failed to load are left out, and nothing names a path, a setting, or an error.
+    A version that is not a string is left out without refusing its plugin.
+    """
+    _write_plugin(tmp_path, ROUTES, version="2.1.0", mindroom_plugin_api="1.0")
+    _write_plugin(tmp_path, None, name="plain", version=2)
+    _write_plugin(tmp_path, None, name="off", version="9.9.9")
+    _write_plugin(tmp_path, None, name="broken", tools_source="raise RuntimeError('broken secret')\n")
+    _, runtime_paths = _config(tmp_path)
+    entries = [
+        {"path": "./plugins/broken", "settings": {"api_key": "setting secret"}},
+        {"path": "./plugins/demo", "settings": {"api_key": "setting secret"}},
+        {"path": "./plugins/off", "enabled": False},
+        "./plugins/plain",
+    ]
+    config = Config.validate_with_runtime({"plugins": entries}, runtime_paths, tolerate_plugin_load_errors=True)
+    generation = prepare_plugins(config, runtime_paths)
+    assert [skipped.path for skipped in generation.skipped] == ["./plugins/broken"]
+    publish_plugins(generation)
+    app = _app(config, runtime_paths)
+
+    response = TestClient(app).get("/api/plugins", headers=_signed_in(app))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "plugin_api_version": _server_plugin_api(),
+        "plugins": [
+            {"name": "demo", "version": "2.1.0", "mindroom_plugin_api": "1.0"},
+            {"name": "plain", "version": None, "mindroom_plugin_api": None},
+        ],
+    }
+
+
+def test_plugin_list_needs_a_client_session(tmp_path: Path) -> None:
+    """Without a live client session the list answers 401 and names no plugin."""
+    _, client = _published_client(tmp_path)
+
+    for headers in ({}, {"Authorization": "Bearer nope"}, {"Authorization": "Basic abc"}):
+        response = client.get("/api/plugins", headers=headers)
+        assert (response.status_code, response.json()) == (
+            401,
+            {"detail": "Missing, invalid or expired client session."},
+        ), headers
+
+
+def test_plugin_list_is_empty_before_a_config_loads(tmp_path: Path) -> None:
+    """Before any config has loaded, the list names no plugin and no plugin route answers."""
+    _write_plugin(tmp_path, ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    app = FastAPI()
+    ensure_app_state(app).api_state = config_lifecycle.ApiState(
+        threading.Lock(),
+        config_lifecycle.ApiSnapshot(1, runtime_paths),
+    )
+    mount_plugin_routes(app)
+    client = TestClient(app)
+
+    assert client.get("/api/plugins", headers=_signed_in(app)).json() == {
+        "plugin_api_version": _server_plugin_api(),
+        "plugins": [],
+    }
+    assert client.get("/api/plugins/demo/ping").status_code == 404
+
+
+def test_plugin_list_follows_a_reload(tmp_path: Path) -> None:
+    """After a reload the list names the plugins published now, with the versions their manifests state now."""
+    _write_plugin(tmp_path, ROUTES, version="1.0.0")
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    client = TestClient(app)
+    headers = _signed_in(app)
+    assert client.get("/api/plugins", headers=headers).json()["plugins"] == [
+        {"name": "demo", "version": "1.0.0", "mindroom_plugin_api": None},
+    ]
+
+    _write_plugin(tmp_path, ROUTES, version="1.1.0", mindroom_plugin_api="1.0")
+    publish_test_plugins(config, runtime_paths)
+
+    assert client.get("/api/plugins", headers=headers).json()["plugins"] == [
+        {"name": "demo", "version": "1.1.0", "mindroom_plugin_api": "1.0"},
+    ]
+
+
 def test_raising_route_answers_an_opaque_500_and_the_app_keeps_serving(tmp_path: Path) -> None:
     """A plugin route that raises gives a 500 that names nothing of the error, and the next request is served."""
     app, _ = _published_client(tmp_path)
@@ -328,6 +425,20 @@ def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
     assert "routes module imported" in str(plugin.routes_error)
 
 
+def test_worker_refresh_reads_a_changed_manifest_version(tmp_path: Path) -> None:
+    """A worker's refresh keeps a plugin's unchanged modules but takes the versions its manifest states now."""
+    root = _write_plugin(tmp_path, None, tools_source=TOOLS, version="1.0.0")
+    config, runtime_paths = _config(tmp_path)
+    [before] = refresh_plugins(config, runtime_paths).loaded_plugins
+
+    manifest = {"name": "demo", "tools_module": "tools.py", "version": "1.1.0", "mindroom_plugin_api": "1.0"}
+    (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    [after] = refresh_plugins(config, runtime_paths).loaded_plugins
+
+    assert after.modules == before.modules
+    assert (after.version, after.mindroom_plugin_api) == ("1.1.0", "1.0")
+
+
 def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path) -> None:
     """Plugin routes see the main app's client sessions and room membership, so their checks pass and refuse."""
     app, client = _published_client(tmp_path)
@@ -371,7 +482,7 @@ def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_pat
 
 
 def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """On the real API app, a plugin's GET route wins over the frontend's catch-all.
+    """On the real API app, a plugin's GET route and the plugin list win over the frontend's catch-all.
 
     A route that raises answers its opaque 500 from inside the main app's middleware, so it keeps the forced headers.
     """
@@ -379,6 +490,7 @@ def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.
     config, runtime_paths = _config(tmp_path)
     publish_test_plugins(config, runtime_paths)
     monkeypatch.setattr(ensure_app_state(main.app), "api_state", _api_state(config, runtime_paths))
+    monkeypatch.setattr(ensure_app_state(main.app), "client_sessions", ClientSessionStore())
     client = TestClient(main.app, raise_server_exceptions=False)
 
     response = client.get("/api/plugins/demo/ping")
@@ -388,3 +500,6 @@ def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.
     boom = client.get("/api/plugins/demo/boom")
     assert (boom.status_code, boom.text) == (500, "Internal Server Error")
     assert (boom.headers["cache-control"], boom.headers["x-content-type-options"]) == ("no-store", "nosniff")
+    listed = client.get("/api/plugins", headers=_signed_in(main.app))
+    assert listed.json()["plugins"] == [{"name": "demo", "version": None, "mindroom_plugin_api": None}]
+    assert (listed.headers["cache-control"], listed.headers["x-content-type-options"]) == ("no-store", "nosniff")

@@ -1,19 +1,35 @@
-"""Serve each published plugin's HTTP routes under ``/api/plugins/<plugin>/``, following plugin reloads."""
+"""List the published plugins at ``/api/plugins`` and serve each one's HTTP routes under ``/api/plugins/<plugin>/``.
+
+Both follow plugin reloads.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastapi import Request  # noqa: TC002 - FastAPI resolves the list route's parameter annotation at runtime.
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
+from mindroom.api.client_sessions import presented_session
+from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
     from starlette.types import ASGIApp, Receive, Scope, Send
 
+    from mindroom.tool_system.plugins import ConfigPlugins
+
 _MOUNT_PATH = "/api/plugins"
+
+
+def _published_plugins(app: FastAPI) -> ConfigPlugins | None:
+    """Return the served config's view of the published plugins, or None before any config has loaded."""
+    snapshot = config_lifecycle.require_api_state(app).snapshot
+    if snapshot.runtime_config is None:
+        return None
+    return config_plugins(snapshot.runtime_config, snapshot.runtime_paths)
 
 
 class _PluginRoutesApp:
@@ -43,13 +59,30 @@ class _PluginRoutesApp:
         await routes_app({**sub_scope, "root_path": plugin_root, "app_root_path": plugin_root}, receive, send)
 
     def _routes_app(self, name: str) -> ASGIApp | None:
-        snapshot = config_lifecycle.require_api_state(self._app).snapshot
-        if snapshot.runtime_config is None:
+        plugins = _published_plugins(self._app)
+        if plugins is None:
             return None
-        plugins = config_plugins(snapshot.runtime_config, snapshot.runtime_paths).loaded_plugins
-        return next((plugin.routes_app for plugin in plugins if plugin.name == name), None)
+        return next((plugin.routes_app for plugin in plugins.loaded_plugins if plugin.name == name), None)
+
+
+async def _list_plugins(request: Request) -> dict[str, object]:
+    """Answer a signed-in client with this MindRoom's plugin API version and each published plugin's manifest versions.
+
+    Nothing else about a plugin is listed: no path, setting, or load error.
+    """
+    presented_session(request)
+    plugins = _published_plugins(request.app)
+    major, minor = PLUGIN_API_VERSION
+    return {
+        "plugin_api_version": f"{major}.{minor}",
+        "plugins": [
+            {"name": plugin.name, "version": plugin.version, "mindroom_plugin_api": plugin.mindroom_plugin_api}
+            for plugin in (plugins.loaded_plugins if plugins is not None else ())
+        ],
+    }
 
 
 def mount_plugin_routes(app: FastAPI) -> None:
-    """Serve the published plugins' routes on ``app``; mount before any catch-all route that would shadow them."""
+    """Serve the plugin list and the published plugins' routes on ``app``; add them before any catch-all route."""
+    app.add_api_route(_MOUNT_PATH, _list_plugins, methods=["GET"])
     app.mount(_MOUNT_PATH, _PluginRoutesApp(app))

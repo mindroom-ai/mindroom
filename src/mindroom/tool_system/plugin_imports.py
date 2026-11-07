@@ -43,6 +43,9 @@ class _PluginManifest:
     """Validated plugin manifest data."""
 
     name: str
+    # The plugin's own version and the plugin API version it needs, as the manifest states them.
+    version: str | None
+    mindroom_plugin_api: str | None
     tools_module: str | None
     hooks_module: str | None
     oauth_module: str | None
@@ -56,6 +59,8 @@ class _PluginBase:
     """Loaded plugin details that depend only on the manifest."""
 
     name: str
+    version: str | None
+    mindroom_plugin_api: str | None
     root: Path
     manifest_path: Path
     tools_module_path: Path | None
@@ -288,6 +293,8 @@ def _load_plugin_base(root: Path) -> _PluginBase:
 
     return _PluginBase(
         name=manifest.name,
+        version=manifest.version,
+        mindroom_plugin_api=manifest.mindroom_plugin_api,
         root=root,
         manifest_path=manifest_path,
         tools_module_path=tools_module_path,
@@ -323,7 +330,9 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Invalid plugin manifest name", path=str(path), plugin_name=name, error=str(exc))  # noqa: TRY400
         msg = f"{exc} ({path})"
         raise PluginValidationError(msg) from exc
-    _check_plugin_api(data.get("mindroom_plugin_api"), normalized_name, path)
+    mindroom_plugin_api = _check_plugin_api(data.get("mindroom_plugin_api"), normalized_name, path)
+    # A version only informs clients, so one that is not a string is left out rather than refusing the plugin.
+    version = data.get("version")
 
     tools_module = _manifest_module(data, "tools_module", path)
     hooks_module = _manifest_module(data, "hooks_module", path)
@@ -349,6 +358,8 @@ def _parse_manifest(path: Path) -> _PluginManifest:
 
     return _PluginManifest(
         name=normalized_name,
+        version=version if isinstance(version, str) else None,
+        mindroom_plugin_api=mindroom_plugin_api,
         tools_module=tools_module,
         hooks_module=hooks_module,
         oauth_module=oauth_module,
@@ -358,10 +369,10 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     )
 
 
-def _check_plugin_api(needed: object, plugin_name: str, path: Path) -> None:
-    """Refuse a plugin whose manifest needs another plugin API major, or a later minor of this one."""
+def _check_plugin_api(needed: object, plugin_name: str, path: Path) -> str | None:
+    """Return the plugin API version the manifest needs, refusing another major or a later minor of this one."""
     if needed is None:
-        return
+        return None
     match = _PLUGIN_API_PATTERN.fullmatch(needed) if isinstance(needed, str) else None
     if match is None:
         msg = f'Plugin mindroom_plugin_api must be a "MAJOR.MINOR" string such as "1.0": {path}'
@@ -372,6 +383,7 @@ def _check_plugin_api(needed: object, plugin_name: str, path: Path) -> None:
         advice = "upgrade MindRoom" if version > (major, minor) else "update the plugin"
         msg = f"Plugin {plugin_name!r} needs plugin API {needed}, but this MindRoom provides {major}.{minor}: {advice} ({path})"
         raise PluginValidationError(msg)
+    return match[0]
 
 
 def _manifest_module(data: dict[str, Any], field: str, path: Path) -> str | None:

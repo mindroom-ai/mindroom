@@ -8211,7 +8211,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.plugin_routes"
 depends_on = [
+    "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
 ]
 visibility = ["mindroom.api.main"]
