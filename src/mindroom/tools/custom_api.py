@@ -218,7 +218,8 @@ def custom_api_tools() -> type[CustomApiTools]:
             if has_credentials and not self.base_url:
                 return json.dumps({"error": _CREDENTIALS_NEED_BASE_URL}, indent=2)
             url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}" if self.base_url else endpoint
-            url = validate_server_fetch_url(url)
+            # The transport resolves the hostname and checks each dialed address within the timeout.
+            url = validate_server_fetch_url(url, resolve_hostnames=False)
             event_hooks = None
             request_headers = httpx.Headers(self._get_headers(headers))
             if has_credentials and self.base_url:

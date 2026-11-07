@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -327,7 +328,6 @@ def _install_custom_api_transport(
             )
         return response
 
-    monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
     monkeypatch.setattr(
         custom_api_module,
         "ServerFetchAsyncHTTPTransport",
@@ -686,6 +686,27 @@ def test_web_tools_give_up_on_a_server_that_trickles_its_response(
     assert time.monotonic() - started < 2
     assert result == error
     assert len(requests) == 1
+
+
+def test_custom_api_tool_returns_at_its_timeout_while_a_hostname_lookup_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout covers resolving the API's hostname, not only the request after it."""
+    released = threading.Event()
+
+    def hang(*_args: object, **_kwargs: object) -> object:
+        released.wait(10)
+        raise socket.gaierror(socket.EAI_NONAME, "lookup released")
+
+    monkeypatch.setattr(socket, "getaddrinfo", hang)
+    tool = custom_api_tools()(base_url="https://api.example.com", timeout=0.3)
+    started = time.monotonic()
+    try:
+        payload = json.loads(tool.make_request("data"))
+        elapsed = time.monotonic() - started
+    finally:
+        released.set()
+
+    assert payload == {"error": "Request failed: the request did not finish within 0.3 seconds"}
+    assert elapsed < 2
 
 
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
