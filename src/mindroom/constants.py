@@ -1064,6 +1064,8 @@ COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
+# Marks a notice that asks its reader to reply in its thread, so clients show it as a conversation, not a status.
+CONVERSATION_CONTENT_KEY = "io.mindroom.conversation"
 # A finished call's duration and spoken turns by sender ID, on its transcript message.
 CALL_TRANSCRIPT_CONTENT_KEY = "io.mindroom.call_transcript"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
