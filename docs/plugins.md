@@ -228,7 +228,8 @@ Other `mindroom` modules can change in any release.
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
   "routes_module": "routes.py",
-  "skills": ["skills"]
+  "skills": ["skills"],
+  "reserved_namespaces": ["com.example.my_plugin."]
 }
 ```
 
@@ -240,6 +241,7 @@ Other `mindroom` modules can change in any release.
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
+| `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -911,6 +913,13 @@ It answers 503 when membership is unavailable: `No running MindRoom bot is in th
 
 Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
 See [Skills](skills.md) for the `SKILL.md` format, precedence, and the per-agent `skills:` allowlist that plugin skills also require.
+
+## Reserved namespaces
+
+A plugin whose Matrix events clients trust, such as cards it sends, lists their prefixes in the manifest `reserved_namespaces` so agents cannot forge them.
+While the plugin is loaded, the `matrix_api` tool refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
+Every other built-in tool fixes the event type and top-level content keys it sends, and the plugin's own sends are not affected.
+An agent whose code execution tools run in the primary process instead of a worker is fully trusted and can still send anything; see [Security posture](architecture/security-posture.md).
 
 ## Hooks
 
