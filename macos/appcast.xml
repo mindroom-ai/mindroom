@@ -5,6 +5,32 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.11.164</title>
+            <pubDate>Sat, 07 Nov 2026 13:49:01 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>2688</sparkle:version>
+            <sparkle:shortVersionString>2026.11.164</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.11.164
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Install Noto fonts in the MindRoom image so browser pages render CJK text and colour emoji (#3753)](https://github.com/mindroom-ai/mindroom/commit/cef5354b2) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.11.164/MindRoom.zip" length="74428017" type="application/octet-stream" sparkle:edSignature="D9nBu+0RIS/kdaYwfA0uTrCuaBPp/HXkDosc+omDBPovJsbDfh5W+rERbWkq19S2hIoMWCqGuBhCmDm1jwVECg=="/>
+        </item>
+        <item>
             <title>2026.11.33</title>
             <pubDate>Sun, 01 Nov 2026 14:43:07 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
