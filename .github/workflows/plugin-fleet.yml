@@ -58,6 +58,8 @@ jobs:
     name: Build plugin matrix
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
 
@@ -91,6 +93,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    permissions:
+      contents: read
     uses: ./.github/workflows/plugin-ci.yml
     with:
       plugin_repository: ${{ matrix.plugin_repository }}
