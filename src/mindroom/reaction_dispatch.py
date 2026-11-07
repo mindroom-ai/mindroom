@@ -81,7 +81,7 @@ class ReactionDispatcher:
                     "Failed to resolve reaction target thread for hook context",
                     room_id=room_id,
                     target_event_id=target_event_id,
-                    error=str(exc),
+                    error=repr(exc),
                 )
 
         context = ReactionReceivedContext(
