@@ -586,7 +586,8 @@ async def test_caller_speech_over_late_audio_clears_it_once(output_clock: Output
             await deliver(call.output, output_clock, value, at=value * 0.1)
         for value in range(10, 25):
             await deliver(call.output, output_clock, value, at=2.5)
-        # 1.5 s arrived at 2.5 s behind audio that finished at 1.0 s, so 1.3 s is still queued.
+        # 1.5 s arrived at 2.5 s after the output ran dry and plays from 2.6 s behind its cushion,
+        # so 1.4 s is still queued.
         output_clock.now = 2.7
         call.caller("speaking")
         call.caller("listening")
@@ -596,7 +597,7 @@ async def test_caller_speech_over_late_audio_clears_it_once(output_clock: Output
     assert call.sink.values == list(range(26))
     assert call.sink.calls == ["clear"]
     assert drop_logs(logs) == [
-        {"event": "call_output_backlog_dropped", "log_level": "warning", "dropped_ms": 1300},
+        {"event": "call_output_backlog_dropped", "log_level": "warning", "dropped_ms": 1400},
     ]
 
 
@@ -643,20 +644,45 @@ async def test_clearing_a_flushed_segment_keeps_counting_the_next_one(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("queued_deltas", "cleared"), [(1, False), (5, False), (6, True)])
+@pytest.mark.parametrize(("queued_deltas", "cleared"), [(1, False), (4, False), (5, True)])
 async def test_caller_speech_leaves_up_to_half_a_second_queued(
     output_clock: OutputClock,
     call: CallSession,
     queued_deltas: int,
     cleared: bool,
 ) -> None:
-    """The normal lead and short backlogs stay for GPT-Live to yield on its own."""
+    """The playout cushion and short backlogs stay for GPT-Live to yield on its own."""
     with capture_logs() as logs:
         for value in range(queued_deltas):
             await deliver(call.output, output_clock, value, at=0.0)
         call.caller("speaking")
     assert (call.sink.calls == ["clear"]) is cleared
     assert len(drop_logs(logs)) == cleared
+
+
+async def handed_over_at_once(call: CallSession, clock: OutputClock, value: int, *, at: float) -> bool:
+    """Deliver one delta and report whether RoomIO got it without waiting out the playout cushion."""
+    delivery = asyncio.create_task(deliver(call.output, clock, value, at=at))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    at_once = value in call.sink.values
+    await asyncio.wait_for(delivery, timeout=SETTLE_TIMEOUT_SECONDS)
+    return at_once
+
+
+@pytest.mark.asyncio
+async def test_live_output_keeps_a_cushion_for_late_deltas(output_clock: OutputClock, call: CallSession) -> None:
+    """Playback starts 100 ms after an utterance's first audio and again after running dry, never per late delta."""
+    # The first delta waits for the cushion, so it plays from 0.1 s to 0.2 s.
+    assert not await handed_over_at_once(call, output_clock, 0, at=0.0)
+    assert await handed_over_at_once(call, output_clock, 1, at=0.1)
+    # 80 ms late, but the cushion still had 20 ms to play.
+    assert await handed_over_at_once(call, output_clock, 2, at=0.28)
+    # The output ran dry at 0.4 s, so playback resumes with a new cushion.
+    assert not await handed_over_at_once(call, output_clock, 3, at=0.55)
+    call.output.flush()
+    assert not await handed_over_at_once(call, output_clock, 4, at=2.0)
+    assert call.sink.values == [0, 1, 2, 3, 4]
 
 
 @pytest.mark.asyncio

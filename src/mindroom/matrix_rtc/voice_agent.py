@@ -67,11 +67,17 @@ _AUDIO_SAMPLE_RATE = 24_000
 _AUDIO_CHANNELS = 1
 _AUDIO_FRAME_SIZE_MS = 50
 _CALL_TURN_CORRELATION_KEY = "mindroom_call_turn_id"
-#: GPT-Live streams speech in real time with a normal lead of one 100 ms delta,
-#: so an event-loop stall leaves the speech it held back queued to play late.
+#: GPT-Live streams speech in real time, on average slightly slower, so the
+#: output would hold almost nothing when the next 100 ms delta arrives. Each
+#: delta that came late would then play as LiveKit's 10 ms blocks of digital
+#: silence in the middle of a word, which the caller hears as crackling.
+#: Playback therefore starts this long after the first audio of an utterance,
+#: and again after the output ran dry, to keep a cushion for late deltas.
+_LIVE_OUTPUT_PLAYOUT_LEAD_S = 0.1
+#: An event-loop stall leaves the speech it held back queued to play late.
 #: When the caller starts talking over more than this much queued speech, the
 #: queue is discarded so they hear the model react instead of the late speech.
-#: Up to this much stays for GPT-Live to finish or yield on its own.
+#: Up to this much, the cushion included, stays for GPT-Live to finish or yield on its own.
 _LIVE_OUTPUT_MAX_QUEUED_S = 0.5
 
 
@@ -1206,8 +1212,8 @@ async def _attach_private_transcript_synchronizer(
     return synchronizer.aclose
 
 
-def _drop_live_backlog_on_caller_speech(session: AgentSession) -> None:
-    """Discard GPT-Live speech that a stall left queued once the caller talks over it."""
+def _drop_live_backlog_on_caller_speech(session: AgentSession) -> None:  # noqa: C901 - SDK class is defined lazily
+    """Play GPT-Live speech with a cushion, and discard what a stall left queued once the caller talks over it."""
     from livekit.agents.voice.io import AudioOutput, AudioOutputCapabilities  # noqa: PLC0415
 
     class _LiveOutputBacklog(AudioOutput):
@@ -1229,9 +1235,14 @@ def _drop_live_backlog_on_caller_speech(session: AgentSession) -> None:
         async def capture_frame(self, frame: rtc.AudioFrame) -> None:
             await super().capture_frame(frame)
             self._capturing = True
+            held_until = 0.0
+            if not self._segment_cleared and (now := time.monotonic()) >= self._playout_end:
+                # Nothing is left to play: start this audio with a cushion.
+                held_until = now + _LIVE_OUTPUT_PLAYOUT_LEAD_S
+                await asyncio.sleep(_LIVE_OUTPUT_PLAYOUT_LEAD_S)
             await self._sink.capture_frame(frame)
             if not self._segment_cleared:
-                self._playout_end = max(self._playout_end, time.monotonic()) + frame.duration
+                self._playout_end = max(self._playout_end, time.monotonic(), held_until) + frame.duration
 
         def flush(self) -> None:
             super().flush()
