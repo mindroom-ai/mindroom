@@ -9,7 +9,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom.approval.tool_approval import tool_may_require_approval
+from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.hooks import HookBindings
 from mindroom.mcp_gateway.execution import run_gateway_sync
 from mindroom.mcp_gateway.toolkits import run_toolkit_operation
@@ -103,15 +103,16 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
     return entry
 
 
-def _blocked(context: AgentToolContext, function: ToolFunction) -> bool:
-    return function.gate is ToolGate.CONFIRM or tool_may_require_approval(context.config, function.name)
+def _blocked(context: AgentToolContext, toolkit_name: str, function: ToolFunction) -> bool:
+    alias = toolkit_approval_alias(context.config, context.plugins.tools, toolkit_name, function.name)
+    return function.gate is ToolGate.CONFIRM or tool_may_require_approval(context.config, function.name, alias)
 
 
-def _function(context: AgentToolContext, toolkit: AnyToolkit, name: str) -> ToolFunction:
+def _function(context: AgentToolContext, toolkit_name: str, toolkit: AnyToolkit, name: str) -> ToolFunction:
     function = toolkit_function(toolkit, name)
     if function is None:
         raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
-    if _blocked(context, function):
+    if _blocked(context, toolkit_name, function):
         raise GatewayError(code=GatewayErrorCode.APPROVAL_REQUIRED)
     return function
 
@@ -206,7 +207,7 @@ async def search_tools(
                         "description": (function.description or "")[:256],
                     }
                     for function in adapt_toolkit(built).functions
-                    if _handle(function.name) and not _blocked(context, function)
+                    if _handle(function.name) and not _blocked(context, selected_toolkit, function)
                 ]
                 return _search_results(items, query, limit)
 
@@ -275,7 +276,7 @@ async def get_tool(
         return _error(context, GatewayErrorCode.TOOL_NOT_FOUND)
 
     async def selected(built: AnyToolkit) -> ToolSchemaResponse:
-        return _schema_payload(context.agent_name, toolkit, _function(context, built, function))
+        return _schema_payload(context.agent_name, toolkit, _function(context, toolkit, built, function))
 
     return await _guard(context, _selected_operation(context, toolkit, manager, selected, require_current_access))
 
@@ -331,7 +332,7 @@ async def invoke_tool(
         return _error(context, GatewayErrorCode.INVALID_ARGUMENTS)
 
     async def selected(built: AnyToolkit) -> InvocationResponse:
-        target = replace(_function(context, built, function), registered_toolkit=toolkit)
+        target = replace(_function(context, toolkit, built, function), registered_toolkit=toolkit)
         _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
         policy = build_tool_hook_middleware(
             HookBindings(registry=context.plugins.hooks),

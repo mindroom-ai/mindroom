@@ -134,9 +134,6 @@ class ToolRuntimeContext:
     # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
     hooks: HookBindings = field(default_factory=HookBindings)
     correlation_id: str | None = None
-    # The agent turn the calls run in, and in a delegated child's turn the turn that delegated it; None outside a turn.
-    turn_id: str | None = None
-    parent_turn_id: str | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[ToolFunction], bool] | None = None
@@ -155,6 +152,9 @@ class ToolRuntimeContext:
     # Whether people see this turn's calls in its reply, which tool hooks read as ``shown``; only a reply that shows tool
     # calls in a turn that is not quiet sets it.
     tool_calls_shown: bool = False
+    # The agent turn the calls run in, and in a delegated child's turn the turn that delegated it; None outside a turn.
+    turn_id: str | None = None
+    parent_turn_id: str | None = None
 
     @property
     def current_config(self) -> Config:
