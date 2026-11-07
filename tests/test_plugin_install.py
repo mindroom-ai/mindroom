@@ -40,6 +40,16 @@ _BROKEN_PLUGIN_FILES = {
     "hooks.py": "raise RuntimeError('plugin exploded')\n",
 }
 
+_MARKUP_ERROR_PLUGIN_FILES = {
+    **_BROKEN_PLUGIN_FILES,
+    "hooks.py": "raise RuntimeError('plugin exploded: list[str] [/x] :100:')\n",
+}
+
+
+def _without_whitespace(text: str) -> str:
+    """Drop the line breaks Rich inserts when it wraps long paths."""
+    return "".join(text.split())
+
 
 def _archive_bytes(files: dict[str, str], root: str = "demo-plugin-abc123") -> bytes:
     buffer = io.BytesIO()
@@ -346,6 +356,39 @@ def test_plugins_install_cli_reports_failure_without_traceback(
     assert "Traceback (most recent call last)" not in result.output
 
 
+def test_plugins_install_cli_prints_markup_in_errors_literally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Markup-like text in an install error should print as is, not vanish or crash the CLI."""
+    _fake_github(monkeypatch, files=_MARKUP_ERROR_PLUGIN_FILES)
+
+    result = runner.invoke(
+        app,
+        ["plugins", "install", "acme/demo-plugin", "--plugins-dir", str(tmp_path / "plugins")],
+    )
+
+    assert result.exit_code == 1
+    assert "pluginexploded:list[str][/x]:100:" in _without_whitespace(result.stdout)
+
+
+def test_plugins_install_cli_prints_markup_in_result_literally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Markup and emoji codes in the repository and paths should print as is in the result and snippet."""
+    _fake_github(monkeypatch)
+    plugins_dir = tmp_path / "vendor[" / "x]"
+
+    result = runner.invoke(app, ["plugins", "install", "acme/demo[y]:100:", "--plugins-dir", str(plugins_dir)])
+
+    assert result.exit_code == 0
+    output = _without_whitespace(result.stdout)
+    assert f"Installedplugin:compat-demo(acme/demo[y]:100:@{'a' * 12})" in output
+    assert f"Location:{plugins_dir / 'demo[y]:100:'}" in output
+    assert f"-path:{plugins_dir / 'demo[y]:100:'}" in output
+
+
 def test_plugins_update_cli_updates_all_vendored_plugins(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -373,10 +416,34 @@ def test_plugins_update_cli_requires_exactly_one_target(tmp_path: Path) -> None:
     assert "exactly one of NAME or --all" in result.output
 
 
-@pytest.mark.parametrize("name", ["../outside", "..", "a/b", "a\\b", ""])
+def test_plugins_update_cli_prints_markup_literally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Markup-like paths, plugin names, and errors should print as is, not vanish or crash the CLI."""
+    plugins_dir = tmp_path / "vendor[" / "x]"
+    empty = runner.invoke(app, ["plugins", "update", "--all", "--plugins-dir", str(plugins_dir)])
+    assert empty.exit_code == 0
+    assert f"Novendoredpluginsfoundin{plugins_dir}" in _without_whitespace(empty.stdout)
+
+    _fake_github(monkeypatch)
+    install_plugin(parse_plugin_spec("acme/demo-plugin"), plugins_dir)
+    (plugins_dir / "demo-plugin").rename(plugins_dir / "demo[y]")
+    current = runner.invoke(app, ["plugins", "update", "--all", "--plugins-dir", str(plugins_dir)])
+    assert current.exit_code == 0
+    assert f"Alreadyuptodate:demo[y]({'a' * 12})" in _without_whitespace(current.stdout)
+
+    _fake_github(monkeypatch, commit="b" * 40, files=_MARKUP_ERROR_PLUGIN_FILES)
+    failed = runner.invoke(app, ["plugins", "update", "demo[y]", "--plugins-dir", str(plugins_dir)])
+    assert failed.exit_code == 1
+    assert "Pluginupdatefailed:demo[y]:" in _without_whitespace(failed.stdout)
+    assert "pluginexploded:list[str][/x]:100:" in _without_whitespace(failed.stdout)
+
+
+@pytest.mark.parametrize("name", ["../outside", "..", "a/b", "a\\b", "", "x[/y]"])
 def test_plugins_update_cli_rejects_traversal_names(tmp_path: Path, name: str) -> None:
     """Update targets must stay inside the plugins directory."""
     result = runner.invoke(app, ["plugins", "update", name, "--plugins-dir", str(tmp_path)])
 
     assert result.exit_code == 2
-    assert "Invalid plugin name" in result.output
+    assert f"Invalid plugin name (expected a plain directory name): {name}" in result.output

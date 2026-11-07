@@ -56,7 +56,7 @@ def plugin_check(
             }
             typer.echo(json.dumps(failure))
         else:
-            console.print(f"[red]Plugin check failed:[/red] {escape(str(exc))}")
+            _print_literal("[red]Plugin check failed:[/red] ", exc)
             _print_outside_imports(outside_imports, strict=strict)
         raise typer.Exit(1) from None
 
@@ -77,14 +77,19 @@ def plugin_check(
         if strict_failure:
             raise typer.Exit(1)
         return
-    console.print(f"[green]Plugin is compatible:[/green] {result.name}")
-    console.print(f"  Tools:       {', '.join(result.tool_names) or 'none'}")
-    console.print(f"  Hooks:       {', '.join(result.hook_names) or 'none'}")
-    console.print(f"  Automations: {', '.join(result.automation_names) or 'none'}")
-    console.print(f"  Skills:      {', '.join(result.skill_directories) or 'none'}")
+    _print_literal("[green]Plugin is compatible:[/green] ", result.name)
+    _print_literal("  Tools:       ", ", ".join(result.tool_names) or "none")
+    _print_literal("  Hooks:       ", ", ".join(result.hook_names) or "none")
+    _print_literal("  Automations: ", ", ".join(result.automation_names) or "none")
+    _print_literal("  Skills:      ", ", ".join(result.skill_directories) or "none")
     _print_outside_imports(outside_imports, strict=strict)
     if strict_failure:
         raise typer.Exit(1)
+
+
+def _print_literal(markup: str, text: object) -> None:
+    """Print fixed Rich markup followed by text shown as is, with no markup or emoji codes read from the text."""
+    console.print(f"{markup}{escape(str(text))}", emoji=False)
 
 
 def _internal_imports_json(outside_imports: list[OutsideImport]) -> list[dict[str, str | int]]:
@@ -115,12 +120,12 @@ def plugin_install(
     try:
         result = install_plugin(parse_plugin_spec(spec), _resolved_plugins_dir(plugins_dir, config_dir))
     except Exception as exc:
-        console.print(f"[red]Plugin install failed:[/red] {exc}")
+        _print_literal("[red]Plugin install failed:[/red] ", exc)
         raise typer.Exit(1) from None
 
     _print_installed(result)
     console.print("\nAdd it to config.yaml:")
-    console.print(f"plugins:\n  - path: {_config_snippet_path(result.directory, config_dir)}")
+    _print_literal("plugins:\n  - path: ", _config_snippet_path(result.directory, config_dir))
 
 
 @plugins_app.command("update")
@@ -141,13 +146,13 @@ def plugin_update(
         console.print("[red]--ref requires a single plugin NAME.[/red]")
         raise typer.Exit(2)
     if name is not None and (not name or name in {".", ".."} or "/" in name or "\\" in name):
-        console.print(f"[red]Invalid plugin name (expected a plain directory name):[/red] {name}")
+        _print_literal("[red]Invalid plugin name (expected a plain directory name):[/red] ", name)
         raise typer.Exit(2)
 
     resolved_plugins_dir = _resolved_plugins_dir(plugins_dir, activate_cli_runtime(path).config_dir)
     directories = find_locked_plugin_dirs(resolved_plugins_dir) if update_all else (resolved_plugins_dir / str(name),)
     if not directories:
-        console.print(f"No vendored plugins found in {resolved_plugins_dir}")
+        _print_literal("No vendored plugins found in ", resolved_plugins_dir)
         return
 
     failed = False
@@ -156,10 +161,10 @@ def plugin_update(
             update = update_plugin(directory, ref=ref)
         except Exception as exc:
             failed = True
-            console.print(f"[red]Plugin update failed:[/red] {directory.name}: {exc}")
+            _print_literal("[red]Plugin update failed:[/red] ", f"{directory.name}: {exc}")
             continue
         if update.installed is None:
-            console.print(f"Already up to date: {directory.name} ({update.previous_commit[:12]})")
+            _print_literal("Already up to date: ", f"{directory.name} ({update.previous_commit[:12]})")
         else:
             _print_installed(update.installed, previous_commit=update.previous_commit)
     if failed:
@@ -168,11 +173,11 @@ def plugin_update(
 
 def _print_installed(result: InstallResult, previous_commit: str | None = None) -> None:
     transition = f"{previous_commit[:12]} -> " if previous_commit else ""
-    console.print(
-        f"[green]Installed plugin:[/green] {result.name} "
-        f"({result.lock.repository}@{transition}{result.lock.commit[:12]})",
+    _print_literal(
+        "[green]Installed plugin:[/green] ",
+        f"{result.name} ({result.lock.repository}@{transition}{result.lock.commit[:12]})",
     )
-    console.print(f"  Location: {result.directory}")
+    _print_literal("  Location: ", result.directory)
     if result.has_pyproject:
         console.print(
             "[yellow]  Note: the plugin declares pyproject.toml dependencies; "

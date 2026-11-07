@@ -381,6 +381,49 @@ def test_plugins_check_cli_reports_compatibility(tmp_path: Path) -> None:
     assert "Automations: none" in result.stdout
 
 
+def test_plugins_check_cli_prints_markup_in_names_literally(tmp_path: Path) -> None:
+    """Markup and emoji codes in tool, hook, and skill names should print as is in the summary."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={
+            "name": "compat-demo",
+            "tools_module": "tools.py",
+            "hooks_module": "hooks.py",
+            "skills": ["skills:100: [/x]"],
+        },
+        modules={
+            "tools.py": (
+                "from agno.tools import Toolkit\n"
+                "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+                "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+                "@register_tool_with_metadata(\n"
+                "    name='demo:100: [/x]',\n"
+                "    file_access=ToolFileAccess.NONE,\n"
+                "    display_name='Demo',\n"
+                "    description='Demo tool',\n"
+                "    category=ToolCategory.DEVELOPMENT,\n"
+                ")\n"
+                "def demo_tools():\n"
+                "    return Toolkit\n"
+            ),
+            "hooks.py": (
+                "from mindroom.hooks import hook\n"
+                "@hook(event='message:received', name='audit:100: [/x]')\n"
+                "async def audit_hook(ctx):\n"
+                "    del ctx\n"
+            ),
+        },
+    )
+    (plugin_root / "skills:100: [/x]").mkdir(parents=True)
+
+    result = runner.invoke(app, ["plugins", "check", str(plugin_root)])
+
+    assert result.exit_code == 0
+    assert "Tools:       demo:100: [/x]" in result.stdout
+    assert "Hooks:       audit:100: [/x]" in result.stdout
+    assert "Skills:      skills:100: [/x]" in result.stdout
+
+
 def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> None:
     """CI output should preserve the plugin error without a Typer traceback."""
     plugin_root = _write_plugin(
