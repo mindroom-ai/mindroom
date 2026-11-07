@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from typing import Any, TypeGuard
 from urllib.parse import urlsplit
 
 import nio
-from aiohttp import ClientResponse
+from aiohttp import ClientConnectionError, ClientResponse
 from nio import crypto
 from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
@@ -38,6 +39,7 @@ _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
 _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
+_DURABLE_UPLOAD_RETRY_SECONDS = 10.0
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
@@ -288,18 +290,33 @@ async def upload_media_bytes(
     *,
     content_type: str,
     filename: str,
+    durable: bool = False,
 ) -> tuple[nio.UploadResponse | nio.UploadError, dict[str, object] | None]:
-    """Upload an in-memory byte payload through nio's callback-based upload API."""
+    """Upload an in-memory byte payload through nio's callback-based upload API.
+
+    A ``durable`` caller freezes what the upload produced, so a homeserver that stays down or rate limiting
+    past nio's retry bound is waited out instead of failing the upload.
+    """
 
     def data_provider(_monitor: object, _data: object) -> io.BytesIO:
         return io.BytesIO(upload_bytes)
 
-    return await client.upload(
-        data_provider=data_provider,
-        content_type=content_type,
-        filename=filename,
-        filesize=len(upload_bytes),
-    )
+    while True:
+        try:
+            result = await client.upload(
+                data_provider=data_provider,
+                content_type=content_type,
+                filename=filename,
+                filesize=len(upload_bytes),
+            )
+        except (ClientConnectionError, TimeoutError):
+            if not durable:
+                raise
+        else:
+            if not (durable and isinstance(result[0], nio.UploadError) and result[0].status_code == "M_LIMIT_EXCEEDED"):
+                return result
+        logger.warning("matrix_upload_waiting_for_homeserver", filename=filename)
+        await asyncio.sleep(_DURABLE_UPLOAD_RETRY_SECONDS)
 
 
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:
