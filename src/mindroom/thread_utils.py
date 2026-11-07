@@ -59,24 +59,30 @@ def _extract_mentioned_user_ids(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
-    """Extract mentioned user IDs from message content.
+    """Extract mentioned user IDs from message content, without managed entities when its mentions wake no agent."""
+    user_ids = _listed_or_found_user_ids(content, config, runtime_paths)
+    if content.get(WAKE_MENTIONED_KEY) is not False:
+        return user_ids
+    registry = entity_identity_registry(config, runtime_paths)
+    return [user_id for user_id in user_ids if not registry.is_managed_user_id(user_id)]
+
+
+def _listed_or_found_user_ids(
+    content: dict[str, object],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Return the user IDs a message lists or, failing that, the ones found in its text.
 
     Checks ``m.mentions.user_ids`` first, and takes it as the whole list when the
-    content marks it exact; an exact list whose message must not wake the agents
-    it mentions keeps only the users who are not managed entities. Otherwise,
-    when that field is absent or empty, falls back to Matrix HTML pills and
-    finally raw visible-body mention tokens.
+    content marks it exact. Otherwise, when that field is absent or empty, falls
+    back to Matrix HTML pills and finally raw visible-body mention tokens.
     """
     mentions = content.get("m.mentions")
     raw_user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
     user_ids = raw_user_ids if isinstance(raw_user_ids, list) else []
-    exact = content.get(EXACT_MENTIONS_KEY) is True
-    if user_ids or exact:
-        listed: list[str] = [user_id for user_id in user_ids[:_MAX_MENTIONED_USER_IDS] if isinstance(user_id, str)]
-        if exact and content.get(WAKE_MENTIONED_KEY) is False:
-            registry = entity_identity_registry(config, runtime_paths)
-            return [user_id for user_id in listed if not registry.is_managed_user_id(user_id)]
-        return listed
+    if user_ids or content.get(EXACT_MENTIONS_KEY) is True:
+        return [user_id for user_id in user_ids[:_MAX_MENTIONED_USER_IDS] if isinstance(user_id, str)]
 
     formatted_body = content.get("formatted_body")
     if isinstance(formatted_body, str):

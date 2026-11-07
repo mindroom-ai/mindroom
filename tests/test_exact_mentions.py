@@ -12,7 +12,7 @@ import pytest
 from mindroom.coalescing.batch import build_prepared_turn, requester_coalescing_key
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME, WAKE_MENTIONED_KEY
 from mindroom.dispatch_source import HOOK_SOURCE_KIND
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -107,14 +107,15 @@ async def _sent_card(
     mentions: list[str] | None,
     *,
     wake_mentioned: bool = True,
+    text: str = CARD,
 ) -> dict[str, Any]:
-    """Send the card from a hook with ``mentions`` and ``wake_mentioned`` and return the Matrix content it sent."""
+    """Send ``text`` from a hook with ``mentions`` and ``wake_mentioned`` and return the Matrix content it sent."""
     client = make_matrix_client_mock(user_id=ROUTER)
     transport = AsyncMock(side_effect=delivered_matrix_side_effect("$card"))
     with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
         event_id = await _hook_context(config, route, client).send_message(
             "!room:localhost",
-            CARD,
+            text,
             mentions=mentions,
             wake_mentioned=wake_mentioned,
         )
@@ -226,6 +227,31 @@ async def test_card_that_wakes_no_one_keeps_its_mentions_but_activates_no_agent(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wake_mentioned", [True, False])
+async def test_card_that_wakes_no_one_still_mentions_a_person_it_only_links(
+    config: Config,
+    wake_mentioned: bool,
+) -> None:
+    """A person mentioned only by a link in the text is still mentioned, whether or not the send wakes agents."""
+    content = await _sent_card(
+        config,
+        "bot",
+        None,
+        wake_mentioned=wake_mentioned,
+        text=f"Please review, [Alice](https://matrix.to/#/{ALICE})",
+    )
+
+    _, _, has_non_agent_mentions = check_agent_mentioned(
+        {"content": content},
+        MatrixID.parse(ALPHA),
+        config,
+        runtime_paths_for(config),
+        room=_room_with(ALICE, ALPHA, BETA, ROUTER),
+    )
+    assert has_non_agent_mentions is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wake_mentioned", [True, False])
 async def test_agent_reading_a_card_that_wakes_no_one_is_not_mentioned_but_sees_the_person(
     config: Config,
     wake_mentioned: bool,
@@ -280,10 +306,12 @@ async def test_long_card_keeps_its_exact_mentions_on_the_preview(config: Config)
         "body": CARD * 3000,
         "m.mentions": {"user_ids": []},
         EXACT_MENTIONS_KEY: True,
+        WAKE_MENTIONED_KEY: False,
     }
 
     preview = await prepare_large_message(client, "!room:localhost", content, room_encrypted=False)
 
     assert preview["body"] != content["body"]
     assert preview[EXACT_MENTIONS_KEY] is True
+    assert preview[WAKE_MENTIONED_KEY] is False
     assert _mentioned(config, preview) == []

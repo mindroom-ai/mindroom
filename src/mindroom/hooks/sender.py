@@ -74,7 +74,6 @@ async def send_hook_message(
     if mentions is not None:
         # Names in the text still render as pills, but only the caller's list mentions anyone.
         content["m.mentions"] = {"user_ids": list(mentions)}
-    if mentions is not None or not wake_mentioned:
         content[EXACT_MENTIONS_KEY] = True
     if not wake_mentioned:
         # Receivers keep the people this message mentions and drop the agents, so no agent is woken by it.

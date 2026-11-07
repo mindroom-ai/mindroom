@@ -102,7 +102,7 @@ The rules are:
 5. **Mentioning another joined room participant**: if a message tags only joined users who are neither agents, teams, nor configured bot accounts, agents and teams stay silent.
 
 MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is empty from HTML mention pills in `formatted_body`, or otherwise from plain `@name` text in the body, so bridged messages without mention metadata still count.
-A hook or tool send with [`mentions`](https://docs.mindroom.chat/hooks/#sending-messages) mentions only the users listed there.
+A hook or tool send with [`mentions`](https://docs.mindroom.chat/hooks/#sending-messages) mentions only the users listed there, and one with `wake_mentioned=False` mentions none of the agents it names.
 Mentions of users who are not in the room or only invited do not suppress normal responses.
 Mentioning a configured agent that has not joined the room still counts as an explicit mention for the other agents.
 
