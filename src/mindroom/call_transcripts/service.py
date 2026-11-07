@@ -835,12 +835,12 @@ def _turns(lines: Sequence[StoredLine]) -> tuple[_Turn, ...]:
 
 def _summary(transcript: CallTranscript) -> str:
     """Return the message's body without notes: the call's length, and that nothing could be transcribed if so."""
-    summary = f"Call · {_minutes(transcript.duration_seconds)} min"
+    summary = f"Call · {call_minutes(transcript.duration_seconds)} min"
     return summary if transcript.turns else f"{summary}. Nothing could be transcribed."
 
 
-def _minutes(duration_seconds: int) -> int:
-    """Return a call's length in whole minutes, at least one, as its row and message say it."""
+def call_minutes(duration_seconds: int) -> int:
+    """Return a call's length in whole minutes, at least one, as its row, its message and its notes say it."""
     return max(1, round(duration_seconds / 60))
 
 
@@ -856,7 +856,7 @@ def _owed_row_edit(call: StoredCall) -> tuple[RowEdit, EndedRow] | None:
         room_id=call.room_id,
         call_id=call.id,
         row_event_id=call.row_event_id,
-        body=f"Call ended · {_minutes(duration_seconds)} min",
+        body=f"Call ended · {call_minutes(duration_seconds)} min",
         ended_at=call.ended_at,
         duration_seconds=duration_seconds,
         transcript_event_id=call.transcript_event_id,

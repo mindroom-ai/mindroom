@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.call_transcripts.service import call_minutes
 from mindroom.helper_usage import record_system_usage
 from mindroom.providers import registry as provider_registry
 
@@ -82,9 +83,8 @@ def _prompt(transcript: CallTranscript) -> str:
         f"{_folded(transcript.names.get(turn.sender) or turn.sender)}: {_folded(turn.text)}"
         for turn in transcript.turns
     )
-    minutes = max(1, round(transcript.duration_seconds / 60))
     return (
-        f"The call lasted {minutes} min.\n\n"
+        f"The call lasted {call_minutes(transcript.duration_seconds)} min.\n\n"
         f"<transcript>\n{escape(lines, quote=False)}\n</transcript>\n\n"
         "Write the call's notes and follow the response schema."
     )
