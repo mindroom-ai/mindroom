@@ -464,47 +464,50 @@ class LockedTurns:
     ) -> None:
         """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
 
+        The turn's start and its one pause or end bracket this run, so its plugins see every way it ends.
         ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
         row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
         """
         cancelled: asyncio.CancelledError | None = None
-        async with session_started_on_creation(
-            reply_session,
-            correlation_id=lifecycle.identity.correlation_id,
-        ):
-            try:
-                outcome = await self._attempt_outcome(
-                    request,
-                    target=target,
-                    response_function=response_function,
-                    approval_suspension_handler=approval_suspension_handler,
-                    participation=participation,
-                    response_kind=lifecycle.identity.response_kind,
-                )
-            except asyncio.CancelledError as error:
-                if current_task_is_process_shutdown():
-                    raise
-                # The turn still settles as cancelled; the cancellation then propagates.
-                cancelled = error
-                outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
         handle = current_span()
-        if handle is not None and not handle.exited:
-            outcome = await self._end_span_after_outcome(
-                handle,
+        async with lifecycle.turn(resumed=handle is not None and handle.span.kind is rl.SpanKind.APPROVAL_RESUME):
+            async with session_started_on_creation(
+                reply_session,
+                correlation_id=lifecycle.identity.correlation_id,
+            ):
+                try:
+                    outcome = await self._attempt_outcome(
+                        request,
+                        target=target,
+                        response_function=response_function,
+                        approval_suspension_handler=approval_suspension_handler,
+                        participation=participation,
+                        response_kind=lifecycle.identity.response_kind,
+                    )
+                except asyncio.CancelledError as error:
+                    if current_task_is_process_shutdown():
+                        raise
+                    # The turn still settles as cancelled; the cancellation then propagates.
+                    cancelled = error
+                    outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
+            handle = current_span()
+            if handle is not None and not handle.exited:
+                outcome = await self._end_span_after_outcome(
+                    handle,
+                    outcome,
+                    target=target,
+                    delivery_started=progress.delivery_started,
+                    contact_turn=request.contact is not None,
+                )
+            progress.ending = outcome.ending
+            await self._finalize_locked_outcome(
+                lifecycle,
                 outcome,
-                target=target,
-                delivery_started=progress.delivery_started,
-                contact_turn=request.contact is not None,
+                post_response_outcome=build_post_response_outcome(outcome),
+                post_response_deps=post_response_deps,
             )
-        progress.ending = outcome.ending
-        await self._finalize_locked_outcome(
-            lifecycle,
-            outcome,
-            post_response_outcome=build_post_response_outcome(outcome),
-            post_response_deps=post_response_deps,
-        )
-        if cancelled is not None:
-            raise cancelled
+            if cancelled is not None:
+                raise cancelled
 
     async def _end_span_after_outcome(
         self,

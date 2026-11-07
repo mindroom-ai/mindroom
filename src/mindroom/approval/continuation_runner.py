@@ -379,6 +379,7 @@ class ApprovalContinuationRunner:
                 message_received_depth=request.response_envelope.message_received_depth,
                 dispatch_policy_source_kind=request.response_envelope.dispatch_policy_source_kind,
                 correlation_id=correlation_id_for_request(request),
+                turn_id=request.turn_id,
                 history_scope=history_scope,
                 origin=request.response_envelope.origin,
                 memory_prompt=request.prompt,
@@ -1040,9 +1041,9 @@ class ApprovalContinuationRunner:
         *,
         target: MessageTarget,
     ) -> ResponseRequest:
-        """Rebuild the original response's envelope, sources, and correlation for resumed hooks and post-effects.
+        """Rebuild the original response's envelope, sources, correlation, and turn for resumed hooks and post-effects.
 
-        The resumed reply runs as a turn of its own, with a new turn ID.
+        The resumed reply continues the paused turn, under its turn ID.
         It carries no contact: a contact turn offers no function that asks for approval, so it never pauses.
         """
         envelope = MessageEnvelope(
@@ -1066,6 +1067,7 @@ class ApprovalContinuationRunner:
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,
             correlation_id=continuation.correlation_id,
+            turn_id=continuation.turn_id or uuid4().hex,
             participating_agent_names=continuation.team_member_names or (continuation.entity_name,),
         )
 
@@ -1253,7 +1255,7 @@ class ApprovalContinuationRunner:
                 approval_state=owned.state,
             )
             if not isinstance(step, Resume):
-                await self._run_step(owned, step, target=target)
+                await self._run_paused_step(owned, step, target=target)
                 return
             if not is_sender_allowed_for_entity_replies_in_room(
                 owned.requester_id,
@@ -1268,7 +1270,7 @@ class ApprovalContinuationRunner:
                 self.deps.runtime.agent_reply_memberships,
                 require_resolved_membership=True,
             ):
-                await self._run_step(owned, Settle(_UNAUTHORIZED), target=target)
+                await self._run_paused_step(owned, Settle(_UNAUTHORIZED), target=target)
                 return
             # Each claimed generation runs in its own resume span.
             async with self.deps.replies.span_scope() as resume_slot:
@@ -1286,9 +1288,21 @@ class ApprovalContinuationRunner:
             advanced = current.generation > claimed.generation
             step = next_step(await self._facts(current, recover=True), Resumed("suspended", advanced=advanced))
             if not isinstance(step, Resume):
-                await self._run_step(current, step, target=target)
+                await self._run_paused_step(current, step, target=target)
                 return
             owned = current
+
+    async def _run_paused_step(self, paused: ApprovalContinuation, step: Step, *, target: MessageTarget) -> None:
+        """Run one step of a paused reply's approval; a settlement that ends a reply no resume claimed ends its turn.
+
+        A claimed continuation's resume ends the turn itself.
+        """
+        if not await self._run_step(paused, step, target=target) or not isinstance(step, Settle):
+            return
+        if paused.claim_span_id is None:
+            request = self.approval_response_request(paused, target=target)
+            lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(paused))
+            await lifecycle.end_turn("failed" if step.failure.kind is ApprovalFailureKind.ERROR else "cancelled")
 
     async def _run_owned_approval_continuation(
         self,

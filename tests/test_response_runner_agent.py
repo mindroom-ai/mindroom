@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
@@ -2819,7 +2819,10 @@ class TestAgentBot(AgentBotTestBase):
             events.append("cleanup_complete")
             return outcome
 
-        lifecycle = cast("Any", SimpleNamespace(identity=identity, finalize=finalize))
+        lifecycle = cast(
+            "Any",
+            SimpleNamespace(identity=identity, finalize=finalize, turn=lambda **_kwargs: nullcontext()),
+        )
         # The response runs in the reply span the locked generation claims for it.
         async with runner.deps.replies.span_scope():
             claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())

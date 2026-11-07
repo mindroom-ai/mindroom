@@ -105,7 +105,10 @@ class _Observer:
     notes: list[tuple[NoteKind, str | None]] = field(default_factory=list)
     expire: AsyncMock = field(default_factory=lambda: AsyncMock(return_value=True))
     lifecycle: MagicMock = field(
-        default_factory=lambda: MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome)),
+        default_factory=lambda: MagicMock(
+            finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome),
+            end_turn=AsyncMock(),
+        ),
     )
     wakes: list[tuple[str, ...]] = field(default_factory=list)
 

@@ -6570,6 +6570,30 @@ class TestApprovalContinuations:
         assert restored is not None
         assert restored.origin == replace(continuation.origin, acts_for_requester=False)
 
+    async def test_continuation_without_a_turn_id_loads_with_none(self, alice: PrincipalStore) -> None:
+        """A continuation keeps its paused turn's ID; one stored before continuations kept it reads as having none."""
+        await self.admit_sources(alice)
+        continuation = replace(self.continuation(), turn_id="turn-paused")
+        await paused_for_approval(alice, continuation)
+        assert await alice.approvals.approval_continuation("approval-1") == continuation
+
+        row = await alice._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
+        assert row is not None
+        stored = json.loads(str(row["context_json"]))
+        del stored["turn_id"]
+        await alice._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(stored), "approval-1"),
+            ),
+        )
+        assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, turn_id=None)
+
     async def test_continuation_loads_the_execution_identity_its_run_paused_under(
         self,
         alice: PrincipalStore,

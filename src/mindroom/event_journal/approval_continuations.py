@@ -215,6 +215,8 @@ class ApprovalContinuation:
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
     correlation_id: str | None = None
+    # The paused turn's ID, which its resumed run keeps; None for a continuation stored without one.
+    turn_id: str | None = None
     history_scope: HistoryScope | None = None
     # Who sent and who requested the paused turn, restored for the resumed hooks.
     origin: TurnOrigin = field(kw_only=True)
@@ -266,6 +268,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "message_received_depth": continuation.message_received_depth,
         "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
         "correlation_id": continuation.correlation_id,
+        "turn_id": continuation.turn_id,
         "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
         "origin": _origin_to_dict(continuation.origin),
         "memory_prompt": continuation.memory_prompt,
@@ -374,6 +377,14 @@ def _from_rows(
         message_received_depth=int(stored["message_received_depth"]),
         dispatch_policy_source_kind=cast("str | None", stored["dispatch_policy_source_kind"]),
         correlation_id=cast("str | None", stored["correlation_id"]),
+        # LEGACY_COMPAT: Approval continuations stored without their paused turn's ID.
+        # Legacy format: the stored context of an approval continuation had no turn_id key.
+        # Last legacy release: every release before this change ships, v2026.11.187 the newest when written, stores
+        #   continuations without it; replacement: unreleased, the first release with this change stores the paused
+        #   turn's ID in every continuation.
+        # Handling: absence reads as None, so the resumed reply runs under a new turn ID, as every resume did before.
+        # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_turn_id_loads_with_none.
+        turn_id=cast("str | None", stored.get("turn_id")),
         history_scope=HistoryScope.from_metadata(stored["history_scope"]),
         origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
         memory_prompt=cast("str | None", stored["memory_prompt"]),
