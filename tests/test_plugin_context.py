@@ -10,28 +10,33 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from mindroom.api.app_state import ensure_app_state
-from mindroom.api.config_lifecycle import ApiSnapshot
+from mindroom.api.config_lifecycle import ApiSnapshot, require_api_state
 from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
-from mindroom.plugin_api import PluginContext, current_plugin_context
+from mindroom.plugin_api import current_plugin_context
 from mindroom.plugin_http import plugin_context
 from mindroom.tool_system.plugins import PluginInactiveError
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
-    ToolRuntimeContext,
     detached_requester_context,
     tool_runtime_context,
 )
-from tests.authorization_helpers import isolated_membership_index
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, publish_test_plugins
+from tests.authorization_helpers import isolated_membership_index, make_test_tool_runtime_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    publish_test_plugins,
+    test_runtime_paths,
+)
 from tests.test_plugin_routes import _app, _write_plugin
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from fastapi import FastAPI
+
+    from mindroom.constants import RuntimePaths
 
 ROUTES = """
 from typing import Annotated
@@ -93,16 +98,6 @@ async def live(websocket: WebSocket) -> None:
 """
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}", encoding="utf-8")
-    return resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "mindroom_data",
-        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
-    )
-
-
 def _bound(runtime_paths: RuntimePaths, *entries: dict[str, Any]) -> Config:
     """Return a config whose ``plugins:`` are ``entries``, each naming a plugin under ``plugins/`` by its ``name``."""
     plugins = [{"path": f"./plugins/{entry.pop('name')}", **entry} for entry in map(dict, entries)]
@@ -113,7 +108,7 @@ def _client(tmp_path: Path, *entries: dict[str, Any]) -> tuple[FastAPI, TestClie
     """Publish the plugins ``entries`` name, each serving ``ROUTES``, and return the API serving them."""
     for entry in entries:
         _write_plugin(tmp_path, ROUTES, name=entry["name"])
-    runtime_paths = _runtime_paths(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
     config = _bound(runtime_paths, *entries)
     publish_test_plugins(config, runtime_paths)
     app = _app(config, runtime_paths)
@@ -122,8 +117,7 @@ def _client(tmp_path: Path, *entries: dict[str, Any]) -> tuple[FastAPI, TestClie
 
 def _reload(app: FastAPI, config: Config, runtime_paths: RuntimePaths | None = None) -> None:
     """Publish ``config`` to the API as a config reload does, for other ``runtime_paths`` when given."""
-    state = ensure_app_state(app).api_state
-    assert state is not None
+    state = require_api_state(app)
     snapshot = state.snapshot
     state.snapshot = ApiSnapshot(
         snapshot.generation + 1,
@@ -181,8 +175,7 @@ def test_a_reload_that_disables_or_removes_the_plugin_fails_its_route_closed(tmp
     app, client, runtime_paths = _client(tmp_path, {"name": "demo", "settings": {"key": "secret"}})
     if change == "other-runtime":
         config = _bound(runtime_paths, {"name": "demo", "settings": {"key": "secret"}})
-        (tmp_path / "other").mkdir()
-        app.state.reload = lambda: _reload(app, config, _runtime_paths(tmp_path / "other"))
+        app.state.reload = lambda: _reload(app, config, test_runtime_paths(tmp_path / "other"))
     else:
         entries = [{"name": "demo", "enabled": False}] if change == "disabled" else []
         app.state.reload = lambda: _reload(app, _bound(runtime_paths, *entries))
@@ -238,18 +231,17 @@ def test_plugin_context_outside_a_plugin_route_names_its_misuse() -> None:
 def test_a_plugin_tool_reads_its_plugins_context_until_a_reload_disables_it(tmp_path: Path) -> None:
     """Inside a tool call a plugin reads its context by name, and it fails closed once the current config drops it."""
     _write_plugin(tmp_path, None, name="demo")
-    runtime_paths = _runtime_paths(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
     config = _bound(runtime_paths, {"name": "demo", "settings": {"key": "value"}})
-    plugins = publish_test_plugins(config, runtime_paths)
+    publish_test_plugins(config, runtime_paths)
     current = [config]
-    runtime = ToolRuntimeContext(
+    runtime = make_test_tool_runtime_context(
         agent_name="code",
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
         requester_id="@alice:example.org",
         client=MagicMock(),
         config=config,
         runtime_paths=runtime_paths,
-        plugins=plugins,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         config_provider=lambda: current[0],
@@ -260,7 +252,6 @@ def test_a_plugin_tool_reads_its_plugins_context_until_a_reload_disables_it(tmp_
         with pytest.raises(PluginInactiveError, match="Plugin 'nope' is not active"):
             current_plugin_context("nope")
 
-    assert isinstance(ctx, PluginContext)
     assert (ctx.plugin_name, dict(ctx.settings), ctx.config, ctx.is_active()) == (
         "demo",
         {"key": "value"},
@@ -280,7 +271,7 @@ def test_a_plugin_tool_reads_its_plugins_context_until_a_reload_disables_it(tmp_
 def test_a_plugin_tool_reads_its_plugins_context_in_an_openai_compatible_request(tmp_path: Path) -> None:
     """A tool call without a Matrix conversation, as for an OpenAI-compatible API request, reads its plugin's context."""
     _write_plugin(tmp_path, None, name="demo")
-    runtime_paths = _runtime_paths(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
     config = _bound(runtime_paths, {"name": "demo", "settings": {"key": "value"}})
     publish_test_plugins(config, runtime_paths)
     current: list[Config | None] = [config]
