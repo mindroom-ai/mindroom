@@ -140,8 +140,9 @@ def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
         for path in (directory / name for name in file_names if name.endswith(".py")):
             try:
                 tree = ast.parse(path.read_bytes(), filename=str(path))
-            except (OSError, SyntaxError):
+            except (OSError, SyntaxError, RecursionError, MemoryError):
                 # A file Python cannot read or parse runs no imports, and `check_plugin` fails on any such module the plugin loads.
+                # The parser raises RecursionError or MemoryError for sources nested too deeply or too long to compile.
                 continue
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

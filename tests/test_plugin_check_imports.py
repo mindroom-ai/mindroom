@@ -92,6 +92,9 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
         "venv/lib/python3.13/site-packages/mindroom/hooks.py": "from mindroom.constants import ROUTER_AGENT_NAME\n",
         ".venv/bin/activate_this.py": "import mindroom.constants\n",
         "legacy.py": "print 'python 2'\nfrom mindroom.hooks import hook\n",
+        # Sources too deeply nested or too long for Python's parser, which raises other errors for them.
+        "long_sum.py": "from mindroom.hooks import hook\nx = " + "1+" * 10_000 + "1\n",
+        "long_branches.py": "from mindroom.hooks import hook\nif x:\n    pass\n" + "elif x:\n    pass\n" * 6_000,
         "notes.txt": "from mindroom.hooks import hook\n",
     }.items():
         path = tmp_path / relative_path
