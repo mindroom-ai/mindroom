@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import ssl
 import stat
 from collections.abc import Iterator, Mapping
@@ -15,6 +16,7 @@ from uuid import UUID
 import aiohttp
 import nio
 import pytest
+from aiohttp import web
 from nio.durable import DurableSyncConfig
 from nio.store.database import DefaultStore, SqliteStore
 from structlog.testing import capture_logs
@@ -32,9 +34,11 @@ from mindroom.matrix import _owned_session, client_session
 from mindroom.matrix.client_session import (
     MindRoomAsyncClient,
     PermanentMatrixStartupError,
+    create_matrix_http_client,
     login_flows,
     matrix_client_config,
 )
+from mindroom.matrix.client_delivery import send_room_event_result
 from tests.conftest import legacy_default_store_client
 
 if TYPE_CHECKING:
@@ -167,6 +171,79 @@ def test_matrix_client_config_enables_sync_token_storage() -> None:
     config = matrix_client_config()
 
     assert config.store_sync_tokens is True
+
+
+_ROOM_ID = "!room:example.org"
+_MESSAGE = {"msgtype": "m.text", "body": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_matrix_requests_give_up_on_a_homeserver_that_stays_down(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An event lookup and a send end in an error instead of retrying forever, after outlasting a one-minute restart."""
+    waits: list[float] = []
+    nio_wait = nio.AsyncClient.get_timeout_retry_wait_time
+
+    async def skip_wait(client: nio.AsyncClient, got_timeouts: int) -> float:
+        waits.append(await nio_wait(client, got_timeouts))
+        return 0.0
+
+    monkeypatch.setattr(nio.AsyncClient, "get_timeout_retry_wait_time", skip_wait)
+    with socket.socket() as closed:
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    client = create_matrix_http_client(f"http://127.0.0.1:{port}", runtime_paths, "@mindroom_agent:example.org")
+    client.access_token = "token"  # noqa: S105
+
+    try:
+        async with asyncio.timeout(5):
+            with pytest.raises(aiohttp.ClientConnectionError):
+                await client.room_get_event(_ROOM_ID, "$event")
+            assert 60 < sum(waits) < 120
+            assert await send_room_event_result(client, _ROOM_ID, "m.room.message", _MESSAGE) is None
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_matrix_requests_give_up_on_a_homeserver_that_keeps_rate_limiting(tmp_path: Path) -> None:
+    """An event lookup and a send return the 429 after a bounded number of tries instead of retrying forever."""
+    attempts: list[str] = []
+
+    async def rate_limited(request: web.Request) -> web.Response:
+        attempts.append(request.path)
+        return web.json_response(
+            {"errcode": "M_LIMIT_EXCEEDED", "error": "Too many requests", "retry_after_ms": 1},
+            status=429,
+        )
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", rate_limited)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    assert site._server is not None
+    port = site._server.sockets[0].getsockname()[1]
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    client = create_matrix_http_client(f"http://127.0.0.1:{port}", runtime_paths, "@mindroom_agent:example.org")
+    client.access_token = "token"  # noqa: S105
+
+    try:
+        async with asyncio.timeout(5):
+            lookup = await client.room_get_event(_ROOM_ID, "$event")
+            send = await send_room_event_result(client, _ROOM_ID, "m.room.message", _MESSAGE)
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+    assert isinstance(lookup, nio.RoomGetEventError)
+    assert isinstance(send, nio.RoomSendError)
+    assert lookup.status_code == send.status_code == "M_LIMIT_EXCEEDED"
+    assert len(attempts) == 2 * 21
 
 
 @pytest.mark.asyncio
