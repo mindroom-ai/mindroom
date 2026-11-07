@@ -489,6 +489,39 @@ async def test_a_room_taken_out_of_the_config_that_is_not_followed_is_left(
 
 
 @pytest.mark.asyncio
+async def test_rooms_taken_out_of_the_config_together_with_the_room_listing_them_are_left(tmp_path: Path) -> None:
+    """A room listing another keeps it only while the bot stays in it, so dropping both leaves both."""
+    bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}, joined=(PARENT, ROOM))
+    # The bot stays in a configured room that no sync has delivered yet.
+    bot.client.joined_rooms.side_effect = lambda: nio.JoinedRoomsResponse(rooms=[OTHER_ROOM, *bot.client.rooms])
+    bot.lifecycle.deps = replace(bot.lifecycle.deps, get_configured_rooms=lambda: [OTHER_ROOM])
+
+    await bot.lifecycle.leave_unconfigured_rooms()
+
+    assert sorted(bot.memberships) == [(PARENT, "leave"), (ROOM, "leave")]
+    assert bot.lifecycle.invited_room_ids() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_rooms_taken_out_of_the_config_stay_under_a_room_that_stays_however_deep(tmp_path: Path) -> None:
+    """A dropped room listed by a dropped room that itself stays, listed by a configured room, stays too."""
+    bot = _Bot(
+        tmp_path,
+        {
+            PARENT: [_create(), _child(ROOM)],
+            ROOM: [_create(), _parent(PARENT), _child(OTHER_ROOM)],
+            OTHER_ROOM: [_create(), _parent(ROOM)],
+        },
+        joined=(PARENT, ROOM, OTHER_ROOM),
+    )
+
+    await bot.lifecycle.leave_unconfigured_rooms()
+
+    assert bot.memberships == []
+    assert bot.lifecycle.invited_room_ids() == {ROOM, OTHER_ROOM}
+
+
+@pytest.mark.asyncio
 async def test_a_room_taken_off_its_list_while_a_cleanup_keeps_it_is_left_after_that_cleanup(tmp_path: Path) -> None:
     """A removal arriving while a cleanup pass decides to keep a listed room waits for that pass, then leaves it."""
     state = {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}
@@ -527,7 +560,7 @@ async def test_listings_replayed_from_room_state_at_startup_join_and_leave_nothi
     tmp_path: Path,
     replayed: str,
 ) -> None:
-    """A full-state sync replays every listing in the bot's rooms; around the startup sweep each room is joined once."""
+    """Listings replayed from room state at startup join each room once and leave none, around the startup sweep."""
     bot = _Bot(
         tmp_path,
         {
@@ -590,10 +623,14 @@ async def test_room_cleanup_during_a_follow_keeps_the_room(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_listing_change_seen_only_as_room_state_reaches_the_listing_callback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delivery", ["unfilled-gap", "new-join"])
+async def test_only_a_listing_change_lost_to_a_gap_reaches_the_listing_callback_from_room_state(
+    tmp_path: Path,
+    delivery: str,
+) -> None:
     """After a gap longer than the sync recovers, a room taken off a list arrives only as state, and still reaches it.
 
-    Other room state still reaches no callback.
+    The state of a room the bot just joined holds old listings, not changes, so they, like other room state, do not.
     """
     bot = _agent_bot(tmp_path)
     seen: list[str] = []
@@ -601,33 +638,35 @@ async def test_a_listing_change_seen_only_as_room_state_reaches_the_listing_call
     async def on_event(_room: nio.MatrixRoom, event: nio.Event) -> None:
         seen.append(event.event_id)
 
-    def message(event_id: str) -> dict:
-        content = {"msgtype": "m.text", "body": "hello"}
-        return {
-            "type": "m.room.message",
-            "event_id": event_id,
-            "sender": ALICE,
-            "origin_server_ts": 1,
-            "content": content,
-        }
+    def event(event_id: str, kind: str, content: dict, *, sender: str = ALICE, state_key: str | None = None) -> dict:
+        source = {"type": kind, "event_id": event_id, "sender": sender, "origin_server_ts": 1, "content": content}
+        return source if state_key is None else {**source, "state_key": state_key}
 
-    def joined(state: list[dict], timeline: dict) -> dict:
-        return {"next_batch": "next", "rooms": {"join": {PARENT: {"state": {"events": state}, "timeline": timeline}}}}
+    def joined(room_id: str, state: list[dict], timeline: dict) -> dict:
+        return {"next_batch": "next", "rooms": {"join": {room_id: {"state": {"events": state}, "timeline": timeline}}}}
 
+    message = {"msgtype": "m.text", "body": "hello"}
     unlisted = {"event_id": "$unlisted", "origin_server_ts": 1, **_child(ROOM, listed=False)}
-    topic = {
-        "type": "m.room.topic",
-        "event_id": "$topic",
-        "sender": ALICE,
-        "state_key": "",
-        "origin_server_ts": 1,
-        "content": {"topic": "Plans"},
-    }
-    gap = {"limited": True, "prev_batch": "gap", "events": [message("$latest")]}
+    state = [event("$topic", "m.room.topic", {"topic": "Plans"}, state_key=""), unlisted]
+    if delivery == "unfilled-gap":
+        first, recovered = PARENT, [event("$older", "m.room.message", message)]
+        timeline = {"limited": True, "prev_batch": "gap", "events": [event("$latest", "m.room.message", message)]}
+    else:
+        first, recovered = OTHER_ROOM, []
+        own = bot.agent_user.user_id
+        timeline = {
+            "limited": False,
+            "events": [event("$join", "m.room.member", {"membership": "join"}, sender=own, state_key=own)],
+        }
+    old_listing = {"event_id": "$old", "origin_server_ts": 1, **_child(OTHER_ROOM, listed=False)}
     async with _owned_session(bot, DurableSyncConfig(recovery_page_size=1, max_recovery_pages=1)) as session:
         session.client.add_event_callback(on_event, nio.Event)
-        await _consume_frame(bot, session, json.dumps(joined([], {"limited": False, "events": []})).encode())
-        records = await _consume_repaired_frame(bot, session, joined([topic, unlisted], gap), [message("$older")])
+        await _consume_frame(bot, session, json.dumps(joined(first, [], {"limited": False, "events": []})).encode())
+        gap_rooms: set[str] = set()
+        records = await _consume_repaired_frame(bot, session, joined(PARENT, state, timeline), recovered, gap_rooms)
+        # The next sync brings the room's whole state again, old listings included.
+        next_sync = joined(PARENT, [old_listing], {"limited": False, "events": []})
+        await _consume_repaired_frame(bot, session, next_sync, [], gap_rooms)
 
-    assert any(record.kind is RecordKind.LOSS for record in records)
-    assert seen == ["$unlisted"]
+    assert [record.room_id for record in records if record.kind is RecordKind.LOSS] == [PARENT]
+    assert seen == (["$unlisted"] if delivery == "unfilled-gap" else [])

@@ -16,6 +16,10 @@ from mindroom.matrix.transport_progress import is_transport_progress_source
 
 __all__ = ["consume_one_ingestion_batch", "run_ingestion_pump", "validate_ingestion_batch"]
 
+# Nio's loss for a room whose history before this sync it cannot vouch for, as one this account just joined; that room's
+# state in the same sync is a snapshot of old state, not changes.
+_UNKNOWN_HISTORY_LOSS = "unknown authorization baseline"
+
 
 class _OwnedIngestionSession(Protocol):
     """Public durable session operations needed by the application pump."""
@@ -126,8 +130,13 @@ async def consume_one_ingestion_batch(
     after_sync: Callable[[], Awaitable[None]] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    gap_rooms: set[str] | None = None,
 ) -> ej.AdmissionFacts | None:
-    """Commit the whole batch, run ordered hooks and callbacks, then acknowledge."""
+    """Commit the whole batch, run ordered hooks and callbacks, then acknowledge.
+
+    `gap_rooms` carries the rooms whose history the current sync lost to a gap across that sync's batches; without it, a
+    loss reported in an earlier batch of the sync is not known.
+    """
     batch = await session.next_batch()
     if batch is None:
         return None
@@ -141,6 +150,7 @@ async def consume_one_ingestion_batch(
         for record, converted_record in zip(batch.records, converted.records, strict=True):
             before_admission(converted_record, record.provenance)
     result = await admission.admit_ingestion_batch(converted)
+    lost_rooms = _rooms_lost_to_a_gap(gap_rooms, batch)
     for record, converted_record, facts in zip(batch.records, converted.records, result.record_facts, strict=True):
         if after_admission is not None:
             await after_admission(converted_record, facts, record.provenance)
@@ -153,17 +163,37 @@ async def consume_one_ingestion_batch(
                 on_decryption_failure(record)
             continue
         if converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
-            await _dispatch_auxiliary_record(session, record, account_id)
+            await _dispatch_auxiliary_record(session, record, account_id, lost_rooms)
     if batch.completes_sync and after_sync is not None:
         await after_sync()
     await session.ack(batch)
     return result
 
 
+def _rooms_lost_to_a_gap(gap_rooms: set[str] | None, batch: SyncBatch) -> frozenset[str]:
+    """Return the rooms whose history this batch's sync has lost to a gap so far, as opposed to never known.
+
+    `gap_rooms` keeps them across the sync's batches and is emptied once this batch completes the sync.
+    """
+    gap_rooms = set() if gap_rooms is None else gap_rooms
+    gap_rooms.update(
+        record.room_id
+        for record in batch.records
+        if record.kind is RecordKind.LOSS
+        and record.room_id is not None
+        and record.source.get("reason") != _UNKNOWN_HISTORY_LOSS
+    )
+    lost_rooms = frozenset(gap_rooms)
+    if batch.completes_sync:
+        gap_rooms.clear()
+    return lost_rooms
+
+
 async def _dispatch_auxiliary_record(
     session: _OwnedIngestionSession,
     record: SyncRecord,
     account_id: str,
+    lost_rooms: frozenset[str],
 ) -> None:
     """Dispatch auxiliary callbacks at least once, filtering transport-only edits."""
     if record.kind is RecordKind.TIMELINE and is_transport_progress_source(
@@ -171,8 +201,8 @@ async def _dispatch_auxiliary_record(
         self_sender=account_id,
     ):
         return
-    if record.kind is RecordKind.STATE and record.source.get("type") == "m.space.child":
-        # Nio routes no room state to callbacks, and a listing change after a gap the sync cannot fill arrives only there.
+    if record.route is None and record.room_id in lost_rooms and record.source.get("type") == "m.space.child":
+        # Nio routes no room state to callbacks, and a listing change in a gap the sync could not fill arrives only there.
         record = replace(record, route="event")
     await session.dispatch(record)
 
@@ -193,6 +223,7 @@ async def run_ingestion_pump(
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
+    gap_rooms: set[str] = set()
     while True:
         await asyncio.sleep(0)
         try:
@@ -205,6 +236,7 @@ async def run_ingestion_pump(
                 after_sync=after_sync,
                 on_decryption_failure=on_decryption_failure,
                 schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
+                gap_rooms=gap_rooms,
             )
         except ej.DeliveryProjectionPendingError:
             if wait_for_delivery_projection is None:

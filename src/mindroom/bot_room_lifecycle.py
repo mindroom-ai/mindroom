@@ -480,8 +480,8 @@ class BotRoomLifecycle:
     async def _rooms_to_leave(self) -> list[str]:
         """Return joined rooms this bot should now leave before DM filtering.
 
-        A room one of this bot's rooms lists, as this bot would follow it, stays and is kept as followed from then on, so
-        taking a listed room out of the configuration never makes this bot leave it.
+        A room listed, as this bot would follow it, by a room this bot stays in stays too and is kept as followed from then
+        on, so taking a listed room out of the configuration never makes this bot leave it.
         """
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
@@ -503,7 +503,13 @@ class BotRoomLifecycle:
             state = matrix_state_for_runtime(self.deps.runtime_paths)
             configured_rooms.update(room_id for room_id in (state.space_room_id, state.server_emoji_room_id) if room_id)
 
-        return [room_id for room_id in current_rooms - configured_rooms if not await self._keep_listed_room(room_id)]
+        leaving = current_rooms - configured_rooms
+        # A room kept this way can list others in turn, so the pass repeats until it keeps no more.
+        while kept := {
+            room_id for room_id in leaving if await self._keep_listed_room(room_id, current_rooms - leaving)
+        }:
+            leaving -= kept
+        return list(leaving)
 
     async def send_welcome_message_if_empty(
         self,
@@ -765,13 +771,15 @@ class BotRoomLifecycle:
             else:
                 self._logger().warning("Failed to join listed room", room_id=room_id, parent_id=parent_id)
 
-    async def _keep_listed_room(self, room_id: str) -> bool:
-        """Keep a joined room as followed when a room this bot is in lists it as this bot would follow it."""
+    async def _keep_listed_room(self, room_id: str, parent_ids: set[str]) -> bool:
+        """Keep a joined room as followed when one of `parent_ids` lists it as this bot would follow it."""
         async with self._lock_for_room(self._invite_join_locks, room_id):
             client = self._client()
-            for parent_id, parent in tuple(client.rooms.items()):
+            for parent_id in parent_ids:
+                parent = client.rooms.get(parent_id)
                 if (
-                    room_id in parent.children
+                    parent is not None
+                    and room_id in parent.children
                     and room_id in await self._admitted_listed_rooms(parent_id)
                     and await _names_parent(client, room_id, parent_id)
                 ):
