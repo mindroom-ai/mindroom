@@ -159,7 +159,6 @@ _.response_event_mismatch_count  # recovery diagnostic field logged through asdi
 get_personal_agents  # unused function (src/mindroom/api/main.py)
 healthz  # unused function (src/mindroom/api/sandbox_runner_app.py)
 _.serialize  # unused method (src/mindroom/config/models.py)
-_.is_active  # plugin hooks inspect whether their registry snapshot is still live (src/mindroom/hooks/context.py)
 normalize_embeddings  # SentenceTransformer encode keyword in the local model protocol (src/mindroom/embeddings/sentence_transformers_embedder.py)
 _.generate_image  # Agno toolkit override (src/mindroom/custom_tools/gemini_media.py)
 _.to_config_dict  # used by scripts/sync_config.py (src/mindroom/model_defaults.py)
