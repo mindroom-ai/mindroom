@@ -18043,7 +18043,7 @@ Each call is one request with no tools and no conversation history.
 
 ### Fetching public URLs
 
-To download a page or file from a URL a model or user supplied, use `fetch_public_url` from `mindroom.plugin_api`, or `fetch_public_url_sync` in synchronous code; the built-in `website` tool fetches through it too:
+To download a page or file from a URL a model or user supplied, use `fetch_public_url` from `mindroom.plugin_api` in async code, or `fetch_public_url_sync` in synchronous code that runs off the event loop, such as a synchronous tool:
 
 ```python
 from mindroom.plugin_api import PublicFetchError, fetch_public_url

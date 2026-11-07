@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import httpx
+import idna
 from httpx._utils import get_environment_proxies
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
@@ -70,7 +71,7 @@ async def _read_final_response(response: httpx.Response, max_bytes: int) -> Publ
         msg = f"The server answered with HTTP status {response.status_code}."
         raise PublicFetchError(msg, code="http_status", status_code=response.status_code)
     codings = response.headers.get_list("content-encoding", split_commas=True)
-    if any(coding.strip().lower() not in {"", "identity"} for coding in codings):
+    if any(coding.lower() not in {"", "identity"} for coding in codings):
         msg = "The response must use identity content encoding."
         raise PublicFetchError(msg, code="content_encoding")
     try:
@@ -122,9 +123,13 @@ async def fetch_public_url(url: str, *, max_bytes: int, use_env_proxy: bool = Fa
         msg = f"The fetch did not finish within {_DEADLINE_SECONDS:g} seconds."
         raise PublicFetchError(msg, code="timeout") from None
     except ServerFetchUrlError as error:
+        if error.reason == "dns_resolution_failed":
+            # A failed lookup is a network failure the caller may retry, not a refused URL.
+            msg = "The request failed (dns_resolution_failed)."
+            raise PublicFetchError(msg, code="request_failed") from None
         msg = f"The URL is not allowed for a public fetch ({error.reason})."
         raise PublicFetchError(msg, code="url_not_allowed") from None
-    except (httpx.InvalidURL, httpx.UnsupportedProtocol):
+    except (httpx.InvalidURL, idna.IDNAError):
         msg = "The URL is not allowed for a public fetch (invalid_url)."
         raise PublicFetchError(msg, code="url_not_allowed") from None
     except httpx.HTTPError as error:

@@ -37,14 +37,9 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def _public_dns_for_website_tests(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep website reader tests focused on crawler behavior instead of real DNS."""
-    monkeypatch.setattr(
-        "mindroom.server_fetch_url.socket.getaddrinfo",
-        lambda *_args, **_kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443)),
-        ],
-    )
+def _no_crawl_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl without the pause between fetches; the pacing test records the pauses instead."""
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", lambda _reader: None)
 
 
 def _serve(monkeypatch: pytest.MonkeyPatch, respond: Callable[[str], httpx.Response]) -> list[str]:
@@ -120,11 +115,7 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
         """,
     }
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     _serve(monkeypatch, lambda url: _page(pages[url]))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = json.loads(WebsiteTools().read_url(root_url))
     content_by_url = {document["meta_data"]["url"]: document["content"] for document in documents}
@@ -163,22 +154,16 @@ def test_website_reader_pauses_only_between_fetches(monkeypatch: pytest.MonkeyPa
     assert steps == [f"fetch {root_url}", "pause", f"fetch {docs_url}"]
 
 
-def test_website_reader_rejects_private_starting_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Agent-callable website reads should not fetch private network URLs."""
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000/private", "file:///etc/passwd"], ids=["private", "file"])
+def test_website_reader_refuses_a_starting_url_that_is_not_public_http(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    """Agent-callable website reads fetch only public HTTP(S) URLs, refusing others before any request."""
     requested_urls = _serve(monkeypatch, lambda _url: _page("private"))
 
     with pytest.raises(PublicFetchError, match="URL is not allowed"):
-        _MindRoomWebsiteReader().read("http://127.0.0.1:8000/private")
-
-    assert requested_urls == []
-
-
-def test_website_reader_rejects_unsupported_schemes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Agent-callable website reads should only allow HTTP(S) URLs."""
-    requested_urls = _serve(monkeypatch, lambda _url: _page("file"))
-
-    with pytest.raises(PublicFetchError, match="URL is not allowed"):
-        _MindRoomWebsiteReader().read("file:///etc/passwd")
+        _MindRoomWebsiteReader().read(url)
 
     assert requested_urls == []
 
@@ -187,11 +172,7 @@ def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyP
     """Redirects to private network URLs should be blocked before following the hop."""
     start_url = "https://example.com/redirect"
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(monkeypatch, lambda _url: _redirect("http://127.0.0.1/admin"))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     with pytest.raises(PublicFetchError, match="URL is not allowed"):
         _MindRoomWebsiteReader().read(start_url)
@@ -214,11 +195,7 @@ def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pyt
     </html>
     """
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(monkeypatch, lambda url: _redirect(final_url) if url == start_url else _page(html))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
 
@@ -273,11 +250,7 @@ def test_website_reader_crawls_from_a_start_url_with_surrounding_whitespace(monk
         docs_url: "<main><p>Docs page with enough reference text to keep it as a document.</p></main>",
     }
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(monkeypatch, lambda url: _page(pages[url]))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(f"  {root_url}\n")
 
@@ -303,11 +276,7 @@ def test_website_reader_crawls_an_internationalized_domain(monkeypatch: pytest.M
         absolute_url: "<main><p>Absolute page with enough reference text to keep it as a document.</p></main>",
     }
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(monkeypatch, lambda url: _page(pages[url]))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read("https://b\u00fccher.example/")
 
@@ -346,14 +315,10 @@ def test_website_reader_does_not_record_cross_host_redirect_content(
         """,
     }
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(
         monkeypatch,
         lambda url: _redirect(offsite_url) if url == redirect_url else _page(pages[url]),
     )
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
     content_by_url = {document.meta_data["url"]: document.content for document in documents}
@@ -383,14 +348,10 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
         """,
     }
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(
         monkeypatch,
         lambda url: _redirect(private_url) if url == redirect_url else _page(pages[url]),
     )
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
 
@@ -415,11 +376,7 @@ def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pyte
     </html>
     """
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(monkeypatch, lambda _url: _page(html))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
 
@@ -442,11 +399,7 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
     </html>
     """
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(monkeypatch, lambda _url: _page(html))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
 
@@ -488,11 +441,7 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
         """,
     }
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
     requested_urls = _serve(monkeypatch, lambda url: _page(pages[url]))
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
 
@@ -514,6 +463,30 @@ def test_safe_url_for_log_handles_malformed_urls_without_secrets() -> None:
     """Website log sanitization should not raise on malformed caller URLs."""
     assert _safe_url_for_log("https://user:pass@example.test:99999/docs?token=secret") == "https://example.test/docs"
     assert _safe_url_for_log("http://user:pass@[not-ip]/docs?token=secret") == "http://[not-ip]/docs"
+
+
+def test_website_reader_logs_a_fetched_url_without_its_query_or_fragment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful read logs the page URL without its query or fragment, which can carry secrets."""
+    logged_messages: list[str] = []
+
+    def record(message: str) -> None:
+        logged_messages.append(message)
+
+    for log_function in ("log_debug", "log_warning", "log_error"):
+        monkeypatch.setattr(f"mindroom.custom_tools.website.{log_function}", record)
+    _serve(
+        monkeypatch,
+        lambda _url: _page("<main><p>Reference material with enough page text for the reader.</p></main>"),
+    )
+
+    documents = json.loads(WebsiteTools().read_url("https://example.test/docs?token=query-secret#frag-secret"))
+
+    assert "Reference material" in documents[0]["content"]
+    assert logged_messages == [
+        "Reading website: https://example.test/docs",
+        "Reading: https://example.test/docs",
+        "Crawling: https://example.test/docs",
+    ]
 
 
 def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.MonkeyPatch) -> None:

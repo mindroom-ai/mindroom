@@ -43,10 +43,11 @@ def _serve(
     return requests
 
 
-def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
-    def resolve(host: str, port: int, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
-        del host
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (_PUBLIC_ADDRESS, port))]
+def _public_dns(monkeypatch: pytest.MonkeyPatch, addresses: tuple[str, ...] = (_PUBLIC_ADDRESS,)) -> None:
+    """Resolve every hostname to `addresses`, in order."""
+
+    def resolve(_host: str, port: int, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port)) for address in addresses]
 
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
@@ -97,6 +98,8 @@ async def test_a_fetch_follows_public_redirects_and_returns_the_final_page(monke
         "file:///etc/passwd",
         "ftp://example.com/file",
         "http://[::1",
+        "http://xn--/",
+        "http://xn--zz.example/",
     ],
 )
 async def test_a_url_that_is_not_public_http_is_refused_before_any_request(
@@ -113,14 +116,22 @@ async def test_a_url_that_is_not_public_http_is_refused_before_any_request(
 
 
 @pytest.mark.asyncio
-async def test_a_redirect_to_loopback_is_refused_before_it_is_followed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A public page cannot hand the fetch to a loopback service."""
-    requests = _serve(monkeypatch, lambda _request: httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"}))
+@pytest.mark.parametrize(
+    ("location", "reason"),
+    [("http://127.0.0.1/admin", "private_address"), ("http://xn--zz.example/", "invalid_url")],
+)
+async def test_a_redirect_to_a_url_that_is_not_public_http_is_refused_before_it_is_followed(
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    reason: str,
+) -> None:
+    """A public page can hand the fetch neither to a loopback service nor to a host that is not a valid name."""
+    requests = _serve(monkeypatch, lambda _request: httpx.Response(302, headers={"Location": location}))
 
     error = await _refusal("https://example.com/redirect")
 
     assert error.code == "url_not_allowed"
-    assert "private_address" in str(error)
+    assert reason in str(error)
     assert [str(request.url) for request in requests] == ["https://example.com/redirect"]
 
 
@@ -220,6 +231,21 @@ async def test_an_error_status_is_refused_with_its_status_code(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_a_hostname_that_does_not_resolve_is_a_request_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed lookup is a network failure the caller may retry, not a refused URL."""
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+
+    error = await _refusal("https://unresolvable.example/")
+
+    assert error.code == "request_failed"
+    assert "dns_resolution_failed" in str(error)
+
+
+@pytest.mark.asyncio
 async def test_a_connection_failure_is_a_request_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Network errors keep their own code, apart from refusals."""
 
@@ -235,7 +261,7 @@ async def test_a_connection_failure_is_a_request_failure(monkeypatch: pytest.Mon
 
 
 class _TrickleStream(httpcore.AsyncMockStream):
-    """A server that sends its headers, or its headers and then its body, one byte at a time."""
+    """A server that sends `prefix` at once, then one more byte every 20 ms for as long as it is read."""
 
     def __init__(self, prefix: bytes) -> None:
         super().__init__([])
@@ -243,10 +269,10 @@ class _TrickleStream(httpcore.AsyncMockStream):
 
     async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
         del max_bytes, timeout
-        await asyncio.sleep(0.02)
         if self._prefix:
-            chunk, self._prefix = self._prefix[:1], self._prefix[1:]
-            return chunk
+            prefix, self._prefix = self._prefix, b""
+            return prefix
+        await asyncio.sleep(0.02)
         return b"x"
 
 
@@ -283,12 +309,7 @@ async def test_a_host_whose_first_address_never_answers_is_reached_at_its_next(m
     monkeypatch.setattr(public_fetch, "_CONNECT_TIMEOUT_SECONDS", 0.1)
     dead, live = "93.184.216.34", "93.184.216.35"
 
-    def resolve(_host: str, port: int, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port)) for address in (dead, live)
-        ]
-
-    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    _public_dns(monkeypatch, (dead, live))
     attempts: list[str] = []
 
     async def connect(
@@ -297,7 +318,7 @@ async def test_a_host_whose_first_address_never_answers_is_reached_at_its_next(m
         _port: int,
         timeout: float | None = None,  # noqa: ASYNC109
         **_kwargs: object,
-    ) -> _RecordingStream:
+    ) -> httpcore.AsyncMockStream:
         attempts.append(host)
         if host == dead:
             # The real backend gives up on a silent address only when the connect timeout it was handed runs out.
@@ -306,7 +327,7 @@ async def test_a_host_whose_first_address_never_answers_is_reached_at_its_next(m
             await asyncio.sleep(timeout)
             msg = "connect timed out"
             raise httpcore.ConnectTimeout(msg)
-        return _RecordingStream([b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npage"])
+        return httpcore.AsyncMockStream([b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npage"])
 
     monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
 
