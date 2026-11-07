@@ -98,6 +98,8 @@ class Outcome:
     source_pending: bool = True
     # The paused reply's state afterwards.
     reply: ReplyState = ReplyState.PAUSED
+    # How each ``turn:ended`` the decider fired for the paused turn reported it ended.
+    turn_ended: tuple[str, ...] = ()
 
 
 @dataclass
@@ -184,6 +186,7 @@ async def _outcome(bot: AgentBot, observer: _Observer) -> Outcome:
         cards=None if observer.expire.await_args is None else observer.expire.await_args.args[1],
         source_pending=await store.is_pending("$source"),
         reply=reply.state,
+        turn_ended=tuple(call.args[0] for call in observer.lifecycle.end_turn.await_args_list),
     )
 
 
@@ -346,10 +349,17 @@ async def _failing_waiting(bot: AgentBot, failure: ApprovalFailure) -> ApprovalC
     return await _fence(bot, waiting, failure)
 
 
-def _settled(note: NoteKind, reason: str, reply: ReplyState, *, finalized: int = 0) -> Outcome:
+def _settled(
+    note: NoteKind,
+    reason: str,
+    reply: ReplyState,
+    *,
+    finalized: int = 0,
+    turn_ended: tuple[str, ...] = (),
+) -> Outcome:
     """Return a paused reply that settled into ``reply`` with ``note``, its cards expired with ``reason``.
 
-    An error note shows ``reason`` as its text.
+    An error note shows ``reason`` as its text. ``turn_ended`` is how the settlement ended a turn no resume claimed.
     """
     return Outcome(
         continuation=None,
@@ -358,6 +368,7 @@ def _settled(note: NoteKind, reason: str, reply: ReplyState, *, finalized: int =
         cards=reason,
         source_pending=False,
         reply=reply,
+        turn_ended=turn_ended,
     )
 
 
@@ -370,12 +381,12 @@ DISPATCH_CASES = (
     _DispatchCase(
         "waiting_leased_by_another_runtime_settles_publication_interrupted",
         lambda bot: _waiting(bot, _PREVIOUS),
-        _settled(NoteKind.ERROR, _PUBLICATION_INTERRUPTED, ReplyState.FAILED),
+        _settled(NoteKind.ERROR, _PUBLICATION_INTERRUPTED, ReplyState.FAILED, turn_ended=("failed",)),
     ),
     _DispatchCase(
         "waiting_leased_by_this_runtime_settles_publication_interrupted",
         lambda bot: _waiting(bot, _self(bot)),
-        _settled(NoteKind.ERROR, _PUBLICATION_INTERRUPTED, ReplyState.FAILED),
+        _settled(NoteKind.ERROR, _PUBLICATION_INTERRUPTED, ReplyState.FAILED, turn_ended=("failed",)),
     ),
     _DispatchCase(
         "claimed_by_another_runtime_without_final_releases_to_replay",
@@ -416,7 +427,7 @@ DISPATCH_CASES = (
     _DispatchCase(
         "failing_user_stop_settles_cancelled",
         lambda bot: _failing_waiting(bot, _STOP),
-        _settled(NoteKind.CANCELLED, _STOP.reason, ReplyState.CANCELLED),
+        _settled(NoteKind.CANCELLED, _STOP.reason, ReplyState.CANCELLED, turn_ended=("cancelled",)),
     ),
     _DispatchCase(
         "failing_restart_settles_restart_note",
@@ -431,7 +442,7 @@ DISPATCH_CASES = (
     _DispatchCase(
         "failing_error_settles_its_text",
         lambda bot: _failing_waiting(bot, _HTTP_502),
-        _settled(NoteKind.ERROR, _HTTP_502.reason, ReplyState.FAILED),
+        _settled(NoteKind.ERROR, _HTTP_502.reason, ReplyState.FAILED, turn_ended=("failed",)),
     ),
     _DispatchCase(
         "failing_shutdown_without_final_releases_to_replay",
@@ -521,7 +532,12 @@ async def test_dispatch_settles_a_ready_reply_its_requester_may_no_longer_drive(
         ),
     ):
         await _dispatch(bot, owned)
-    assert await _outcome(bot, observer) == _settled(NoteKind.ERROR, _UNAUTHORIZED, ReplyState.FAILED)
+    assert await _outcome(bot, observer) == _settled(
+        NoteKind.ERROR,
+        _UNAUTHORIZED,
+        ReplyState.FAILED,
+        turn_ended=("failed",),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -433,6 +433,25 @@ async def test_a_cancellation_during_finalization_ends_the_turn_once_as_finally_
     assert _events(seen) == [(EVENT_TURN_RESUMED, None), (EVENT_TURN_ENDED, "cancelled")]
 
 
+async def test_a_cancelled_turn_ended_hook_leaves_the_others_to_see_the_end(tmp_path: Path) -> None:
+    """One cancelled observer of a turn's end does not keep the next from seeing it."""
+    seen: list[str | None] = []
+
+    @hook(EVENT_TURN_ENDED, name="cancelled_observer")
+    async def cancelled_observer(_ctx: TurnLifecycleContext) -> None:
+        raise asyncio.CancelledError
+
+    @hook(EVENT_TURN_ENDED, name="later_observer")
+    async def later_observer(ctx: TurnLifecycleContext) -> None:
+        seen.append(ctx.outcome)
+
+    lifecycle = _lifecycle(tmp_path, [], hooks=[cancelled_observer, later_observer])
+    async with lifecycle.turn(resumed=False):
+        await _finalize(lifecycle, FinalDeliveryOutcome(ending=Completed()))
+
+    assert seen == ["completed"]
+
+
 async def test_a_pause_at_process_shutdown_reports_nothing_more(tmp_path: Path) -> None:
     """Orderly shutdown stops a settling turn's pause and end events, as it stops its other best-effort hooks."""
     seen: _Seen = []
