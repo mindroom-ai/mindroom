@@ -299,11 +299,12 @@ Cancellation does not undo external side effects or forcibly stop arbitrary Pyth
 A job belongs to its conversation and requester, and to the agent that answers there; a team owns the jobs its members start for it.
 For a team formed on the fly by mentioning several agents, the follow-up comes from the agent that posted the team's reply, on its own.
 While a reply of that agent runs, it is told after its next tool call which jobs ended meanwhile and is asked to acknowledge them with one `job(action="collect")` call, which returns their results.
-A job with no useful output still needs acknowledging; a cancelled job needs none.
+A job with no useful output, or a cancelled one, still needs acknowledging.
 A reply that starts after jobs ended is told the same way when it begins.
 Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
-Cancelled jobs and a silent schedule's jobs get no follow-up; the next reply hears of cancelled jobs, and a silent schedule's next run hears of its own.
+A cancelled job gets one too, so the conversation shows that it ended without completing.
+A silent schedule's jobs get no follow-up; its next run hears of them.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
 Another requester's reply in a shared room never hears of these results.
 A job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own.
