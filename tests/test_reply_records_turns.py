@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -13,6 +14,8 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+import mindroom.live_frames.publisher as live_publisher_module
+import mindroom.streaming as streaming_module
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
 from mindroom.background_tasks import wait_for_background_tasks
@@ -24,6 +27,7 @@ from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, E
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
+from mindroom.live_frames.transport import LiveSendOutcome
 from mindroom.llm.events import ReportedCall, ToolStarted
 from mindroom.llm.media import Image
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
@@ -310,6 +314,80 @@ async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: 
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.CANCELLED]
     assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
     assert not await bot._reply_runtime.store.is_pending("$event")
+
+
+@pytest.mark.parametrize(
+    ("ending", "note"),
+    [
+        ("stop", "**[Response cancelled by user]**"),
+        ("error", "**[Response interrupted by an error: model failed]**"),
+    ],
+)
+async def test_a_reply_ending_early_keeps_what_its_live_frames_showed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+    note: str,
+) -> None:
+    """Frames show the text between durable edits; a Stop or failure keeps all of it above its note."""
+    bot = await _streaming_bot(tmp_path)
+    streaming = bot.config.defaults.streaming
+    # Frames carry the progress: the next durable edit is a minute away.
+    streaming.update_interval = 60
+    streaming.max_idle = 2.0
+    frames: list[str] = []
+
+    async def relays(_homeserver_url: str) -> bool:
+        return True
+
+    async def send_frame(
+        _client: object,
+        _room_id: str,
+        frame: dict[str, object],
+        **_kwargs: object,
+    ) -> LiveSendOutcome:
+        frames.append(json.dumps(frame))
+        return LiveSendOutcome.SENT
+
+    monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", relays)
+    monkeypatch.setattr(live_publisher_module, "send_live_frame", send_frame)
+    monkeypatch.setattr(live_publisher_module, "_FRAME_INTERVAL_SECONDS", 0.01)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    shown_live = asyncio.Event()
+
+    async def frame_shows(text: str) -> None:
+        while not any(text in frame for frame in frames):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Partial"
+        await frame_shows("Partial")
+        yield " and the words after it"
+        await frame_shows("words after it")
+        if ending == "error":
+            msg = "model failed"
+            raise RuntimeError(msg)
+        shown_live.set()
+        await asyncio.Event().wait()
+        yield "never"
+
+    with patch_response_runner_module(
+        stream_agent_response=stream,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        if ending == "stop":
+            await asyncio.wait_for(shown_live.wait(), timeout=5)
+            reply = await _reply(bot)
+            assert reply.event_id is not None
+            stop = await _stop(bot, reply.event_id, 7)
+            assert await asyncio.wait_for(stop, timeout=5)
+        await asyncio.wait_for(response, timeout=5)
+
+    # Only frames showed the later words; the edits before the ending held "Partial" alone.
+    assert "words after it" not in "".join(_sent_bodies(bot)[:-1])
+    assert _sent_bodies(bot)[-1] == f"Partial and the words after it\n\n{note}"
 
 
 async def test_setup_failure_after_the_placeholder_shows_the_dispatch_error(tmp_path: Path) -> None:
