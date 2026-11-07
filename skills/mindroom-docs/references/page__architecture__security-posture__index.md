@@ -256,6 +256,8 @@ MindRoom verifies it at the configured homeserver's `/_matrix/federation/v1/open
 Like Connections sign-in, it refuses with 403 unless the homeserver binds tokens to this deployment's audience, because without binding any backend a user opens from the client could replay their token; unlike Connections, no setting waives this.
 It answers 503 when it cannot check whether the homeserver binds tokens, and verifies the token a second time after that check, requiring the same user, so binding switched off between the two requests cannot pass an unbound token.
 It answers with a random session token that lives only in the backend's memory and expires after 3600 seconds, so a restart signs every client out.
+`DELETE /api/client-sessions` ends the session whose token its `Authorization: Bearer` header carries at once, as a client does at sign-out, and answers 401 for a missing, unknown, or expired token.
+Plugin routes check the session only when a request arrives, so a response already streaming outlives the session's expiry or revocation.
 The store keeps at most 8 sessions per user, evicting that user's oldest past it, and 10,000 in all, evicting the oldest of anyone's past that, so it never refuses a sign-in and, below 10,000 sessions, one user's sign-ins never sign another user out.
 A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` or `require_room_member` is public; plugin code already runs with the primary's full trust.
 Workers never import a routes module, as long as it is its own file that the plugin's tools and hooks modules do not import.

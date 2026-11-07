@@ -28,6 +28,7 @@ _CLIENT_SESSION_TTL_SECONDS = 3600
 # About 3 MB when full; high enough that sign-ins evict only their own user's sessions in practice.
 _CLIENT_SESSION_CAPACITY = 10_000
 _CLIENT_SESSIONS_PER_USER = 8
+_BEARER_PREFIX = "bearer "
 
 router = APIRouter(prefix="/api/client-sessions")
 
@@ -62,7 +63,8 @@ class ClientSessionStore:
         self._sessions: dict[str, _ClientSession] = {}
         self._tokens_by_user: dict[str, list[str]] = {}
 
-    def _drop(self, token: str) -> None:
+    def revoke(self, token: str) -> None:
+        """End ``token``'s session at once; the token must name a stored session."""
         session = self._sessions.pop(token)
         tokens = self._tokens_by_user[session.user_id]
         tokens.remove(token)
@@ -73,11 +75,11 @@ class ClientSessionStore:
         """Start a session for ``user_id`` that lasts :data:`_CLIENT_SESSION_TTL_SECONDS`."""
         now = self.clock()
         while self._sessions and (oldest := next(iter(self._sessions.values()))).expires_at <= now:
-            self._drop(oldest.token)
+            self.revoke(oldest.token)
         while len(self._tokens_by_user.get(user_id, ())) >= self.per_user_capacity:
-            self._drop(self._tokens_by_user[user_id][0])
+            self.revoke(self._tokens_by_user[user_id][0])
         while len(self._sessions) >= self.capacity:
-            self._drop(next(iter(self._sessions)))
+            self.revoke(next(iter(self._sessions)))
         session = _ClientSession(secrets.token_urlsafe(32), user_id, now + _CLIENT_SESSION_TTL_SECONDS)
         self._sessions[session.token] = session
         self._tokens_by_user.setdefault(user_id, []).append(session.token)
@@ -89,7 +91,7 @@ class ClientSessionStore:
         if session is None:
             return None
         if session.expires_at <= self.clock():
-            self._drop(token)
+            self.revoke(token)
             return None
         return session
 
@@ -106,6 +108,20 @@ def _client_session_store(app: FastAPI) -> ClientSessionStore:
     if state.client_sessions is None:
         state.client_sessions = ClientSessionStore()
     return state.client_sessions
+
+
+def presented_session(request: Request) -> _ClientSession:
+    """Return the live session ``Authorization: Bearer <session_token>`` presents, or answer 401."""
+    header = request.headers.get("Authorization", "")
+    store = ensure_app_state(request.app).client_sessions
+    session = (
+        store.lookup(header[len(_BEARER_PREFIX) :].strip())
+        if store is not None and header.lower().startswith(_BEARER_PREFIX)
+        else None
+    )
+    if session is None:
+        raise HTTPException(401, "Missing, invalid or expired client session.", headers={"WWW-Authenticate": "Bearer"})
+    return session
 
 
 async def _verified_user(token: MatrixOpenIDToken, paths: RuntimePaths, request: Request) -> str:
@@ -134,3 +150,10 @@ async def exchange_openid_token(payload: _ExchangeRequest, request: Request) -> 
         raise HTTPException(401, "Matrix OpenID verification failed.")
     session = _client_session_store(request.app).create(user_id)
     return {"session_token": session.token, "user_id": session.user_id, "expires_at": int(session.expires_at)}
+
+
+@router.delete("", status_code=204)
+async def revoke_client_session(request: Request) -> None:
+    """End the presented session at once, as a client does at sign-out; its token then answers 401 everywhere."""
+    session = presented_session(request)
+    _client_session_store(request.app).revoke(session.token)
