@@ -9446,7 +9446,8 @@ Watching needs no control; input needs **Take control**, which pauses the agent'
 Open the WebSocket `GET /api/computers/sessions/{session_id}/screencast` with the subprotocols `mindroom-screencast` and `mindroom-ticket.<ticket>`, where the ticket comes from `POST /api/computers/sessions/{session_id}/stream-ticket`.
 As for the desktop stream, the `Origin` must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, each ticket opens one stream, and room access is rechecked while it runs.
 A session has one live stream: opening the page stream closes its desktop stream, and the reverse.
-Releasing control or stopping the Computer closes the stream; reconnect with a new ticket to keep watching.
+Releasing control closes the stream; reconnect with a new ticket to keep watching.
+Stopping the Computer also ends the session, so create a new session to watch again.
 
 The server sends:
 
