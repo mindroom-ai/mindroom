@@ -139,10 +139,16 @@ class FakeBridge:
         self.frame_keys: list[tuple[str, bytes, int]] = []
         self.agent_options: CallVoiceAgentOptions | None = None
         self.closed = False
+        self.roster_vacated = False
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
         """Record the authoritative media roster."""
         self.participant_rosters.append(participant_identities)
+        self.roster_vacated = False
+
+    def vacate_roster(self) -> None:
+        """Record that the Matrix roster emptied while the session runs."""
+        self.roster_vacated = True
 
     async def connect(self, grant: SfuGrant) -> None:
         """Record the grant."""
@@ -528,6 +534,15 @@ async def _deliver(manager: CallManager, delivery: Awaitable[None]) -> None:
     await delivery
     while tasks := tuple(manager._reconcile_tasks.values()):
         await asyncio.gather(*tasks)
+
+
+async def _caller_leaves_sfu(manager: CallManager, bridge: FakeBridge) -> None:
+    """Report what the bridge sees once a caller whose roster emptied leaves the SFU: the held session ends."""
+    assert bridge.roster_vacated
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_terminated is not None
+    bridge.agent_options.on_session_terminated(False)
+    await asyncio.gather(*list(manager._background_tasks))
 
 
 def _call_state(manager: CallManager, room_id: str = ROOM_ID) -> _RoomCall:
@@ -4443,21 +4458,191 @@ async def test_shutdown_drains_retry_during_reconciliation(
 
 @pytest.mark.asyncio
 async def test_call_member_expiry_reconciles_without_a_new_event(tmp_path: Path) -> None:
-    """An expired membership cannot keep a media session alive indefinitely."""
-    clock_values = iter((1_000, 1_000, 1_000, 1_001))
+    """An expired membership cannot keep a media session alive once the caller's media is gone too."""
+    now_ms = [1_000]
     call_event = _remote_member_event(created_ts=1_000, expires_ms=1)
     client = _client()
     client.room_get_state.return_value = _state_response(call_event)
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: next(clock_values))
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    now_ms[0] = 1_001
     for _ in range(20):
-        if bridge.closed:
+        if bridge.roster_vacated:
             break
         await asyncio.sleep(0.001)
 
+    # The caller is still in the room, so the session waits for the bridge's SFU verdict.
+    assert bridge.roster_vacated
+    assert not bridge.closed
+    await _caller_leaves_sfu(manager, bridge)
     assert bridge.closed
+    await manager.shutdown()
+
+
+def _lapsed_membership_state(*, created_ts: int) -> nio.RoomGetStateResponse:
+    """Alice is still in the room, but her call membership is empty: her delayed leave event fired."""
+    lapsed = {**_remote_member_event(created_ts=created_ts), "content": {}}
+    return nio.RoomGetStateResponse([lapsed, _room_member_event()], ROOM_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_lapsed_caller_membership_keeps_the_call_and_its_frame_keys(tmp_path: Path) -> None:
+    """A caller whose membership lapsed while their media stayed in the SFU keeps talking to the same session.
+
+    Leaving would start a new session that misses the frame key the caller rotated meanwhile.
+    """
+    joined_ts = int(time.time() * 1000)
+    room = _room(encrypted=True)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridges: list[FakeBridge] = []
+
+    def bridge_factory(_identity: str, _e2ee: bool) -> FakeBridge:
+        bridges.append(FakeBridge())
+        return bridges[-1]
+
+    manager = _manager(client, FakeBridge(), tmp_path, bridge_factory=bridge_factory)
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    [bridge] = bridges
+    session = _call_state(manager).session
+    assert session is not None
+
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    assert bridge.roster_vacated
+    assert not bridge.closed
+    assert _call_state(manager).session is session
+
+    # The caller rotates its key when its own membership lapses; the held roster still admits it.
+    await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts + 8_000))
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    assert not bridge.roster_vacated
+    assert bridge.participant_rosters[-1] == frozenset({"@alice:example.org:ALICEDEV"})
+    assert _call_state(manager).session is session
+    assert len(bridges) == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_roster_gap_ends_the_call_after_its_grace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A caller whose membership never returns cannot hold the agent in the call."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._ROSTER_GAP_GRACE_MS", 5)
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.roster_vacated
+    assert not bridge.closed
+
+    for _ in range(200):
+        if bridge.closed:
+            break
+        await asyncio.sleep(0.005)
+        while tasks := tuple(manager._reconcile_tasks.values()):
+            await asyncio.gather(*tasks)
+    assert bridge.closed
+    assert _call_state(manager).logical_call is None
+    await manager.shutdown()
+
+
+async def _never_answers(_room_id: str) -> nio.RoomGetStateResponse:
+    """Hang like a state read whose connection nio keeps retrying."""
+    await asyncio.Event().wait()
+    raise AssertionError
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["error", "hang"])
+async def test_roster_gap_deadline_ends_the_call_when_room_state_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    """An unreachable homeserver cannot keep a call whose roster already emptied past its grace."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._STATE_FETCH_TIMEOUT_S", 0.01)
+    now_ms = [int(time.time() * 1000)]
+    joined_ts = now_ms[0]
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.roster_vacated
+
+    if failure == "error":
+        client.room_get_state.return_value = nio.RoomGetStateError("503 upstream unavailable")
+    else:
+        client.room_get_state.side_effect = _never_answers
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert not bridge.closed
+
+    now_ms[0] += 60_000
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.closed
+    assert _call_state(manager).logical_call is None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_caller_who_leaves_the_room_during_a_roster_gap_ends_the_call(tmp_path: Path) -> None:
+    """Only a caller still in the room holds a lapsed call; leaving the room ends it at once."""
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert not bridge.closed
+
+    lapsed = {**_remote_member_event(created_ts=joined_ts), "content": {}}
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        [lapsed, _room_member_event(membership="leave")],
+        ROOM_ID,
+    )
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.closed
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hang_up_ends_a_held_call_when_the_caller_leaves_the_sfu(tmp_path: Path) -> None:
+    """A caller who hangs up leaves the SFU right after their membership, which ends the held session."""
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    await _caller_leaves_sfu(manager, bridge)
+
+    assert bridge.closed
+    assert _call_state(manager).session is None
+    # The bot cleared its own membership state event on leave.
+    final_args, final_kwargs = client.room_put_state.await_args_list[-1]
+    assert final_args[2] == {}
+    assert final_kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
