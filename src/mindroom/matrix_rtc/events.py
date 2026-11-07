@@ -10,9 +10,12 @@ as plain dict transforms.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix import event_types as matrix_event_types
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 CALL_MEMBER_EVENT_TYPE = matrix_event_types.CALL_MEMBER_EVENT_TYPE
 CALL_ENCRYPTION_KEYS_EVENT_TYPE = matrix_event_types.CALL_ENCRYPTION_KEYS_EVENT_TYPE
@@ -131,6 +134,34 @@ def parse_membership_event(event_source: dict[str, Any]) -> CallMember | None:
         expires_ms=expires,
         livekit_service_url=_preferred_livekit_service_url(content),
     )
+
+
+def room_joined_user_ids(events: Iterable[dict[str, Any]]) -> frozenset[str]:
+    """Return the users full room state shows joined to the room."""
+    return frozenset(
+        event["state_key"]
+        for event in events
+        if event.get("type") == "m.room.member"
+        and isinstance(event.get("state_key"), str)
+        and isinstance(content := event.get("content"), dict)
+        and content.get("membership") == "join"
+    )
+
+
+def active_call_memberships(events: Iterable[dict[str, Any]], now_ms: int) -> list[CallMember]:
+    """Return the room call's memberships in full room state: unexpired, of people joined to the room, in state order.
+
+    A membership stays in state after its person left the room, and until it expires after its device stopped.
+    """
+    state = list(events)
+    joined = room_joined_user_ids(state)
+    return [
+        member
+        for event in state
+        if (member := parse_membership_event(event)) is not None
+        and not member.is_expired(now_ms)
+        and member.user_id in joined
+    ]
 
 
 @dataclass(frozen=True)

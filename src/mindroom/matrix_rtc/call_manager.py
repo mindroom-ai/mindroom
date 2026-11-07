@@ -68,7 +68,9 @@ from mindroom.matrix_rtc.events import (
     RTC_NOTIFICATION_EVENT_TYPE,
     CallMember,
     ReceivedFrameKey,
+    active_call_memberships,
     parse_membership_event,
+    room_joined_user_ids,
 )
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
 from mindroom.matrix_rtc.transcript import CallTranscript
@@ -1039,25 +1041,12 @@ class CallManager:
         if isinstance(response, nio.RoomGetStateError):
             logger.warning("call_state_fetch_failed", room_id=room_id, error=response.message)
             return None
-        joined_user_ids = frozenset(
-            raw_event["state_key"]
-            for raw_event in response.events
-            if raw_event.get("type") == "m.room.member"
-            and isinstance(raw_event.get("state_key"), str)
-            and isinstance(raw_event.get("content"), dict)
-            and raw_event["content"].get("membership") == "join"
-        )
-        now_ms = self._clock_ms()
-        members = []
-        for raw_event in response.events:
-            member = parse_membership_event(raw_event)
-            if member is None or member.is_expired(now_ms):
-                continue
-            if member.user_id not in joined_user_ids:
-                continue
-            if member.user_id == self._client.user_id:
-                continue
-            members.append(member)
+        joined_user_ids = room_joined_user_ids(response.events)
+        members = [
+            member
+            for member in active_call_memberships(response.events, self._clock_ms())
+            if member.user_id != self._client.user_id
+        ]
         agent_call_events = tuple(
             event for event in response.events if event.get("type") == AGENT_CALL_STATE_EVENT_TYPE
         )

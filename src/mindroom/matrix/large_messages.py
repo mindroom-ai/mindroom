@@ -941,6 +941,9 @@ async def prepare_large_message(
         room_encrypted=encrypted_delivery_safe,
     )
     if sidecar_usable:
+        if source_content.get("msgtype") == "m.notice":
+            # A notice's preview stays a notice, so the push rule that keeps notices quiet still matches it.
+            modified_content["msgtype"] = "m.notice"
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,

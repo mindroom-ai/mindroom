@@ -980,6 +980,46 @@
       "title": "BudgetsConfig",
       "type": "object"
     },
+    "CallTranscriptsConfig": {
+      "additionalProperties": false,
+      "description": "Transcripts of calls between people, with notes when the call ends.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Transcribe calls between people",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "notes_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Configured LLM alias that writes each call's notes (none writes no notes)",
+          "title": "Notes Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "languages": {
+          "default": [],
+          "description": "Language codes hinted to speech-to-text (the first is sent)",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Languages",
+          "type": "array"
+        }
+      },
+      "title": "CallTranscriptsConfig",
+      "type": "object"
+    },
     "CallsConfig": {
       "additionalProperties": false,
       "description": "MatrixRTC settings, named call profiles, and agent assignments.",
@@ -1041,6 +1081,15 @@
           "default": null,
           "description": "Same-server MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
           "title": "Livekit Service Url"
+        },
+        "transcripts": {
+          "$ref": "#/$defs/CallTranscriptsConfig",
+          "default": {
+            "enabled": false,
+            "notes_model": null,
+            "languages": []
+          },
+          "description": "Transcripts of calls between people in rooms with the router"
         }
       },
       "title": "CallsConfig",
@@ -6007,7 +6056,12 @@
         "enabled": false,
         "profiles": {},
         "agents": {},
-        "livekit_service_url": null
+        "livekit_service_url": null,
+        "transcripts": {
+          "enabled": false,
+          "languages": [],
+          "notes_model": null
+        }
       },
       "description": "Voice call (MatrixRTC) configuration"
     },

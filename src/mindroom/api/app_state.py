@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Awaitable, Callable
     from contextlib import AbstractAsyncContextManager
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from mindroom.api.usage_export import UsageExportRunner
     from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
+    from mindroom.call_transcripts.service import CallTranscriptService
     from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -56,6 +58,8 @@ class EmbeddedRuntime:
     agent_cli_registry: TurnToolRegistry
     script_broker: ScriptToolBroker
     script_worker_keepalive: Callable[[WorkerBackend], None]
+    # The call transcript service while `calls.transcripts.enabled` is on, the same one each time; None while off.
+    call_transcripts: Callable[[], CallTranscriptService | None]
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,11 @@ class _MindroomAppState:
     # Bound while `mindroom run` serves this app; plugin routes read live room membership through it.
     room_members: Callable[[str], Awaitable[frozenset[str]]] | None = None
     usage_export_runner: UsageExportRunner | None = None
+    # Bound while `mindroom run` serves this app, and set once it begins to shut down: responses that would stream
+    # until told to stop end then, so the server's shutdown does not wait for them.
+    shutdown_requested: asyncio.Event | None = None
+    # How many call event streams each user has open, for the per-user cap.
+    call_event_streams: dict[str, int] = field(default_factory=dict)
 
     @property
     def runtime(self) -> EmbeddedRuntime:

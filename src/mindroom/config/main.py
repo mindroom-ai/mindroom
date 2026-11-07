@@ -664,6 +664,11 @@ class Config(BaseModel):
             msg = "calls.profiles references unknown Live agent model(s): " + ", ".join(invalid_live_models)
             raise ValueError(msg)
 
+        notes_model = self.calls.transcripts.notes_model
+        if notes_model is not None and notes_model not in self.models:
+            msg = f"calls.transcripts.notes_model references unknown model: {notes_model}"
+            raise ValueError(msg)
+
         self._reject_call_agents_sharing_a_room(lambda room: room)
         return self
 
