@@ -72,3 +72,32 @@ def test_plugins_check_cli_reports_a_package_spec_that_does_not_resolve() -> Non
     assert result.exit_code == 1
     assert "Configured plugin module could not be resolved: pkg:missing_check_demo_pkg:plugins/demo" in result.stdout
     assert "Traceback (most recent call last)" not in result.output
+
+
+def test_plugins_check_cli_lists_imports_outside_the_plugin_api_in_the_resolved_package_plugin(
+    working_directory: Path,
+) -> None:
+    """The import report reads the plugin directory a package spec resolves to, not the spec as a path."""
+    (working_directory.parent / "site-packages" / "check_demo_pkg" / "plugins" / "demo" / "helpers.py").write_text(
+        "from mindroom.hooks import hook\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["plugins", "check", "--json", "pkg:check_demo_pkg:plugins/demo"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["internal_imports"] == [
+        {"path": "helpers.py", "line": 1, "name": "mindroom.hooks.hook"},
+    ]
+
+
+def test_plugins_check_cli_json_reports_a_package_spec_that_does_not_resolve() -> None:
+    """A spec that resolves to no plugin directory fails as JSON with the loader's reason and no imports to list."""
+    result = runner.invoke(app, ["plugins", "check", "--json", "pkg:missing_check_demo_pkg:plugins/demo"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "status": "failed",
+        "detail": "Configured plugin module could not be resolved: pkg:missing_check_demo_pkg:plugins/demo",
+        "internal_imports": [],
+    }
