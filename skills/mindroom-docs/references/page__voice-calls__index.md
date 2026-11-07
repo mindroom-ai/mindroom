@@ -364,6 +364,7 @@ Privacy:
 
 - Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
 - MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
+- A message that cannot be posted, because the router has left the room or for a day after the call, is dropped along with the call's lines.
 - Speech-to-text and notes count as internal AI work under `call_transcript` in [usage](https://docs.mindroom.chat/usage/#token-usage).
 
 ### Routes for clients

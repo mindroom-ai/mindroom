@@ -45,6 +45,8 @@ _NOTES_TIMEOUT_SECONDS = 90.0
 _CLOCK_TOLERANCE_SECONDS = 5.0
 _MIN_TICK_SECONDS = 1.0
 _FORGET_AFTER_SECONDS = 3600.0
+# A transcript message still not posted this long after its call ended is given up, and the call's lines deleted.
+_GIVE_UP_AFTER_SECONDS = 86_400.0
 
 _NO_SUCH_CALL = "This call does not exist."
 _NOT_IN_ROOM = "You are not in this room."
@@ -170,6 +172,10 @@ class EndedRow:
 
 class _CallRoom(Protocol):
     """The router's side of the rooms calls are in."""
+
+    def router_joined(self, room_id: str) -> bool | None:
+        """Return whether the router is joined to the room, None while it is not ready."""
+        ...
 
     async def is_member(self, room_id: str, user_id: str) -> bool | None:
         """Return whether ``user_id`` is joined to the room, None when the router cannot tell."""
@@ -593,7 +599,10 @@ class CallTranscriptService:
             del self._recent_speech[user_id]
 
     async def _post_transcript(self, call: StoredCall) -> None:
-        """Post a due transcript message unless a stretch of the call is still being transcribed."""
+        """Post a due transcript message unless a stretch of the call is still being transcribed.
+
+        The message of a call in a room the router has left is given up.
+        """
         async with self._room_lock(call.room_id):
             fresh = await asyncio.to_thread(self._store.call, call.id)
             if (
@@ -607,7 +616,10 @@ class CallTranscriptService:
                 return
             self._posting.add(fresh.id)
         try:
-            await self._post_transcript_now(fresh)
+            if self._room.router_joined(fresh.room_id) is False:
+                await self._give_up(fresh, reason="router-not-in-room")
+            else:
+                await self._post_transcript_now(fresh)
         finally:
             self._posting.discard(fresh.id)
 
@@ -675,7 +687,14 @@ class CallTranscriptService:
         )
 
     async def _postpone(self, call: StoredCall, *, failed: bool = True) -> None:
-        """Make the call's message due again in a minute, counting a failed attempt unless ``failed`` is False."""
+        """Make the call's message due again in a minute, counting a failed attempt unless ``failed`` is False.
+
+        A message still not posted a day after its call ended is given up instead.
+        """
+        assert call.ended_at is not None
+        if self._clock() - call.ended_at >= _GIVE_UP_AFTER_SECONDS:
+            await self._give_up(call, reason="not-posted-for-a-day")
+            return
         await asyncio.to_thread(
             self._store.postpone_transcript,
             call.id,
@@ -683,6 +702,12 @@ class CallTranscriptService:
             failed=failed,
         )
         logger.warning("call_transcript_postponed", room_id=call.room_id, call_id=call.id, failed=failed)
+
+    async def _give_up(self, call: StoredCall, *, reason: str) -> None:
+        """Finish an ended call without its transcript message, deleting its lines."""
+        await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock())
+        self._written_notes.pop(call.id, None)
+        logger.warning("call_transcript_given_up", room_id=call.room_id, call_id=call.id, reason=reason)
 
     def _claim_row(self, call: StoredCall) -> bool:
         """Claim posting the call's row: only if it has none and nobody is posting it already."""

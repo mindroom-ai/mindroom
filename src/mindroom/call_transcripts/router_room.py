@@ -87,6 +87,11 @@ class RouterCallRoom:
     """A clock that never jumps, which times how long one read of a room's state is reused."""
     _reads: dict[str, _StateRead] = field(default_factory=dict, init=False, repr=False, compare=False)
 
+    def router_joined(self, room_id: str) -> bool | None:
+        """Return whether the router is joined to the room, as of its last sync; None while it is not ready."""
+        client = self.client()
+        return None if client is None else room_id in client.rooms
+
     async def is_member(self, room_id: str, user_id: str) -> bool | None:
         """Return whether the person is joined to the room; nobody is a member of a room the router is not in."""
         client = self.client()

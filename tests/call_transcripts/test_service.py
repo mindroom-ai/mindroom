@@ -77,6 +77,7 @@ class FakeRoom:
     names: dict[str, str] = field(default_factory=lambda: {ANN: "Ann", BOB: "Bob"})
     readable: bool = True
     ready: bool = True
+    router_in_room: bool = True
     failed_transcript_posts: int = 0
     crashing_rooms: set[str] = field(default_factory=set)
     on_read: Callable[[], None] | None = None
@@ -92,6 +93,11 @@ class FakeRoom:
     def _read(self) -> None:
         if self.on_read is not None:
             self.on_read()
+
+    def router_joined(self, room_id: str) -> bool | None:
+        """Answer from ``router_in_room`` while the router is ready."""
+        del room_id
+        return self.router_in_room if self.ready else None
 
     async def is_member(self, room_id: str, user_id: str) -> bool | None:
         """Answer from ``members``, or not at all while the room is unreadable."""
@@ -896,6 +902,48 @@ async def test_notes_wait_until_the_room_can_be_read_so_they_name_people_by_name
     assert transcript.names == {ANN: "Ann", BOB: "Bob"}
     [message] = world.room.transcripts
     assert message.body == "## About\nThe launch."
+
+
+@pytest.mark.asyncio
+async def test_a_message_still_not_posted_a_day_after_its_call_is_given_up(world: World) -> None:
+    """A room the router cannot read for a day gets no message, and the call's lines are not kept any longer."""
+    call_id = await world.end_by_leaving(ANN)
+    world.room.readable = False
+    world.clock.advance(20)
+    await world.service.tick()
+    world.clock.advance(86_370)
+    await world.service.tick()
+    assert world.store.lines(call_id) != []
+
+    world.clock.advance(60)
+    await world.service.tick()
+    world.room.readable = True
+    world.clock.advance(60)
+    await world.service.tick()
+
+    assert world.room.transcripts == []
+    assert world.store.lines(call_id) == []
+    stored = world.store.call(call_id)
+    assert stored is not None
+    assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 86_460, None)
+
+
+@pytest.mark.asyncio
+async def test_the_message_of_a_call_in_a_room_the_router_left_is_given_up(world: World) -> None:
+    """Once the router is no longer in the room, the message is not written or posted, and its lines are deleted."""
+    call_id = await world.end_by_leaving(ANN, BOB)
+    world.room.router_in_room = False
+    world.clock.advance(20)
+
+    await world.service.tick()
+
+    assert world.room.transcripts == []
+    assert world.notes.transcripts == []
+    assert world.store.lines(call_id) == []
+    stored = world.store.call(call_id)
+    assert stored is not None
+    assert stored.transcript_done_at is not None
+    assert stored.transcript_event_id is None
 
 
 @pytest.mark.asyncio

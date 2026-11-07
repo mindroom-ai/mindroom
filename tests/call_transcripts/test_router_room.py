@@ -339,6 +339,7 @@ async def test_without_a_ready_router_nothing_can_be_told() -> None:
     """Before the router is ready, or after it stopped, every question is answered with None and nothing is posted."""
     room = _room(None)
 
+    assert room.router_joined(ROOM) is None
     assert await room.call_members(ROOM) is None
     assert await room.is_member(ROOM, ANN) is None
     assert await room.may_post(ROOM, ANN) is None
@@ -352,10 +353,12 @@ async def test_without_a_ready_router_nothing_can_be_told() -> None:
 async def test_a_room_the_router_is_not_in_has_nobody_in_its_call_and_no_members() -> None:
     """The router reads only rooms it is in: in any other, nobody is in a call and nobody is a member."""
     client = FakeRouterClient(state={ROOM: [_member(ANN), _call_member(ANN, created_ms=NOW_MS)]})
+    assert _room(client).router_joined(ROOM) is True
     client.rooms.clear()
 
     room = _room(client)
 
+    assert room.router_joined(ROOM) is False
     assert await room.call_members(ROOM) == {}
     assert await room.is_member(ROOM, ANN) is False
     assert await room.may_post(ROOM, ANN) is False
