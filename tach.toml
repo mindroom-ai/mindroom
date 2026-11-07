@@ -5439,6 +5439,7 @@ depends_on = [
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
 ]
 visibility = ["mindroom.cli.plugins", "mindroom.plugin_install"]
