@@ -18,7 +18,7 @@ from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
-from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation
 from mindroom.timing import emit_timing_event
 
@@ -78,6 +78,7 @@ def _sanitized_delivery_error_message(error: Exception) -> str:
 
 
 def _log_matrix_delivery_exception(
+    client: nio.AsyncClient,
     error: Exception,
     *,
     room_id: str,
@@ -85,7 +86,8 @@ def _log_matrix_delivery_exception(
     cache_bypass: bool,
 ) -> None:
     """Log one local Matrix send/edit exception without exposing device details."""
-    logger.error(
+    log = logger.warning if durable_session_closed(client) else logger.error
+    log(
         "matrix_message_delivery_exception",
         room_id=room_id,
         operation=operation,
@@ -121,6 +123,7 @@ async def _send_prepared_room_message(  # noqa: PLR0911
             access_token = client.access_token
             if not access_token:
                 _log_matrix_delivery_exception(
+                    client,
                     nio.LocalProtocolError("Matrix client access token is required to send a message."),
                     room_id=room_id,
                     operation=operation,
@@ -163,6 +166,7 @@ async def _send_prepared_room_message(  # noqa: PLR0911
         )
     except Exception as error:
         _log_matrix_delivery_exception(
+            client,
             error,
             room_id=room_id,
             operation=operation,

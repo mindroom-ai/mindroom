@@ -105,14 +105,9 @@ def proxy_targets(monkeypatch: pytest.MonkeyPatch) -> list[ResolvedWorkerTarget 
     """Replace only remote dispatch; retain resolver, registry and proxy wrappers."""
     targets: list[ResolvedWorkerTarget | None] = []
 
-    def dispatch(
-        *,
-        tool_name: str,
-        worker_target: ResolvedWorkerTarget | None,
-        **_kwargs: object,
-    ) -> str:
-        targets.append(worker_target)
-        return f"worker:{tool_name}"
+    def dispatch(*, stand_ins: sandbox_proxy.WorkerStandIns, **_kwargs: object) -> str:
+        targets.append(stand_ins.worker_target)
+        return f"worker:{stand_ins.tool_name}"
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", dispatch)
     return targets
