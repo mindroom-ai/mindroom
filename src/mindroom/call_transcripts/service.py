@@ -228,7 +228,8 @@ class CallTranscriptService:
 
         Coming into the call needs permission to post in the room; a heartbeat does not check it again.
         """
-        await self._require_member(room_id, user_id, _NOT_IN_ROOM)
+        live = await asyncio.to_thread(self._store.live_call, room_id)
+        await self._require_member(room_id, user_id, _NOT_IN_ROOM, call=live)
         # The room side is read before taking the room's lock and never under it, so a slow homeserver cannot hold
         # up heartbeats. Whether posting is needed is decided under the lock, with the call being joined.
         may_post = await self._room.may_post(room_id, user_id)
@@ -252,16 +253,7 @@ class CallTranscriptService:
 
         Someone whose app was never in the call records nothing.
         """
-        call = await self._call_for(call_id, user_id)
-        async with self._room_lock(call.room_id):
-            call = await self._fresh(call_id)
-            if call.ended_at is not None or user_id not in await asyncio.to_thread(self._store.presence, call.id):
-                return
-            now = self._clock()
-            await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now, left=True)
-            ended = await self._end_if_empty(call, now)
-        if ended:
-            await self._edit_row(call.id)
+        await self._leave(await self._call_for(call_id, user_id), user_id)
 
     async def pause(self, call_id: str, user_id: str, *, paused: bool) -> Call:
         """Pause or resume transcription for everyone in the call; only someone in the call can do either."""
@@ -274,7 +266,6 @@ class CallTranscriptService:
             members = await self._present(call, now)
             if user_id not in members:
                 raise CallRefusedError(code="forbidden", message=_NOT_IN_CALL)
-            await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now)
             await asyncio.to_thread(self._store.set_pause, call.id, user_id if paused else None, at=now)
             return _call_view(await self._fresh(call_id), members)
 
@@ -438,10 +429,9 @@ class CallTranscriptService:
         self._count_speech(user_id, now)
 
     async def _admit_to_live_call(self, call: StoredCall, user_id: str, now: float) -> None:
-        """Take speech only from someone whose app is in the call, as their check-in, and never while it is paused."""
+        """Take speech only from someone whose app is in the call, and never while it is paused."""
         if user_id not in await self._present(call, now):
             raise CallRefusedError(code="forbidden", message=_NOT_IN_CALL)
-        await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now)
         if call.paused_since is not None:
             raise CallRefusedError(code="paused", message="Transcription is paused.")
 
@@ -649,7 +639,7 @@ class CallTranscriptService:
     async def _call_for(self, call_id: str, user_id: str) -> StoredCall:
         """Return the call, taking its room from the call itself; to anyone outside that room it does not exist."""
         call = await self._fresh(call_id)
-        await self._require_member(call.room_id, user_id, _NO_SUCH_CALL)
+        await self._require_member(call.room_id, user_id, _NO_SUCH_CALL, call=call)
         return call
 
     async def _fresh(self, call_id: str) -> StoredCall:
@@ -658,12 +648,50 @@ class CallTranscriptService:
             raise CallRefusedError(code="not-found", message=_NO_SUCH_CALL)
         return call
 
-    async def _require_member(self, room_id: str, user_id: str, not_found: str) -> None:
+    async def _require_member(
+        self,
+        room_id: str,
+        user_id: str,
+        not_found: str,
+        *,
+        call: StoredCall | None = None,
+    ) -> None:
+        """Refuse someone not joined to the room (``not-found``), or anyone while the room cannot be checked.
+
+        Someone whose app is in the live ``call`` is checked in first, so a room that cannot be read for a while, as
+        while the router restarts or the homeserver is down, never counts them out; once it can be read, someone no
+        longer joined to it leaves the call.
+        """
+        in_call = call is not None and await self._check_in(call, user_id)
         member = await self._room.is_member(room_id, user_id)
         if member is None:
             raise CallRefusedError(code="unavailable", message="The room cannot be checked right now.")
         if not member:
+            if call is not None and in_call:
+                await self._leave(call, user_id)
             raise CallRefusedError(code="not-found", message=not_found)
+
+    async def _check_in(self, call: StoredCall, user_id: str) -> bool:
+        """Record a check-in from someone whose app is in the live call; return whether it is."""
+        async with self._room_lock(call.room_id):
+            fresh = await asyncio.to_thread(self._store.call, call.id)
+            now = self._clock()
+            if fresh is None or fresh.ended_at is not None or user_id not in await self._present(fresh, now):
+                return False
+            await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now)
+            return True
+
+    async def _leave(self, call: StoredCall, user_id: str) -> None:
+        """Take the person's app out of a live call at once, unless it was never in it; the last one out ends it."""
+        async with self._room_lock(call.room_id):
+            call = await self._fresh(call.id)
+            if call.ended_at is not None or user_id not in await asyncio.to_thread(self._store.presence, call.id):
+                return
+            now = self._clock()
+            await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now, left=True)
+            ended = await self._end_if_empty(call, now)
+        if ended:
+            await self._edit_row(call.id)
 
     def _room_lock(self, room_id: str) -> asyncio.Lock:
         return self._room_locks.setdefault(room_id, asyncio.Lock())

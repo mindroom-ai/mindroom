@@ -5852,6 +5852,7 @@ The rules:
 
 - Starting or joining a call needs permission to post messages in the room; reading the live call needs room membership.
 - A person's app is in the call while it checks in at least every 60 seconds, which it does every 20 seconds; leaving takes it out at once.
+- A check-in from someone already in the call counts even while MindRoom cannot read the room and answers 503, so a router restart or a homeserver outage ends no call; someone who has left the room is out of the call at their first request once it can be read.
 - Leaving from one device takes the person out of the call; their other device in the call rejoins with its next check-in.
 - Only people whose MindRoom Chat takes part are in the call: people in it from other Matrix apps are neither listed nor transcribed.
 - A call ends when nobody is in it, checked when someone leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.

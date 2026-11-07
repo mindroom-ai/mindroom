@@ -362,6 +362,56 @@ async def test_a_restart_does_not_end_a_call_whose_apps_check_in_again(world: Wo
     assert (await world.service.live(ROOM, ANN)).call is None
 
 
+@pytest.mark.asyncio
+async def test_a_room_that_cannot_be_read_for_a_while_ends_no_call(world: World) -> None:
+    """Heartbeats from people in the call count while the room cannot be read, though they answer unavailable."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    world.room.readable = False
+    for step in range(6):
+        world.clock.advance(15)
+        if step % 2:
+            await _refused("unavailable", lambda: world.service.join(ROOM, ANN))
+            await _refused("unavailable", lambda: world.service.join(ROOM, BOB))
+        await world.service.tick()
+    await _refused("unavailable", lambda: world.service.join(ROOM, CAROL))
+
+    world.room.readable = True
+    again = await world.service.join(ROOM, ANN)
+
+    assert world.clock.now == START + 90
+    assert (again.id, again.ended_at, again.members) == (call.id, None, (ANN, BOB))
+    stored = world.store.call(call.id)
+    assert stored is not None
+    assert stored.ended_at is None
+
+
+@pytest.mark.asyncio
+async def test_someone_removed_from_the_room_is_out_of_the_call_at_their_next_request_it_can_tell(
+    world: World,
+) -> None:
+    """While the room cannot be read a removed person stays in; once it can, their heartbeat answers 404 and they leave."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    world.room.members.discard(BOB)
+    world.room.readable = False
+    world.clock.advance(20)
+    await _refused("unavailable", lambda: world.service.join(ROOM, BOB))
+
+    world.room.readable = True
+    await _refused("not-found", lambda: world.service.join(ROOM, BOB))
+
+    live = (await world.service.live(ROOM, ANN)).call
+    assert live is not None
+    assert (live.id, live.members) == (call.id, (ANN,))
+    world.room.members.discard(ANN)
+    await _refused("not-found", lambda: world.say(call.id, ANN))
+    stored = world.store.call(call.id)
+    assert stored is not None
+    assert stored.ended_at == START + 20
+    assert [edit.call_id for edit in world.room.row_edits] == [call.id]
+
+
 # Ending
 
 
@@ -1477,11 +1527,13 @@ async def test_a_stuck_transcription_becomes_a_gap_and_does_not_hold_back_the_me
 
 
 @pytest.mark.asyncio
-async def test_join_decides_whether_to_check_posting_with_the_call_it_joins(world: World) -> None:
-    """Someone whose app dropped out while the room was being read is checked for permission to post again."""
-    await world.service.join(ROOM, ANN)
+async def test_a_heartbeat_checks_in_before_the_room_is_read(world: World) -> None:
+    """A slow read of the room never drops someone out of the call, so their heartbeat needs no permission to post."""
+    call = await world.service.join(ROOM, ANN)
     world.clock.advance(60)
     world.room.posters = set()
     world.room.on_read = lambda: world.clock.advance(1)
 
-    await _refused("forbidden", lambda: world.service.join(ROOM, ANN))
+    again = await world.service.join(ROOM, ANN)
+
+    assert (again.id, again.members) == (call.id, (ANN,))
