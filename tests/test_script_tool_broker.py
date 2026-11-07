@@ -1112,8 +1112,8 @@ class _RoutedConnectionToolkit(_ConnectedCalculator):
 def _routed_connection_calculator(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     """Register ``calculator`` as a toolkit with a connection whose worker calls answer 3; yield what runs where."""
 
-    def worker(*, tool_name: str, function_name: str, **_kwargs: object) -> str:
-        _RoutedConnectionToolkit.lifecycle.append(f"worker {tool_name}.{function_name}")
+    def worker(*, stand_ins: sandbox_proxy.WorkerStandIns, function_name: str, **_kwargs: object) -> str:
+        _RoutedConnectionToolkit.lifecycle.append(f"worker {stand_ins.tool_name}.{function_name}")
         return "3"
 
     _RoutedConnectionToolkit.lifecycle.clear()
