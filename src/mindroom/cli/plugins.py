@@ -36,10 +36,12 @@ def plugin_check(
     """Strictly validate one plugin against this MindRoom version."""
     from mindroom.plugin_check import check_plugin, imports_outside_plugin_api  # noqa: PLC0415
 
+    outside_imports = imports_outside_plugin_api(path)
     try:
         result = check_plugin(path)
     except Exception as exc:
         console.print(f"[red]Plugin check failed:[/red] {exc}")
+        _print_outside_imports(outside_imports, strict=strict)
         raise typer.Exit(1) from None
 
     console.print(f"[green]Plugin is compatible:[/green] {result.name}")
@@ -47,13 +49,17 @@ def plugin_check(
     console.print(f"  Hooks:       {', '.join(result.hook_names) or 'none'}")
     console.print(f"  Automations: {', '.join(result.automation_names) or 'none'}")
     console.print(f"  Skills:      {', '.join(result.skill_directories) or 'none'}")
-    if outside_imports := imports_outside_plugin_api(path):
+    _print_outside_imports(outside_imports, strict=strict)
+    if strict and outside_imports:
+        raise typer.Exit(1)
+
+
+def _print_outside_imports(outside_imports: list[str], *, strict: bool) -> None:
+    if outside_imports:
         label = "[red]Error:[/red]" if strict else "[yellow]Warning:[/yellow]"
         console.print(f"{label} imports from outside the plugin API can break in any MindRoom release:")
         for outside_import in outside_imports:
             console.out(f"  {outside_import}")
-        if strict:
-            raise typer.Exit(1)
 
 
 @plugins_app.command("install")

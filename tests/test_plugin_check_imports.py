@@ -136,6 +136,25 @@ def test_plugins_check_cli_lists_each_import_outside_the_plugin_api_whole_on_its
     assert "MessageTarget" not in result.stdout
 
 
+def test_plugins_check_cli_lists_imports_outside_the_plugin_api_of_a_plugin_that_fails_to_load(tmp_path: Path) -> None:
+    """A plugin broken by a MindRoom module it imports still gets every import outside the plugin API listed."""
+    plugin_root = _hooks_plugin(
+        tmp_path / "plugin",
+        "from mindroom.constants import ROUTER_AGENT_NAME\nfrom mindroom.retired_module import helper\n",
+    )
+
+    result = runner.invoke(app, ["plugins", "check", str(plugin_root)], env={"COLUMNS": "80"})
+
+    assert result.exit_code == 1
+    assert "Plugin check failed:" in result.stdout
+    assert "No module named 'mindroom.retired_module'" in result.stdout
+    assert (
+        "Warning: imports from outside the plugin API can break in any MindRoom release:\n"
+        "  hooks.py:1: mindroom.constants.ROUTER_AGENT_NAME\n"
+        "  hooks.py:2: mindroom.retired_module.helper\n"
+    ) in result.stdout
+
+
 def test_plugins_check_cli_strict_accepts_a_plugin_that_imports_only_the_plugin_api(tmp_path: Path) -> None:
     """Every documented public import loads and passes `--strict`."""
     plugin_root = _hooks_plugin(

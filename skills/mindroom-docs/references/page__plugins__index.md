@@ -191,7 +191,7 @@ mindroom plugins check ./my-plugin
 
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
-It then warns about each import of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line.
+Whether or not the plugin loads, it also warns about each import of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 
