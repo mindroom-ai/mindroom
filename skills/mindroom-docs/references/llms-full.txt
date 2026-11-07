@@ -17601,7 +17601,7 @@ plugins:
 
 The `python:`, `pkg:`, and `module:` prefixes always resolve a package, and `:sub/path` after the package name points to a subdirectory inside it.
 In a dotted name such as `python:my_skill_pack.plugins.demo`, each part after the first must be a package directory, or a namespace package directory, inside the one before.
-MindRoom finds those parts on disk without running any `__init__.py`, so a package that extends its path with `pkgutil.extend_path` or comes from a custom import hook cannot appear after the first part.
+MindRoom finds those parts on disk without running any `__init__.py`, so it does not find a part that only a `pkgutil.extend_path` call or a custom import hook would provide.
 The resolved directory must contain `mindroom.plugin.json`.
 
 ## Live development (hot reload)

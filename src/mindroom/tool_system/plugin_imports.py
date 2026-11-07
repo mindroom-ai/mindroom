@@ -199,7 +199,12 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     module_name, subpath, _explicit = parsed
     # Find each later part on disk inside the one before, so finding a plugin runs no package's __init__.py.
     first, *rest = module_name.split(".")
-    spec = util.find_spec(first)
+    try:
+        # The first part goes through sys.modules and sys.meta_path, which raise for a module without a spec.
+        spec = util.find_spec(first)
+    except Exception as exc:
+        msg = f"Failed to resolve plugin module {plugin_path}: {exc}"
+        raise PluginValidationError(msg) from exc
     for part in rest:
         if spec is None or not spec.submodule_search_locations:
             return None

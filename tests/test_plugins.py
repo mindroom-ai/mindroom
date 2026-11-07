@@ -588,6 +588,17 @@ def test_a_dotted_package_spec_whose_middle_part_is_not_a_package_does_not_resol
     assert str(skipped.error) == f"Configured plugin module could not be resolved: {spec}"
 
 
+def test_configured_plugin_roots_leave_out_a_package_spec_python_cannot_look_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spec whose package Python cannot look up, such as a module without `__spec__`, resolves to no root."""
+    name = f"nospec_{uuid.uuid4().hex}"
+    monkeypatch.setitem(sys.modules, name, ModuleType(name))
+
+    assert get_configured_plugin_roots(Config(plugins=[f"python:{name}.demo"]), _minimal_runtime_paths(tmp_path)) == ()
+
+
 def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> None:
     """Relative plugin paths should resolve from the config directory."""
     config_dir = tmp_path / "cfg"
