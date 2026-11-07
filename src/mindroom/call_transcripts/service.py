@@ -391,14 +391,16 @@ class CallTranscriptService:
     async def _end_if_empty(self, call: StoredCall, now: float) -> bool:
         """End a live call nobody is in, under the room's lock: its pause ends, and its message is due 20 seconds later.
 
-        Returns whether it ended.
+        It ended when an app in it last checked in or left, never before it started: not when that is noticed, which
+        may be hours later after MindRoom was down. Returns whether it ended.
         """
         if await self._present(call, now):
             return False
+        presence = await asyncio.to_thread(self._store.presence, call.id)
         await asyncio.to_thread(
             self._store.end_call,
             call.id,
-            at=now,
+            at=max([call.started_at, *(app.present_at for app in presence.values())]),
             transcript_due_at=now + _TRANSCRIPT_DELAY_SECONDS,
         )
         logger.info("call_transcript_call_ended", room_id=call.room_id, call_id=call.id)

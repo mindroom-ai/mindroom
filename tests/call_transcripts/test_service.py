@@ -482,6 +482,36 @@ async def test_the_call_ends_when_the_last_person_leaves(world: World) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_call_ends_when_its_last_app_was_last_heard_from_not_when_that_is_noticed(world: World) -> None:
+    """A two-minute call that MindRoom only finds empty after three hours down lasted two minutes, everywhere."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    world.clock.advance(60)
+    await world.say(call.id, ANN)
+    await world.service.leave(call.id, ANN)
+    world.clock.advance(60)
+    await world.service.join(ROOM, BOB)
+    world.clock.advance(3 * 3600)
+
+    world.restart()
+    await world.service.tick()
+    world.clock.advance(61)
+    await world.service.tick()
+    world.clock.advance(20)
+    await world.service.tick()
+
+    stored = world.store.call(call.id)
+    assert stored is not None
+    assert stored.ended_at == START + 120
+    [ended, linked] = world.room.row_edits
+    assert (ended.body, ended.ended_at, ended.duration_seconds) == ("Call ended · 2 min", START + 120, 120)
+    assert linked.duration_seconds == 120
+    [message] = world.room.transcripts
+    assert message.transcript.duration_seconds == 120
+    assert world.notes.transcripts[0].duration_seconds == 120
+
+
+@pytest.mark.asyncio
 async def test_a_live_call_is_checked_every_15_seconds(world: World) -> None:
     """The check runs at most 15 seconds apart, sooner when a transcript message falls due."""
     assert await world.service.tick() == 15
