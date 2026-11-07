@@ -513,9 +513,9 @@ async def test_a_call_ends_when_its_last_app_was_last_heard_from_not_when_that_i
     stored = world.store.call(call.id)
     assert stored is not None
     assert stored.ended_at == START + 120
-    [ended] = world.room.row_edits
+    ended, with_transcript = world.room.row_edits
     assert (ended.body, ended.ended_at, ended.duration_seconds) == ("Call ended · 2 min", START + 120, 120)
-    assert ended.transcript_event_id == "$transcript-1"
+    assert with_transcript == replace(ended, transcript_event_id="$transcript-1")
     [message] = world.room.transcripts
     assert message.transcript.duration_seconds == 120
     assert world.notes.transcripts[0].duration_seconds == 120
@@ -660,8 +660,10 @@ async def test_a_row_edit_owed_for_hours_is_still_made_and_given_up_only_a_day_a
     world.room.failing_edits = False
     world.clock.advance(60)
     await world.tick()
-    [ended] = world.room.row_edits
-    assert (ended.call_id, ended.transcript_event_id) == (first, "$transcript-1")
+    assert [(edit.call_id, edit.transcript_event_id) for edit in world.room.row_edits] == [
+        (first, None),
+        (first, "$transcript-1"),
+    ]
 
     world.room.failing_edits = True
     second = await world.end_by_leaving(BOB)
@@ -671,15 +673,16 @@ async def test_a_row_edit_owed_for_hours_is_still_made_and_given_up_only_a_day_a
     world.clock.advance(60)
     await world.tick()
     assert world.store.call(second) is not None
-    world.clock.advance(3600)
+    world.clock.advance(3601)
     await world.tick()
     assert world.store.call(second) is None
-    assert [edit.call_id for edit in world.room.row_edits] == [first]
+    assert [edit.call_id for edit in world.room.row_edits] == [first, first]
+    assert [message.call_id for message in world.room.transcripts] == [first]
 
 
 @pytest.mark.asyncio
-async def test_a_row_posted_after_the_end_is_edited_once_with_its_transcript(world: World) -> None:
-    """A row that only goes up with the transcript message gets one edit, saying both the end and the message."""
+async def test_a_row_posted_after_the_end_is_edited_for_the_end_and_then_its_transcript(world: World) -> None:
+    """A row that only goes up when the transcript message is due says the call ended before the message is posted."""
     world.room.ready = False
     call_id = await world.end_by_leaving(ANN)
     world.clock.advance(20)
@@ -690,8 +693,10 @@ async def test_a_row_posted_after_the_end_is_edited_once_with_its_transcript(wor
     await world.tick()
 
     assert world.room.rows == [(ROOM, call_id)]
-    [edit] = world.room.row_edits
-    assert (edit.row_event_id, edit.transcript_event_id) == ("$row-1", "$transcript-1")
+    assert [(edit.row_event_id, edit.transcript_event_id) for edit in world.room.row_edits] == [
+        ("$row-1", None),
+        ("$row-1", "$transcript-1"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -711,6 +716,24 @@ async def test_an_edit_for_the_end_is_never_sent_after_the_one_with_the_transcri
     await world.tick()
 
     assert len(world.room.transcripts) == 1
+    assert [edit.transcript_event_id for edit in world.room.row_edits] == [None, "$transcript-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_row_says_its_call_ended_before_the_message_is_written(world: World) -> None:
+    """An edit for the end still owed when the message falls due is made first: the row never shows a live call meanwhile."""
+    world.room.failing_edits = True
+    call_id = await world.end_by_leaving(ANN)
+    world.room.failing_edits = False
+    world.notes.gate = asyncio.Event()
+    world.clock.advance(60)
+
+    await world.service.tick()
+    await world.notes.started.wait()
+
+    assert [(edit.call_id, edit.transcript_event_id) for edit in world.room.row_edits] == [(call_id, None)]
+    world.notes.gate.set()
+    await world.settled()
     assert [edit.transcript_event_id for edit in world.room.row_edits] == [None, "$transcript-1"]
 
 

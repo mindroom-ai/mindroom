@@ -574,7 +574,8 @@ class CallTranscriptService:
         return call.row_event_id is None or self._transcript_due(call, now) or _owed_row_edit(call) is not None
 
     async def _settle_now(self, call_id: str) -> None:
-        """Make the call's Matrix writes one at a time, in order: its row, its message once due, then the row's edits.
+        """Make the call's Matrix writes one at a time, in order: its row, the row's edit for the end, its message once
+        due, then the row's edit for the message.
 
         Each is sent under a transaction of its own, so making it again never posts twice. A write that cannot be
         made holds them all a minute, when a tick starts them again.
@@ -600,14 +601,14 @@ class CallTranscriptService:
                 await self._postpone(call, reason="row-not-posted", failed=False)
             else:
                 await asyncio.to_thread(self._store.set_row_event_id, call.id, event_id)
-        elif self._transcript_due(call, self._clock()):
-            await self._post_transcript(call, call.row_event_id)
         elif (owed := _owed_row_edit(call)) is not None:
             edit, row = owed
             if await self._room.edit_row(row) is None:
                 await self._postpone(call, reason="row-not-edited", failed=False)
             else:
                 await asyncio.to_thread(self._store.record_row_edit, call.id, edit)
+        else:
+            await self._post_transcript(call, call.row_event_id)
 
     def _transcript_due(self, call: StoredCall, now: float) -> bool:
         """Return whether the ended call's message is due: 20 seconds after the end, with none of its speech in flight."""
