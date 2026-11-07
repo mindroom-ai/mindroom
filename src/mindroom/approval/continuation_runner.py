@@ -1182,6 +1182,11 @@ class ApprovalContinuationRunner:
         tool_context = replace(tool_context, tool_calls_shown=continuation.show_tool_calls and not request.quiet)
         if cli_approval_handler is not None:
             tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
+        # The runs the resume starts get the hook's instructions; a run that paused keeps the system prompt it stored.
+        request = await self.deps.request_preparer.with_system_enrichment(
+            request,
+            target_member_names=continuation.team_member_names or None,
+        )
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
             if continuation.entity_kind == "team":
@@ -1221,6 +1226,7 @@ class ApprovalContinuationRunner:
                             show_tool_calls=continuation.show_tool_calls,
                             tool_trace_collector=tool_trace_collector,
                             progress=progress,
+                            system_enrichment_items=request.system_enrichment_items,
                         )
             else:
                 result = await self._approval_execution.continue_run(
@@ -1233,6 +1239,7 @@ class ApprovalContinuationRunner:
                         response_run_id=continuation.run_id,
                     ),
                     progress=progress,
+                    system_enrichment_items=request.system_enrichment_items,
                 )
         return result
 
