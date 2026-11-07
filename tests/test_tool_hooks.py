@@ -1029,8 +1029,9 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del mentions
+        del mentions, wake_mentioned
         sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return f"${body}-event"
 
@@ -1112,8 +1113,9 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent.append(extra_content)
         return "$dispatch-event"
 
@@ -1216,8 +1218,9 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del mentions
+        del mentions, wake_mentioned
         sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return "$dispatch-event"
 
@@ -1364,8 +1367,9 @@ async def test_a_sync_tool_call_keeps_its_hooks_on_the_loop_and_its_body_off_it(
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch, mentions
+        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch, mentions, wake_mentioned
         current_loop = asyncio.get_running_loop()
         current_thread = threading.get_ident()
         seen.append(("sender", current_thread, id(current_loop)))
@@ -1902,8 +1906,9 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent.append(extra_content)
         return "$dispatch-event"
 

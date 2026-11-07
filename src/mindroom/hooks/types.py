@@ -130,10 +130,12 @@ class HookMessageSender(Protocol):
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> Awaitable[str | None]:
         """Send one hook-originated Matrix message.
 
-        ``mentions`` lists every Matrix user ID the message mentions, so names in its text mention nobody else.
+        ``mentions`` lists every Matrix user ID the message mentions, so names in its text mention nobody else, and
+        ``wake_mentioned=False`` keeps every agent it mentions from being activated by that mention.
         """
 
 

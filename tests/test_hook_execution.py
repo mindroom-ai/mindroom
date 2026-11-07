@@ -593,8 +593,9 @@ async def test_emit_final_response_transform_preserves_send_requester_and_depth(
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del mentions
+        del mentions, wake_mentioned
         sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return "$hook-event"
 

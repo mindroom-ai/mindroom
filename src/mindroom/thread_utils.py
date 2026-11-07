@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom import authorization
-from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.room_membership import room_membership_is_complete
@@ -62,14 +62,21 @@ def _extract_mentioned_user_ids(
     """Extract mentioned user IDs from message content.
 
     Checks ``m.mentions.user_ids`` first, and takes it as the whole list when the
-    content marks it exact. Otherwise, when that field is absent or empty, falls
-    back to Matrix HTML pills and finally raw visible-body mention tokens.
+    content marks it exact; an exact list that also asks receivers to skip its
+    mentions keeps only the users who are not managed entities, so it activates
+    no agent. Otherwise, when that field is absent or empty, falls back to
+    Matrix HTML pills and finally raw visible-body mention tokens.
     """
     mentions = content.get("m.mentions")
     raw_user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
     user_ids = raw_user_ids if isinstance(raw_user_ids, list) else []
-    if user_ids or content.get(EXACT_MENTIONS_KEY) is True:
-        return [user_id for user_id in user_ids[:_MAX_MENTIONED_USER_IDS] if isinstance(user_id, str)]
+    exact = content.get(EXACT_MENTIONS_KEY) is True
+    if user_ids or exact:
+        listed: list[str] = [user_id for user_id in user_ids[:_MAX_MENTIONED_USER_IDS] if isinstance(user_id, str)]
+        if exact and content.get(SKIP_MENTIONS_KEY) is True:
+            registry = entity_identity_registry(config, runtime_paths)
+            return [user_id for user_id in listed if not registry.is_managed_user_id(user_id)]
+        return listed
 
     formatted_body = content.get("formatted_body")
     if isinstance(formatted_body, str):

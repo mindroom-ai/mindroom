@@ -23,11 +23,15 @@ from mindroom.hooks import (
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.teams.formation import TeamOutcome, decide_team_formation
 from mindroom.thread_utils import check_agent_mentioned, get_all_mentioned_agents_in_thread
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    TEST_PASSWORD,
     bind_runtime_paths,
     create_mock_room,
     delivered_matrix_side_effect,
@@ -35,17 +39,17 @@ from tests.conftest import (
     make_matrix_client_mock,
     make_visible_message,
     runtime_paths_for,
+    sync_bot_runtime_state,
     test_runtime_paths,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.matrix.identity import MatrixID
-
 ALPHA = "@mindroom_alpha:localhost"
 BETA = "@mindroom_beta:localhost"
 ROUTER = "@mindroom_router:localhost"
+ALICE = "@alice:localhost"
 CARD = "Review card: @alpha and @beta signed off"
 
 # The bot's own sender, which tools also get as `context.hooks.message_sender`, and the scheduler's.
@@ -94,12 +98,23 @@ def _hook_context(config: Config, route: _Route, client: AsyncMock) -> HookConte
     )
 
 
-async def _sent_card(config: Config, route: _Route, mentions: list[str] | None) -> dict[str, Any]:
-    """Send the card from a hook with ``mentions`` and return the Matrix content it sent."""
+async def _sent_card(
+    config: Config,
+    route: _Route,
+    mentions: list[str] | None,
+    *,
+    wake_mentioned: bool = True,
+) -> dict[str, Any]:
+    """Send the card from a hook with ``mentions`` and ``wake_mentioned`` and return the Matrix content it sent."""
     client = make_matrix_client_mock(user_id=ROUTER)
     transport = AsyncMock(side_effect=delivered_matrix_side_effect("$card"))
     with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
-        event_id = await _hook_context(config, route, client).send_message("!room:localhost", CARD, mentions=mentions)
+        event_id = await _hook_context(config, route, client).send_message(
+            "!room:localhost",
+            CARD,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
+        )
     assert event_id == "$card"
     sent_client, room_id, content = transport.await_args.args
     assert (sent_client, room_id) == (client, "!room:localhost")
@@ -158,6 +173,90 @@ async def test_hook_card_mentions_only_whom_the_hook_names(
         materializable_agent_names={"alpha", "beta"},
     )
     assert (team.outcome is TeamOutcome.TEAM) is (len(expected) > 1)
+
+
+def _room_with(*user_ids: str) -> nio.MatrixRoom:
+    """Return a room whose complete membership is ``user_ids``."""
+    room = nio.MatrixRoom("!room:localhost", ROUTER)
+    for user_id in user_ids:
+        room.add_member(user_id, None, None)
+    room.members_synced = True
+    return room
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["bot", "schedule"])
+@pytest.mark.parametrize("wake_mentioned", [True, False])
+@pytest.mark.parametrize(
+    "mentions",
+    [None, [ALICE, ALPHA], [BETA]],
+    ids=["parsed", "person-and-agent", "other-agent"],
+)
+async def test_card_that_wakes_no_one_keeps_its_mentions_but_activates_no_agent(
+    config: Config,
+    route: _Route,
+    wake_mentioned: bool,
+    mentions: list[str] | None,
+) -> None:
+    """A card sent with wake_mentioned=False mentions the same people, but no agent counts as mentioned, now or later.
+
+    A mentioned person still keeps agents from answering, and an agent the card names does not stop another one
+    from continuing, so only the agents' activation by mention changes.
+    """
+    content = await _sent_card(config, route, mentions, wake_mentioned=wake_mentioned)
+
+    listed = [ALPHA, BETA] if mentions is None else mentions
+    assert content["m.mentions"] == {"user_ids": listed}
+    mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+        {"content": content},
+        MatrixID.parse(ALPHA),
+        config,
+        runtime_paths_for(config),
+        room=_room_with(ALICE, ALPHA, BETA, ROUTER),
+    )
+    woken = [user_id for user_id in listed if user_id != ALICE] if wake_mentioned else []
+    assert [agent.full_id for agent in mentioned_agents] == woken
+    assert am_i_mentioned is (ALPHA in woken)
+    assert has_non_agent_mentions is (ALICE in listed)
+    assert [agent.full_id for agent in _mentioned_in_thread(config, content)] == woken
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wake_mentioned", [True, False])
+async def test_agent_reading_a_card_that_wakes_no_one_is_not_mentioned_but_sees_the_person(
+    config: Config,
+    wake_mentioned: bool,
+) -> None:
+    """The agent's own reading of the card leaves it unmentioned and still sees the person the card mentions."""
+    content = await _sent_card(config, "bot", [ALICE, ALPHA], wake_mentioned=wake_mentioned)
+    runtime_paths = runtime_paths_for(config)
+    bot = make_test_agent_bot(
+        AgentMatrixUser(agent_name="alpha", user_id=ALPHA, display_name="Alpha", password=TEST_PASSWORD),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    bot.client = AsyncMock()
+    bot.client.user_id = ALPHA
+    sync_bot_runtime_state(bot)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": content,
+            "sender": ROUTER,
+            "event_id": "$card",
+            "room_id": "!room:localhost",
+            "origin_server_ts": 1,
+        },
+    )
+
+    context = await bot._conversation_resolver.extract_message_context(
+        _room_with(ALICE, ALPHA, BETA, ROUTER),
+        event,
+        thread_id=None,
+    )
+
+    assert context.am_i_mentioned is wake_mentioned
+    assert [agent.full_id for agent in context.mentioned_agents] == ([ALPHA] if wake_mentioned else [])
+    assert context.has_non_agent_mentions is True
 
 
 @pytest.mark.asyncio

@@ -260,8 +260,9 @@ async def test_contact_hook_sends_carry_the_requester(tmp_path: Path) -> None:
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str:
-        del room_id, body, thread_id, trigger_dispatch, mentions
+        del room_id, body, thread_id, trigger_dispatch, mentions, wake_mentioned
         sent.append((source_hook, extra_content))
         return "$event"
 
@@ -296,8 +297,9 @@ async def test_contact_hook_sends_continue_the_inbound_hook_chain_depth(tmp_path
         *,
         trigger_dispatch: bool = False,
         mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str:
-        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent.append(extra_content)
         return "$event"
 
