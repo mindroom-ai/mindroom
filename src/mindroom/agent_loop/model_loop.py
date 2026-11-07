@@ -105,7 +105,7 @@ class EndRun:
 type RequestDecision = SendRequest | EndRun
 type BeforeRequestHook = Callable[[LoopState], Awaitable[RequestDecision]]
 type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunction]], list[dict[str, Any]]]
-type AnswerToolCalls = Callable[[Message, StopReason | None], list[Message] | None]
+type AnswerToolCalls = Callable[[Sequence[Message], StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
 type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[None]]
 type LoopEndHook = Callable[[LoopState, ModelRequest], None]
@@ -118,9 +118,10 @@ class LoopHooks:
     - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
       ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
       (participation, the skill review's budget).
-    - ``answer_tool_calls``: sees each assistant message that requests tools together with the turn's stop reason;
-      when it returns result messages, one per call in call order, they answer the batch in place of running it, and
-      each call is recorded and announced as a failed call (the output-limit policy).
+    - ``answer_tool_calls``: sees the live messages, which end with an assistant message that requests tools,
+      together with the turn's stop reason; when it returns result messages, one per call in call order, they answer
+      the batch in place of running it, and each call is recorded and announced as a failed call (the output-limit
+      policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
@@ -316,7 +317,7 @@ async def _run_tool_batch(
     finished.
     """
     assert message.tool_calls
-    answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
+    answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(state.messages, stop_reason)
     if answers is not None:
         batch = answered_tool_batch(answers)
     else:

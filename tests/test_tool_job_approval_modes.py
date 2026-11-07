@@ -14,6 +14,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from mindroom.agent_loop.build import AgentBuild, AgentSurface
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
+from mindroom.agent_loop.prompt import PromptSpec
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.config.agent import AgentConfig
@@ -31,6 +36,7 @@ from mindroom.event_journal import (
     tool_job_run_id,
 )
 from mindroom.llm.runs import RunStatus, ToolExecution
+from mindroom.mid_turn import QueuedMessage
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, SpanSlot, _current_slot
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
 from mindroom.tool_jobs import approvals as approvals_module
@@ -43,10 +49,11 @@ from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, ToolJob
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE, AdaptedToolkit
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.history_helpers import replay_settings
 from tests.reply_span_helpers import reply_span
 from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
@@ -58,6 +65,7 @@ from tests.tool_job_helpers import (
     job_tool,
     reserve_job_card,
     resume_job_turn,
+    run_built_turn,
     run_job_turn,
     saved_job_card_decision,
     saved_jobs,
@@ -341,6 +349,85 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
         else:
             assert "No." in _tool_result(response)
             assert run.effects == []
+
+
+class _NewerMessageWaits:
+    """The reply's queue, which holds a newer message of its requester until the reply ends."""
+
+    def has_pending_human_messages(self) -> bool:
+        return True
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$newer", None),)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_told_to_pause_asks_for_no_more_approvals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated call made after the pause notice posts no card; the reply ends instead.
+
+    A newer message releases every wait at once, so each gated call became a job waiting on a card of its own. After a
+    restart, the message a reply answered waits behind the follow-up of its interrupted job, and a model that ignored
+    the notice posted cards until someone stopped the reply.
+    """
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run:
+        toolkit = _GatedTools(run.effects)
+        [function] = gated_functions(toolkit, run.config, authored_as="report_writer", approvals_as_jobs=True).values()
+        [tool] = toolkit_job_tools(toolkit, authored_name="report_writer").values()
+        # A model that never heeds the notice: every step calls the gated tool again.
+        model = ScriptedModel(
+            [*(calls(tool_call("write_report", f"write-{step}", title="q3")) for step in (1, 2, 3)), answer("done")],
+        )
+        build = AgentBuild(
+            spec=AgentSpec(
+                id="leader",
+                name="Leader",
+                model=model,
+                system_messages=(),
+                toolkits=(AdaptedToolkit(name="tools", functions=(function,), instructions=None),),
+            ),
+            prompt=PromptSpec(role="test", instructions=()),
+            request_template=EMPTY_REQUEST,
+            history_settings=replay_settings(),
+            surface=AgentSurface(
+                mode="standard",
+                cli_shell=False,
+                deferred=(),
+                context_documents=(),
+                context_files=(),
+                knowledge_sources=(),
+                output_file_policy=None,
+            ),
+            tool_policy=(),
+            tool_jobs=job_actor(replace(tool, function=function)),
+        )
+        newer = asyncio.Event()
+        newer.set()
+        async with execution_resources():
+            with (
+                tool_runtime_context(run.context),
+                pending_human_messages_context(newer),
+                queued_message_signal_context(_NewerMessageWaits()),
+            ):
+                response = await asyncio.wait_for(
+                    run_built_turn(build, config=run.config, runtime_paths=run.paths),
+                    JOB_TEST_TIMEOUT,
+                )
+                jobs = await run.runtime.list_jobs(owner=run.owner, depth=0)
+                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+    assert response.status is RunStatus.completed
+    # The first call's job asks once; the call the model made after the notice starts no job and ends the reply.
+    assert len(jobs) == 1
+    assert len(run.cards.requested) == 1
+    assert len(model.requests) == 2
+    assert response.tools is not None
+    assert [(execution.tool_call_id, execution.is_error) for execution in response.tools] == [
+        ("write-1", False),
+        ("write-2", True),
+    ]
+    assert run.effects == []
 
 
 @pytest.mark.asyncio

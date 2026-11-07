@@ -20,6 +20,7 @@ import pytest
 
 from mindroom import agents
 from mindroom.ai import run_delegated_child_response
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -37,6 +38,7 @@ from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.mid_turn import QueuedMessage
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -1958,3 +1960,64 @@ async def test_a_child_paused_again_after_its_resumed_run_continued_reports_ever
     reported, counted = _child_turn_usage(tmp_path, config, paths)
     assert counted == (65, 7)
     assert reported == counted
+
+
+class _NewerMessageWaits:
+    """The reply's queue, which holds a newer message of its requester until the reply ends."""
+
+    def has_pending_human_messages(self) -> bool:
+        return True
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$newer", None),)
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_works_until_its_own_request_carries_the_pause_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notice a newer message adds after the parent's delegation batch never stops the subagent that batch runs.
+
+    Only the run whose request carried the notice stops at its next calls: the subagent writes its report, reads the
+    notice after its own batch, and answers.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code", tools=["report"]),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            # The subagent runs inline in the parent's batch, under the reply's queued-message notices.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+        ),
+        "code",
+        users=[REQUESTER],
+    )
+    entity_ids(config, paths)
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Paused.")],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "write-1")), answer("Report written")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report, queued_message_signal_context(_NewerMessageWaits()):
+        await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+
+    assert report.written == ["written"]
+    assert len(code.requests) == 2
+    parent = _parent_record(config, paths, _leader_identity(), "parent-run")
+    result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result, str)
+    assert "Report written" in result

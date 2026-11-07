@@ -14,6 +14,8 @@ from mindroom.llm.errors import ModelOutputLimitError
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.agent_loop.model_loop import AnswerToolCalls
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import StopReason
@@ -34,7 +36,7 @@ def output_limit_policy() -> AnswerToolCalls:
     """Return the ``answer_tool_calls`` hook of one run, counting that run's cut-off responses."""
     cut_off_responses = 0
 
-    def answer(message: Message, stop_reason: StopReason | None) -> list[Message] | None:
+    def answer(messages: Sequence[Message], stop_reason: StopReason | None) -> list[Message] | None:
         nonlocal cut_off_responses
         if stop_reason != "output_limit":
             return None
@@ -49,7 +51,7 @@ def output_limit_policy() -> AnswerToolCalls:
         logger.warning("tool_calls_cut_off_by_output_limit", cut_off_responses=cut_off_responses)
         return [
             failed_answer(call.get("id"), (call.get("function") or {}).get("name"), CUT_OFF_TOOL_CALL_RESULT)
-            for call in message.tool_calls or []
+            for call in messages[-1].tool_calls or []
         ]
 
     return answer
