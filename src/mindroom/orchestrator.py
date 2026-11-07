@@ -85,6 +85,7 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.token_counting.families import start_loading_o200k
+from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.plugins import (
     PluginGeneration,
     PluginReloadResult,
@@ -923,7 +924,11 @@ class _MultiAgentOrchestrator:
         await preload_matrix_call_dependencies(config)
         freeze_startup_heap()
         watch = self.plugin_watch.capture(config)
-        generation = prepare_plugins(config, self.runtime_paths)
+        try:
+            generation = prepare_plugins(config, self.runtime_paths)
+        except PluginValidationError as exc:
+            # A plugin set that cannot load, such as one missing a required plugin, fails again until the config changes.
+            raise PermanentStartupError(str(exc)) from exc
         try:
             entity_names = configured_entity_names(config)
             entity_users = await prepare_managed_accounts(

@@ -3231,6 +3231,7 @@ depends_on = [
     "mindroom.scheduling.runtime",
     "mindroom.thread_export.workspace_sync",
     "mindroom.approval.tool_approval",
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.automations.runner",

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The (major, minor) version of the plugin API, which `mindroom.plugin_api` exports; docs/plugins.md says when to bump
-# it, and `tests/test_plugin_api.py` fails on a change to the surface it versions until it is bumped.
+# it, and `tests/test_plugin_api.py` fails on a change to the names and parameters it pins until it is bumped.
 PLUGIN_API_VERSION = (1, 0)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"

@@ -13,32 +13,24 @@ from typer.testing import CliRunner
 
 from mindroom.cli.main import app
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION, PluginValidationError
 from mindroom.tool_system.plugins import PluginGeneration, dispose_plugins, prepare_plugins
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, initialize_from_config_file, runtime_paths_for, test_runtime_paths
 from tests.test_plugin_check import _write_plugin
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
-
 _HOOKS = "from mindroom.plugin_api import hook\n\n@hook('message:received')\nasync def audit(ctx):\n    del ctx\n"
-
-
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}", encoding="utf-8")
-    return resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
 
 
 def _prepare(tmp_path: Path, plugins: list[object]) -> PluginGeneration:
     """Load ``plugins``, a config's ``plugins:`` entries, as startup and reloads do."""
-    generation = prepare_plugins(Config(plugins=plugins), _runtime_paths(tmp_path))
+    generation = prepare_plugins(Config(plugins=plugins), test_runtime_paths(tmp_path))
     dispose_plugins(generation)
     return generation
 
@@ -209,6 +201,19 @@ async def test_a_refused_load_ends_the_tasks_its_loaded_plugins_started(tmp_path
         for task in probe.tasks:
             task.cancel()
         await asyncio.gather(*probe.tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_startup_that_cannot_load_a_required_plugin_fails_with_the_reason(tmp_path: Path) -> None:
+    """Startup refuses a required plugin that does not load as a permanent error, which `mindroom run` prints."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text(
+        "plugins:\n  - path: ./plugins/missing\n    required: true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PermanentStartupError, match=r"^Required plugin \./plugins/missing failed to load"):
+        await initialize_from_config_file(runtime_paths)
 
 
 @pytest.mark.asyncio

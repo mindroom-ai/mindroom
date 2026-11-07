@@ -90,7 +90,7 @@ plugins:
 | --- | --- | --- | --- |
 | `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
 | `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
-| `required` | bool | `false` | Set to `true` to make startup fail, and a reload be refused, when the plugin does not load for any reason, instead of running without it; see [Broken plugins](#broken-plugins) |
+| `required` | bool | `false` | Set to `true` to make startup fail, and a reload be refused, when the plugin is skipped for any reason, instead of running without it; see [Broken plugins](#broken-plugins) |
 | `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module; masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
@@ -150,16 +150,16 @@ Keep in mind:
 
 ### Broken plugins
 
-`mindroom run` startup does not crash on a broken plugin, unless its entry sets `required: true`.
+`mindroom run` startup does not crash on a broken plugin unless its entry sets `required: true`, which stops startup with `Required plugin <path> failed to load: <reason>`.
 It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
 If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
 Agents keep a disabled tool in their config, including the tools a generated agent's owner chose, and offer it again once the plugin loads.
 Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.
 `mindroom config validate` and `mindroom plugins check` report the same problems as errors instead.
-When a required plugin does not load, startup fails with `Required plugin <path> failed to load: <reason>`, and a config change that would leave it unloaded is refused, keeping the running config.
 
 When a save breaks a plugin during hot reload, MindRoom skips that plugin the same way and keeps the other plugins active.
-When the configured plugins cannot load together, such as two plugins sharing a `name`, or a required plugin does not load, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
+When the configured plugins cannot load together, such as two plugins sharing a `name`, or a required plugin would be skipped, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
+A config change that would leave a required plugin skipped is refused, and the running config stays.
 The next valid save reloads normally.
 For hooks that raise while handling an event, see [Errors and timeouts](https://docs.mindroom.chat/hooks/#errors-and-timeouts).
 
@@ -180,7 +180,7 @@ The reply lists the active plugins, the number of cancelled background tasks, an
 ```
 
 Only users listed in `administrators` in `config.yaml` may run it; others get `❌ Admin only.`
-A reload whose plugins cannot load together, or that cannot load a required plugin, keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
+A reload whose plugins cannot load together, or that would skip a required plugin, keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
 `!reload_plugins` is an alias.
 
 ## Compatibility checks
@@ -197,7 +197,7 @@ It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does
 
 ## Plugin API versions
 
-`PLUGIN_API_VERSION` in `mindroom.plugin_api` is the version, as `(major, minor)`, of what this page lets plugins use: the manifest format and the names it says to import from `mindroom.plugin_api` and the other modules it names.
+`PLUGIN_API_VERSION` in `mindroom.plugin_api` is the version, as `(major, minor)`, of what this page and [Hooks](https://docs.mindroom.chat/hooks/) let plugins use: the manifest format, and the names they say to import from `mindroom.plugin_api` and the other modules they name.
 A change that only adds to the API bumps the minor version, so a plugin written for an earlier minor of the same major keeps working.
 A breaking change, one that removes or changes anything a plugin uses, bumps the major version.
 Anything a major bump removes or changes is first deprecated for at least 30 days.
