@@ -119,10 +119,10 @@ def test_plugins_check_cli_warns_about_imports_outside_the_plugin_api(tmp_path: 
         tmp_path / "plugin",
         "from mindroom.plugin_api import MessageTarget\nfrom mindroom.hooks import hook\n" + _HOOK,
     )
-    # A path that reads as console markup, in a line longer than the console is wide.
+    # A path that reads as console markup, a line number that reads as an emoji code, in a line wider than the console.
     (plugin_root / "tests").mkdir()
     (plugin_root / "tests" / "test_[slow]_runtime_context_integration.py").write_text(
-        "from mindroom.tool_system.runtime_context import ToolRuntimeContext\n",
+        "\n" * 99 + "from mindroom.tool_system.runtime_context import ToolRuntimeContext\n",
         encoding="utf-8",
     )
 
@@ -133,7 +133,7 @@ def test_plugins_check_cli_warns_about_imports_outside_the_plugin_api(tmp_path: 
     assert (
         "Warning: imports from outside the plugin API can break in any MindRoom release:\n"
         "  hooks.py:2: mindroom.hooks.hook\n"
-        "  tests/test_[slow]_runtime_context_integration.py:1: mindroom.tool_system.runtime_context.ToolRuntimeContext\n"
+        "  tests/test_[slow]_runtime_context_integration.py:100: mindroom.tool_system.runtime_context.ToolRuntimeContext\n"
     ) in result.stdout
     assert "MessageTarget" not in result.stdout
 

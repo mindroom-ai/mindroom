@@ -51,7 +51,7 @@ def plugin_check(
         label = "[red]Error:[/red]" if strict else "[yellow]Warning:[/yellow]"
         console.print(f"{label} imports from outside the plugin API can break in any MindRoom release:")
         for outside_import in outside_imports:
-            console.print(f"  {outside_import}", markup=False, soft_wrap=True)
+            console.out(f"  {outside_import}")
         if strict:
             raise typer.Exit(1)
 
