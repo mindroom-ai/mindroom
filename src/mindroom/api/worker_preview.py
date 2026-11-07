@@ -1,8 +1,8 @@
 """Sandbox runner routes that relay the primary's requests to apps listening on this worker's loopback.
 
 ``GET /api/sandbox-runner/ports`` lists the ports apps listen on at loopback, and ``/api/sandbox-runner/ports/{port}/{path}``
-passes any method, its body streamed both ways, or a WebSocket, to ``{path}`` on the app at ``127.0.0.1:{port}``, or at
-``[::1]:{port}`` when it listens only there.
+passes a GET, HEAD, POST, PUT, PATCH, DELETE, or OPTIONS request, its body streamed both ways, or a WebSocket, to
+``{path}`` on the app at ``127.0.0.1:{port}``, or at ``[::1]:{port}`` when it listens only there.
 Only a dedicated worker's runner relays: the shared runner's loopback is every agent's, and in a pod it is the primary's too.
 The runner's own token never reaches an app.
 """
@@ -10,7 +10,6 @@ The runner's own token never reaches an app.
 from __future__ import annotations
 
 import ipaddress
-import secrets
 import sys
 from contextlib import suppress
 from pathlib import Path
@@ -22,7 +21,7 @@ from starlette.responses import StreamingResponse
 from yarl import URL
 
 from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
-from mindroom.api.sandbox_runner import app_runner_token, app_runtime_paths, validate_runner_token
+from mindroom.api.sandbox_runner import app_runtime_paths, validate_runner_token
 from mindroom.previews.relay import relay_websocket
 
 if TYPE_CHECKING:
@@ -63,6 +62,8 @@ _LOOPBACK_HOSTS = {
     ipaddress.ip_address("::"): "[::1]",
 }
 _TCP_LISTEN = "0A"
+# Reach an app within 10 seconds, then wait on it as long as the stream lasts.
+_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10)
 
 
 def _refused(status_code: int, detail: str) -> HTTPException:
@@ -74,8 +75,7 @@ def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     words = (int(hex_words[start : start + 8], 16) for start in range(0, len(hex_words), 8))
     address = ipaddress.ip_address(b"".join(word.to_bytes(4, sys.byteorder) for word in words))
     # A dual-stack socket bound to an IPv4 address, as Java binds localhost, shows in tcp6 as ::ffff:<address>.
-    mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
-    return mapped if mapped is not None else address
+    return (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
 
 
 def _loopback_ports() -> dict[int, str]:
@@ -115,11 +115,12 @@ def _upstream_url(connection: HTTPConnection, port: int) -> URL:
     return URL(f"http://{host}:{port}/{target}{'?' if query else ''}{query}", encoded=True)
 
 
-def _end_to_end(headers: Iterable[tuple[str, str]], drop: frozenset[str] = frozenset()) -> list[tuple[str, str]]:
+def _end_to_end(headers: Iterable[tuple[str, str]], drop: frozenset[str]) -> list[tuple[str, str]]:
     """Return ``headers`` without the hop-by-hop ones, those their Connection header names, and ``drop``."""
     pairs = [(name.lower(), value) for name, value in headers]
     named = {token.strip().lower() for name, value in pairs if name == "connection" for token in value.split(",")}
-    return [(name, value) for name, value in pairs if name not in _HOP_HEADERS | named | drop]
+    excluded = _HOP_HEADERS | named | drop
+    return [(name, value) for name, value in pairs if name not in excluded]
 
 
 class _AppResponse(StreamingResponse):
@@ -131,7 +132,8 @@ class _AppResponse(StreamingResponse):
             (name.encode("latin-1"), value.encode("latin-1"))
             for name, value in _end_to_end(
                 ((name.decode("latin-1"), value.decode("latin-1")) for name, value in upstream.raw_headers),
-                frozenset({_REFUSED_HEADER}),
+                # The runner's server already sends its own Date and Server, which the answer keeps once.
+                frozenset({_REFUSED_HEADER, "date", "server"}),
             )
         ]
         self._upstream = upstream
@@ -157,10 +159,7 @@ async def relay(request: Request, port: int) -> StreamingResponse:
     """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
     url = _upstream_url(request, port)
     has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
-    session = aiohttp.ClientSession(
-        auto_decompress=False,
-        timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
-    )
+    session = aiohttp.ClientSession(auto_decompress=False, timeout=_TIMEOUT)
     try:
         upstream = await session.request(
             request.method,
@@ -179,11 +178,8 @@ async def relay(request: Request, port: int) -> StreamingResponse:
 @router.websocket("/{port}/{path:path}")
 async def relay_socket(websocket: WebSocket, port: int) -> None:
     """Pass one WebSocket to the app on ``port`` at this worker's loopback, message by message."""
-    token = app_runner_token(websocket.app)
-    if not token or not secrets.compare_digest(websocket.headers.get(_TOKEN_HEADER, ""), token):
-        await websocket.close(code=1008)
-        return
     try:
+        await validate_runner_token(websocket, websocket.headers.get(_TOKEN_HEADER))
         url = _upstream_url(websocket, port)
     except HTTPException:
         await websocket.close(code=1008)
@@ -192,7 +188,7 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
     headers = [(name, value) for name, value in websocket.headers.items() if name in _WEBSOCKET_HEADERS]
     try:
         async with (
-            aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)) as session,
+            aiohttp.ClientSession(timeout=_TIMEOUT) as session,
             session.ws_connect(url, protocols=protocols, headers=headers, max_msg_size=_MAX_MESSAGE_BYTES) as upstream,
         ):
             await websocket.accept(subprotocol=upstream.protocol)

@@ -50,7 +50,7 @@ async def _upstream_to_client(websocket: WebSocket, upstream: aiohttp.ClientWebS
 
 
 async def relay_websocket(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:
-    """Pass messages both ways until either side closes, then close both with that side's close code."""
+    """Pass messages both ways until either side closes or is lost, then close both with the code that ended it."""
     tasks = [
         asyncio.create_task(_client_to_upstream(websocket, upstream)),
         asyncio.create_task(_upstream_to_client(websocket, upstream)),
@@ -59,8 +59,11 @@ async def relay_websocket(websocket: WebSocket, upstream: aiohttp.ClientWebSocke
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
-            with suppress(WebSocketDisconnect, aiohttp.ClientError, OSError, RuntimeError):
+            try:
                 code = task.result()
+            except (WebSocketDisconnect, aiohttp.ClientError, OSError, RuntimeError):
+                # A side that could not be sent to was lost.
+                code = 1011
     finally:
         for task in tasks:
             task.cancel()

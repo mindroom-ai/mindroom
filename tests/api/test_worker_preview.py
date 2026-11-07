@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import socket
-from contextlib import AsyncExitStack, asynccontextmanager
+import sys
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,18 @@ from mindroom.constants import resolve_runtime_paths
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+pytestmark = [
+    pytest.mark.skipif(sys.platform != "linux", reason="The relay reads listening sockets from /proc/net."),
+    # The runner serves WebSockets with uvicorn's default implementation, the deprecated websockets.legacy one.
+    pytest.mark.filterwarnings(r"ignore:websockets\.legacy is deprecated.*:DeprecationWarning:websockets\.legacy"),
+    pytest.mark.filterwarnings(
+        r"ignore:websockets\.server\.WebSocketServerProtocol is deprecated:DeprecationWarning:uvicorn\.protocols\.websockets\.websockets_impl",
+    ),
+    pytest.mark.filterwarnings(
+        r"ignore:remove second argument of ws_handler:DeprecationWarning:websockets\.legacy\.server",
+    ),
+]
 
 # The runner's refusals carry this header, so a caller tells them from an app's answers.
 _REFUSED = "x-mindroom-relay-refused"
@@ -49,7 +62,7 @@ async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_R
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     server = uvicorn.Server(
-        uvicorn.Config(sandbox_runner_app.app, lifespan="off", ws="websockets-sansio", log_level="error"),
+        uvicorn.Config(sandbox_runner_app.app, lifespan="off", log_level="error"),
     )
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     try:
@@ -91,34 +104,48 @@ async def _echo(request: web.Request) -> web.Response:
     return response
 
 
-async def _socket(request: web.Request) -> web.WebSocketResponse:
+async def _socket(request: web.Request) -> web.WebSocketResponse:  # noqa: C901 - one branch per scripted command
     """Greet with the handshake headers the app received and echo each message.
 
-    "big" asks for a 5 MiB message, "bye" closes with 4001, "restart" with 1012, "quiet" without a code, "crash" drops
-    the connection without closing, and the client's own close code is recorded.
+    "big" asks for a 5 MiB message, "flood" for messages until the socket closes, "bye" closes with 4001, "restart"
+    with 1012, "quiet" without a code, "crash" drops the connection without closing, and the client's own close code
+    is recorded.
     """
     websocket = web.WebSocketResponse(protocols=("chat",))
     await websocket.prepare(request)
     await websocket.send_json({name.lower(): value for name, value in request.headers.items()})
+    flooding: list[asyncio.Task[None]] = []
+
+    async def flood() -> None:
+        with suppress(ConnectionError):
+            while not websocket.closed:
+                await websocket.send_str("x" * 1024)
+
     async for message in websocket:
-        if message.type == aiohttp.WSMsgType.TEXT and message.data == "bye":
-            await websocket.close(code=4001)
-        elif message.type == aiohttp.WSMsgType.TEXT and message.data == "restart":
-            await websocket.close(code=1012)
-        elif message.type == aiohttp.WSMsgType.TEXT and message.data == "quiet":
-            # A close frame without a status code, as a browser's close() sends; aiohttp has no public call for it.
-            await websocket._writer.send_frame(b"", aiohttp.WSMsgType.CLOSE)
-            assert request.transport is not None
-            request.transport.close()
-        elif message.type == aiohttp.WSMsgType.TEXT and message.data == "crash":
-            assert request.transport is not None
-            request.transport.close()
-        elif message.type == aiohttp.WSMsgType.TEXT and message.data == "big":
-            await websocket.send_bytes(b"x" * 5 * 1024 * 1024)
-        elif message.type == aiohttp.WSMsgType.TEXT:
-            await websocket.send_str(message.data)
-        elif message.type == aiohttp.WSMsgType.BINARY:
+        if message.type == aiohttp.WSMsgType.BINARY:
             await websocket.send_bytes(message.data)
+            continue
+        match message.data:
+            case "bye":
+                await websocket.close(code=4001)
+            case "restart":
+                await websocket.close(code=1012)
+            case "quiet":
+                # A close frame without a status code, as a browser's close() sends; aiohttp has no public call for it.
+                await websocket._writer.send_frame(b"", aiohttp.WSMsgType.CLOSE)
+                assert request.transport is not None
+                request.transport.close()
+            case "crash":
+                assert request.transport is not None
+                request.transport.close()
+            case "big":
+                await websocket.send_bytes(b"x" * 5 * 1024 * 1024)
+            case "flood":
+                flooding.append(asyncio.create_task(flood()))
+            case _:
+                await websocket.send_str(message.data)
+    for task in flooding:
+        await task
     request.app[_CLOSE_CODES].put_nowait(websocket.close_code)
     return websocket
 
@@ -161,12 +188,6 @@ async def _app(
         await runner.cleanup()
 
 
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
 @pytest.mark.asyncio
 async def test_relay_passes_a_request_and_its_answer_without_the_runner_token(tmp_path: Path) -> None:
     """Method, encoded path, query, body, and duplicate answer headers pass; the token and hop-by-hop headers do not."""
@@ -185,6 +206,7 @@ async def test_relay_passes_a_request_and_its_answer_without_the_runner_token(tm
         assert response.status == 200
         assert _REFUSED not in response.headers
         assert response.headers.getall("Set-Cookie") == ["a=1", "b=2"]
+        assert len(response.headers.getall("Date")) == len(response.headers.getall("Server")) == 1
         assert "Proxy-Authenticate" not in response.headers
         seen = await response.json()
     headers = dict(seen.pop("headers"))
@@ -247,38 +269,21 @@ async def test_relay_passes_an_apps_answer_as_the_app_sent_it(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_relay_reaches_apps_listening_on_ipv6_loopback_or_every_ipv6_address(tmp_path: Path) -> None:
-    """Apps on ``[::1]`` alone or on ``[::]`` are listed and reached."""
+@pytest.mark.parametrize("host", ["::1", "::", "::ffff:127.0.0.1"])
+async def test_relay_reaches_an_app_on_an_ipv6_socket_that_takes_loopback(tmp_path: Path, host: str) -> None:
+    """An app on ``[::1]``, every IPv6 address, or ``::ffff:127.0.0.1`` (as Java binds localhost) is listed and reached."""
     async with AsyncExitStack() as stack:
         try:
-            ports = [await stack.enter_async_context(_app(host)) for host in ("::1", "::")]
-        except OSError:
-            pytest.skip("No IPv6 loopback on this host.")
-        runner = await stack.enter_async_context(_runner(tmp_path))
-        client = await stack.enter_async_context(aiohttp.ClientSession())
-        async with client.get(runner.root, headers=_AUTH) as response:
-            assert set(ports) <= set(await response.json())
-        for port in ports:
-            async with client.get(f"{runner.root}/{port}/hello", headers=_AUTH) as response:
-                assert response.status == 200
-                assert (await response.json())["path"] == "/hello"
-
-
-@pytest.mark.asyncio
-async def test_relay_reaches_an_app_on_an_ipv4_mapped_loopback_address(tmp_path: Path) -> None:
-    """An IPv6 socket bound to ``::ffff:127.0.0.1``, as Java binds localhost, is listed and reached at loopback."""
-    async with AsyncExitStack() as stack:
-        try:
-            port = await stack.enter_async_context(_app("::ffff:127.0.0.1"))
+            port = await stack.enter_async_context(_app(host))
         except OSError:
             pytest.skip("No IPv6 on this host.")
         runner = await stack.enter_async_context(_runner(tmp_path))
         client = await stack.enter_async_context(aiohttp.ClientSession())
         async with client.get(runner.root, headers=_AUTH) as response:
             assert port in await response.json()
-        async with client.get(f"{runner.root}/{port}/mapped", headers=_AUTH) as response:
+        async with client.get(f"{runner.root}/{port}/hello", headers=_AUTH) as response:
             assert response.status == 200
-            assert (await response.json())["path"] == "/mapped"
+            assert (await response.json())["path"] == "/hello"
 
 
 @pytest.mark.asyncio
@@ -304,10 +309,10 @@ async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other
 
 
 @pytest.mark.asyncio
-async def test_relay_refuses_a_port_no_app_listens_on_at_loopback(tmp_path: Path) -> None:
+async def test_relay_refuses_a_port_no_app_listens_on_at_loopback(tmp_path: Path, unused_tcp_port: int) -> None:
     """A closed port, the runner's own, and a server only on another address are marked refusals."""
     async with _app("127.0.0.2") as elsewhere, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for port in (_free_port(), runner.port, elsewhere):
+        for port in (unused_tcp_port, runner.port, elsewhere):
             async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
                 assert response.status == 502
                 assert response.headers[_REFUSED] == "1"
@@ -436,19 +441,38 @@ async def test_relay_closes_the_app_normally_when_the_caller_closes_without_a_co
             ).encode(),
         )
         assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 101")
-        # A masked close frame with an empty payload.
+        # A masked close frame with an empty payload; like a browser, hang up once the runner has closed its side.
         writer.write(b"\x88\x80\x00\x00\x00\x00")
         async with asyncio.timeout(5):
-            assert await close_codes.get() == 1000
+            await reader.read()
         writer.close()
         await writer.wait_closed()
+        async with asyncio.timeout(5):
+            assert await close_codes.get() == 1000
 
 
 @pytest.mark.asyncio
-async def test_relay_refuses_a_websocket_nothing_answers(tmp_path: Path) -> None:
+async def test_relay_ends_the_apps_websocket_in_an_error_when_the_caller_drops_mid_stream(tmp_path: Path) -> None:
+    """A caller that drops its connection while the app streams to it ends the app's socket with 1011, not a normal 1000."""
+    close_codes: asyncio.Queue[int | None] = asyncio.Queue()
+    async with _app(close_codes=close_codes) as port, _runner(tmp_path) as runner:
+        async with aiohttp.ClientSession() as client:
+            websocket = await client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH)
+            await websocket.receive_json()
+            await websocket.send_str("flood")
+            assert await websocket.receive_str() == "x" * 1024
+            # Drop the connection without a close frame.
+            assert websocket._response.connection is not None
+            websocket._response.connection.transport.abort()
+        async with asyncio.timeout(5):
+            assert await close_codes.get() == 1011
+
+
+@pytest.mark.asyncio
+async def test_relay_refuses_a_websocket_nothing_answers(tmp_path: Path, unused_tcp_port: int) -> None:
     """A WebSocket to a closed port, or to an app path that takes none, is refused at the handshake."""
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        for url in (f"{runner.root}/{_free_port()}/socket", f"{runner.root}/{port}/plain"):
+        for url in (f"{runner.root}/{unused_tcp_port}/socket", f"{runner.root}/{port}/plain"):
             with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
                 await client.ws_connect(url, headers=_AUTH)
             assert refused.value.status == 403
