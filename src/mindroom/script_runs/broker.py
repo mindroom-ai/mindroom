@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.tool_system.agno_toolkits import AnyToolkit
-    from mindroom.tool_system.declarations import ApprovalAlias
     from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
@@ -543,12 +542,6 @@ class ScriptToolBroker:
         """Run the call through the tool-call policy; return what it came to."""
         context = prepared.context
         function = prepared.function
-        alias = toolkit_approval_alias(
-            context.config,
-            context.plugins.tools,
-            function.registered_toolkit,
-            function.name,
-        )
         with tool_runtime_context(context):
             authored_decision = await _request_authored_confirmation(
                 runtime_resolver=self.runtime_resolver,
@@ -566,7 +559,6 @@ class ScriptToolBroker:
                 run=run,
                 call=call,
                 approval_config=prepared.approval_config,
-                alias=alias,
                 authored_decision=authored_decision,
                 execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
             )
@@ -780,7 +772,6 @@ def _build_background_approval_gate(
     run: ScriptRunRecord,
     call: ScriptCallRecord,
     approval_config: Config,
-    alias: ApprovalAlias | None,
     authored_decision: ToolApprovalDecision | None,
     execution_gate: Callable[[], Awaitable[ToolApprovalDecision]],
 ) -> _BackgroundApprovalGate:
@@ -799,7 +790,12 @@ def _build_background_approval_gate(
                 call.grant.function_name,
                 arguments,
                 run.agent_name,
-                alias,
+                toolkit_approval_alias(
+                    context.config,
+                    context.plugins.tools,
+                    call.grant.toolkit_name,
+                    call.grant.function_name,
+                ),
             )
             if policy_requires_approval:
                 decision = await runtime_resolver.request_approval(

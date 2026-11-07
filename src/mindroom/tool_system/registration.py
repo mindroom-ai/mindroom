@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
+    ApprovalAlias,
     ConfigField,
     SetupType,
     ToolAuthoredOverrideValidator,
@@ -19,8 +20,6 @@ from mindroom.tool_system.registry import register_tool
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-
-    from mindroom.tool_system.declarations import ApprovalAlias
 
 
 def register_tool_with_metadata(
