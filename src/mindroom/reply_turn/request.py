@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -82,6 +83,8 @@ class ResponseRequest:
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
     correlation_id: str | None = None
+    # The turn's own ID, which its hooks and tool calls carry; unlike the correlation ID, no other turn shares it.
+    turn_id: str = field(default_factory=lambda: uuid4().hex)
     matrix_run_metadata: Mapping[str, Any] | None = None
     participating_agent_names: tuple[str, ...] = ()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()

@@ -199,6 +199,8 @@ The argument takes every form a `plugins:` entry takes, as listed in [Path resol
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
+It leaves out the plugin's top-level `tests/` directory and any directory inside the plugin with its own manifest, which is a separate plugin.
+It also accepts `mindroom.script_sdk`, the client that [background scripts](https://docs.mindroom.chat/tools/background-scripts/#calling-agent-tools-from-a-script), such as a skill's scripts, call tools with.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
 The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
@@ -429,6 +431,8 @@ def lines_tools() -> type[LineTools]:
 A call then needs approval when its own rules ask for it or when the `judged_as` rules would ask about any call `judge` returns, so a rule that auto-approves `run_line` does not lift a `run_shell_command` rule.
 `judge` reads only the call's arguments, since an approval covers exactly those: return an empty list for a call that amounts to no call of `judged_as`, and `None` when the arguments cannot tell, which asks whenever the `judged_as` rules may ask.
 The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
+Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias.
+When an option can turn an aliased function off, pass every function the toolkit can offer as `function_names` to `register_tool_with_metadata`, so the toolkit still builds without it.
 In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](https://docs.mindroom.chat/tools/agent-orchestration/#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
 
 ### Dependencies
@@ -537,6 +541,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
+| `SHARED_DIRECTORY_ROOTS` | `shared_directory_roots` | A function that returns the [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) the tool can reach where it runs, each with its `path` and whether it is `writable`: in the primary process the constructing agent's, or none when tools run in dedicated workers or through the sandbox proxy, and in a worker every directory it mounts (see [Access by deployment](https://docs.mindroom.chat/tools/execution-and-coding/#access-by-deployment)); call it on each use, since the agent can join or leave one while it replies |
 
 ```python
 from mindroom.plugin_api import (
@@ -655,6 +660,7 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 `mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
 `context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
 `await context.hooks.message_sender(room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch=False, mentions=None, wake_mentioned=True)` sends a message from the turn's bot, with `source_hook` such as `"my-plugin:my-tool"` naming what sent it; `extra_content`, `trigger_dispatch`, `mentions`, and `wake_mentioned` work as in a hook's [`ctx.send_message`](https://docs.mindroom.chat/hooks/#sending-messages), but the message does not carry the turn's requester.
+`context.turn_id` names the agent turn the call belongs to, which that turn's hooks carry as `ctx.turn_id`, or is `None` for a call outside a turn, such as a background script's; in a delegated subagent's turn, `context.parent_turn_id` names the turn that delegated it.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -1096,7 +1102,7 @@ async def greetings(websocket: WebSocket) -> None:
 ```
 
 A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call of an agent run on the primary; anywhere else it raises `RuntimeError`.
-A plugin that uses its context states `"mindroom_plugin_api": "1.2"` in its manifest, so an older MindRoom skips it with a clear reason.
+A plugin that uses its context states `"mindroom_plugin_api": "1.3"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 | Member | Value |
 |--------|-------|

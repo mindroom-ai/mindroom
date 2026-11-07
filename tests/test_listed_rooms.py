@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
@@ -402,6 +404,185 @@ async def test_a_restart_follows_missed_listings_reading_only_rooms_that_list_on
 
     assert sorted(bot.memberships) == [(OTHER_ROOM, "join"), (PARENT, "join"), (ROOM, "join")]
     assert [call.args[0] for call in bot.client.room_get_state.await_args_list] == [PARENT]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["taken-off", "parent-left"])
+async def test_a_room_whose_listing_ends_before_its_follow_joins_is_not_joined(tmp_path: Path, change: str) -> None:
+    """A removal, or the bot leaving the room that lists it, after the follow read the listing keeps the bot out."""
+    state = {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}
+    bot = _Bot(tmp_path, state)
+    read_state = bot.client.room_get_state.side_effect
+
+    async def change_after_the_read(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        listing = await read_state(room_id)
+        if change == "parent-left":
+            bot.client.rooms.pop(PARENT)
+            return listing
+        state[PARENT] = [_create(), _child(ROOM, listed=False)]
+        bot.client.rooms[PARENT].handle_event(_space_child_event(ROOM, listed=False))
+        # The removal's own work, which finds the bot not yet in the room.
+        await bot.lifecycle._leave_unlisted_room(PARENT, ROOM)
+        return listing
+
+    bot.client.room_get_state.side_effect = change_after_the_read
+
+    with capture_logs() as logs:
+        await bot.on_space_child(ROOM)
+
+    assert bot.memberships == []
+    assert bot.lifecycle.invited_room_ids() == frozenset()
+    assert [log for log in logs if log["log_level"] == "error"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_room_taken_out_of_the_config_that_is_still_listed_is_kept(tmp_path: Path) -> None:
+    """A configured room its room also lists stays, followed, once the configuration drops it, and stays at restart.
+
+    Deciding reads only the room whose synced list names it.
+    """
+    bot = _Bot(
+        tmp_path,
+        {OTHER_ROOM: [_create()], PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]},
+        joined=(OTHER_ROOM, PARENT, ROOM),
+    )
+    bot.lifecycle.deps = replace(bot.lifecycle.deps, get_configured_rooms=lambda: [PARENT, OTHER_ROOM])
+
+    await bot.lifecycle.leave_unconfigured_rooms()
+    await bot.lifecycle.join_configured_rooms()
+    await bot.lifecycle.leave_unconfigured_rooms()
+    await bot.settle()
+
+    assert (ROOM, "leave") not in bot.memberships
+    assert bot.lifecycle.invited_room_ids() == {ROOM}
+    assert [call.args[0] for call in bot.client.room_get_state.await_args_list] == [PARENT]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [
+        {PARENT: [_create()], ROOM: [_create(), _parent(PARENT)]},
+        {PARENT: [_create("m.space"), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]},
+        {PARENT: [_create(), _child(ROOM, sender=MALLORY)], ROOM: [_create(), _parent(PARENT)]},
+        {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT, canonical=False)]},
+    ],
+    ids=["not-listed", "parent-is-a-space", "listing-not-admitted", "not-canonical"],
+)
+async def test_a_room_taken_out_of_the_config_that_is_not_followed_is_left(
+    tmp_path: Path,
+    state: dict[str, list[dict]],
+) -> None:
+    """Only a listing the bot would follow keeps a room the configuration dropped."""
+    bot = _Bot(tmp_path, state, accept_invites=[ALICE], joined=(PARENT, ROOM))
+    bot.client.rooms[PARENT].children.add(ROOM)
+
+    await bot.lifecycle.leave_unconfigured_rooms()
+
+    assert bot.memberships == [(ROOM, "leave")]
+    assert bot.lifecycle.invited_room_ids() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_reads_only_rooms_whose_synced_list_names_the_dropped_room(tmp_path: Path) -> None:
+    """A listing this bot has not synced yet is not read, so it keeps nothing; its arrival is followed as usual."""
+    bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}, joined=(PARENT, ROOM))
+    bot.client.rooms[PARENT].children.clear()
+
+    assert await bot.lifecycle._rooms_to_leave() == [ROOM]
+    bot.client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rooms_taken_out_of_the_config_together_with_the_room_listing_them_are_left(tmp_path: Path) -> None:
+    """A room listing another keeps it only while the bot stays in it, so dropping both leaves both."""
+    bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}, joined=(PARENT, ROOM))
+    # The bot stays in a configured room that no sync has delivered yet.
+    bot.client.joined_rooms.side_effect = lambda: nio.JoinedRoomsResponse(rooms=[OTHER_ROOM, *bot.client.rooms])
+    bot.lifecycle.deps = replace(bot.lifecycle.deps, get_configured_rooms=lambda: [OTHER_ROOM])
+
+    await bot.lifecycle.leave_unconfigured_rooms()
+
+    assert sorted(bot.memberships) == [(PARENT, "leave"), (ROOM, "leave")]
+    assert bot.lifecycle.invited_room_ids() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_rooms_taken_out_of_the_config_stay_under_a_room_that_stays_however_deep(tmp_path: Path) -> None:
+    """A dropped room listed by a dropped room that itself stays, listed by a configured room, stays too."""
+    bot = _Bot(
+        tmp_path,
+        {
+            PARENT: [_create(), _child(ROOM)],
+            ROOM: [_create(), _parent(PARENT), _child(OTHER_ROOM)],
+            OTHER_ROOM: [_create(), _parent(ROOM)],
+        },
+        joined=(PARENT, ROOM, OTHER_ROOM),
+    )
+
+    await bot.lifecycle.leave_unconfigured_rooms()
+
+    assert bot.memberships == []
+    assert bot.lifecycle.invited_room_ids() == {ROOM, OTHER_ROOM}
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_never_waits_for_a_room_another_task_is_handling(tmp_path: Path) -> None:
+    """A config reload's cleanup finishes while an invitation's handling holds the room, waiting on that reload.
+
+    The room is treated as it was before rooms were kept, and so is one just handed to a task waiting for it.
+    """
+    bot = _Bot(
+        tmp_path,
+        {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]},
+        joined=(PARENT, ROOM),
+    )
+    lock = bot.lifecycle._lock_for_room(bot.lifecycle._invite_join_locks, ROOM)
+
+    await lock.acquire()
+    async with asyncio.timeout(5):
+        await bot.lifecycle.leave_unconfigured_rooms()
+    assert bot.memberships == [(ROOM, "leave")]
+
+    waiting = asyncio.create_task(lock.acquire())
+    await asyncio.sleep(0)
+    lock.release()
+    async with asyncio.timeout(5):
+        assert not await bot.lifecycle._keep_listed_room(ROOM, {PARENT})
+    assert await waiting
+
+
+@pytest.mark.asyncio
+async def test_a_room_taken_off_its_list_while_a_cleanup_keeps_it_is_left_after_that_cleanup(tmp_path: Path) -> None:
+    """A removal arriving while a cleanup pass decides to keep a listed room waits for that pass, then leaves it."""
+    state = {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}
+    bot = _Bot(tmp_path, state, joined=(PARENT, ROOM))
+    read_state_event = bot.client.room_get_state_event.side_effect
+    unlisted: list[bool] = []
+
+    async def unlist_while_deciding(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if not unlisted:
+            state[PARENT] = [_create(), _child(ROOM, listed=False)]
+            parent, event = bot.client.rooms[PARENT], _space_child_event(ROOM, listed=False)
+            parent.handle_event(event)
+            await bot.lifecycle.on_space_child(parent, event)
+            unlisted.append((ROOM, "leave") in bot.memberships)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            unlisted.append((ROOM, "leave") in bot.memberships)
+        return await read_state_event(room_id, event_type, state_key)
+
+    bot.client.room_get_state_event.side_effect = unlist_while_deciding
+
+    await bot.lifecycle.leave_unconfigured_rooms()
+    await bot.settle()
+
+    assert unlisted == [False, False]
+    assert bot.memberships == [(ROOM, "leave")]
 
 
 @pytest.mark.asyncio

@@ -157,7 +157,7 @@ _EXPORTS = [
 _HOOK = "event_name, config, runtime_paths, correlation_id"
 _HOOK_HELPERS = (
     "plugin_name, settings, logger, runtime_started_at, message_sender, agent_message_snapshot_reader, matrix_admin, "
-    "room_state_querier, room_state_putter"
+    "room_state_querier, room_state_putter, turn_id, parent_turn_id"
 )
 _TOOL_HOOK = f"config, runtime_paths, correlation_id, *, event_name, {_HOOK_HELPERS}"
 
@@ -270,7 +270,7 @@ _SIGNATURES = {
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
         "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
-        "cli_approval_handler, hook_source, tool_output_paths, tool_calls_shown)"
+        "cli_approval_handler, hook_source, tool_output_paths, tool_calls_shown, turn_id, parent_turn_id)"
     ),
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
@@ -514,7 +514,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 2), "f660ed5023d7b7699fef6f1c013ca40955057a8bbdfcb32bcfa5a2a9e208d831")
+_PINNED_VERSION = ((1, 3), "8623d5e9eaba58e130ad28bbce4c09b8a813bf48b21440ac5b4192ef9d5651c7")
 
 
 def _is_enum(obj: object) -> bool:

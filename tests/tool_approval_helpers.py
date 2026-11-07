@@ -15,6 +15,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from tests.conftest import register_test_tool
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     import pytest
@@ -54,13 +55,27 @@ def gated_functions(
     return {function.name: function for function in adapted.functions}
 
 
-def judge_test_tool_function_as_shell(monkeypatch: pytest.MonkeyPatch, tool_name: str, function_name: str) -> None:
-    """Make the built-in tool ``tool_name`` say its ``function_name`` calls are shell commands their arguments hide."""
-    alias = ApprovalAlias(judged_as="run_shell_command", judge=lambda _arguments: None)
+def judge_test_tool_function_as_shell(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    function_name: str,
+    judge: Callable[[Mapping[str, object]], Sequence[Mapping[str, object]] | None] = lambda _arguments: None,
+) -> None:
+    """Make the built-in tool ``tool_name`` say its ``function_name`` calls are shell commands, read by ``judge``.
+
+    By default, their arguments hide the commands.
+    """
+    alias = ApprovalAlias(judged_as="run_shell_command", judge=judge)
     register_test_tool(
         monkeypatch,
         replace(builtin_tool_registry().entries[tool_name], approval_aliases={function_name: alias}),
     )
+
+
+def timed_out_judge(_arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]] | None:
+    """Fail as a judge whose service timed out, with ``judging service timed out`` as its own message."""
+    msg = "judging service timed out"
+    raise TimeoutError(msg)
 
 
 def scheduled_call_approvals(**methods: object) -> AbstractContextManager[object]:

@@ -468,7 +468,7 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         rooms=[],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = AsyncMock(rooms={})
     left_room_ids: list[str] = []
 
     async def mock_leave_non_dm_rooms(

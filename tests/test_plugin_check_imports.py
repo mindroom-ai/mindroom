@@ -40,6 +40,11 @@ def _hooks_plugin(root: Path, hooks_module: str) -> Path:
             id="plugin-http",
         ),
         pytest.param(
+            "import mindroom.script_sdk\nfrom mindroom.script_sdk import MindRoomTools\n",
+            [],
+            id="script-sdk",
+        ),
+        pytest.param(
             "from . import helpers\nfrom .mindroom import hooks\nimport mindroomx\nfrom mindroom_extra import hooks\n",
             [],
             id="not-mindroom",
@@ -73,15 +78,15 @@ def test_imports_outside_plugin_api_names_each_mindroom_import_outside_it(
     source: str,
     expected: list[str],
 ) -> None:
-    """Only `mindroom.plugin_api`, `mindroom.plugin_http`, and the documented names count as the plugin API."""
-    (tmp_path / "module.py").write_text(source, encoding="utf-8")
+    """Only the plugin API's modules and documented names count."""
+    plugin_root = _write_plugin(tmp_path / "plugin", manifest={}, modules={"module.py": source})
 
-    assert _outside_imports(tmp_path) == expected
+    assert _outside_imports(plugin_root) == expected
 
 
 def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(tmp_path: Path) -> None:
-    """Findings sort by path and line, and installed packages, hidden directories, and unreadable files are skipped."""
-    for relative_path, source in {
+    """Findings sort by path and line, skipping the plugin's tests, nested plugins, installed packages, and the like."""
+    modules = {
         "hooks.py": (
             "def load():\n    from mindroom.constants import ROUTER_AGENT_NAME\n"
             + "\n" * 6
@@ -89,6 +94,10 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
         ),
         "helpers/__init__.py": "from mindroom.logging_config import get_logger\n",
         "tests/test_hooks.py": "from mindroom.hooks.decorators import get_hook_metadata\n",
+        "helpers/tests/test_helpers.py": "from mindroom.constants import ROUTER_AGENT_NAME\n",
+        "plugins/nested/mindroom.plugin.json": "{}",
+        "plugins/nested/hooks.py": "from mindroom.hooks import hook\n",
+        "plugins/shared.py": "from mindroom.logging_config import get_logger\n",
         "venv/lib/python3.13/site-packages/mindroom/hooks.py": "from mindroom.constants import ROUTER_AGENT_NAME\n",
         ".venv/bin/activate_this.py": "import mindroom.constants\n",
         "legacy.py": "print 'python 2'\nfrom mindroom.hooks import hook\n",
@@ -96,20 +105,31 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
         "long_sum.py": "from mindroom.hooks import hook\nx = " + "1+" * 10_000 + "1\n",
         "long_branches.py": "from mindroom.hooks import hook\nif x:\n    pass\n" + "elif x:\n    pass\n" * 6_000,
         "notes.txt": "from mindroom.hooks import hook\n",
-    }.items():
-        path = tmp_path / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(source, encoding="utf-8")
+    }
+    plugin_root = _write_plugin(tmp_path / "plugin", manifest={}, modules=modules)
     # An editor's lock file while hooks.py has unsaved changes.
-    (tmp_path / ".#hooks.py").symlink_to("user@host.1234:1700000000")
+    (plugin_root / ".#hooks.py").symlink_to("user@host.1234:1700000000")
 
-    assert _outside_imports(tmp_path) == [
+    assert _outside_imports(plugin_root) == [
         "helpers/__init__.py:1: mindroom.logging_config.get_logger",
+        "helpers/tests/test_helpers.py:1: mindroom.constants.ROUTER_AGENT_NAME",
         "hooks.py:2: mindroom.constants.ROUTER_AGENT_NAME",
         "hooks.py:9: mindroom.hooks",
         "hooks.py:10: mindroom.hooks.hook",
-        "tests/test_hooks.py:1: mindroom.hooks.decorators.get_hook_metadata",
+        "plugins/shared.py:1: mindroom.logging_config.get_logger",
     ]
+
+
+def test_imports_outside_plugin_api_skips_a_directory_it_cannot_enter(tmp_path: Path) -> None:
+    """A directory the user cannot enter, such as a container's data volume, is skipped instead of failing the scan."""
+    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.hooks import hook\n")
+    locked = plugin_root / "data" / "pgdata"
+    locked.mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        assert _outside_imports(plugin_root) == ["hooks.py:1: mindroom.hooks.hook"]
+    finally:
+        locked.chmod(0o700)
 
 
 @pytest.mark.parametrize(("options", "exit_code", "label"), [([], 0, "Warning"), (["--strict"], 1, "Error")])
@@ -125,8 +145,8 @@ def test_plugins_check_cli_lists_each_import_outside_the_plugin_api_whole_on_its
         "from mindroom.plugin_api import MessageTarget\nfrom mindroom.hooks import hook\n",
     )
     # A path that reads as console markup, a line number that reads as an emoji code, in a line wider than the console.
-    (plugin_root / "tests").mkdir()
-    (plugin_root / "tests" / "test_[slow]_runtime_context_integration.py").write_text(
+    (plugin_root / "helpers").mkdir()
+    (plugin_root / "helpers" / "[slow]_runtime_context.py").write_text(
         "\n" * 99 + "from mindroom.tool_system.runtime_context import ToolRuntimeContext\n",
         encoding="utf-8",
     )
@@ -138,8 +158,8 @@ def test_plugins_check_cli_lists_each_import_outside_the_plugin_api_whole_on_its
     assert "Plugin is compatible: imports-demo" in result.stdout
     assert (
         f"{label}: imports from outside the plugin API can break in any MindRoom release:\n"
+        "  helpers/[slow]_runtime_context.py:100: mindroom.tool_system.runtime_context.ToolRuntimeContext\n"
         "  hooks.py:2: mindroom.hooks.hook\n"
-        "  tests/test_[slow]_runtime_context_integration.py:100: mindroom.tool_system.runtime_context.ToolRuntimeContext\n"
     ) in result.stdout
     assert "MessageTarget" not in result.stdout
 
@@ -216,4 +236,17 @@ def test_plugins_check_cli_strict_accepts_a_plugin_that_imports_only_the_plugin_
 
     assert result.exit_code == 0, result.output
     assert "Plugin is compatible: imports-demo" in result.stdout
+    assert "plugin API" not in result.stdout
+
+
+def test_plugins_check_cli_fails_on_a_directory_without_a_manifest_without_reading_its_files(tmp_path: Path) -> None:
+    """A directory that is not a plugin fails on its missing manifest, and none of its Python files are scanned."""
+    directory = tmp_path / "not-a-plugin"
+    (directory / "package").mkdir(parents=True)
+    (directory / "package" / "module.py").write_text("from mindroom.hooks import hook\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["plugins", "check", str(directory)])
+
+    assert result.exit_code == 1
+    assert "Plugin check failed: Plugin manifest missing:" in result.stdout
     assert "plugin API" not in result.stdout
