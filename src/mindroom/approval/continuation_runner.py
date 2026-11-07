@@ -1288,7 +1288,7 @@ class ApprovalContinuationRunner:
             advanced = current.generation > claimed.generation
             step = next_step(await self._facts(current, recover=True), Resumed("suspended", advanced=advanced))
             if not isinstance(step, Resume):
-                await self._run_paused_step(current, step, target=target)
+                await self._run_step(current, step, target=target)
                 return
             owned = current
 
