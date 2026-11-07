@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The relay reads listening sockets from /proc/net."),
+    pytest.mark.skipif(sys.platform != "linux", reason="The port list reads listening sockets from /proc/net."),
     # The runner serves WebSockets with uvicorn's default implementation, the deprecated websockets.legacy one.
     pytest.mark.filterwarnings(r"ignore:websockets\.legacy is deprecated.*:DeprecationWarning:websockets\.legacy"),
     pytest.mark.filterwarnings(
@@ -396,7 +396,8 @@ async def test_relay_passes_a_websocket_both_ways_without_the_runner_token(tmp_p
     async with (
         _app() as port,
         _runner(tmp_path) as runner,
-        aiohttp.ClientSession() as client,
+        # Headers the caller leaves out stay out: the relay adds no User-Agent, Accept or Accept-Encoding.
+        aiohttp.ClientSession(skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding")) as client,
         client.ws_connect(
             f"{runner.root}/{port}/socket?room=1",
             headers={**_AUTH, "Cookie": "session=app"},
@@ -410,7 +411,7 @@ async def test_relay_passes_a_websocket_both_ways_without_the_runner_token(tmp_p
         handshake = greeting["headers"]
         assert handshake["cookie"] == "session=app"
         assert handshake["host"] == f"127.0.0.1:{port}"
-        assert "x-mindroom-sandbox-token" not in handshake
+        assert {"x-mindroom-sandbox-token", "user-agent", "accept", "accept-encoding"}.isdisjoint(handshake)
         await websocket.send_str("hello")
         assert await websocket.receive_str() == "hello"
         await websocket.send_bytes(b"\x00\x01")

@@ -51,6 +51,8 @@ _HOP_HEADERS = frozenset(
         "upgrade",
     },
 )
+# Headers aiohttp adds to a request that lacks them, which the relay leaves to the caller.
+_AIOHTTP_DEFAULT_HEADERS = ("Accept", "User-Agent", "Accept-Encoding")
 # A browser's handshake headers an app may read; the relay makes its own WebSocket handshake.
 _WEBSOCKET_HEADERS = frozenset({"accept-language", "authorization", "cookie", "origin", "user-agent"})
 # uvicorn's limit on the messages the relay receives from the primary, applied to the app's messages too.
@@ -190,7 +192,7 @@ async def relay(request: Request, port: int) -> StreamingResponse:
             headers=_end_to_end(request.headers.items(), frozenset({"host", _TOKEN_HEADER})),
             data=request.stream() if has_body else None,
             allow_redirects=False,
-            skip_auto_headers=("Accept", "User-Agent", "Accept-Encoding", "Content-Type"),
+            skip_auto_headers=(*_AIOHTTP_DEFAULT_HEADERS, "Content-Type"),
         )
     except (aiohttp.ClientError, TimeoutError, OSError):
         await session.close()
@@ -211,7 +213,11 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
     headers = [(name, value) for name, value in websocket.headers.items() if name in _WEBSOCKET_HEADERS]
     try:
         async with (
-            aiohttp.ClientSession(timeout=_TIMEOUT, middlewares=(_loopback_only,)) as session,
+            aiohttp.ClientSession(
+                timeout=_TIMEOUT,
+                middlewares=(_loopback_only,),
+                skip_auto_headers=_AIOHTTP_DEFAULT_HEADERS,
+            ) as session,
             session.ws_connect(url, protocols=protocols, headers=headers, max_msg_size=_MAX_MESSAGE_BYTES) as upstream,
         ):
             await websocket.accept(subprotocol=upstream.protocol)
