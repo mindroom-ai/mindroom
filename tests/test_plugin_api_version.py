@@ -106,6 +106,29 @@ def test_an_incompatible_plugin_is_skipped_before_any_of_its_modules_runs(tmp_pa
     assert str(skipped.error).startswith(f"Plugin 'demo' needs plugin API {major + 1}.{minor}")
 
 
+def test_an_incompatible_plugin_in_a_package_is_skipped_before_any_package_code_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding `python:vendor.demo` runs no `__init__.py`, so `vendor`'s import of another plugin's tools never runs."""
+    major = PLUGIN_API_VERSION[0]
+    vendor = f"vendor_{uuid.uuid4().hex}"
+    site_packages = tmp_path / "site-packages"
+    _write_plugin(
+        site_packages / vendor / "other",
+        manifest={"name": "other", "tools_module": "tools.py"},
+        modules={"tools.py": "raise RuntimeError('other tools ran')\n"},
+    )
+    _write_plugin(site_packages / vendor / "demo", manifest={"name": "demo", "mindroom_plugin_api": f"{major + 1}.0"})
+    (site_packages / vendor / "__init__.py").write_text(f"from {vendor}.other import tools\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    [skipped] = _prepare(tmp_path, [f"python:{vendor}.demo"]).skipped
+
+    assert str(skipped.error).startswith(f"Plugin 'demo' needs plugin API {major + 1}.0")
+    assert vendor not in sys.modules
+
+
 def test_plugins_check_reports_a_plugin_that_needs_a_newer_plugin_api(tmp_path: Path) -> None:
     """`mindroom plugins check` fails with the same reason a load skips the plugin for."""
     major, minor = PLUGIN_API_VERSION

@@ -8,7 +8,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from importlib import util
+from importlib import machinery, util
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -197,13 +197,14 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         return None
 
     module_name, subpath, _explicit = parsed
-    try:
-        spec = util.find_spec(module_name)
-    except ModuleNotFoundError:
-        return None
-    except (Exception, SystemExit) as exc:
-        msg = f"Failed to resolve plugin module {plugin_path}: {exc}"
-        raise PluginValidationError(msg) from exc
+    # Find each later part on disk inside the one before, so finding a plugin runs no package's __init__.py.
+    first, *rest = module_name.split(".")
+    spec = util.find_spec(first)
+    for part in rest:
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        # By its bare name, a namespace package's path never looks up its unimported parent in sys.modules.
+        spec = machinery.PathFinder.find_spec(part, list(spec.submodule_search_locations))
     if spec is None:
         return None
 
