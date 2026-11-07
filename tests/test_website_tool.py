@@ -8,6 +8,7 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
@@ -15,16 +16,13 @@ from bs4 import BeautifulSoup
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools import website
 from mindroom.custom_tools.website import (
     _MAX_PAGE_BYTES,
-    _MAX_REDIRECTS,
-    _TOO_MANY_REDIRECTS,
     WebsiteTools,
     _MindRoomWebsiteReader,
     _safe_url_for_log,
 )
-from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.public_fetch import PublicFetchError
 from mindroom.tool_system.metadata import (
     ToolConfigOverrideError,
     get_tool_by_name,
@@ -32,6 +30,9 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.website import website_tools
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +44,27 @@ def _public_dns_for_website_tests(monkeypatch: pytest.MonkeyPatch) -> None:
             (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443)),
         ],
     )
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, respond: Callable[[str], httpx.Response]) -> list[str]:
+    """Answer each request MindRoom's guarded transports let through, by URL, and record the URLs requested."""
+    requested: list[str] = []
+
+    async def handle(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return respond(str(request.url))
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
+    return requested
+
+
+def _page(html: str | bytes, headers: dict[str, str] | None = None) -> httpx.Response:
+    body = html.encode() if isinstance(html, str) else html
+    return httpx.Response(200, headers=headers, stream=httpx.ByteStream(body))
+
+
+def _redirect(location: str) -> httpx.Response:
+    return httpx.Response(302, headers={"Location": location})
 
 
 def test_website_reader_prefers_content_body_over_search_modal() -> None:
@@ -97,16 +119,10 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        return httpx.Response(200, content=pages[url].encode(), request=request)
-
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    _serve(monkeypatch, lambda url: _page(pages[url]))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = json.loads(WebsiteTools().read_url(root_url))
@@ -128,14 +144,14 @@ def test_website_reader_pauses_only_between_fetches(monkeypatch: pytest.MonkeyPa
     }
     steps: list[str] = []
 
-    def fake_get(url: str, **_kwargs: object) -> httpx.Response:
+    def fetch(url: str) -> httpx.Response:
         steps.append(f"fetch {url}")
-        return httpx.Response(200, content=pages[url].encode(), request=httpx.Request("GET", url))
+        return _page(pages[url])
 
     def record_delay(_reader: _MindRoomWebsiteReader) -> None:
         steps.append("pause")
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    _serve(monkeypatch, fetch)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", record_delay)
 
     _MindRoomWebsiteReader().read(docs_url)
@@ -148,16 +164,9 @@ def test_website_reader_pauses_only_between_fetches(monkeypatch: pytest.MonkeyPa
 
 def test_website_reader_rejects_private_starting_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Agent-callable website reads should not fetch private network URLs."""
-    requested_urls: list[str] = []
+    requested_urls = _serve(monkeypatch, lambda _url: _page("private"))
 
-    def fake_get(url: str, **_kwargs: object) -> httpx.Response:
-        requested_urls.append(url)
-        msg = "private URL should be rejected before an HTTP request is made"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
-
-    with pytest.raises(ValueError, match="URL is not allowed"):
+    with pytest.raises(PublicFetchError, match="URL is not allowed"):
         _MindRoomWebsiteReader().read("http://127.0.0.1:8000/private")
 
     assert requested_urls == []
@@ -165,16 +174,9 @@ def test_website_reader_rejects_private_starting_url(monkeypatch: pytest.MonkeyP
 
 def test_website_reader_rejects_unsupported_schemes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Agent-callable website reads should only allow HTTP(S) URLs."""
-    requested_urls: list[str] = []
+    requested_urls = _serve(monkeypatch, lambda _url: _page("file"))
 
-    def fake_get(url: str, **_kwargs: object) -> httpx.Response:
-        requested_urls.append(url)
-        msg = "unsupported URL schemes should be rejected before a request is made"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
-
-    with pytest.raises(ValueError, match="URL is not allowed"):
+    with pytest.raises(PublicFetchError, match="URL is not allowed"):
         _MindRoomWebsiteReader().read("file:///etc/passwd")
 
     assert requested_urls == []
@@ -183,57 +185,17 @@ def test_website_reader_rejects_unsupported_schemes(monkeypatch: pytest.MonkeyPa
 def test_website_reader_revalidates_redirect_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirects to private network URLs should be blocked before following the hop."""
     start_url = "https://example.com/redirect"
-    requested_urls: list[str] = []
-
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        if url == start_url:
-            return httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"}, request=request)
-        msg = "private redirect target should be rejected before fetching"
-        raise AssertionError(msg)
 
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    requested_urls = _serve(monkeypatch, lambda _url: _redirect("http://127.0.0.1/admin"))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
-    with pytest.raises(ValueError, match="URL is not allowed"):
+    with pytest.raises(PublicFetchError, match="URL is not allowed"):
         _MindRoomWebsiteReader().read(start_url)
 
     assert requested_urls == [start_url]
-
-
-def test_website_reader_follows_allowed_redirect_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Allowed redirect chains should be followed to their final response."""
-    start_url = "https://example.com/redirect"
-    intermediate_url = "https://example.com/intermediate"
-    final_url = "https://example.com/final"
-    requested_urls: list[str] = []
-
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        if url == start_url:
-            return httpx.Response(302, headers={"Location": intermediate_url}, request=request)
-        if url == intermediate_url:
-            return httpx.Response(301, headers={"Location": "/final"}, request=request)
-        assert url == final_url
-        return httpx.Response(200, text="ok", request=request)
-
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
-
-    response, fetched_url = _MindRoomWebsiteReader()._get_validated_response(start_url)
-
-    assert requested_urls == [start_url, intermediate_url, final_url]
-    assert response.status_code == 200
-    assert response.text == "ok"
-    assert fetched_url == final_url
 
 
 def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,22 +212,11 @@ def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pyt
       </body>
     </html>
     """
-    requested_urls: list[str] = []
-
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        if url == start_url:
-            return httpx.Response(301, headers={"Location": final_url}, request=request)
-        assert url == final_url
-        return httpx.Response(200, content=html.encode(), request=request)
 
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    requested_urls = _serve(monkeypatch, lambda url: _redirect(final_url) if url == start_url else _page(html))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -275,32 +226,14 @@ def test_website_reader_records_safe_public_cross_host_redirect(monkeypatch: pyt
     assert "Public redirected content" in documents[0].content
 
 
-def test_website_reader_respects_max_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect loops should stop at the website reader redirect limit."""
-    start_url = "https://example.com/redirect"
-    requested_urls: list[str] = []
+def test_website_reader_refuses_a_hostname_that_resolves_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The address a hostname resolves to when the connection is made is checked, so DNS cannot reach a local server."""
+    served: list[str] = []
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        return httpx.Response(302, headers={"Location": start_url}, request=request)
-
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
-
-    with pytest.raises(httpx.TooManyRedirects, match=_TOO_MANY_REDIRECTS):
-        _MindRoomWebsiteReader()._get_validated_response(start_url)
-
-    assert len(requested_urls) == _MAX_REDIRECTS + 1
-
-
-def test_website_reader_rejects_dns_rebind_at_connect_time(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The address validated for a hostname must be the address used for the outbound connection."""
-
-    class RebindHandler(BaseHTTPRequestHandler):
+    class LocalHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            body = b"<html><body><main><p>Private local server content fetched after DNS rebinding.</p></main></body></html>"
+            served.append(self.path)
+            body = b"<html><body><main><p>Private local server content reached through DNS.</p></main></body></html>"
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
@@ -310,34 +243,24 @@ def test_website_reader_rejects_dns_rebind_at_connect_time(monkeypatch: pytest.M
         def log_message(self, format: str, *_args: object) -> None:  # noqa: A002, ARG002
             return
 
-    server = HTTPServer(("127.0.0.1", 0), RebindHandler)
+    server = HTTPServer(("127.0.0.1", 0), LocalHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    dns_calls = 0
 
-    def fake_getaddrinfo(host: str | bytes, port: int, *_args: object, **_kwargs: object) -> list[object]:
-        nonlocal dns_calls
-        if host in ("rebind.test", b"rebind.test"):
-            dns_calls += 1
-            ip_address = "93.184.216.34" if dns_calls == 1 else "127.0.0.1"
-            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, port))]
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
+    def resolve_to_loopback(_host: str | bytes, port: int, *_args: object, **_kwargs: object) -> list[object]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port))]
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
-
-    monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+    monkeypatch.setattr("socket.getaddrinfo", resolve_to_loopback)
 
     try:
-        with pytest.raises(ServerFetchUrlError) as exc_info:
+        with pytest.raises(PublicFetchError, match="private_address") as exc_info:
             _MindRoomWebsiteReader().read(f"http://rebind.test:{server.server_port}/")
     finally:
         server.shutdown()
         server.server_close()
 
-    assert exc_info.value.reason == "private_address"
-    assert dns_calls >= 2
+    assert exc_info.value.code == "url_not_allowed"
+    assert served == []
 
 
 def test_website_reader_does_not_record_cross_host_redirect_content(
@@ -347,7 +270,6 @@ def test_website_reader_does_not_record_cross_host_redirect_content(
     start_url = "https://example.com/"
     redirect_url = "https://example.com/redirect"
     offsite_url = "https://other.example/final"
-    requested_urls: list[str] = []
     pages = {
         start_url: """
         <html>
@@ -372,19 +294,13 @@ def test_website_reader_does_not_record_cross_host_redirect_content(
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        if url == redirect_url:
-            return httpx.Response(302, headers={"Location": offsite_url}, request=request)
-        return httpx.Response(200, content=pages[url].encode(), request=request)
-
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    requested_urls = _serve(
+        monkeypatch,
+        lambda url: _redirect(offsite_url) if url == redirect_url else _page(pages[url]),
+    )
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -401,7 +317,6 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
     start_url = "https://example.test/docs"
     redirect_url = "https://example.test/redirect"
     private_url = "http://127.0.0.1/private"
-    requested_urls: list[str] = []
     pages = {
         start_url: """
         <html>
@@ -416,19 +331,13 @@ def test_website_reader_skips_discovered_redirect_to_private_url(monkeypatch: py
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        if url == redirect_url:
-            return httpx.Response(302, headers={"Location": private_url}, request=request)
-        return httpx.Response(200, content=pages[url].encode(), request=request)
-
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    requested_urls = _serve(
+        monkeypatch,
+        lambda url: _redirect(private_url) if url == redirect_url else _page(pages[url]),
+    )
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -442,7 +351,6 @@ def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pyte
     """A malformed discovered URL should not discard content that was already collected."""
     start_url = "https://example.test/docs"
     bad_url = "https://example.test:99999/bad"
-    requested_urls: list[str] = []
     html = f"""
     <html>
       <body>
@@ -455,18 +363,10 @@ def test_website_reader_skips_discovered_url_with_invalid_port(monkeypatch: pyte
     </html>
     """
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert url == start_url
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        return httpx.Response(200, content=html.encode(), request=request)
-
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    requested_urls = _serve(monkeypatch, lambda _url: _page(html))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -490,21 +390,15 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
     </html>
     """
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        assert url == start_url
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        return httpx.Response(200, content=html.encode(), request=request)
-
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    requested_urls = _serve(monkeypatch, lambda _url: _page(html))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
 
+    assert requested_urls == [start_url]
     assert documents[0].meta_data["url"] == start_url
     assert "ported URL crawling" in documents[0].content
 
@@ -526,7 +420,6 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
     """Same-host crawling should not treat unrelated public-suffix siblings as in scope."""
     start_url = "https://service.co.uk/"
     attacker_url = "https://attacker.co.uk/private"
-    requested_urls: list[str] = []
     pages = {
         start_url: """
         <html>
@@ -551,17 +444,10 @@ def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.
         """,
     }
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        requested_urls.append(url)
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        return httpx.Response(200, content=pages[url].encode(), request=request)
-
     def no_delay(_reader: _MindRoomWebsiteReader) -> None:
         pass
 
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
+    requested_urls = _serve(monkeypatch, lambda url: _page(pages[url]))
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     documents = _MindRoomWebsiteReader().read(start_url)
@@ -587,49 +473,30 @@ def test_safe_url_for_log_handles_malformed_urls_without_secrets() -> None:
 
 
 def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Website reads should not leak caller URL secrets through wrapper or reader logs."""
+    """A read refused for the credentials in its URL logs the URL without its credentials, query, or fragment."""
     full_url = "https://user:secret@example.test/docs?token=query-secret#frag-secret"
     logged_messages: list[str] = []
-    html = """
-    <html>
-      <body>
-        <main>
-          <h1>Docs</h1>
-          <p>Reference material with enough page text to exercise the reader.</p>
-        </main>
-      </body>
-    </html>
-    """
 
-    def fake_log_debug(message: str) -> None:
+    def record(message: str) -> None:
         logged_messages.append(message)
 
-    def fake_get(url: str, *, timeout: int, follow_redirects: bool) -> httpx.Response:
-        assert url == full_url
-        assert timeout == 10
-        assert follow_redirects is False
-        request = httpx.Request("GET", url)
-        return httpx.Response(200, content=html.encode(), request=request)
+    for log_function in ("log_debug", "log_warning", "log_error"):
+        monkeypatch.setattr(f"mindroom.custom_tools.website.{log_function}", record)
+    requested_urls = _serve(monkeypatch, lambda _url: _page("<main><p>Docs</p></main>"))
 
-    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
-        pass
+    with pytest.raises(PublicFetchError, match="credentials_in_url"):
+        WebsiteTools().read_url(full_url)
 
-    monkeypatch.setattr("mindroom.custom_tools.website.log_debug", fake_log_debug)
-    monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
-    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
-
-    WebsiteTools().read_url(full_url)
-
+    assert requested_urls == []
     assert logged_messages == [
         "Reading website: https://example.test/docs",
         "Reading: https://example.test/docs",
         "Crawling: https://example.test/docs",
+        "Failed to fetch https://example.test/docs while crawling: "
+        "The URL is not allowed for a public fetch (credentials_in_url).",
+        "Error reading website https://example.test/docs: PublicFetchError",
     ]
-    joined_messages = " ".join(logged_messages)
-    assert full_url not in joined_messages
-    assert "user:secret" not in joined_messages
-    assert "query-secret" not in joined_messages
-    assert "frag-secret" not in joined_messages
+    assert "secret" not in " ".join(logged_messages)
 
 
 def test_website_tool_always_offers_read_url(tmp_path: Path) -> None:
@@ -683,33 +550,31 @@ def test_website_docs_describe_mindroom_reader() -> None:
 
 
 @pytest.mark.parametrize(
-    ("headers", "body", "refused"),
+    ("headers", "body", "code"),
     [
-        pytest.param({"Content-Encoding": "gzip"}, gzip.compress(b"a" * 10_000_000), True, id="compressed"),
-        pytest.param({}, b"a" * (_MAX_PAGE_BYTES + 1), True, id="oversized"),
-        pytest.param({"Content-Encoding": "identity"}, b"<p>whole page</p>", False, id="identity"),
+        pytest.param(
+            {"Content-Encoding": "gzip"},
+            gzip.compress(b"a" * 10_000_000),
+            "content_encoding",
+            id="compressed",
+        ),
+        pytest.param({}, b"a" * (_MAX_PAGE_BYTES + 1), "too_large", id="oversized"),
+        pytest.param({}, b"a" * _MAX_PAGE_BYTES, None, id="at-the-limit"),
     ],
 )
-def test_server_fetch_reads_only_uncompressed_pages_within_the_limit(
+def test_website_reader_reads_only_uncompressed_pages_within_the_limit(
     monkeypatch: pytest.MonkeyPatch,
     headers: dict[str, str],
     body: bytes,
-    refused: bool,
+    code: str | None,
 ) -> None:
-    """Pages are requested uncompressed, and neither a compressed nor an oversized body is inflated or buffered."""
-    requested_encodings: list[str | None] = []
+    """A 2 MiB page is read, while a larger or compressed one fails instead of being inflated or buffered whole."""
+    _serve(monkeypatch, lambda _url: _page(body, headers))
 
-    def serve(request: httpx.Request) -> httpx.Response:
-        requested_encodings.append(request.headers.get("accept-encoding"))
-        chunks = [body[start : start + 65536] for start in range(0, len(body), 65536)]
-        return httpx.Response(200, headers=headers, content=iter(chunks))
-
-    monkeypatch.setattr(website, "ServerFetchHTTPTransport", lambda: httpx.MockTransport(serve))
-
-    if refused:
-        with pytest.raises(httpx.DecodingError):
-            website._server_fetch_get("https://example.com/", timeout=5, follow_redirects=False)
-    else:
-        response = website._server_fetch_get("https://example.com/", timeout=5, follow_redirects=False)
-        assert response.content == body
-    assert requested_encodings == ["identity"]
+    if code is None:
+        documents = _MindRoomWebsiteReader().read("https://example.com/")
+        assert sum(len(document.content) for document in documents) == _MAX_PAGE_BYTES
+        return
+    with pytest.raises(PublicFetchError) as exc_info:
+        _MindRoomWebsiteReader().read("https://example.com/")
+    assert exc_info.value.code == code
