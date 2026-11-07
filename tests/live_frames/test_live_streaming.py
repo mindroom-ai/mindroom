@@ -451,3 +451,73 @@ async def test_stopped_frames_catch_up_at_once(tmp_path: Path, frames: _Frames) 
     assert len(frames.sent) == 2
     assert edits.contents[0]["body"].startswith("Hello world")
     assert edits.contents[0]["io.mindroom.live_checkpoint"] == {"sid": frames.sent[0]["sid"], "seq": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_update_cancelled_before_it_is_recorded_keeps_what_frames_showed(
+    tmp_path: Path,
+    frames: _Frames,
+) -> None:
+    """A Stop during the final transform leaves the reply's records holding the text frames showed, not the create."""
+    records, edits = _records(), _Edits()
+    transforming = asyncio.Event()
+
+    async def transform(text: str) -> str:
+        transforming.set()
+        await asyncio.Event().wait()
+        return text
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
+        config = _config(tmp_path, update_interval=60)
+        response = asyncio.create_task(
+            send_streaming_response(
+                make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+                MessageTarget.resolve(_ROOM_ID, None, "$question"),
+                config,
+                runtime_paths_for(config),
+                _stream("Hello", 0.05, " world", 0.05),
+                final_text_transform=transform,
+                **records.hooks(),
+            ),
+        )
+        await asyncio.wait_for(transforming.wait(), timeout=5)
+        response.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await response
+
+    assert any("world" in json.dumps(frame) for frame in frames.sent)
+    assert [write.kind for write in records.writes] == ["create", "progress"]
+    assert records.writes[-1].progress.text == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_a_continued_reply_left_early_keeps_what_frames_showed(tmp_path: Path, frames: _Frames) -> None:
+    """Work resumed after an approval and then stopped leaves the records holding the text its frames showed."""
+    config = _config(tmp_path, update_interval=60)
+    records = FakeReplyRecords()
+
+    async def frame_shows(text: str) -> None:
+        while not any(text in json.dumps(frame) for frame in frames.sent):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    with (
+        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=_Edits().edit)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async with stream_progress_edits(
+            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            MessageTarget.resolve(_ROOM_ID, None, "$question"),
+            config,
+            runtime_paths_for(config),
+            event_id="$answer",
+            show_tool_calls=True,
+            **records.progress_hooks(),
+        ) as publish:
+            await publish(StructuredStreamChunk(content="Approved."))
+            await asyncio.wait_for(frame_shows("Approved."), timeout=5)
+            await publish(StructuredStreamChunk(content="Approved. Building now"))
+            await asyncio.wait_for(frame_shows("Building now"), timeout=5)
+            raise asyncio.CancelledError
+
+    assert [write.kind for write in records.writes] == ["progress", "progress_delivered", "progress"]
+    assert records.writes[-1].progress.text == "Approved. Building now"
