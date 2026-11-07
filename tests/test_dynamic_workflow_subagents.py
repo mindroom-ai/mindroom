@@ -25,6 +25,7 @@ from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import judge_test_tool_function_as_shell
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -269,6 +270,58 @@ async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monk
             "Leave mode unset for a participant that needs no shell."
         )
     assert approved["status"] == "ok", approved
+
+
+_ALIAS_REFUSAL = (
+    "calls run_shell_command through add, which requires approval, and workflow participants cannot pause for "
+    "approval; check the operator tool_approval rules and the dynamic_workflow allowed_tools setting."
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "allowed", "rules", "refused"),
+    [
+        pytest.param(["calculator"], ["calculator"], None, True, id="toolkit"),
+        pytest.param(["calculator.add"], ["calculator"], None, True, id="function"),
+        pytest.param(["calculator.subtract"], ["calculator"], None, False, id="other-function"),
+        pytest.param(["calculator", "shell"], ["calculator", "shell"], None, False, id="shell-pre-approved"),
+        pytest.param(
+            ["calculator"],
+            ["calculator"],
+            {"run_shell_command": "auto_approve"},
+            False,
+            id="shell-auto-approved",
+        ),
+    ],
+)
+async def test_a_function_judged_as_a_gated_function_is_refused_before_saving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    allowed: list[str],
+    rules: dict[str, str] | None,
+    refused: bool,
+) -> None:
+    """The calculator says ``add`` runs shell commands, so a participant may use it only where the shell needs no approval.
+
+    The shell runs without approval when the participant's own pre-approved tools include it or an operator rule
+    auto-approves it; otherwise validation refuses the participant instead of building it without ``add``.
+    """
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    toolkits = sorted({entry.partition(".")[0] for entry in tools})
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": allowed}}, *toolkits], rules=rules)
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    with workflow.context():
+        spec = _spec([{"id": "adder", "system_prompt": "Add.", "tools": tools}])
+        validated = json.loads(await workflow.tools.validate_workflow(spec))
+
+    if refused:
+        assert validated["status"] == "error", validated
+        assert validated["message"] == f"Dynamic Workflow participant 'adder' tool '{tools[0]}' {_ALIAS_REFUSAL}"
+    else:
+        assert validated["status"] == "ok", validated
 
 
 @pytest.mark.asyncio
