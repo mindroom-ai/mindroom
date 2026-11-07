@@ -82,6 +82,7 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.tool_approval_helpers import judge_test_tool_function_as_shell
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -883,6 +884,26 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
 
 
 @pytest.mark.asyncio
+async def test_script_broker_judges_a_call_by_the_rules_of_the_function_its_alias_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule auto-approves ``add``, yet the run grants no shell, so an ``add`` the calculator calls a shell command asks."""
+    events: list[str] = []
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    broker, token = _broker(
+        tmp_path,
+        events=events,
+        approval_decision=ToolApprovalDecision(approved=False, reason="No shell commands."),
+    )
+
+    receipt = await _call_through_gateway(broker, _request(call_id="aliased-call"), token)
+
+    assert receipt.error == {"kind": "approval_denied", "message": "No shell commands.", "retryable": False}
+    assert "approval:run-1:aliased-call" in events
+
+
+@pytest.mark.asyncio
 async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None:
     """Cancelling broker ownership also makes its durable approval non-actionable."""
     events: list[str] = []
@@ -1112,8 +1133,8 @@ class _RoutedConnectionToolkit(_ConnectedCalculator):
 def _routed_connection_calculator(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     """Register ``calculator`` as a toolkit with a connection whose worker calls answer 3; yield what runs where."""
 
-    def worker(*, tool_name: str, function_name: str, **_kwargs: object) -> str:
-        _RoutedConnectionToolkit.lifecycle.append(f"worker {tool_name}.{function_name}")
+    def worker(*, stand_ins: sandbox_proxy.WorkerStandIns, function_name: str, **_kwargs: object) -> str:
+        _RoutedConnectionToolkit.lifecycle.append(f"worker {stand_ins.tool_name}.{function_name}")
         return "3"
 
     _RoutedConnectionToolkit.lifecycle.clear()

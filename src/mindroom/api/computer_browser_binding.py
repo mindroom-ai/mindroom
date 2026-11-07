@@ -57,6 +57,8 @@ class _ComputerBrowserProvider:
         invoke: Callable[[AnyToolkit, Callable[..., object], list[object], dict[str, object]], Awaitable[object]],
     ) -> tuple[str, BrowserSession]:
         """Bind the output-wrapped toolkit; the caller owns invocation policy and timeout."""
+        from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
+
         key = toolkit.bind_worker_display(display, workspace)
 
         async def execute(current_function: str, *args: object, **kwargs: object) -> object:
@@ -70,6 +72,9 @@ class _ComputerBrowserProvider:
                 raise ValueError(msg)
             return await invoke(toolkit, function.entrypoint, list(args), kwargs)
 
+        if isinstance(toolkit, BrowserTools):
+            # The browser tool runs its browser in this process, so a screencast can show its page.
+            return key, BrowserSession(execute=execute, close=toolkit.aclose, page=toolkit.worker_active_page)
         return key, BrowserSession(execute=execute, close=toolkit.aclose)
 
 

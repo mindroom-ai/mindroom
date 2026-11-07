@@ -23,6 +23,7 @@ from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_
 from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.worker_computer.client import computer_request, computer_stream
+from mindroom.worker_computer.protocol import SCREENCAST_PROTOCOL
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import worker_backend_kind
@@ -292,21 +293,28 @@ def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:
     return sessions.active_worker_keys() if sessions is not None else frozenset()
 
 
-async def _upstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:
+async def _upstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse, protocol: str) -> None:
+    # Desktop viewers send binary RFB; screencast viewers send JSON text.
     while True:
         message = await websocket.receive()
         if message["type"] == "websocket.disconnect":
             return
-        data = message.get("bytes")
-        if not isinstance(data, bytes):
+        data = message.get("text" if protocol == SCREENCAST_PROTOCOL else "bytes")
+        if isinstance(data, str):
+            await upstream.send_str(data)
+        elif isinstance(data, bytes):
+            await upstream.send_bytes(data)
+        else:
             raise WebSocketDisconnect(code=1003)
-        await upstream.send_bytes(data)
 
 
-async def _downstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:
+async def _downstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse, protocol: str) -> None:
+    # A screencast sends JSON text between its binary frames.
     async for message in upstream:
         if message.type == aiohttp.WSMsgType.BINARY:
             await websocket.send_bytes(message.data)
+        elif protocol == SCREENCAST_PROTOCOL and message.type == aiohttp.WSMsgType.TEXT:
+            await websocket.send_text(message.data)
         else:
             return
 
@@ -342,39 +350,50 @@ async def _maintain(websocket: WebSocket, session: ComputerSession, stream: asyn
             continue
 
 
-def _stream_session(websocket: WebSocket, session_id: str) -> ComputerSession:
+def _stream_session(websocket: WebSocket, session_id: str, protocol: str) -> ComputerSession:
     paths = config_lifecycle.require_api_state(websocket.app).snapshot.runtime_paths
     if websocket.headers.get("origin") not in allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV):
         raise ComputerError(403, "Computer stream origin is not allowed.")
     # Uvicorn SansIO can expose comma-separated header values instead of tokens.
-    protocols = [protocol.strip() for value in websocket.scope.get("subprotocols", []) for protocol in value.split(",")]
-    tickets = [value.removeprefix("mindroom-ticket.") for value in protocols if value.startswith("mindroom-ticket.")]
-    if "binary" not in protocols or len(tickets) != 1:
+    offered = [offer.strip() for value in websocket.scope.get("subprotocols", []) for offer in value.split(",")]
+    tickets = [value.removeprefix("mindroom-ticket.") for value in offered if value.startswith("mindroom-ticket.")]
+    if protocol not in offered or len(tickets) != 1:
         raise ComputerError(401, "A computer stream ticket is required.")
     return _store(websocket.app).consume_stream_ticket(session_id, tickets[0])
 
 
 @router.websocket("/sessions/{session_id}/stream")
 async def stream(websocket: WebSocket, session_id: str) -> None:
+    """Relay the worker desktop's RFB stream."""
+    await _relay(websocket, session_id, "binary")
+
+
+@router.websocket("/sessions/{session_id}/screencast")
+async def screencast(websocket: WebSocket, session_id: str) -> None:
+    """Relay the screencast of the agent's browser page under the same ticket, rechecks, and control lease."""
+    await _relay(websocket, session_id, SCREENCAST_PROTOCOL)
+
+
+async def _relay(websocket: WebSocket, session_id: str, protocol: str) -> None:
     """Consume a subprotocol ticket; only backend headers carry worker credentials."""
     tasks: list[asyncio.Task[object]] = []
     session: ComputerSession | None = None
     stream_closed = asyncio.Event()
     accepted = False
     try:
-        session = _stream_session(websocket, session_id)
+        session = _stream_session(websocket, session_id, protocol)
         await _checked_status(websocket, session)
         if session.stream is not None:
             session.stream.set()
         session.stream = stream_closed
         assert session.handle is not None
         assert session.generation is not None
-        async with computer_stream(session.handle, session.session_id, session.generation) as upstream:
-            await websocket.accept(subprotocol="binary", headers=[(b"cache-control", b"no-store")])
+        async with computer_stream(session.handle, session.session_id, session.generation, protocol) as upstream:
+            await websocket.accept(subprotocol=protocol, headers=[(b"cache-control", b"no-store")])
             accepted = True
             tasks = [
-                asyncio.create_task(_upstream(websocket, upstream), name="viewer"),
-                asyncio.create_task(_downstream(websocket, upstream), name="worker"),
+                asyncio.create_task(_upstream(websocket, upstream, protocol), name="viewer"),
+                asyncio.create_task(_downstream(websocket, upstream, protocol), name="worker"),
                 asyncio.create_task(_maintain(websocket, session, stream_closed), name="recheck"),
                 # Revocation must not wait for a periodic check that is still running.
                 asyncio.create_task(stream_closed.wait(), name="closed"),
@@ -384,6 +403,7 @@ async def stream(websocket: WebSocket, session_id: str) -> None:
                 "Computer stream ended",
                 requester_id=session.target.requester_id,
                 agent_user_id=session.target.agent_user_id,
+                protocol=protocol,
                 ended_by=sorted(task.get_name() for task in done),
             )
             for task in done:

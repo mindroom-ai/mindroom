@@ -461,13 +461,17 @@ All contexts include these fields:
 | `RoomMemberJoinedContext`, `RoomMemberLeftContext` | `agent_name`, `room_id`, `event_id`, `user_id`, `sender_id`, `display_name`, `avatar_url`, `membership`, `prev_membership` |
 | `ConfigReloadedContext` | `changed_entities`, `added_entities`, `removed_entities`, `plugin_changes` |
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
-| `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
-| `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
+| `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `shown`, `chat_preview()`, `declined`, `decline_reason`, `decline(reason)` |
+| `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `shown`, `chat_preview()`, `result`, `error`, `blocked`, `duration_ms` |
 | `ContactBeforeSendContext` | `agent_name`, `room_id`, `thread_id`, `requester_id`, `contact_id`, `counterparty_id`, `counterparty_name`, `rules`, `text`, `message_received_depth`, `verdict` (`"send"`, `"revise"`, or `"deny"`), `feedback`, `rewrite(text)`, `revise(feedback)`, `deny(reason)` |
 | `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
+`shown` is true when the call runs in a reply that shows its tool calls, as [`show_tool_calls`](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) sets.
+Calls report false in [voice calls](https://docs.mindroom.chat/voice-calls/), [listening](https://docs.mindroom.chat/configuration/agents/#listening) turns, [background scripts](https://docs.mindroom.chat/tools/background-scripts/), [contact](https://docs.mindroom.chat/agent-contacts/) turns, [silent](https://docs.mindroom.chat/scheduling/#silent-delivery) scheduled tasks, a delegated agent's turn, and outside a Matrix conversation, such as through the OpenAI-compatible API or the MCP gateway.
+The call a [pre-approved scheduled call](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) stores also reports false, since its reply shows only `run_scheduled_call`.
+`chat_preview()` returns the call's arguments as that reply's tool trace previews them, with secrets redacted, each value cut to 250 characters, and the whole preview cut to 1200, or `None` when `shown` is false, so a plugin that mirrors tool activity elsewhere shows no more than the chat does.
 
 ### Message objects
 
@@ -532,11 +536,15 @@ ResponseResult(
 
 ### Sending messages
 
-**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False, mentions=None, wake_mentioned=True)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
 
 - For contexts that come from a message, the original human or configured bot-account requester is carried along, so routing, permissions, and memory attribution use that requester rather than the relaying bot.
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
+- `@name` mentions of agents and teams in `text` mention them, unless `mentions` lists the Matrix user IDs of everyone the message mentions.
+  Names in `text` then still show as links, but only the listed users are mentioned, so an agent named only in `text` is not woken by the name and does not count as [mentioned earlier](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) in its thread; `mentions=[]` mentions nobody.
+- `wake_mentioned=False` keeps the message's mentions, but no agent it mentions is woken by that mention or counts as mentioned earlier in its thread; a mentioned person still keeps agents from answering, as with any mention of a person.
+- `extra_content` can set standard fields of the message content, such as `"msgtype": "m.notice"` for a notice, which agents never answer, or a `formatted_body` of your own in place of the HTML rendered from `text`; without `mentions`, an `m.mentions` in it only adds to the mentions found in `text`.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
 - Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
 - A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.

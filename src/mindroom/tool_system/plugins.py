@@ -78,6 +78,8 @@ class _LoadedPlugin:
     name: str
     root: Path
     skill_dirs: tuple[Path, ...]
+    # The content-key and event-type prefixes its manifest reserves from agent tools.
+    reserved_namespaces: tuple[str, ...]
     # The modules' paths and mtimes when they executed, so validation knows when the source changed.
     source: tuple[tuple[Path, float], ...]
     tools: Mapping[str, ToolMetadata]
@@ -238,6 +240,11 @@ class ConfigPlugins:
         )
 
     @cached_property
+    def reserved_namespaces(self) -> tuple[str, ...]:
+        """Return the content-key and event-type prefixes reserved by the configured plugins the generation loaded."""
+        return tuple(namespace for plugin in self.loaded_plugins for namespace in plugin.reserved_namespaces)
+
+    @cached_property
     def oauth_providers(self) -> Mapping[str, OAuthProvider]:
         """Return the built-in, MCP, and configured plugins' OAuth providers; a plugin whose callback fails is skipped."""
         # Deferred: the OAuth registry imports every provider family, which the plugin loader must not load.
@@ -378,8 +385,9 @@ def _mcp_tool_entries(mcp_servers: Mapping[str, MCPServerConfig]) -> dict[str, T
 def prepare_plugins(config: Config, runtime_paths: RuntimePaths) -> PluginGeneration:
     """Load ``config``'s plugins fresh into an unpublished generation, leaving the installed modules in place.
 
-    A plugin that fails to load is skipped. A structural error, such as two configured plugins with one manifest name
-    or two plugins registering one tool, raises, and nothing this preparation started keeps running.
+    A plugin that fails to load is skipped, unless its entry is required. A required plugin that fails, or a structural
+    error, such as two configured plugins with one manifest name or two plugins registering one tool, raises, and
+    nothing this preparation started keeps running.
     """
     with staged_plugins(config, runtime_paths) as generation:
         return generation
@@ -403,12 +411,26 @@ def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[Plug
             plugin_imports._PLUGIN_CACHE.clear()
             plugins, skipped = _load_plugins(config, runtime_paths, previous=None, routes=True)
             generation = _installed_generation(plugins, skipped)
+            _raise_if_required_plugin_skipped(config, generation)
             _log_loaded_plugins(generation)
             yield generation
         finally:
             _install_canonical_modules(installed_modules, installed_cache)
             plugin_imports._PLUGIN_CACHE.clear()
             plugin_imports._PLUGIN_CACHE.update(installed_manifests)
+
+
+def _raise_if_required_plugin_skipped(config: Config, generation: PluginGeneration) -> None:
+    """Raise with each skipped plugin whose entry is required, ending the tasks ``generation`` started."""
+    required = {entry.path for entry in config.plugins if entry.enabled and entry.required}
+    failures = [
+        f"Required plugin {plugin.path} failed to load: {plugin.error}"
+        for plugin in generation.skipped
+        if plugin.path in required
+    ]
+    if failures:
+        dispose_plugins(generation)
+        raise plugin_imports.PluginValidationError("; ".join(failures))
 
 
 def publish_plugins(generation: PluginGeneration) -> PluginReloadResult:
@@ -723,6 +745,7 @@ def _materialize_plugin(
         and previous.name == plugin.name
         and previous.modules == modules
         and previous.skill_dirs == tuple(plugin.skill_dirs)
+        and previous.reserved_namespaces == plugin.reserved_namespaces
     ):
         return previous
     hooks_module = hooks_entry.module if hooks_entry is not None else None
@@ -730,6 +753,7 @@ def _materialize_plugin(
         name=plugin.name,
         root=plugin.root,
         skill_dirs=tuple(plugin.skill_dirs),
+        reserved_namespaces=plugin.reserved_namespaces,
         source=tuple(source.items()),
         # A plugin's tools are the ones its tools module registers.
         tools=tools_entry.registrations if tools_entry is not None else MappingProxyType({}),
