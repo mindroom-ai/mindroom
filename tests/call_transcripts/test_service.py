@@ -1814,6 +1814,7 @@ async def test_the_transcript_waits_for_a_stretch_still_being_transcribed(world:
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(60)
     await world.service.leave(call.id, ANN)
+    await world.settled()
     world.transcriber.gate = asyncio.Event()
     world.clock.advance(15)
     upload = asyncio.create_task(world.say(call.id, ANN, ago=17, seconds=1))
