@@ -239,7 +239,7 @@ A body larger than 8 MiB, or one the server compressed despite being asked not t
 | `api_key` | `password` | `null` | Bearer token. |
 | `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
 | `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
-| `timeout` | `number` | `30` | Request timeout in seconds. |
+| `timeout` | `number` | `30` | Seconds the whole request may take, including redirects and the response body. |
 | `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
 | `all` | `boolean` | `false` | Enable `make_request()`. |
 

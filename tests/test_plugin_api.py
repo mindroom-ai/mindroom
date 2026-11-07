@@ -292,8 +292,8 @@ _SIGNATURES = {
     "current_call": "()",
     "current_execution_identity": "()",
     "emit_custom_event": "(plugin_name, event_name, payload)",
-    "fetch_public_url": "(url, *, max_bytes, use_env_proxy)",
-    "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy)",
+    "fetch_public_url": "(url, *, max_bytes, use_env_proxy, user_agent)",
+    "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy, user_agent)",
     "get_logger": "(name)",
     "get_tool_by_name": (
         "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "
@@ -513,7 +513,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 3), "0334ab1872ef1271f348e38c69803c7f0f34d3aefce33d31b7b4888687a74e41")
+_PINNED_VERSION = ((1, 4), "11196e9b633a2189f9ffa209050a912ebb16ead7f5652a191a355b66855f9770")
 
 
 def _is_enum(obj: object) -> bool:

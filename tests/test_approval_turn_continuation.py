@@ -28,8 +28,10 @@ from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.mid_turn_compaction import without_run_usage
+from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
@@ -403,6 +405,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
                 tool_trace_collector=trace,
                 typing_log_context={},
                 progress=None,
+                system_enrichment_items=(),
             )
 
     if outcome in {"error", "preparation_error"}:
@@ -563,6 +566,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         tool_trace_collector=trace,
         tool_context=turn_tool_context(config, paths, identity),
         progress=None,
+        system_enrichment_items=(),
     )
     assert isinstance(result, CompletedApprovalRun)
     expected = "Before approval.\n\n" + ("🔧 `inspect` [1]\n\n" if show_tool_calls else "") + "After approval."
@@ -613,6 +617,7 @@ async def test_approval_settlement_uses_typed_status(
         tool_trace_collector=[],
         tool_context=turn_tool_context(config, paths, identity),
         progress=None,
+        system_enrichment_items=(),
     )
     if status is RunStatus.error:
         with pytest.raises(RuntimeError, match="Terminal response"):
@@ -745,6 +750,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         tool_trace_collector=[],
         typing_log_context={},
         progress=progress,
+        system_enrichment_items=(),
     )
 
     contents = [chunk.content for chunk in published]
@@ -843,6 +849,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
+        system_enrichment_items=(),
     )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -943,10 +950,11 @@ async def _approve_add(
     identity: ToolExecutionIdentity,
     paused: PausedAttempt,
     call_id: str,
+    system_enrichment_items: tuple[EnrichmentItem, ...] = (),
 ) -> CompletedApprovalRun | PausedAttempt:
     """Approve ``paused``'s addition ``call_id`` through a response runner built after the pause, as after a restart.
 
-    The runner reads the paused run from storage alone.
+    The runner reads the paused run from storage alone, and resumes with ``system_enrichment_items``.
     """
     continuation = approval_continuation(
         approval_id=f"approval-{call_id}",
@@ -978,6 +986,7 @@ async def _approve_add(
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
+        system_enrichment_items=system_enrichment_items,
     )
 
 
@@ -1044,6 +1053,7 @@ async def test_an_approved_run_rebuilds_from_the_plugins_its_turn_captured(
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
+        system_enrichment_items=(),
     )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -1077,6 +1087,27 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
 
     assert counted_usage(storage, identity.session_id) == [(30, 3), (30, 3)]
     assert _published_tokens(result) == counted_total(storage, identity.session_id)
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_enrichment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The attempt a model switch starts after the approved run holds the resume's system enrichment in its prompt."""
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("enrich-session")
+    model = _CheckedModel([_add("approved", 10, 1), _continue_call("continue"), answer("Done.")])
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.")
+
+    result = await _approve_add(tmp_path, config, paths, identity, paused, "approved", (instruction,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text.endswith("Done.")
+    *_, fresh = model.requests
+    assert instruction.text in system_text(fresh.messages)
 
 
 @pytest.mark.asyncio
@@ -1250,6 +1281,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
+        system_enrichment_items=(),
     )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -1314,6 +1346,7 @@ async def test_an_approved_run_settles_its_job_claims_once_it_ends(
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
+        system_enrichment_items=(),
     )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -1370,6 +1403,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         tool_trace_collector=[],
         tool_context=turn_tool_context(config, paths, identity),
         progress=progress,
+        system_enrichment_items=(),
     )
 
     assert isinstance(result, PausedAttempt)
@@ -1459,6 +1493,7 @@ async def test_a_call_made_before_an_approval_replays_whole_and_failed_when_the_
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
+            system_enrichment_items=(),
         )
 
     [replay] = [run for run in stored_runs(config, paths, identity.session_id) if is_interrupted_replay_run(run)]
