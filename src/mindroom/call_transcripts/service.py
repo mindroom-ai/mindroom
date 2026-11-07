@@ -612,7 +612,10 @@ class CallTranscriptService:
             self._settling.pop(call_id, None)
 
     async def _settle_step(self, call: StoredCall) -> None:
-        """Make the first Matrix write the call owes, or hold its writes a minute if it cannot be made."""
+        """Make the first Matrix write the call owes, or hold its writes a minute if it cannot be made.
+
+        A due message the router may not post is given up, as when it left the room, before any notes or upload.
+        """
         if call.row_event_id is None:
             event_id = await self._room.post_row(call.room_id, call.id)
             if event_id is None:
@@ -625,6 +628,8 @@ class CallTranscriptService:
                 await self._postpone(call, reason="row-not-edited")
             else:
                 await asyncio.to_thread(self._store.record_row_edit, call.id, edit)
+        elif await self._room.router_may_post(call.room_id) is False:
+            await self._finish(call, given_up="router-may-not-post")
         else:
             await self._post_transcript(call, call.row_event_id)
 
@@ -641,7 +646,6 @@ class CallTranscriptService:
         """Post the ended call's one message in its row's thread, with notes while they can be had, or hold it a minute.
 
         A call in which people spoke but none of it could be transcribed posts a message that says so, without turns.
-        A message the router may not post is given up, as when it left the room.
         """
         assert call.ended_at is not None
         # Due and read under the room's lock, so every stretch let in before then has its line written first.
@@ -652,9 +656,6 @@ class CallTranscriptService:
         turns = _turns(lines)
         if not turns and all(line.reason != "not-transcribed" for line in lines):
             await self._finish(call)
-            return
-        if await self._room.router_may_post(call.room_id) is False:
-            await self._finish(call, given_up="router-may-not-post")
             return
         notes = self._written_notes.get(call.id)
         writes_notes = (
