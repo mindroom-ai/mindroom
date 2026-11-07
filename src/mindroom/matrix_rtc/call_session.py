@@ -117,7 +117,8 @@ class CallSessionDeps:
     bridge: VoiceBridgeLike
     key_transport: _FrameKeyTransportLike
     fetch_grant: Callable[[], Coroutine[None, None, SfuGrant]]
-    agent_options: CallVoiceAgentOptions
+    #: Prepares the voice agent while the session joins the call's media.
+    prepare_agent: Callable[[], Coroutine[None, None, CallVoiceAgentOptions]]
     livekit_service_url: str
     start_is_allowed: Callable[[], bool]
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
@@ -148,6 +149,9 @@ class CallSession:
     _key_retry_attempt: int = field(default=0, init=False)
     _undelivered_key_device_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     _reported_failure_codes: set[str] = field(default_factory=set, init=False)
+    _preparing_agent: asyncio.Task[CallVoiceAgentOptions] | None = field(default=None, init=False)
+    #: When each start step finished, in ``time.monotonic()`` seconds.
+    start_stages: dict[str, float] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         """Initialize the frame-key manager from the client identity."""
@@ -169,11 +173,28 @@ class CallSession:
         return f"{client.user_id}:{required_device_id(client)}"
 
     async def start(self, members: list[CallMember]) -> None:
-        """Join the call: connect media, publish membership, distribute keys."""
+        """Join the call: connect media, publish membership, distribute keys, then start the voice agent.
+
+        The voice agent is prepared while the media steps, which hold most of a join's wait, run.
+        """
         self._members = members
         self._sync_bridge_participants()
+        stages = self.start_stages
+
+        def prepared(task: asyncio.Task[CallVoiceAgentOptions]) -> None:
+            stages["agent_prepared"] = time.monotonic()
+            # A join that fails in a media step never awaits the preparation, so take its failure here.
+            if not task.cancelled():
+                task.exception()
+
+        preparing = self._preparing_agent = asyncio.create_task(
+            self.deps.prepare_agent(),
+            name=f"matrix_rtc_prepare_agent_{self.room_id}",
+        )
+        preparing.add_done_callback(prepared)
         try:
             grant = await self.deps.fetch_grant()
+            stages["sfu_granted"] = time.monotonic()
             self._require_start_allowed()
             try:
                 await self.deps.bridge.connect(grant)
@@ -182,31 +203,42 @@ class CallSession:
                 # manager's join guard handles them as an ordinary failed join.
                 msg = f"LiveKit SFU connect failed: {error}"
                 raise CallJoinError(msg) from error
+            stages["sfu_connected"] = time.monotonic()
             self._require_start_allowed()
             await self._publish_membership(initial=True)
+            stages["membership_published"] = time.monotonic()
             self._require_start_allowed()
             if self.e2ee_enabled:
                 await self._distribute_keys()
+                stages["keys_sent"] = time.monotonic()
                 self._require_start_allowed()
             self._spawn(self._membership_refresh_loop())
+            options = await preparing
             self._require_start_allowed()
             try:
-                await self.deps.bridge.start_agent(self.deps.agent_options)
+                await self.deps.bridge.start_agent(options)
             except Exception as error:
                 if isinstance(error, CallJoinError):
                     raise
                 msg = f"Voice agent start failed: {error}"
                 raise CallJoinError(msg) from error
+            stages["agent_started"] = time.monotonic()
             self._require_start_allowed()
         except BaseException:
+            # The preparation publishes nothing, so the session stops without waiting for it to unwind.
+            preparing.cancel()
             await self.stop()
             raise
         logger.info("call_joined", room_id=self.room_id, identity=self._local_identity)
 
     def _require_start_allowed(self) -> None:
-        """Abort before the next call-start side effect when ownership was revoked."""
+        """Abort before the next call-start side effect when ownership was revoked or the agent's preparation failed."""
         if not self.deps.start_is_allowed():
             raise CallStartRevokedError
+        preparing = self._preparing_agent
+        if preparing is not None and preparing.done():
+            # Raises the preparation's failure, so a call whose agent cannot start publishes nothing more.
+            preparing.result()
 
     async def on_members_changed(self, members: list[CallMember]) -> None:
         """React to remote membership changes (key rotation/sharing)."""

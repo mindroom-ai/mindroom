@@ -112,7 +112,7 @@ from tests.matrix_state_helpers import save_matrix_state
 from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -2080,6 +2080,169 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
     assert _call_state(manager).logical_call is None
 
 
+class _BlockedAgentBuild:
+    """A call agent build that waits until the test releases it, recording cancellation."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def build_call_tools(self, **kwargs: object) -> CallAgentTooling:
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return CallAgentTooling(
+            tools=(),
+            instructions="You are Helper.",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_agent_is_prepared_while_the_session_joins_the_call_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The agent and its live instructions are built while the SFU connect is in flight, not after the keys."""
+    prompt_built = asyncio.Event()
+
+    async def get_system_prompt() -> str:
+        prompt_built.set()
+        return "You are Helper."
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
+            get_system_prompt=get_system_prompt,
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = _BlockingConnectBridge()
+    manager = _manager(client, bridge, tmp_path, _live_config())
+
+    with capture_logs() as logs:
+        join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+        await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
+        await asyncio.wait_for(prompt_built.wait(), timeout=1)
+        assert bridge.agent_options is None
+        bridge.release_connect.set()
+        await join
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    assert (await options.get_instructions()).startswith("You are Helper.")
+    [timing] = [log for log in logs if log["event"] == "call_join_timing"]
+    stages = ("service_resolved", "agent_prepared", "sfu_granted", "sfu_connected", "membership_published")
+    assert all(timing[f"{stage}_ms"] <= timing["agent_started_ms"] for stage in stages)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_agent_failure_during_the_sfu_connect_ends_the_join_before_its_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An agent that cannot be materialized stops the media join it ran beside before the agent shows in the call."""
+    build_failed = asyncio.Event()
+
+    async def fail_tools(**_kwargs: object) -> CallAgentTooling:
+        build_failed.set()
+        msg = "prompt failed"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fail_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = _BlockingConnectBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
+    await asyncio.wait_for(build_failed.wait(), timeout=1)
+    bridge.release_connect.set()
+    await join
+
+    assert bridge.closes == 1
+    assert bridge.agent_options is None
+    # Only the leave's empty membership is written: the agent never joined the call's roster.
+    assert [call.args[2] for call in client.room_put_state.await_args_list] == [{}]
+    assert _call_state(manager).session is None
+    assert _call_state(manager).retry_task is None
+    assert _call_state(manager).logical_call is not None
+    assert _call_state(manager).logical_call.join_blocked
+
+
+@pytest.mark.asyncio
+async def test_media_join_failure_cancels_the_agent_build_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed SFU grant cancels the agent build running beside it, closes the bridge, and retries the join."""
+    build = _BlockedAgentBuild()
+
+    async def offline_grant(*_args: object, **_kwargs: object) -> SfuGrant:
+        await build.started.wait()
+        msg = "authorization service offline"
+        raise httpx.ConnectError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", build.build_call_tools)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_backends.request_sfu_grant", offline_grant)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await asyncio.wait_for(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())), timeout=1)
+
+    await asyncio.wait_for(build.cancelled.wait(), timeout=1)
+    assert bridge.closed
+    assert bridge.connected_grant is None
+    assert _call_state(manager).session is None
+    assert _call_state(manager).retry_task is not None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_reply_revocation_cancels_the_agent_build_of_a_starting_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Revocation does not wait for a call's agent build: it cancels the build and leaves the joined media."""
+    build = _BlockedAgentBuild()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", build.build_call_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path)
+    manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
+
+    join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(build.started.wait(), timeout=1)
+    _leave_grant_room(memberships, config)
+    try:
+        await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
+    finally:
+        build.release.set()
+        await join
+
+    assert build.cancelled.is_set()
+    assert bridge.closed
+    assert bridge.agent_options is None
+    assert _call_state(manager).session is None
+    assert _call_state(manager).logical_call is None
+
+
 @dataclass
 class _ManagerBot:
     """A fleet member whose call work runs on a real call manager, as `AgentBot` runs it."""
@@ -3537,6 +3700,15 @@ def _member(
     )
 
 
+def _prepared(options: CallVoiceAgentOptions) -> Callable[[], Coroutine[None, None, CallVoiceAgentOptions]]:
+    """Return a session's agent preparation that yields ``options`` at once."""
+
+    async def prepare_agent() -> CallVoiceAgentOptions:
+        return options
+
+    return prepare_agent
+
+
 def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport, clock: list[int]) -> CallSession:
     async def fetch_grant() -> SfuGrant:
         return GRANT
@@ -3550,7 +3722,7 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
             bridge=bridge,
             key_transport=transport,
             fetch_grant=fetch_grant,
-            agent_options=VoiceAgentOptions(instructions="hi", model="gpt-realtime-2.1", api_key="sk-test"),
+            prepare_agent=_prepared(VoiceAgentOptions(instructions="hi", model="gpt-realtime-2.1", api_key="sk-test")),
             livekit_service_url=SERVICE_URL,
             start_is_allowed=lambda: True,
             clock_ms=lambda: clock[0],
@@ -3914,8 +4086,10 @@ async def test_manager_skips_call_when_same_agent_materialization_fails(
 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
-    assert bridge.connected_grant is None
     assert bridge.agent_options is None
+    # The media join that ran while the agent was being prepared is torn down.
+    assert bridge.closed
+    assert client.room_put_state.await_args_list[-1].args[2] == {}
     assert _call_state(manager).session is None
     assert _call_state(manager).retry_task is None
     assert _call_state(manager).retry_attempts is None
@@ -4265,6 +4439,65 @@ async def test_manager_retries_transient_focus_discovery_failure(
 
     assert _call_state(manager).retry_task is not None
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_discovered_livekit_service_is_reused_for_joins_shortly_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Joins within the discovery's maximum age skip the well-known read; an older discovery is read again."""
+    discovered: dict[tuple[str, bool, bool], tuple[str, float]] = {}
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._discovered_service_urls", discovered)
+    reads: list[str] = []
+
+    async def read_well_known(server_name: str, **_kwargs: object) -> str:
+        reads.append(server_name)
+        return SERVICE_URL
+
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._read_livekit_service_url", read_well_known)
+    members = [_member("@alice:example.org", "ALICEDEV")]
+
+    async def resolve() -> str | None:
+        return await resolve_livekit_service(members, user_id=BOT_USER, configured_url=None, ssl_verify=True)
+
+    assert await resolve() == SERVICE_URL
+    assert await resolve() == SERVICE_URL
+    assert reads == ["example.org"]
+
+    [(key, (url, _read_at))] = discovered.items()
+    discovered[key] = (url, time.monotonic() - 601)
+    assert await resolve() == SERVICE_URL
+    assert reads == ["example.org", "example.org"]
+
+
+@pytest.mark.asyncio
+async def test_remembered_livekit_service_is_reread_when_a_caller_follows_a_changed_well_known(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remembered discovery that differs from the caller's focus is read again before the call is refused."""
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._discovered_service_urls", {})
+    well_known = [SERVICE_URL]
+    reads: list[str] = []
+
+    async def read_well_known(server_name: str, **_kwargs: object) -> str:
+        reads.append(server_name)
+        return well_known[-1]
+
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._read_livekit_service_url", read_well_known)
+
+    async def resolve(advertised_url: str) -> str | None:
+        return await resolve_livekit_service(
+            [_member("@alice:example.org", "ALICEDEV", livekit_service_url=advertised_url)],
+            user_id=BOT_USER,
+            configured_url=None,
+            ssl_verify=True,
+        )
+
+    assert await resolve(SERVICE_URL) == SERVICE_URL
+    well_known.append("https://rtc2.example.org")
+    assert await resolve("https://rtc2.example.org") == "https://rtc2.example.org"
+    assert len(reads) == 2
+    # The old focus is refused once a fresh read confirms the well-known no longer names it.
+    assert await resolve(SERVICE_URL) is None
+    assert len(reads) == 3
 
 
 @pytest.mark.asyncio
@@ -5216,7 +5449,7 @@ def _plain_session(
             bridge=bridge,
             key_transport=FakeKeyTransport(),
             fetch_grant=fetch_grant,
-            agent_options=VoiceAgentOptions(instructions="x", model="m", api_key="k"),
+            prepare_agent=_prepared(VoiceAgentOptions(instructions="x", model="m", api_key="k")),
             livekit_service_url=SERVICE_URL,
             start_is_allowed=lambda: True,
             on_stopped=on_stopped,  # type: ignore[arg-type]
