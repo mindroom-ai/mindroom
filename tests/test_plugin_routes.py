@@ -266,9 +266,9 @@ def test_plugin_list_names_each_enabled_plugin_that_loaded_with_the_api_it_needs
     _, runtime_paths = _config(tmp_path)
     entries = [
         {"path": "./plugins/broken", "settings": {"api_key": "setting secret"}},
-        {"path": "./plugins/demo", "settings": {"api_key": "setting secret"}},
-        {"path": "./plugins/off", "enabled": False},
         "./plugins/plain",
+        {"path": "./plugins/off", "enabled": False},
+        {"path": "./plugins/demo", "settings": {"api_key": "setting secret"}},
     ]
     config = Config.validate_with_runtime({"plugins": entries}, runtime_paths, tolerate_plugin_load_errors=True)
     generation = prepare_plugins(config, runtime_paths)
@@ -282,8 +282,8 @@ def test_plugin_list_names_each_enabled_plugin_that_loaded_with_the_api_it_needs
     assert response.json() == {
         "plugin_api_version": _server_plugin_api(),
         "plugins": [
-            {"name": "demo", "mindroom_plugin_api": "1.0"},
             {"name": "plain", "mindroom_plugin_api": None},
+            {"name": "demo", "mindroom_plugin_api": "1.0"},
         ],
     }
 
