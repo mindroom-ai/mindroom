@@ -2,7 +2,7 @@ name: Plugin fleet
 
 on:
   pull_request:
-    # Modules that a fleet plugin, mindroom.plugin_api, mindroom.hooks, or mindroom.plugin_check import from, and files this workflow uses.
+    # Modules that a fleet plugin, plugin_api.py, hooks/__init__.py, or plugin_check.py import from, and files this workflow uses.
     # Extend the list when one of them imports another module; pushes to main and the nightly run test every change.
     paths:
       - ".github/plugin-fleet.json"
