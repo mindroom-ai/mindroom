@@ -6907,6 +6907,7 @@ expose = [
     "ToolMetadataValidationError",
     "ToolRegistry",
     "builtin_tool_registry",
+    "plugin_load_active",
 ]
 from = ["mindroom.tool_system.registry"]
 
@@ -6918,7 +6919,9 @@ expose = [
     "ToolRegistry",
     "builtin_tool_registry",
     "compose_tool_registry",
+    "plugin_load_active",
     "plugin_module_registrations",
+    "record_plugin_root",
     "register_tool",
 ]
 from = ["mindroom.tool_system.registry"]
