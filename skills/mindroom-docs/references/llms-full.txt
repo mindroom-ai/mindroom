@@ -17985,6 +17985,7 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 `context.execution_identity` names who the call runs for: the agent, inside a team the member that called the tool, the account that answers, the requester, and the conversation.
 `mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
 `context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
+`await context.hooks.message_sender(room_id, text, thread_id, source_hook, extra_content, *, trigger_dispatch=False, mentions=None, wake_mentioned=True)` sends a message from the turn's bot, with `source_hook` such as `"my-plugin:my-tool"` naming what sent it; the other arguments work as in a hook's [`ctx.send_message`](https://docs.mindroom.chat/hooks/#sending-messages).
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -19019,11 +19020,15 @@ ResponseResult(
 
 ### Sending messages
 
-**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False, mentions=None, wake_mentioned=True)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
 
 - For contexts that come from a message, the original human or configured bot-account requester is carried along, so routing, permissions, and memory attribution use that requester rather than the relaying bot.
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
+- `@name` mentions of agents and teams in `text` mention them, unless `mentions` lists the Matrix user IDs of everyone the message mentions.
+  Names in `text` then still show as links, but only the listed users are mentioned, so another agent named in `text` neither answers the message nor counts as [mentioned earlier](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) in its thread; `mentions=[]` mentions nobody.
+- `wake_mentioned=False` makes agents ignore the message's mentions, so no agent answers it just for being mentioned.
+- `extra_content` is merged into the message content last, so it can set standard fields, such as `"msgtype": "m.notice"` for a notice, which agents never answer, or a `formatted_body` of your own in place of the HTML rendered from `text`.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
 - Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
 - A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.

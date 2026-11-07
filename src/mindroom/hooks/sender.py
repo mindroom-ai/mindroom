@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import HOOK_SOURCE_KEY, SOURCE_KIND_KEY
+from mindroom.constants import EXACT_MENTIONS_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, HOOK_SOURCE_KIND
 from mindroom.hooks.types import HookMessageSender  # noqa: TC001
 
@@ -47,6 +47,8 @@ async def send_hook_message(
     extra_content: dict[str, Any] | None,
     *,
     trigger_dispatch: bool = False,
+    mentions: list[str] | None = None,
+    wake_mentioned: bool = True,
     conversation_reader: ConversationReader,
 ) -> str | None:
     """Send one hook-originated Matrix message."""
@@ -56,6 +58,8 @@ async def send_hook_message(
     content_extra = dict(extra_content or {})
     content_extra[SOURCE_KIND_KEY] = HOOK_DISPATCH_SOURCE_KIND if trigger_dispatch else HOOK_SOURCE_KIND
     content_extra[HOOK_SOURCE_KEY] = source_hook
+    if not wake_mentioned:
+        content_extra[SKIP_MENTIONS_KEY] = True
 
     latest_thread_event_id = await conversation_reader.latest_thread_event_id(
         room_id=room_id,
@@ -69,6 +73,10 @@ async def send_hook_message(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=content_extra,
     )
+    if mentions is not None:
+        # Names in the text still render as pills, but only the caller's list mentions anyone.
+        content["m.mentions"] = {"user_ids": list(mentions)}
+        content[EXACT_MENTIONS_KEY] = True
     delivered = await send_matrix_message(client, room_id, content)
     if delivered is not None:
         return delivered.event_id
@@ -92,6 +100,8 @@ def build_hook_message_sender(
         extra_content: dict[str, Any] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
         return await send_hook_message(
             client,
@@ -103,6 +113,8 @@ def build_hook_message_sender(
             source_hook,
             extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
             conversation_reader=conversation_reader,
         )
 
