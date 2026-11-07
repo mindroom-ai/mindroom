@@ -181,12 +181,15 @@ class FakeNotes:
     markdown: str | None = "## About\nThe launch."
     failing: bool = False
     failing_rooms: set[str] = field(default_factory=set)
+    gate: asyncio.Event | None = None
     transcripts: list[CallTranscript] = field(default_factory=list)
 
     async def write_notes(self, transcript: CallTranscript) -> str | None:
-        """Record the transcript and answer ``markdown``, or fail."""
+        """Record the transcript and answer ``markdown`` once ``gate`` opens, or fail."""
         self.transcripts.append(transcript)
         await asyncio.sleep(0)
+        if self.gate is not None:
+            await self.gate.wait()
         if self.failing or transcript.room_id in self.failing_rooms:
             msg = "The notes model did not answer."
             raise RuntimeError(msg)
@@ -792,6 +795,24 @@ async def test_failed_notes_are_retried_once_after_60_seconds_then_the_transcrip
     await world.service.tick()
     assert world.room.transcripts == []
     world.clock.advance(1)
+    await world.service.tick()
+
+    [message] = world.room.transcripts
+    assert message.body == "Call · 1 min"
+    assert len(world.notes.transcripts) == 2
+
+
+@pytest.mark.asyncio
+async def test_notes_that_never_come_count_as_failed_notes(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A notes model that does not answer within 90 seconds fails that attempt, so it holds up no other call for long."""
+    monkeypatch.setattr(service_module, "_NOTES_TIMEOUT_SECONDS", 0.01)
+    world.notes.gate = asyncio.Event()
+    await world.end_by_leaving(ANN)
+    world.clock.advance(20)
+
+    await world.service.tick()
+    assert world.room.transcripts == []
+    world.clock.advance(60)
     await world.service.tick()
 
     [message] = world.room.transcripts

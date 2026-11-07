@@ -39,6 +39,8 @@ _RETRY_SECONDS = 60.0
 _NOTES_ATTEMPTS = 2
 _SPEAKING_RETRY_AFTER_SECONDS = 3
 _TRANSCRIBE_TIMEOUT_SECONDS = 60.0
+# Notes not written in this long count as failed notes, so a model that never answers holds up no other call for long.
+_NOTES_TIMEOUT_SECONDS = 90.0
 # How far the homeserver's clock, which dates MatrixRTC memberships, may lag MindRoom's.
 _CLOCK_TOLERANCE_SECONDS = 5.0
 _MIN_TICK_SECONDS = 1.0
@@ -634,7 +636,8 @@ class CallTranscriptService:
         )
         if writes_notes:
             try:
-                notes = await self._notes.write_notes(transcript)
+                async with asyncio.timeout(_NOTES_TIMEOUT_SECONDS):
+                    notes = await self._notes.write_notes(transcript)
             except Exception:
                 logger.exception("call_transcript_notes_failed", room_id=call.room_id, call_id=call.id)
                 if call.transcript_attempts + 1 < _NOTES_ATTEMPTS:
