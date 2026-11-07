@@ -714,10 +714,13 @@ async def test_a_stop_during_shutdown_leaves_the_reply_s_jobs_to_the_shutdown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Stop that lands while the runtime shuts down only marks the reply's jobs; the shutdown alone settles them."""
+    """A Stop that lands while the runtime shuts down only marks the reply's jobs; the shutdown alone settles them.
+
+    The mark makes the shutdown deny the job's cards with the Stop's reason.
+    """
     runtime = await tool_job_runtime(tmp_path)
     original_save = ToolJobStore.save
-    saved: list[str] = []
+    saved: list[tuple[str, str | None]] = []
 
     async def recording(
         store: ToolJobStore,
@@ -727,7 +730,7 @@ async def test_a_stop_during_shutdown_leaves_the_reply_s_jobs_to_the_shutdown(
         *,
         approval_end_reason: str | None,
     ) -> None:
-        saved.append(json.loads(job_json)["status"])
+        saved.append((json.loads(job_json)["status"], approval_end_reason))
         await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
 
     await start_job(
@@ -747,7 +750,7 @@ async def test_a_stop_during_shutdown_leaves_the_reply_s_jobs_to_the_shutdown(
     assert runtime._shutdown_task is not None
     await runtime.cancel_stopped_reply("reply")
     await asyncio.wait_for(shutdown, JOB_TEST_TIMEOUT)
-    assert saved == ["interrupted"]
+    assert saved == [("interrupted", REPLY_STOPPED_REASON)]
 
 
 @pytest.mark.asyncio
