@@ -591,7 +591,7 @@ def _skipped_plugin(
     exc: BaseException,
 ) -> SkippedPlugin:
     """Log one plugin that failed to load and return the record of its skip."""
-    plugin_imports._log_skipped_plugin_entry(entry.path, plugin.root, exc)
+    plugin_imports._log_failed_plugin_entry(entry, plugin.root, exc)
     if isinstance(exc, Exception):
         return SkippedPlugin(entry.path, exc, plugin.root)
     msg = f"Plugin materialization failed for {plugin.root}: {exc}"
