@@ -193,6 +193,7 @@ The check strictly validates the manifest, imports declared modules, validates t
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 Whether or not the plugin loads, it also warns about each import of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
+With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 
 ## Plugin structure
