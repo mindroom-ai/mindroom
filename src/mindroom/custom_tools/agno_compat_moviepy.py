@@ -16,8 +16,7 @@ from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoClip, VideoFil
 from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
-from mindroom.file_access import resolve_agent_file
-from mindroom.tools.path_safety import write_agent_file
+from mindroom.file_access import resolve_agent_file, write_agent_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -337,7 +337,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 `ToolFileAccess` values:
 
 - `NONE`: the tool takes no local file paths.
-- `AGENT`: the tool resolves every model-supplied path through `mindroom.plugin_api.resolve_agent_file`, so it follows the agent's `file_access` setting.
+- `AGENT`: the tool reads and writes every model-supplied path through `resolve_agent_file` and `write_agent_file` (see [Agent files](#agent-files)), so it follows the agent's `file_access` setting.
 - `UNCONFINED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
 
 See [Security Posture](architecture/security-posture.md#file-access) for how each class is treated.
@@ -517,7 +517,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `AGENT_NAME` | `agent_name` | The constructing agent's name, when available |
 | `FILE_ACCESS` | `file_access` | The constructing agent's effective `file_access` setting |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
-| `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
+| `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | The constructing agent's workspace root, where managed tool-output saves go |
 | `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
@@ -556,6 +556,78 @@ class NeedsRuntimeTools(Toolkit):
 )
 def needs_runtime_tools() -> type[NeedsRuntimeTools]:
     return NeedsRuntimeTools
+```
+
+### Agent files
+
+A tool that takes file paths from the model reads them with `resolve_agent_file` and writes them with `write_agent_file` from `mindroom.plugin_api`, passing the values of the `TOOL_OUTPUT_WORKSPACE_ROOT` and `FILE_ACCESS` managed init args.
+Both resolve relative paths from the agent's workspace and follow the agent's `file_access`: under `workspace` they raise `ValueError` for a path outside the workspace, and under `unrestricted` they reach any path the tool's process can.
+They work the same when the tool runs in a worker, where the workspace is the agent's workspace in that worker.
+`resolve_agent_file` returns an existing regular file, which its `open()` opens for reading, and names `field_name` in its errors.
+`write_agent_file` creates missing directories, replaces an existing file whole, and returns the path it wrote.
+
+```python
+from pathlib import Path
+from typing import Literal
+
+from mindroom.plugin_api import (
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    Toolkit,
+    register_tool_with_metadata,
+    resolve_agent_file,
+    tool,
+    write_agent_file,
+)
+
+
+class NotesTools(Toolkit):
+    name = "notes"
+
+    def __init__(
+        self,
+        *,
+        tool_output_workspace_root: Path | None,
+        file_access: Literal["workspace", "unrestricted"],
+    ) -> None:
+        super().__init__()
+        self.workspace_root = tool_output_workspace_root
+        self.file_access = file_access
+
+    @tool
+    def save_note(self, path: str, text: str) -> str:
+        """Save a note.
+
+        Args:
+            path: Where to save the note, relative to the workspace.
+            text: The note.
+        """
+        written = write_agent_file(path, text.encode(), workspace_root=self.workspace_root, file_access=self.file_access)
+        return f"Saved {written}."
+
+    @tool
+    def read_note(self, path: str) -> str:
+        """Read a note.
+
+        Args:
+            path: The note's path, relative to the workspace.
+        """
+        note = resolve_agent_file(path, workspace_root=self.workspace_root, file_access=self.file_access, field_name="path")
+        with note.open() as file:
+            return file.read().decode()
+
+
+@register_tool_with_metadata(
+    name="notes",
+    file_access=ToolFileAccess.AGENT,
+    display_name="Notes",
+    description="Save and read notes in the agent workspace",
+    category=ToolCategory.PRODUCTIVITY,
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
+)
+def notes_tools() -> type[NotesTools]:
+    return NotesTools
 ```
 
 ### Tool runtime context
