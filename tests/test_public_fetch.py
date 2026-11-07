@@ -7,7 +7,6 @@ import os
 import socket
 import threading
 import time
-from typing import TYPE_CHECKING
 
 import httpcore
 import httpx
@@ -15,9 +14,7 @@ import pytest
 
 from mindroom import public_fetch
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from tests.public_fetch_helpers import serve
 
 _PUBLIC_ADDRESS = "93.184.216.34"
 _PROXY_HOST = "10.0.0.10"
@@ -26,21 +23,6 @@ _PROXY_HOST = "10.0.0.10"
 def _page(status: int, body: bytes = b"", headers: dict[str, str] | None = None) -> httpx.Response:
     """A response whose body streams like one off the network, so the fetch reads it raw."""
     return httpx.Response(status, headers=headers, stream=httpx.ByteStream(body))
-
-
-def _serve(
-    monkeypatch: pytest.MonkeyPatch,
-    handler: Callable[[httpx.Request], httpx.Response],
-) -> list[httpx.Request]:
-    """Answer every request that passed MindRoom's transports, and record it."""
-    requests: list[httpx.Request] = []
-
-    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return handler(request)
-
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
-    return requests
 
 
 def _public_dns(monkeypatch: pytest.MonkeyPatch, addresses: tuple[str, ...] = (_PUBLIC_ADDRESS,)) -> None:
@@ -69,7 +51,7 @@ async def test_a_fetch_follows_public_redirects_and_returns_the_final_page(monke
             return httpx.Response(301, headers={"Location": "https://www.example.com/final"})
         return _page(200, b"<p>page</p>", {"Content-Type": "text/html; charset=utf-8"})
 
-    requests = _serve(monkeypatch, handler)
+    requests = serve(monkeypatch, handler)
 
     result = await fetch_public_url(" https://example.com/start ", max_bytes=1024)
 
@@ -84,6 +66,23 @@ async def test_a_fetch_follows_public_redirects_and_returns_the_final_page(monke
         "https://www.example.com/final",
     ]
     assert [request.headers["accept-encoding"] for request in requests] == ["identity"] * 3
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_sends_the_given_user_agent_on_every_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller can name itself to the server, while the body is still requested unencoded."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "/final"})
+        return _page(200, b"page")
+
+    requests = serve(monkeypatch, handler)
+
+    await fetch_public_url("https://example.com/start", max_bytes=1024, user_agent="feed-reader/1.0")
+
+    assert [request.headers["user-agent"] for request in requests] == ["feed-reader/1.0"] * 2
+    assert [request.headers["accept-encoding"] for request in requests] == ["identity"] * 2
 
 
 @pytest.mark.asyncio
@@ -107,7 +106,7 @@ async def test_a_url_that_is_not_public_http_is_refused_before_any_request(
     url: str,
 ) -> None:
     """Loopback, private, link-local, local names, other schemes, and malformed URLs never reach the network."""
-    requests = _serve(monkeypatch, lambda _request: _page(200, b"secret"))
+    requests = serve(monkeypatch, lambda _request: _page(200, b"secret"))
 
     error = await _refusal(url)
 
@@ -126,7 +125,7 @@ async def test_a_redirect_to_a_url_that_is_not_public_http_is_refused_before_it_
     reason: str,
 ) -> None:
     """A public page can hand the fetch neither to a loopback service nor to a host that is not a valid name."""
-    requests = _serve(monkeypatch, lambda _request: httpx.Response(302, headers={"Location": location}))
+    requests = serve(monkeypatch, lambda _request: httpx.Response(302, headers={"Location": location}))
 
     error = await _refusal("https://example.com/redirect")
 
@@ -149,7 +148,7 @@ async def test_credentials_in_a_url_or_a_redirect_are_refused(
     requested: list[str],
 ) -> None:
     """A fetch sends no credentials, so a URL carrying them is refused instead of sent."""
-    requests = _serve(
+    requests = serve(
         monkeypatch,
         lambda _request: httpx.Response(302, headers={"Location": "https://user:secret@example.com/next"}),
     )
@@ -164,7 +163,7 @@ async def test_credentials_in_a_url_or_a_redirect_are_refused(
 @pytest.mark.parametrize("encoding", ["gzip", "br", "identity, gzip", "unknown"])
 async def test_a_body_with_a_content_encoding_is_refused(monkeypatch: pytest.MonkeyPatch, encoding: str) -> None:
     """Only identity bodies come back, so no caller receives bytes it would have to decode."""
-    _serve(monkeypatch, lambda _request: _page(200, b"x", {"Content-Encoding": encoding}))
+    serve(monkeypatch, lambda _request: _page(200, b"x", {"Content-Encoding": encoding}))
 
     error = await _refusal("https://example.com/")
 
@@ -175,7 +174,7 @@ async def test_a_body_with_a_content_encoding_is_refused(monkeypatch: pytest.Mon
 @pytest.mark.parametrize("encoding", ["identity", "Identity, identity"])
 async def test_an_identity_body_is_returned(monkeypatch: pytest.MonkeyPatch, encoding: str) -> None:
     """An explicit identity coding is the plain body."""
-    _serve(monkeypatch, lambda _request: _page(200, b"plain", {"Content-Encoding": encoding}))
+    serve(monkeypatch, lambda _request: _page(200, b"plain", {"Content-Encoding": encoding}))
 
     result = await fetch_public_url("https://example.com/", max_bytes=1024)
 
@@ -188,7 +187,7 @@ async def test_a_body_within_the_limit_is_returned_and_a_larger_one_is_refused(
 ) -> None:
     """The byte limit is inclusive and bounds the raw body."""
     bodies = {"/five": b"12345", "/six": b"123456"}
-    _serve(monkeypatch, lambda request: _page(200, bodies[request.url.path]))
+    serve(monkeypatch, lambda request: _page(200, bodies[request.url.path]))
 
     assert (await fetch_public_url("https://example.com/five", max_bytes=5)).content == b"12345"
     error = await _refusal("https://example.com/six", max_bytes=5)
@@ -211,7 +210,7 @@ async def test_ten_redirects_are_followed_and_an_eleventh_is_refused(
             return httpx.Response(302, headers={"Location": f"/hop-{hop + 1}"})
         return _page(200, b"end")
 
-    requests = _serve(monkeypatch, handler)
+    requests = serve(monkeypatch, handler)
 
     if succeeds:
         assert (await fetch_public_url("https://example.com/hop-0", max_bytes=1024)).content == b"end"
@@ -223,7 +222,7 @@ async def test_ten_redirects_are_followed_and_an_eleventh_is_refused(
 @pytest.mark.asyncio
 async def test_an_error_status_is_refused_with_its_status_code(monkeypatch: pytest.MonkeyPatch) -> None:
     """A page the server does not serve is a failure the caller can tell apart by status."""
-    _serve(monkeypatch, lambda _request: _page(404, b"missing"))
+    serve(monkeypatch, lambda _request: _page(404, b"missing"))
 
     error = await _refusal("https://example.com/missing")
 
@@ -253,7 +252,7 @@ async def test_a_connection_failure_is_a_request_failure(monkeypatch: pytest.Mon
         msg = "connection refused"
         raise httpx.ConnectError(msg, request=request)
 
-    _serve(monkeypatch, refuse_connection)
+    serve(monkeypatch, refuse_connection)
 
     error = await _refusal("https://example.com/")
 

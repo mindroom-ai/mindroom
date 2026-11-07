@@ -35,8 +35,8 @@ Matrix sync callback
 | `failure_text.py` | The text a caught exception reports: its text, or its type name when it has none |
 | `github_app_auth.py` | GitHub App installation tokens minted from an App private key and cached until near expiry, shared by Git knowledge sources and Agent Keys |
 | `tls_trust.py` | Shared TLS trust (system store plus certifi's roots, unless the operator sets `SSL_CERT_FILE` or `SSL_CERT_DIR`) for Matrix, the egress broker's upstream connections, and Realtime speech |
-| `bounded_bytes.py` | Shared asynchronous and synchronous byte collection that rejects overflowing chunks before buffering them |
-| `public_fetch.py` | The guarded fetch of one public HTTP(S) URL under one deadline, shared by the `website` tool, worker media, and plugins |
+| `bounded_bytes.py` | Shared asynchronous byte collection that rejects overflowing chunks before buffering them |
+| `public_fetch.py` | The guarded fetch of one public HTTP(S) URL under one deadline, shared by the `website`, `trafilatura`, and `newspaper` tools, worker media, and plugins |
 | `origins.py` | Shared browser-origin normalization and allowlist validation for dashboard auth, CORS, Connections same-origin checks, the Computers and Connections MindRoom Chat allowlists, and MCP gateway origins |
 | `matrix_openid.py` | Matrix OpenID verification at the configured homeserver and audience binding, shared by Computers and the Connections portal |
 | `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |

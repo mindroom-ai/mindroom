@@ -8479,7 +8479,7 @@ depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registr
 
 [[modules]]
 path = "mindroom.tools.agno_compat_newspaper4k"
-depends_on = ["mindroom.bounded_bytes"]
+depends_on = []
 visibility = ["mindroom.tools.newspaper4k"]
 
 [[interfaces]]
