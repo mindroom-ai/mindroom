@@ -253,6 +253,7 @@ It also leaves and logs `call_roster_absent_from_sfu` after a minute in which no
 After that it joins the call again only when the caller rejoins it or MindRoom restarts; after a restart it leaves again a minute later if the caller is still not connected.
 A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
+The agent prepares its voice session while it connects to the call's media, and logs `call_join_timing` once it is in the call, with the milliseconds from the start of the join to each step.
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
 
@@ -340,6 +341,7 @@ LiveKit media still needs a static public IP and open TCP and UDP media ports, w
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables it with `matrix_rtc_enabled: true`.
 
 The agent joins only calls started on your own MatrixRTC backend, meaning the one in `calls.livekit_service_url` or the agent homeserver's `.well-known`; calls started through a different backend are ignored.
+The agent reuses the `.well-known` service for 10 minutes, and reads it again sooner when a call advertises a different one.
 [Managed rooms](rooms.md#room-management) already let every member join calls.
 In other rooms, such as ad-hoc rooms, the power levels must let members send `org.matrix.msc3401.call.member` state events, which Element Call-capable clients set up when they create rooms.
 Calls work in both encrypted and unencrypted rooms.

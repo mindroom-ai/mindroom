@@ -117,6 +117,7 @@ visibility = [
     "mindroom.cli.connect",
     "mindroom.matrix.provisioning",
     "mindroom.script_runs.worker_client",
+    "mindroom.terminal.client",
 ]
 
 [[modules]]
@@ -2262,6 +2263,7 @@ depends_on = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.registry",
+    "mindroom.terminal.session",
 ]
 
 [[modules]]
@@ -2277,6 +2279,7 @@ depends_on = [
     "mindroom.api.sandbox_runner_scripts",
     "mindroom.api.validation_errors",
     "mindroom.api.worker_preview",
+    "mindroom.api.worker_terminal",
 ]
 
 [[modules]]
@@ -6904,6 +6907,7 @@ expose = [
     "ToolMetadataValidationError",
     "ToolRegistry",
     "builtin_tool_registry",
+    "plugin_load_active",
 ]
 from = ["mindroom.tool_system.registry"]
 
@@ -6915,7 +6919,9 @@ expose = [
     "ToolRegistry",
     "builtin_tool_registry",
     "compose_tool_registry",
+    "plugin_load_active",
     "plugin_module_registrations",
+    "record_plugin_root",
     "register_tool",
 ]
 from = ["mindroom.tool_system.registry"]
@@ -7421,6 +7427,7 @@ expose = [
     "primary_owns_tool_settings",
     "view_file_from_worker",
     "to_json_compatible",
+    "worker_call",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
 
@@ -8165,6 +8172,26 @@ depends_on = [
     "mindroom.worker_computer.rfb",
     "mindroom.worker_computer.runtime",
     "mindroom.worker_computer.screencast",
+]
+
+[[modules]]
+path = "mindroom.api.worker_terminal"
+depends_on = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.terminal.session",
+]
+
+[[modules]]
+path = "mindroom.terminal.session"
+depends_on = []
+
+[[modules]]
+path = "mindroom.terminal.client"
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.http_error_detail",
+    "mindroom.terminal.session",
+    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]

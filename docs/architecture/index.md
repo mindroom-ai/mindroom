@@ -16,6 +16,7 @@ icon: lucide/layout
 - [Migration and Compatibility Boundaries](migrations.md) - Why historical formats are handled as they are, and which migrations dependencies own
 - [Matrix Event-Journal Security](matrix-event-journal-security.md) - Which decrypted plaintext is durable, who owns it, and what removes it
 - [Background Tool Jobs](background-tool-jobs.md) - The decisions, invariant purposes, and limits behind background tool jobs
+- [Persistent Terminals](terminals.md) - Why agent terminals live in the worker's sandbox runner, their lifecycle and limits, and the runner's terminal routes
 - [Matrix Event-Journal Contracts](matrix-event-journal-contracts.md) - Event-journal decisions the code does not explain, and the homeserver behaviour you would otherwise rediscover by debugging
 
 ## Storage upgrade boundaries
