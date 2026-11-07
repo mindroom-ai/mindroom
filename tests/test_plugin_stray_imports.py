@@ -15,7 +15,6 @@ from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_t
 from tests.conftest import runtime_paths_for
 from tests.test_plugins import (
     _bind_runtime_paths,
-    _bump_mtime,
     _forgetting_modules,
     _load,
     _write_working_tool_plugin,
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
 
 
 def _package_plugin_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Path]:
-    """Return a config naming the importable plugin package ``stray_pkg``, and the package's tools module."""
+    """Return a config naming the importable plugin package ``stray_pkg``, and the package's directory."""
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "stray_pkg"
     _write_working_tool_plugin(plugin_root, plugin_name="stray-pkg", tool_name="stray_pkg_tool")
@@ -37,7 +36,7 @@ def _package_plugin_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> t
     monkeypatch.syspath_prepend(str(linked_site_packages))
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    return _bind_runtime_paths(Config(plugins=["stray_pkg"]), config_path), plugin_root / "tools.py"
+    return _bind_runtime_paths(Config(plugins=["stray_pkg"]), config_path), plugin_root
 
 
 @pytest.mark.usefixtures("restored_builtin_tools")
@@ -46,17 +45,16 @@ def test_stray_import_of_a_loaded_plugin_tools_module_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A plugin's tools module imported by its own name registers nothing, and the plugin keeps loading its tools."""
-    config, tools_path = _package_plugin_config(tmp_path, monkeypatch)
+    config, plugin_root = _package_plugin_config(tmp_path, monkeypatch)
 
     with _forgetting_modules("stray_pkg"):
         assert "stray_pkg_tool" in _load(config, runtime_paths_for(config)).tools
 
-        with pytest.raises(ToolMetadataValidationError, match=re.escape(str(tools_path.parent.resolve()))):
+        with pytest.raises(ToolMetadataValidationError, match=re.escape(str(plugin_root.resolve()))):
             importlib.import_module("stray_pkg.tools")
         assert "stray_pkg_tool" not in builtin_tool_registry()
 
         # The plugin's next load executes its tools module again and still registers the tool.
-        _bump_mtime(tools_path)
         assert "stray_pkg_tool" in _load(config, runtime_paths_for(config)).tools
 
 
