@@ -232,8 +232,7 @@ QUEUED_MESSAGE_NOTICE_TEXT = (
 BACKGROUND_JOBS_ENDED_NOTICE = (
     "[RUNTIME NOTICE, NOT A USER MESSAGE] The background jobs listed above have ended. "
     'Acknowledge them by calling job(action="collect") once, which returns their results; do this even for jobs '
-    "whose output you do not need. Cancelled jobs need no acknowledgement. "
-    "Then continue your current task."
+    "whose output you do not need. Then continue your current task."
 )
 BACKGROUND_JOBS_FOLLOW_UP_PROMPT = (
     "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs you started earlier in this conversation have ended; this "

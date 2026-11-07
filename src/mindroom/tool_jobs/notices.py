@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.hooks.types import EnrichmentItem
-from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.conversation import current_conversation
 from mindroom.tool_jobs.runtime import describe_job
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -18,9 +17,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import AfterToolBatchHook
     from mindroom.llm.messages import Message
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
-
-logger = get_logger(__name__)
+    from mindroom.tool_jobs.runtime import BackgroundJob
 
 
 @dataclass
@@ -56,32 +53,6 @@ def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
     return "\n".join([*lines, notice])
 
 
-async def _acknowledge_cancellations(runtime: ToolJobRuntime, jobs: Sequence[BackgroundJob]) -> None:
-    """Mark noticed cancelled jobs acknowledged: a cancellation has no result to collect.
-
-    An acknowledgement can fail when the job expired or lost its access after it was listed, or when its store
-    fails; the reply carries on, and after a store failure a later reply notices the unacknowledged cancellation again.
-    """
-    for job in jobs:
-        if job.status != "cancelled":
-            continue
-        try:
-            await _acknowledge_cancellation(runtime, job)
-        except Exception:
-            logger.warning("Background job cancellation was not acknowledged", job_id=job.job_id, exc_info=True)
-
-
-async def _acknowledge_cancellation(runtime: ToolJobRuntime, job: BackgroundJob) -> None:
-    """Claim one cancelled job's outcome and mark it consumed, releasing the claim either way."""
-    waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth, timeout=0)
-    if waited.claim is None:
-        return
-    try:
-        await runtime.acknowledge_wait(job.job_id, waited.claim)
-    finally:
-        await runtime.release_wait(job.job_id, waited.claim)
-
-
 async def _unnoticed_notice(notices: JobNotices) -> str | None:
     """Describe this reply's ended jobs it was not told about yet, and count them as told."""
     current = current_conversation()
@@ -93,12 +64,11 @@ async def _unnoticed_notice(notices: JobNotices) -> str | None:
     if not jobs:
         return None
     notices.noticed.update(job.job_id for job in jobs)
-    await _acknowledge_cancellations(runtime, jobs)
     return _job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
 
 
 async def _turn_start_job_note() -> str | None:
-    """Describe the conversation's jobs that ended before this reply, cancelled ones included, once per reply.
+    """Describe the conversation's jobs that ended before this reply, once per reply.
 
     Every attempt of the reply asks again and gets the same note, since no later attempt replays an earlier one's
     turn context.

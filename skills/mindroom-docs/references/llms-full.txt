@@ -3169,7 +3169,9 @@ Missing credentials, a full limit, a timeout, a provider error, malformed output
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
 A "thanks" or "is this still running?" can therefore cut a long task short.
-A message outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)), sends no wrap-up notice and gets no ⏳ reaction.
+These messages send the agent no wrap-up notice and get no ⏳ reaction from it: one that mentions only other agents or people who have joined the room (unless it asks for a team the agent answers for), and one outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)).
+A person's edit of a text message still waiting in the coalescing queue decides it again, though a ⏳ already on it stays; an edited media caption, or a message not yet queued, is not decided again.
+A voice message counts as waiting while it is transcribed, so a tool batch that ends before its transcript is ready still gets the notice; once the transcript shows it is for someone else, a notice not yet sent is dropped and no ⏳ appears.
 Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
 The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
@@ -7236,6 +7238,8 @@ Use it when an agent seems to ignore messages in an encrypted room.
 ### Troubleshooting Undecryptable Messages
 
 When an agent cannot decrypt a message from an authorized sender, it logs a `matrix_event_decryption_failed` warning and posts one notice for that message's encryption session asking the user to resend.
+The notice replies to that message where an agent reply would go: in the message's thread, in the thread of the message an edit or reply targets, or in a new thread under the message.
+When none of these is known, for example when the edited message cannot be found, the notice is a plain reply.
 Only one agent posts the notice, even in multi-agent rooms.
 Resending normally fixes it, because the sender's client then shares a new key with the agent.
 Decryption-failure counters also appear on `/api/health` under `e2ee`.
@@ -15123,11 +15127,11 @@ Cancellation does not undo external side effects or forcibly stop arbitrary Pyth
 A job belongs to its conversation and requester, and to the agent that answers there; a team owns the jobs its members start for it.
 For a team formed on the fly by mentioning several agents, the follow-up comes from the agent that posted the team's reply, on its own.
 While a reply of that agent runs, it is told after its next tool call which jobs ended meanwhile and is asked to acknowledge them with one `job(action="collect")` call, which returns their results.
-A job with no useful output still needs acknowledging; a cancelled job needs none.
+A job with no useful output, or a cancelled one, still needs acknowledging.
 A reply that starts after jobs ended is told the same way when it begins.
 Ended jobs that no reply collected get one follow-up: a new message in the conversation in which the agent collects them and reports what happened.
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
-Cancelled jobs and a silent schedule's jobs get no follow-up; the next reply hears of cancelled jobs, and a silent schedule's next run hears of its own.
+Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
 Another requester's reply in a shared room never hears of these results.
 A job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own.

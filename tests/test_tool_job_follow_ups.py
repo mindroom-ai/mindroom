@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,6 +29,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.store import ConversationStore
+from mindroom.tool_jobs.client_cancel import JobCancelRequest, cancel_jobs_command, cancel_room_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     _FOLLOW_UP_LIMIT,
@@ -50,6 +52,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
 from tests.tool_job_helpers import (
+    awaiting_approval,
     completed_delegation_job,
     job_context,
     job_coordinator,
@@ -175,13 +178,47 @@ async def test_jobs_ending_together_share_one_follow_up(tmp_path: Path) -> None:
         await runtime.shutdown()
 
 
-async def test_cancelled_jobs_get_no_follow_up(tmp_path: Path) -> None:
-    """A cancelled job never posts a message of its own; the next notice or turn tells the agent."""
+@pytest.mark.parametrize("route", ["jobs_bar", "cancel_all", "stop", "agent_left"])
+async def test_no_cancel_starts_a_follow_up(tmp_path: Path, route: str) -> None:
+    """Whoever cancelled already knows, so no cancel starts a model turn; the next notice or turn tells the agent.
+
+    The routes: the jobs bar's ✕, its Stop all or `!cancel_job all`, a Stop or regenerating edit of the reply that
+    started the jobs, and the agent leaving the room.
+    """
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
+    owner = job_owner()
+    assert owner.room_id is not None
     try:
-        await _ended(runtime, "job_a", BackgroundOutcome("cancelled"))
+        for job_id in ("job_a", "job_b"):
+            await start_job(
+                runtime,
+                job_id,
+                tool_name=f"tool_{job_id}",
+                depth=0,
+                adapter={},
+                owner=owner,
+                operation=partial(awaiting_approval, runtime, job_id),
+                reply_id="reply",
+            )
+            await wait_for_status(runtime, job_id, "awaiting_approval")
+        if route == "jobs_bar":
+            await runtime.request_cancel("job_a")
+            await runtime.request_cancel("job_b")
+        elif route == "cancel_all":
+            await cancel_jobs_command(
+                runtime,
+                room_id=owner.room_id,
+                request=JobCancelRequest(job_id=None, thread_id=None),
+                may_cancel=lambda _job: True,
+            )
+        elif route == "stop":
+            await runtime.cancel_stopped_reply("reply")
+        else:
+            await cancel_room_jobs(runtime, agent_name=owner.recipient, room_id=owner.room_id)
+        for job_id in ("job_a", "job_b"):
+            await wait_for_status(runtime, job_id, "cancelled")
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_not_awaited()
     finally:

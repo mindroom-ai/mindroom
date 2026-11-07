@@ -701,28 +701,66 @@ class TurnPolicy:
             has_active_response_for_target=has_active_response_for_target,
         )
 
-    def reply_mode_leaves_unanswered(
+    def not_for_this_agent(
         self,
         room: nio.MatrixRoom,
         source: dict[str, Any],
         target: MessageTarget,
         envelope: MessageEnvelope,
     ) -> bool:
-        """Return whether a `mentions` room is sure to leave this arriving message to nobody, before any thread is read.
+        """Return whether this agent is sure not to answer this arriving message, before any thread is read.
 
-        Only a message outside any thread is sure to be left: no agent took part in it and it is no follow-up. Ingress
-        asks this so such a message neither asks a running response to wrap up nor shows that it waits for an approval.
+        It is not this agent's when it mentions only other agents or people, or when a `mentions` room leaves it to
+        nobody: it mentions no one and is outside any thread, so no agent took part in it and it is no follow-up.
+        Ingress asks this so such a message neither asks this agent's running response to wrap up nor shows that it
+        waits for this agent's approval.
         """
-        if target.source_thread_id is not None:
-            return False
-        mentioned_agents, _am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
             source,
             self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
         )
-        return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=bool(mentioned_agents))
+        if am_i_mentioned:
+            return False
+        if mentioned_agents or has_non_agent_mentions:
+            # Two or more mentioned agents ask for a team, whose answer one agent surfaces, possibly an unmentioned one.
+            return len(mentioned_agents) < 2 or not self._surfaces_requested_team(room, envelope, mentioned_agents)
+        if target.source_thread_id is not None:
+            return False
+        return self._reply_mode_requires_mention(target.room_id, envelope, mentions_an_agent=False)
+
+    def _surfaces_requested_team(
+        self,
+        room: nio.MatrixRoom,
+        envelope: MessageEnvelope,
+        mentioned_agents: list[MatrixID],
+    ) -> bool:
+        """Return whether this agent surfaces the team these mentioned agents ask for, picked as a turn picks it."""
+        availability = self._responder_availability()
+        candidates = classify_responder_candidates_from_cached_room(
+            room,
+            envelope.requester_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+        )
+        sender_visible_responders = [*candidates.allowed, *candidates.pending]
+        # Two or more tagged agents ask for the same team in any thread or room.
+        form_team = decide_team_formation(
+            mentioned_agents,
+            [],
+            [],
+            config=self.deps.runtime.config,
+            runtime_paths=self.deps.runtime_paths,
+            is_dm_room=False,
+            is_thread=False,
+            available_responders_in_room=sender_visible_responders,
+            materializable_agent_names=availability.materializable_agent_names,
+        )
+        responder_pool = self._filter_materializable_responders(sender_visible_responders, availability)
+        return self._response_owner_for_team_resolution(form_team, responder_pool) == self.deps.matrix_id
 
     def _reply_mode_requires_mention(self, room_id: str, envelope: MessageEnvelope, *, mentions_an_agent: bool) -> bool:
         """Return whether this is a person's message that mentions no agent or team in a `mentions` room."""

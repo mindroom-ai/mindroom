@@ -1877,6 +1877,69 @@ class TestAgentBot(AgentBotTestBase):
         assert not bot._turn_store.has_live_turn_claim(voice_event.event_id)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("mentions", "waits"), [((), True), (("@other:localhost",), False)])
+    async def test_voice_follow_up_for_someone_else_stops_waiting_once_transcribed(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        mentions: tuple[str, ...],
+        *,
+        waits: bool,
+    ) -> None:
+        """A voice follow-up whose transcript mentions only someone else no longer asks the running response to wrap up.
+
+        Like every voice message it counts as waiting while it is transcribed; it then drops that notice and gets no ⏳.
+        """
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {user_id: nio.MatrixUser(user_id) for user_id in ("@user:localhost", "@other:localhost")}
+        room.invited_users = {}
+        room.members_synced = True
+        voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
+        voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
+        content = {"msgtype": "m.text", "body": "can you look", SOURCE_KIND_KEY: "voice"}
+        if mentions:
+            content["m.mentions"] = {"user_ids": list(mentions)}
+        prepared_event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$voice-followup",
+            body="can you look",
+            source={"content": content},
+            server_timestamp=1234567890,
+            payload_trusted=True,
+        )
+
+        with (
+            patch(
+                "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
+                new=AsyncMock(return_value=_VoiceNormalizationResult(event=prepared_event)),
+            ),
+            patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
+            patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()) as reserve,
+            patch("mindroom.voice.ingress.mark_waiting_for_approval") as shows_waiting,
+            patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
+        ):
+            ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
+            await bot._voice_ingress.admit(
+                room,
+                voice_event,
+                bot._ingress_validator.classify(voice_event, source_kind=VOICE_SOURCE_KIND, room_id=room.room_id),
+                dispatch_timing=None,
+                ticket=ticket,
+            )
+            await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
+
+        reservation = reserve.return_value
+        pending_event = admit.await_args.kwargs["ready_result"].pending_event
+        assert (pending_event.notice is reservation) is waits
+        assert reservation.release.called is not waits
+        assert shows_waiting.called is waits
+        pending_event.close()
+
+    @pytest.mark.asyncio
     async def test_file_sidecar_text_preview_enqueues_prepared_text(
         self,
         mock_agent_user: AgentMatrixUser,
