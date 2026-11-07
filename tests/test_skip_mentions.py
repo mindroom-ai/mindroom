@@ -56,30 +56,22 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import SpanHandle
 
 
-def test_should_skip_mentions_with_metadata() -> None:
-    """Test that should_skip_mentions detects the metadata."""
-    content = {"body": "✅ Scheduled task. @email_agent will be mentioned", SKIP_MENTIONS_KEY: True}
-    assert should_skip_mentions(content) is True
-
-
-def test_should_skip_mentions_without_metadata() -> None:
-    """Test that should_skip_mentions returns False when no metadata."""
-    assert should_skip_mentions({"body": "Regular message @email_agent"}) is False
-
-
-def test_should_skip_mentions_explicit_false() -> None:
-    """Test that should_skip_mentions returns False when metadata is False."""
-    content = {"body": "Message with explicit false @email_agent", SKIP_MENTIONS_KEY: False}
-    assert should_skip_mentions(content) is False
-
-
-def test_should_skip_mentions_of_an_edit_marked_in_its_new_content() -> None:
-    """An edit whose replacement content carries the metadata skips mentions."""
-    content = {
-        "body": "* ✅ Scheduled task. @email_agent will be mentioned",
-        "m.new_content": {"body": "✅ Scheduled task. @email_agent will be mentioned", SKIP_MENTIONS_KEY: True},
-    }
-    assert should_skip_mentions(content) is True
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param({"body": "✅ Scheduled task. @email_agent", SKIP_MENTIONS_KEY: True}, True, id="marked"),
+        pytest.param({"body": "Regular message @email_agent"}, False, id="unmarked"),
+        pytest.param({"body": "Explicit false @email_agent", SKIP_MENTIONS_KEY: False}, False, id="explicit_false"),
+        pytest.param(
+            {"body": "* ✅ Scheduled task. @email_agent", "m.new_content": {"body": "✅", SKIP_MENTIONS_KEY: True}},
+            True,
+            id="edit_marked_in_new_content",
+        ),
+    ],
+)
+def test_should_skip_mentions(content: dict[str, object], *, expected: bool) -> None:
+    """Mentions are skipped when the content, or an edit's replacement content, carries the metadata."""
+    assert should_skip_mentions(content) is expected
 
 
 def test_skip_marked_message_does_not_count_its_agents_as_mentioned_earlier(tmp_path: Path) -> None:

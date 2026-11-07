@@ -35,7 +35,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
-from mindroom.thread_utils import get_all_mentioned_agents_in_thread, history_mentioned_user_ids
+from mindroom.thread_utils import get_all_mentioned_agents_in_thread
 from mindroom.tool_system.events import ToolTraceEntry, body_without_tool_markers, build_tool_trace_content
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -666,28 +666,22 @@ async def test_moved_message_mentions_whom_its_original_did(tmp_path: Path, case
         _message(move.ids[ROUTER_AGENT_NAME], {**card, **markers}, "$card:localhost"),
     ]
 
+    names = {user_id: name for name, user_id in move.ids.items()}
+
     def mentioned(messages: list[ResolvedVisibleMessage]) -> list[str]:
-        agents = get_all_mentioned_agents_in_thread(messages, config, runtime_paths)
-        return [entity_ids_by_user_id[agent.full_id] for agent in agents]
+        return [names[agent.full_id] for agent in get_all_mentioned_agents_in_thread(messages, config, runtime_paths)]
 
-    entity_ids_by_user_id = {user_id: name for name, user_id in move.ids.items()}
+    async def moved(messages: list[ResolvedVisibleMessage]) -> list[ResolvedVisibleMessage]:
+        with _matrix(move, messages) as mocks:
+            payload = await _run()
+        assert payload["copied"] == 2
+        return [_message(move.ids[ROUTER_AGENT_NAME], call.args[2]) for call in mocks.send.await_args_list[:2]]
+
     assert mentioned(thread) == expected
-
-    with _matrix(move, thread) as mocks:
-        payload = await _run()
-
-    assert payload["copied"] == 2
-    moved = [_message(move.ids[ROUTER_AGENT_NAME], call.args[2]) for call in mocks.send.await_args_list[:2]]
-    assert move.ids["code"] in moved[1].content["body"]
-    assert mentioned(moved) == expected
-    moved_again = _plan_thread_copy(
-        moved,
-        entity_name_for_sender=entity_ids_by_user_id.get,
-        target_posters=frozenset({ROUTER_AGENT_NAME}),
-        display_names={},
-        mentioned_user_ids=lambda content: history_mentioned_user_ids(content, config, runtime_paths),
-    )
-    assert mentioned([_message(move.ids[ROUTER_AGENT_NAME], copy.content) for copy in moved_again]) == expected
+    moved_once = await moved(thread)
+    assert move.ids["code"] in moved_once[1].content["body"]
+    assert mentioned(moved_once) == expected
+    assert mentioned(await moved(moved_once)) == expected
 
 
 @pytest.mark.asyncio

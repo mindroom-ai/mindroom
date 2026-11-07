@@ -64,11 +64,11 @@ def should_skip_mentions(content: dict[str, Any] | None) -> bool:
     """Return whether mentions in this message content should be ignored."""
     if not isinstance(content, dict):
         return False
-    if bool(content.get(SKIP_MENTIONS_KEY, False)):
+    if content.get(SKIP_MENTIONS_KEY):
         return True
 
     new_content = content.get("m.new_content")
-    return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY, False))
+    return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY))
 
 
 def _extract_mentioned_user_ids(
