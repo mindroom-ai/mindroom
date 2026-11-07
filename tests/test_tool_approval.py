@@ -1990,7 +1990,10 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
     hostnames: object,
     expected: bool,
 ) -> None:
-    """request_network_access calls where every hostname is statically allowlisted need no approval."""
+    """request_network_access calls where every hostname is statically allowlisted need no approval.
+
+    Either way the call's card would stay open for the default window, since the rule sets none.
+    """
     (tmp_path / ".env").write_text("MINDROOM_APPROVED_EGRESS_ALLOWLIST=.example.com\n")
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -2002,7 +2005,7 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
         runtime_paths,
     )
 
-    requires_approval, _ = await evaluate_tool_approval(
+    requires_approval, timeout_seconds = await evaluate_tool_approval(
         config,
         runtime_paths,
         "request_network_access",
@@ -2012,6 +2015,7 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
     )
 
     assert requires_approval is expected
+    assert timeout_seconds == config.tool_approval.timeout_days * 24 * 60 * 60
 
 
 @pytest.mark.parametrize(
