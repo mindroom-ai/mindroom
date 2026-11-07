@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING, Any, Literal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import nio
@@ -15,14 +15,25 @@ from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.event_journal import AdmissionFacts, RoomMembershipPosition
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_thread_modes import clear_room_thread_mode_override, set_room_thread_mode_override
 from mindroom.router.duties import RouterDuties, RouterDutiesDeps
-from tests.conftest import install_bots, make_config_reload_lifecycle, published_config_load, test_runtime_paths
+from tests.bot_helpers import make_test_agent_bot
+from tests.conftest import (
+    TEST_PASSWORD,
+    install_bots,
+    install_runtime_journal_support,
+    make_config_reload_lifecycle,
+    published_config_load,
+    test_runtime_paths,
+)
 from tests.identity_helpers import entity_ids
+from tests.test_bot_ready_hook import _validated_reported_membership_admission
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -712,11 +723,7 @@ async def test_unchanged_reload_retries_failed_write(room_state: RoomState) -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trigger", ["startup", "router_join"])
-async def test_retained_ad_hoc_room_is_reconciled(
-    room_state: RoomState,
-    monkeypatch: pytest.MonkeyPatch,
-    trigger: str,
-) -> None:
+async def test_retained_ad_hoc_room_is_reconciled(room_state: RoomState, trigger: str) -> None:
     """Retained invited rooms receive state on startup and on router rejoin."""
     config, paths, _, events, client = room_state
     for agent in config.agents.values():
@@ -726,11 +733,9 @@ async def test_retained_ad_hoc_room_is_reconciled(
     if trigger == "startup":
         await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_thread_modes()
     else:
-        monkeypatch.setattr(
-            "mindroom.router.duties.config_confirmation.restore_pending_changes",
-            AsyncMock(return_value=0),
-        )
-        await _router_duties(room_state).room_joined(ROOM_ID)
+        duties = _router_duties(room_state)
+        duties.joined(ROOM_ID)
+        await duties.publish_joined_room_thread_modes()
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
 
@@ -911,3 +916,34 @@ async def test_membership_lookup_race_logs_debug(room_state: RoomState) -> None:
     assert any(
         log["event"] == "room_thread_mode_membership_unavailable" and log["log_level"] == "debug" for log in logs
     )
+
+
+@pytest.mark.asyncio
+async def test_router_invite_join_after_agent_publishes_on_next_frame(room_state: RoomState) -> None:
+    """A router that joins after an agent publishes once the next sync frame carries the room's members."""
+    config, paths, ids, events, client = room_state
+    for agent in config.agents.values():
+        agent.rooms = []
+    del events["m.room.member", ids["agent2"].full_id]
+    router_id = ids[ROUTER_AGENT_NAME].full_id
+    user = AgentMatrixUser(ROUTER_AGENT_NAME, router_id, "Router", TEST_PASSWORD)
+    bot = install_runtime_journal_support(make_test_agent_bot(user, config=config, runtime_paths=paths))
+    bot.client = client
+    bot.orchestrator.handle_bot_ready = AsyncMock()
+    bot.mark_sync_loop_started()
+    # A local join leaves nio an empty room until the next sync frame.
+    client.rooms[ROOM_ID] = nio.MatrixRoom(ROOM_ID, router_id)
+    admission = _validated_reported_membership_admission(
+        bot,
+        ROOM_ID,
+        previous_membership="invite",
+        membership="join",
+        previous_epoch=0,
+    )
+    principal = MagicMock(ingestion_membership_position=AsyncMock(return_value=RoomMembershipPosition("join", 0)))
+    with patch.object(bot, "journal_principal", return_value=principal):
+        await bot._after_ingestion_admission(admission, AdmissionFacts(True, False), None)
+    assert (EVENT_TYPE, "") not in events
+    _sync_live_room(room_state)
+    await bot._on_ingestion_frame_completion()
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}

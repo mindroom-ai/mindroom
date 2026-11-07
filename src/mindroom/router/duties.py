@@ -61,6 +61,8 @@ class RouterDuties:
     deps: RouterDutiesDeps
     # Serializes at-least-once room-member-joined emission across the router's callbacks.
     _member_join_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # Rooms the router joined since the last sync frame; a local join's room has no members until that frame.
+    _joined_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def _membership_sync(self) -> AgentReplyMembershipSync:
@@ -84,8 +86,24 @@ class RouterDuties:
                 room_id=room_id,
                 restored_config_count=restored_configs,
             )
-        await reconcile_room_thread_mode(client, self.deps.runtime.config, self.deps.runtime.runtime_paths, room_id)
         await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
+
+    def joined(self, room_id: str) -> None:
+        """Publish the thread mode of a room the router joined by any path, once a sync frame carries its members."""
+        self._joined_room_ids.add(room_id)
+
+    async def publish_joined_room_thread_modes(self) -> None:
+        """Reconcile the rooms the router joined and still holds; failures wait for a later trigger."""
+        runtime = self.deps.runtime
+        room_ids, self._joined_room_ids = self._joined_room_ids, set()
+        if runtime.client is not None:
+            await asyncio.gather(
+                *(
+                    reconcile_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room_id)
+                    for room_id in room_ids
+                    if room_id in runtime.client.rooms
+                ),
+            )
 
     def invalidate_memberships(self, *, reason: str) -> None:
         """Fail closed when the router's view of Matrix membership is uncertain."""

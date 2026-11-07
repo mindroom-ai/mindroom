@@ -1318,6 +1318,7 @@ class AgentBot:
         """Run side effects that do not own raw sync checkpoint safety."""
         if self._router is not None:
             await self._router.refresh_memberships_if_needed()
+            await self._router.publish_joined_room_thread_modes()
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
@@ -1379,6 +1380,8 @@ class AgentBot:
             )
             if joined:
                 self._request_call_reconciliation(room_id)
+        if joined and admission.previous_membership != "join" and self._router is not None:
+            self._router.joined(room_id)
         if not joined and admission.previous_membership == "join":
             await self._reply_runtime.departed(room_id)
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:

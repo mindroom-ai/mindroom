@@ -16,7 +16,7 @@ MindRoom publishes each managed room's effective reply placement in room state e
 `room` means all joined responding agents and teams use the main timeline, `thread` means all use threads, and `mixed` means both modes are present.
 Rooms without joined responders are left unchanged.
 When a room has configured responders, other visiting agents and teams do not affect its mode.
-The router updates this state during setup and reconciliation, after configuration or `!thread_mode` changes, and when responders join or leave, so clients can choose the appropriate conversation view.
+The router updates this state during setup and reconciliation, after configuration or `!thread_mode` changes, when it joins a room by any path, including an invite, and when responders join or leave, so clients can choose the appropriate conversation view.
 MindRoom writes the event only when its current value differs from the effective mode.
 Setting or resetting `!thread_mode` reconciles the resulting mode; `show` only reads the override.
 Unavailable room-state permissions do not prevent setup or replies.
