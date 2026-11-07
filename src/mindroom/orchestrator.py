@@ -1358,7 +1358,12 @@ class _MultiAgentOrchestrator:
                 changed_entities = set(plan.restart | plan.start | catalog_restarts)
                 await self.fleet.create(changed_entities)
                 start_results = await self.fleet.start(changed_entities)
-                await self._reconcile_post_update_rooms(plan, changed_entities)
+                try:
+                    await self._reconcile_post_update_rooms(plan, changed_entities)
+                except Exception:
+                    # The new config is published, so what serves it still binds when its rooms could not be settled.
+                    await self._finalize_config_reload(current_config, plan, changed_entities | plan.live_updated)
+                    raise
                 if start_results.permanently_failed_entities:
                     logger.warning(
                         "Configuration update left some bots disabled due to permanent startup errors",
