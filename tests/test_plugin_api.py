@@ -124,6 +124,7 @@ _EXPORTS = [
     "resolve_turn_model",
     "tool",
     "toolkit_functions",
+    "write_agent_file",
     "write_file_within_root",
 ]
 
@@ -288,6 +289,7 @@ _SIGNATURES = {
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
     "tool": "(function, /, *, name, description)",
     "toolkit_functions": "(toolkit)",
+    "write_agent_file": "(raw_path, payload, *, workspace_root, file_access)",
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
 }
 

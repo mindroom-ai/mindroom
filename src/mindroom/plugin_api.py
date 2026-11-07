@@ -77,6 +77,7 @@ from mindroom.oauth import OAuthConsentGroup, OAuthDiscoveryConfig, OAuthProvide
 from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
+from mindroom.path_safety import write_agent_file
 from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
@@ -221,5 +222,6 @@ __all__ = [
     "resolve_turn_model",
     "tool",
     "toolkit_functions",
+    "write_agent_file",
     "write_file_within_root",
 ]
