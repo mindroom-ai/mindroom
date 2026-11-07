@@ -21,7 +21,12 @@ from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.api.worker_computer import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.worker_computer.protocol import MAX_SCREENCAST_FRAME_BYTES, SCREENCAST_PROTOCOL, BrowserSession
+from mindroom.worker_computer.protocol import (
+    MAX_SCREENCAST_FRAME_BYTES,
+    MAX_SCREENCAST_MESSAGE_BYTES,
+    SCREENCAST_PROTOCOL,
+    BrowserSession,
+)
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.worker_computer.screencast import ScreencastViewer
 from tests.test_worker_computer_runtime import FakeDisplay
@@ -35,8 +40,10 @@ if TYPE_CHECKING:
 RUNNER_TOKEN = "test-runner-token"  # noqa: S105 - isolated test credential
 _TIMEOUT = 10
 _FORM = """<title>Form</title><input id=field><button id=go onclick="document.title = 'clicked'">Go</button>
+<textarea id=notes></textarea>
 <script>
 window.released = [];
+document.addEventListener("wheel", (event) => window.wheeled = event.deltaY);
 document.addEventListener("keyup", (event) => released.push(event.key));
 document.addEventListener("mouseup", (event) => released.push("button " + event.button));
 </script>"""
@@ -143,14 +150,26 @@ async def test_screencast_shows_the_page_and_applies_input_only_while_the_viewer
         await viewer.receive(json.dumps({**backspace, "event": "down"}))
         await viewer.receive(json.dumps({**backspace, "event": "up"}))
         assert await page.input_value("#field") == "hi ün"
+        # Chromium would insert the text of a key held with Meta, which is a shortcut, not typing.
+        meta_q = {"type": "key", "key": "q", "code": "KeyQ", "keyCode": 81, "modifiers": 4}
+        await viewer.receive(json.dumps({**meta_q, "event": "down"}))
+        await viewer.receive(json.dumps({**meta_q, "event": "up"}))
+        assert await page.input_value("#field") == "hi ün"
+        await _click(viewer, page, "#notes")
+        enter = {"type": "key", "key": "Enter", "code": "Enter", "keyCode": 13}
+        await viewer.receive(json.dumps({**enter, "event": "down"}))
+        await viewer.receive(json.dumps({**enter, "event": "up"}))
+        assert await page.input_value("#notes") == "\n"
+        await viewer.receive(json.dumps({"type": "wheel", "x": 10, "y": 10, "dy": 120}))
+        await page.wait_for_function("window.wheeled === 120", timeout=_TIMEOUT * 1000)
 
         await viewer.receive("{}")
         assert await sent.message("error") == {"type": "error", "detail": "Invalid screencast message."}
 
         await page.evaluate("released.length = 0")
         await viewer.receive(json.dumps({"type": "key", "event": "down", "key": "Shift", "code": "ShiftLeft"}))
-        await viewer.receive(json.dumps({"type": "mouse", "event": "down", "x": 1, "y": 1, "button": "left"}))
-    assert sorted(await page.evaluate("released")) == ["Shift", "button 0"]
+        await viewer.receive(json.dumps({"type": "mouse", "event": "down", "x": 1, "y": 1, "button": "right"}))
+    assert sorted(await page.evaluate("released")) == ["Shift", "button 2"]
 
 
 @pytest.mark.asyncio
@@ -188,6 +207,8 @@ class _FakeSession:
         self.on_frame: Any = None
         self.screencasting = asyncio.Event()
         self.acknowledged: asyncio.Queue[int] = asyncio.Queue()
+        # A frame Chromium had in flight when the viewer detached, delivered during the detach.
+        self.frame_on_detach: bytes | None = None
 
     def on(self, event: str, handler: object) -> None:
         assert event == "Page.screencastFrame"
@@ -206,6 +227,8 @@ class _FakeSession:
 
     async def detach(self) -> None:
         self.sent.append(("detach", None))
+        if self.frame_on_detach is not None:
+            self.frame(0, self.frame_on_detach)
 
     def frame(self, frame_id: int, data: bytes) -> None:
         metadata = {"deviceWidth": 1280, "deviceHeight": 800}
@@ -248,6 +271,29 @@ async def test_slow_viewer_gets_the_newest_frame_and_chromium_every_acknowledgem
         assert await sent.frame() == b"fourth"
         assert await acknowledged() == 4
         assert sent.frames.empty()
+
+
+@pytest.mark.asyncio
+async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() -> None:
+    """A frame the left page delivers while the viewer detaches never reaches the viewer after it moved on."""
+    old, new = _FakePage(), _FakePage()
+    old.session.frame_on_detach = b"old"
+    shown = old
+    sent = _Viewer()
+    viewer = ScreencastViewer(
+        lambda: cast("Page", shown),
+        lambda: True,
+        sent.send_text,
+        sent.send_bytes,
+        poll_seconds=0.01,
+    )
+    async with _watching(viewer):
+        await asyncio.wait_for(old.session.screencasting.wait(), _TIMEOUT)
+        shown = new
+        await asyncio.wait_for(new.session.screencasting.wait(), _TIMEOUT)
+        assert ("detach", None) in old.session.sent
+        new.session.frame(1, b"new")
+        assert await sent.frame() == b"new"
 
 
 def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control_lease(tmp_path: Path) -> None:
@@ -298,5 +344,10 @@ def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control
         with client.websocket_connect(url, headers=dict(headers), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
             websocket.receive_text()
             websocket.send_bytes(b"binary input")
+            with pytest.raises(WebSocketDisconnect):
+                websocket.receive_text()
+        with client.websocket_connect(url, headers=dict(headers), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
+            websocket.receive_text()
+            websocket.send_text(" " * (MAX_SCREENCAST_MESSAGE_BYTES + 1))
             with pytest.raises(WebSocketDisconnect):
                 websocket.receive_text()

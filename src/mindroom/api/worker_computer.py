@@ -214,8 +214,8 @@ def _screencast_viewer(
     )
 
 
-async def _client_to_screencast(websocket: WebSocket, viewer: "ScreencastViewer", lease: asyncio.Event) -> None:
-    while not lease.is_set():
+async def _client_to_screencast(websocket: WebSocket, viewer: "ScreencastViewer") -> None:
+    while True:
         message = await websocket.receive()
         if message["type"] == "websocket.disconnect":
             return
@@ -244,7 +244,7 @@ async def screencast(websocket: WebSocket, session_id: str, generation: str) -> 
         offered = SCREENCAST_PROTOCOL in websocket.scope.get("subprotocols", [])
         await websocket.accept(subprotocol=SCREENCAST_PROTOCOL if offered else None)
         tasks = [
-            asyncio.create_task(_client_to_screencast(websocket, viewer, lease), name="viewer"),
+            asyncio.create_task(_client_to_screencast(websocket, viewer), name="viewer"),
             asyncio.create_task(viewer.follow(), name="page"),
             asyncio.create_task(viewer.send(), name="frames"),
             asyncio.create_task(lease.wait(), name="lease"),

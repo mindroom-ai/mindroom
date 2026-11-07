@@ -712,10 +712,10 @@ class BrowserTools(Toolkit):
         self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
 
     def worker_active_page(self) -> Page | None:
-        """Return the page a worker computer's browser shows: the active tab of the profile started last, if open."""
+        """Return the page a worker computer's browser shows: the active tab of the profile started last."""
         for state in reversed(self._worker_session.profiles.values()):
             tab = state.tabs.get(state.active_target_id or "")
-            if not state.cleanup_required and tab is not None and not tab.page.is_closed():
+            if tab is not None:
                 return tab.page
         return None
 

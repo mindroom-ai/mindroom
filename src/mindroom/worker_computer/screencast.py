@@ -184,6 +184,7 @@ class ScreencastViewer:
 
     def _on_frame(self, cdp: CDPSession, params: dict[str, Any]) -> None:
         if cdp is not self._cdp:
+            # The page this viewer is leaving can still deliver a frame while its session detaches.
             return
         if self._frame is not None:
             self._replaced.append((self._frame[0], self._frame[1]["sessionId"]))
@@ -253,7 +254,7 @@ class ScreencastViewer:
                     "y": message.y,
                     "button": message.button,
                     "buttons": message.buttons,
-                    "clickCount": 0 if message.event == "move" else message.clicks,
+                    "clickCount": message.clicks,
                     "modifiers": message.modifiers,
                 },
             )

@@ -140,8 +140,9 @@ async def test_browser_binding_reuses_page_and_closes_on_configuration_change() 
 
 @pytest.mark.asyncio
 async def test_agent_page_is_the_running_browser_page_until_the_computer_stops() -> None:
-    """A screencast shows the agent browser's page only while the computer runs that browser."""
-    runtime = WorkerComputerRuntime(FakeDisplay())
+    """A screencast shows the agent browser's page only while the computer runs that browser on a live display."""
+    display = FakeDisplay()
+    runtime = WorkerComputerRuntime(display)
     page = cast("Page", object())
 
     async def unused(*_args: object, **_kwargs: object) -> None:
@@ -150,6 +151,9 @@ async def test_agent_page_is_the_running_browser_page_until_the_computer_stops()
     assert runtime.agent_page() is None
     await runtime.run_browser_call("browser", lambda _display: BrowserSession(unused, unused, lambda: page), [], {})
     assert runtime.agent_page() is page
+    display.alive = False
+    assert runtime.agent_page() is None
+    display.alive = True
     await runtime.stop()
     assert runtime.agent_page() is None
     await runtime.run_browser_call("browser_mcp", lambda _display: BrowserSession(unused, unused), [], {})
