@@ -8,11 +8,14 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from mindroom.constants import (
+    COPIED_MENTIONS_KEY,
+    EXACT_MENTIONS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     TOOL_TRACE_CONTENT_KEY,
     UNFINISHED_REPLY_STATUSES,
+    WAKE_MENTIONED_KEY,
 )
 from mindroom.custom_tools.attachment_helpers import (
     resolve_current_room_thread_root,
@@ -35,6 +38,7 @@ from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
+from mindroom.thread_utils import should_skip_mentions
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import is_visible_tool_marker_line
 
@@ -64,6 +68,8 @@ _COPIED_CONTENT_KEYS = (
     "org.matrix.msc3245.voice",
     "org.matrix.msc1767.audio",
     TOOL_TRACE_CONTENT_KEY,
+    EXACT_MENTIONS_KEY,
+    WAKE_MENTIONED_KEY,
 )
 
 
@@ -96,6 +102,9 @@ def _plan_thread_copy(
         # Copies are history, never requests: no mention in them may wake an agent.
         content[SKIP_MENTIONS_KEY] = True
         content["m.mentions"] = {}
+        if not should_skip_mentions(message.content):
+            # Its mentions still count as made earlier in the thread, so a team the thread formed carries on.
+            content[COPIED_MENTIONS_KEY] = True
         entity = entity_name_for_sender(message.sender)
         speaks_for = message.content.get(ORIGINAL_SENDER_KEY)
         if entity is not None and isinstance(speaks_for, str) and speaks_for:

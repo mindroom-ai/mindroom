@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom import authorization
-from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY, WAKE_MENTIONED_KEY
+from mindroom.constants import (
+    COPIED_MENTIONS_KEY,
+    EXACT_MENTIONS_KEY,
+    ROUTER_AGENT_NAME,
+    SKIP_MENTIONS_KEY,
+    WAKE_MENTIONED_KEY,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.room_membership import room_membership_is_complete
@@ -54,9 +60,8 @@ class AgentResponseDecision:
     sender_visible_thread_agents: tuple[MatrixID, ...] = ()
 
 
-def should_skip_mentions(event_source: dict[str, Any]) -> bool:
-    """Return whether mentions in this message should be ignored."""
-    content = event_source.get("content", {})
+def should_skip_mentions(content: dict[str, Any] | None) -> bool:
+    """Return whether mentions in this message content should be ignored."""
     if not isinstance(content, dict):
         return False
     if bool(content.get(SKIP_MENTIONS_KEY, False)):
@@ -311,7 +316,7 @@ def get_all_mentioned_agents_in_thread(
 
     for msg in thread_history:
         content = msg.content
-        if should_skip_mentions({"content": content}):
+        if should_skip_mentions(content) and content.get(COPIED_MENTIONS_KEY) is not True:
             continue
         user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
         agents = _agents_from_user_ids(user_ids, registry)

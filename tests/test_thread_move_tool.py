@@ -15,6 +15,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
+    COPIED_MENTIONS_KEY,
     EXACT_MENTIONS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
@@ -187,8 +188,14 @@ def test_plan_copies_only_allowlisted_keys() -> None:
     for copy in (own, relayed):
         assert copy.content[SKIP_MENTIONS_KEY] is True
         assert copy.content["m.mentions"] == {}
-    assert set(own.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions"}
-    assert set(relayed.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions", ORIGINAL_SENDER_KEY}
+    assert set(own.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions", COPIED_MENTIONS_KEY}
+    assert set(relayed.content) == {
+        *TEXT_KEYS,
+        SKIP_MENTIONS_KEY,
+        "m.mentions",
+        COPIED_MENTIONS_KEY,
+        ORIGINAL_SENDER_KEY,
+    }
 
 
 @pytest.mark.parametrize(
@@ -631,11 +638,15 @@ async def test_move_thread_copies_messages_in_order(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "markers",
-    [{"m.mentions": {"user_ids": []}, EXACT_MENTIONS_KEY: True}, {WAKE_MENTIONED_KEY: False}],
-    ids=["exact_mentions", "wake_mentioned_false"],
+    [
+        {"m.mentions": {"user_ids": []}, EXACT_MENTIONS_KEY: True},
+        {WAKE_MENTIONED_KEY: False},
+        {SKIP_MENTIONS_KEY: True},
+    ],
+    ids=["exact_mentions", "wake_mentioned_false", "skip_mentions"],
 )
 async def test_moved_card_does_not_mention_the_agents_it_quotes(tmp_path: Path, markers: dict[str, Any]) -> None:
-    """Agents a card only quotes count as mentioned earlier neither in its thread nor in the thread it moves to."""
+    """Agents a card or notice only quotes count as mentioned earlier neither in its thread nor where it moves."""
     move = _move(tmp_path)
     config, runtime_paths = move.context.config, move.context.runtime_paths
     card = format_message_with_mentions(config, runtime_paths, "Review card: @code and @research signed off")

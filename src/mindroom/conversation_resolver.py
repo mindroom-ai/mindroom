@@ -180,7 +180,7 @@ class ConversationResolver:
         room: nio.MatrixRoom,
     ) -> tuple[list[MatrixID], bool, bool]:
         """Return mention facts from one already-normalized event source."""
-        if should_skip_mentions(event_source):
+        if should_skip_mentions(event_source.get("content")):
             return [], False, False
         return check_agent_mentioned(
             event_source,

@@ -65,7 +65,7 @@ def test_should_skip_mentions_with_metadata() -> None:
             SKIP_MENTIONS_KEY: True,
         },
     }
-    assert should_skip_mentions(event_source) is True
+    assert should_skip_mentions(event_source["content"]) is True
 
 
 def test_should_skip_mentions_without_metadata() -> None:
@@ -76,7 +76,7 @@ def test_should_skip_mentions_without_metadata() -> None:
             "body": "Regular message @email_agent",
         },
     }
-    assert should_skip_mentions(event_source) is False
+    assert should_skip_mentions(event_source["content"]) is False
 
 
 def test_should_skip_mentions_explicit_false() -> None:
@@ -87,7 +87,7 @@ def test_should_skip_mentions_explicit_false() -> None:
             SKIP_MENTIONS_KEY: False,
         },
     }
-    assert should_skip_mentions(event_source) is False
+    assert should_skip_mentions(event_source["content"]) is False
 
 
 def test_should_skip_mentions_of_an_edit_marked_in_its_new_content() -> None:
@@ -98,7 +98,7 @@ def test_should_skip_mentions_of_an_edit_marked_in_its_new_content() -> None:
             "m.new_content": {"body": "✅ Scheduled task. @email_agent will be mentioned", SKIP_MENTIONS_KEY: True},
         },
     }
-    assert should_skip_mentions(event_source) is True
+    assert should_skip_mentions(event_source["content"]) is True
 
 
 def test_skip_marked_message_does_not_count_its_agents_as_mentioned_earlier(tmp_path: Path) -> None:
