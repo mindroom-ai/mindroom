@@ -1176,8 +1176,8 @@ class ApprovalContinuationRunner:
         if tool_context.execution_identity != execution_identity:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
-        # The resumed run's calls belong to the reply it continues, so they read as shown only where that reply shows them.
-        tool_context = replace(tool_context, show_tool_calls=continuation.show_tool_calls)
+        # The resumed run's calls read as its turn's did: shown only where its reply shows them and the turn is not quiet.
+        tool_context = replace(tool_context, show_tool_calls=continuation.show_tool_calls and not request.quiet)
         if cli_approval_handler is not None:
             tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
         paused_answer = _paused_answer()

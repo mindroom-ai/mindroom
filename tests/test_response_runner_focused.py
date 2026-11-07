@@ -7574,6 +7574,7 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         media_inputs=MediaInputs(),
         model_prompt="test",
         active_model_name="default",
+        show_tool_calls=False,
         tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
     )
     started = asyncio.Event()
@@ -7628,6 +7629,7 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
         media_inputs=MediaInputs(),
         model_prompt="test",
         active_model_name="default",
+        show_tool_calls=False,
         tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
     )
     progress = TurnProgress(ending=AwaitingApproval())
@@ -7664,6 +7666,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
         media_inputs=MediaInputs(),
         model_prompt="test",
         active_model_name="default",
+        show_tool_calls=False,
         tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
     )
     tool = ToolExecution(

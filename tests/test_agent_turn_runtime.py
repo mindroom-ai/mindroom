@@ -30,7 +30,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
@@ -2003,6 +2003,12 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     assert not record.requirements
 
 
+def _silent(request: ResponseRequest) -> ResponseRequest:
+    """Return ``request`` as a silent scheduled task's turn, which shows no progress in its room."""
+    origin = message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+    return replace(request, response_envelope=replace(request.response_envelope, origin=origin))
+
+
 def _call_mirror(seen: list[tuple[str, bool, str | None]]) -> list[object]:
     """Return before-call and after-call hooks that record whether each call's reply shows it, and its preview."""
 
@@ -2045,11 +2051,32 @@ async def test_the_runner_tells_a_call_s_hooks_what_its_reply_shows_of_the_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("show_tool_calls", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_tells_a_silent_scheduled_task_s_calls_hooks_that_they_are_hidden(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent scheduled task shows no progress and may post no answer, so its calls read as hidden."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call-1", label="a")), answer("Touched.")])
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+
+    await _respond_through_runner(_runner(reply), _silent(_request()), streaming=False)
+
+    assert seen == [("before", False, None), ("after", False, None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("show_tool_calls", "source_kind", "shown"),
+    [(True, "message", True), (False, "message", False), (True, SILENT_SCHEDULE_SOURCE_KIND, False)],
+)
 async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_shows_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
+    source_kind: str,
+    shown: bool,
 ) -> None:
     """A call in a team's reply, a member's as much as the leader's, tells its hooks whether that reply shows it."""
     seen: list[tuple[str, bool, str | None]] = []
@@ -2072,10 +2099,14 @@ async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_sho
         should_use_streaming=AsyncMock(return_value=False),
         apply_post_response_effects=AsyncMock(),
     ):
-        await runner.generate_team_response_helper(_request(), member_names=["assistant"], team_mode="coordinate")
+        await runner.generate_team_response_helper(
+            _silent(_request()) if source_kind == SILENT_SCHEDULE_SOURCE_KIND else _request(),
+            member_names=["assistant"],
+            team_mode="coordinate",
+        )
 
-    preview = "label=a" if show_tool_calls else None
-    assert seen == [("before", show_tool_calls, preview), ("after", show_tool_calls, preview)]
+    preview = "label=a" if shown else None
+    assert seen == [("before", shown, preview), ("after", shown, preview)]
 
 
 @pytest.mark.asyncio

@@ -472,7 +472,7 @@ All contexts include these fields:
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
-`shown` is true when the call runs in a reply that shows its tool calls, as [`show_tool_calls`](streaming.md#tool-calls-during-streaming) sets; calls in listening, voice, and script turns, in a delegated agent's turn, and outside a Matrix conversation, such as through the OpenAI-compatible API or the MCP gateway, report false.
+`shown` is true when the call runs in a reply that shows its tool calls, as [`show_tool_calls`](streaming.md#tool-calls-during-streaming) sets; calls report false in [voice calls](voice-calls.md), listening and script turns, [contact](agent-contacts.md) turns, [silent](scheduling.md#silent-delivery) scheduled tasks, a delegated agent's turn, and outside a Matrix conversation, such as through the OpenAI-compatible API or the MCP gateway.
 `chat_preview()` returns the call's arguments as that reply's tool trace previews them, with secrets redacted and each value cut to 250 characters, or `None` when `shown` is false, so a plugin that mirrors tool activity elsewhere shows no more than the chat does.
 
 ### Message objects

@@ -16,6 +16,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     ApprovalFailure,
     DeliveryStage,
@@ -51,6 +52,7 @@ from tests.approval_continuation_helpers import dispatch_approval
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     initialize_approval_store_for_test,
+    message_origin,
     patch_response_runner_module,
     publish_hook_plugin,
     unwrap_extracted_collaborator,
@@ -816,12 +818,17 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
         assert (await runner.approvals._approval_outcome_from_delivery(frozen)).final_visible_body == final
 
 
-@pytest.mark.parametrize("show_tool_calls", [True, False])
+@pytest.mark.parametrize(
+    ("show_tool_calls", "source_kind", "shown"),
+    [(True, "message", True), (False, "message", False), (True, SILENT_SCHEDULE_SOURCE_KIND, False)],
+)
 async def test_a_resumed_run_s_calls_tell_their_hooks_whether_the_reply_it_continues_shows_them(
     tmp_path: Path,
     show_tool_calls: bool,
+    source_kind: str,
+    shown: bool,
 ) -> None:
-    """The calls an approved run makes once it resumes read whether its paused reply shows tool calls."""
+    """The calls an approved run makes once it resumes read as its turn's did: shown only in a visible reply showing them."""
     seen: list[tuple[bool, str | None]] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -859,10 +866,18 @@ async def test_a_resumed_run_s_calls_tell_their_hooks_whether_the_reply_it_conti
             ),
             patch.object(type(runner.approvals._approval_execution), "continue_run", AsyncMock(side_effect=resume)),
         ):
-            await runner.generate_response(_plain_request(_target()))
+            request = _plain_request(_target())
+            origin = message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=source_kind,
+            )
+            await runner.generate_response(
+                replace(request, response_envelope=replace(request.response_envelope, origin=origin)),
+            )
 
         assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
-    assert seen == [(show_tool_calls, "name=notes" if show_tool_calls else None)]
+    assert seen == [(shown, "name=notes" if shown else None)]
 
 
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:
