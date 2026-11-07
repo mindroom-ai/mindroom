@@ -659,6 +659,7 @@ class ResponseHookService:
             return draft
         context = BeforeResponseContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_BEFORE_RESPONSE, identity.correlation_id),
+            turn_id=identity.turn_id,
             draft=draft,
         )
         return await emit_transform(self.hook_context.registry, EVENT_MESSAGE_BEFORE_RESPONSE, context)
@@ -681,6 +682,7 @@ class ResponseHookService:
             return draft
         context = FinalResponseTransformContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM, identity.correlation_id),
+            turn_id=identity.turn_id,
             draft=draft,
         )
         draft = await emit_final_response_transform(
@@ -721,6 +723,7 @@ class ResponseHookService:
             return
         context = AfterResponseContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_AFTER_RESPONSE, identity.correlation_id),
+            turn_id=identity.turn_id,
             result=ResponseResult(
                 response_text=response_text,
                 response_event_id=response_event_id,
@@ -748,6 +751,7 @@ class ResponseHookService:
             return
         context = CancelledResponseContext(
             **self.hook_context.base_kwargs(EVENT_MESSAGE_CANCELLED, identity.correlation_id),
+            turn_id=identity.turn_id,
             info=CancelledResponseInfo(
                 envelope=identity.response_envelope,
                 visible_response_event_id=visible_response_event_id,

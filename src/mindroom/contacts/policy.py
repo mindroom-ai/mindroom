@@ -179,6 +179,8 @@ async def _run_hooks(
             runtime_paths=context.runtime_paths,
             correlation_id=context.correlation_id or uuid4().hex,
         ),
+        turn_id=context.turn_id,
+        parent_turn_id=context.parent_turn_id,
         agent_name=record.party(side).id,
         room_id=room_id,
         thread_id=thread_id,

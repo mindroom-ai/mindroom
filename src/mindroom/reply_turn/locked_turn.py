@@ -549,6 +549,7 @@ class LockedTurns:
                 response_envelope=request.response_envelope,
                 sources=request.sources,
                 correlation_id=correlation_id_for_request(request),
+                turn_id=request.turn_id,
                 participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
                 contact_turn=request.contact is not None,
             ),

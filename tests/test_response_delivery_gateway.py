@@ -146,6 +146,7 @@ def _identity(
         response_kind="agent",
         response_envelope=envelope,
         correlation_id="c1",
+        turn_id="turn-1",
         sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
     )
 
@@ -421,6 +422,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 response_kind="agent",
                 response_envelope=envelope,
                 correlation_id="c1",
+                turn_id="turn-1",
                 sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
             ),
         )

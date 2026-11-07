@@ -5749,6 +5749,7 @@ It also leaves and logs `call_roster_absent_from_sfu` after a minute in which no
 After that it joins the call again only when the caller rejoins it or MindRoom restarts; after a restart it leaves again a minute later if the caller is still not connected.
 A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
+The agent prepares its voice session while it connects to the call's media, and logs `call_join_timing` once it is in the call, with the milliseconds from the start of the join to each step.
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
 
@@ -5836,6 +5837,7 @@ LiveKit media still needs a static public IP and open TCP and UDP media ports, w
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables it with `matrix_rtc_enabled: true`.
 
 The agent joins only calls started on your own MatrixRTC backend, meaning the one in `calls.livekit_service_url` or the agent homeserver's `.well-known`; calls started through a different backend are ignored.
+The agent reuses the `.well-known` service for 10 minutes, and reads it again sooner when a call advertises a different one.
 [Managed rooms](https://docs.mindroom.chat/rooms/#room-management) already let every member join calls.
 In other rooms, such as ad-hoc rooms, the power levels must let members send `org.matrix.msc3401.call.member` state events, which Element Call-capable clients set up when they create rooms.
 Calls work in both encrypted and unencrypted rooms.
@@ -7567,6 +7569,7 @@ For a room with shared history and one existing guest, a record looks like this:
 If the room's history setting stops matching the record, or anyone other than a MindRoom agent it does not list joins, is invited, or knocks, onboarding for that human fails with one of the log messages above until someone fixes the room.
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
+Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list, set to 0 at each reconciliation, so the router and agents can publish them.
 
 # Personal Agents
 
@@ -17324,6 +17327,8 @@ Do not report or "fix" these; they are deliberate.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - `!auto_approve` lets a person approve every gated tool call they request in one thread, or in the whole room when it has no threads, for up to 24 hours, including tools that ask for their own confirmation but not tool calls scheduled to run later; only that person can send it, never an agent acting for them.
 - The router publishes each room's open `!auto_approve` windows as unencrypted room state keyed by its own user ID: thread, requester ID, and end time, so the homeserver and every room member can read them even in an encrypted room.
+- The router also publishes which joined members of each room are its installation's router, agent, and team accounts, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read them even in an encrypted room.
+  Other members can send the same event type only under other state keys, so a client trusts only the list a MindRoom router on the viewer's homeserver sent under its own user ID; see [Room Accounts List](https://docs.mindroom.chat/architecture/matrix/#room-accounts-list).
 - Scheduled tasks, including their prompts, and thread tags, including the topic tags agents add automatically, are stored as unencrypted room state, so the homeserver and every room member can read them even in an encrypted room.
 - A `!config set` change awaiting confirmation is stored as unencrypted room state with its config path, requester, and new value, so the homeserver and every room member can read them even in an encrypted room; a new value that display redaction would mask, or that room state cannot hold, such as a decimal number, stays only in the running process.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
@@ -18188,6 +18193,7 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 `mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
 `context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
 `await context.hooks.message_sender(room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch=False, mentions=None, wake_mentioned=True)` sends a message from the turn's bot, with `source_hook` such as `"my-plugin:my-tool"` naming what sent it; `extra_content`, `trigger_dispatch`, `mentions`, and `wake_mentioned` work as in a hook's [`ctx.send_message`](https://docs.mindroom.chat/hooks/#sending-messages), but the message does not carry the turn's requester.
+`context.turn_id` names the agent turn the call belongs to, which that turn's hooks carry as `ctx.turn_id`, or is `None` for a call outside a turn, such as a background script's; in a delegated subagent's turn, `context.parent_turn_id` names the turn that delegated it.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -19162,6 +19168,8 @@ All contexts include these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
+| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval runs as a new turn with the same `correlation_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
+| `parent_turn_id` | `str \| None` | In a delegated subagent's turn, the `turn_id` of the turn that delegated it; otherwise `None` |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
 
