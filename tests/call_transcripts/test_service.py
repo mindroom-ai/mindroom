@@ -187,6 +187,10 @@ class FakeNotes:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     transcripts: list[CallTranscript] = field(default_factory=list)
 
+    def writes_notes(self) -> bool:
+        """Write notes unless ``markdown`` is None, as without a notes model."""
+        return self.markdown is not None
+
     async def write_notes(self, transcript: CallTranscript) -> str | None:
         """Record the transcript and answer ``markdown`` once ``gate`` opens, or fail."""
         self.transcripts.append(transcript)
@@ -967,6 +971,20 @@ async def test_notes_wait_until_the_room_can_be_read_so_they_name_people_by_name
     assert transcript.names == {ANN: "Ann", BOB: "Bob"}
     [message] = world.room.transcripts
     assert message.body == "## About\nThe launch."
+
+
+@pytest.mark.asyncio
+async def test_without_a_notes_model_the_message_does_not_wait_for_names(world: World) -> None:
+    """Only notes name people, so without a notes model a room whose names cannot be read holds nothing up."""
+    world.notes.markdown = None
+    await world.end_by_leaving(ANN)
+    world.room.readable = False
+    world.clock.advance(20)
+
+    await world.tick()
+
+    [message] = world.room.transcripts
+    assert message.body == "Call · 1 min"
 
 
 @pytest.mark.asyncio

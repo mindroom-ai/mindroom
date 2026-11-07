@@ -55,6 +55,10 @@ class ModelNotesWriter:
     config: Callable[[], Config]
     runtime_paths: RuntimePaths
 
+    def writes_notes(self) -> bool:
+        """Return whether ``calls.transcripts.notes_model`` names a model, read now."""
+        return self.config().calls.transcripts.notes_model is not None
+
     async def write_notes(self, transcript: CallTranscript) -> str | None:
         """Return the call's notes in Markdown, recording the model's usage; raise when the model gives none."""
         config = self.config()

@@ -186,6 +186,10 @@ class _Transcriber(Protocol):
 class _NotesWriter(Protocol):
     """The operator's notes model."""
 
+    def writes_notes(self) -> bool:
+        """Return whether a notes model is set, so notes will be written."""
+        ...
+
     async def write_notes(self, transcript: CallTranscript) -> str | None:
         """Return the call's notes in Markdown, None when no notes model is set; raise when they cannot be written."""
         ...
@@ -558,11 +562,11 @@ class CallTranscriptService:
             await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock())
             logger.info("call_transcript_had_no_speech", room_id=call.room_id, call_id=call.id)
             return
-        names = await self._room.display_names(call.room_id, {turn.sender for turn in turns})
         notes = self._written_notes.get(call.id)
-        writes_notes = notes is None and call.transcript_attempts < _NOTES_ATTEMPTS
-        if writes_notes and names is None:
-            # Notes name people by display name; until the room can be read they wait, without using an attempt.
+        writes_notes = notes is None and call.transcript_attempts < _NOTES_ATTEMPTS and self._notes.writes_notes()
+        # Only notes name people, by display name; until the room can be read they wait, without using an attempt.
+        names = await self._room.display_names(call.room_id, {turn.sender for turn in turns}) if writes_notes else {}
+        if names is None:
             await self._postpone(call, failed=False)
             return
         transcript = CallTranscript(
@@ -570,7 +574,7 @@ class CallTranscriptService:
             room_id=call.room_id,
             duration_seconds=round(call.ended_at - call.started_at),
             turns=turns,
-            names=names or {},
+            names=names,
         )
         if writes_notes:
             try:

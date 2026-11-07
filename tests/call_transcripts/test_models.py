@@ -81,14 +81,17 @@ def _notes_model(monkeypatch: pytest.MonkeyPatch, *answers: dict[str, object]) -
 
 @pytest.mark.asyncio
 async def test_without_a_notes_model_there_are_no_notes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """No notes model writes no notes and asks no model."""
+    """No notes model writes no notes and asks no model; with one set, notes are written."""
     paths = test_runtime_paths(tmp_path)
     model = _notes_model(monkeypatch)
+    writer = ModelNotesWriter(lambda: _config(paths, notes_model=None), paths)
 
-    notes = await ModelNotesWriter(lambda: _config(paths, notes_model=None), paths).write_notes(_transcript())
+    notes = await writer.write_notes(_transcript())
 
     assert notes is None
+    assert not writer.writes_notes()
     assert model.requests == []
+    assert ModelNotesWriter(lambda: _config(paths), paths).writes_notes()
 
 
 @pytest.mark.asyncio
