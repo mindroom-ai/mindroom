@@ -36,7 +36,7 @@ The router publishes it on startup and after every config reload, and updates it
 Matrix accepts a state key that starts with `@` only from that user, but any member allowed to send the type can send it under another state key.
 So a client reads only the event keyed by a router's user ID, and trusts it only when its sender is a MindRoom router (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation) on the viewer's own homeserver.
 Each MindRoom installation in a room has its own router, which lists only its own accounts.
-The router can send the event only where the room's power levels allow it, as in the rooms MindRoom and its agents create, which give the type power level 0; a client that creates rooms should do the same.
+The router can send the event only where the room's power levels allow it: managed rooms give the type power level 0 at every startup, but other rooms, such as personal rooms, keep the power levels they were created with, so a client that creates rooms should give the type power level 0 too.
 
 ## Model Selection Protocol
 
