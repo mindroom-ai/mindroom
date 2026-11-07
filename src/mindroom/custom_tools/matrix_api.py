@@ -257,7 +257,7 @@ class MatrixApiTools(Toolkit):
             if isinstance(current, dict):
                 found.update(key for key in current if isinstance(key, str) and key.startswith(prefixes))
                 pending.extend(current.values())
-            elif isinstance(current, list):
+            elif isinstance(current, (list, tuple)):
                 pending.extend(current)
         return sorted(found)
 

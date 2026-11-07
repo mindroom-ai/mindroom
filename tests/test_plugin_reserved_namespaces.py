@@ -94,6 +94,8 @@ async def _call(context: ToolRuntimeContext, **arguments: object) -> dict[str, o
             },
             id="edit",
         ),
+        # Arguments that are not JSON decode as a Python literal, and a tuple serializes as a JSON array.
+        pytest.param({"body": "card", "cards": ({"io.example.card": {"title": "Approved"}},)}, id="tuple"),
     ],
 )
 async def test_matrix_api_refuses_content_keys_a_loaded_plugin_reserves(
