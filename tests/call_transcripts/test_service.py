@@ -1306,6 +1306,30 @@ async def test_speech_said_before_the_end_is_accepted_until_the_transcript_is_po
 
 
 @pytest.mark.asyncio
+async def test_late_speech_is_closed_once_the_notes_are_written_even_while_a_failed_post_waits(world: World) -> None:
+    """The notes posted always cover the transcript posted: a stretch arriving after them is too late, retry or not."""
+    world.room.failed_transcript_posts = 1
+    call = await world.service.join(ROOM, ANN)
+    world.clock.advance(60)
+    world.transcriber.text = "We ship on Friday."
+    await world.say(call.id, ANN)
+    await world.service.leave(call.id, ANN)
+    world.clock.advance(20)
+    await world.service.tick()
+    assert world.room.transcripts == []
+
+    refused = await _refused("forbidden", lambda: world.say(call.id, ANN, ago=25))
+    world.clock.advance(60)
+    await world.service.tick()
+
+    assert refused.message == "It is too late to add to this call's transcript."
+    [message] = world.room.transcripts
+    assert message.body == "## About\nThe launch."
+    assert message.transcript.turns == (_Turn(sender=ANN, text="We ship on Friday."),)
+    assert [transcript.turns for transcript in world.notes.transcripts] == [message.transcript.turns]
+
+
+@pytest.mark.asyncio
 async def test_the_transcript_waits_for_a_stretch_still_being_transcribed(world: World) -> None:
     """A stretch from the call still at speech-to-text when the message falls due is not left out."""
     call = await world.service.join(ROOM, ANN)

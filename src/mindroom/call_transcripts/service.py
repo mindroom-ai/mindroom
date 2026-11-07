@@ -281,8 +281,8 @@ class CallTranscriptService:
         """Transcribe one stretch the person said from ``started_at`` into a line, or a gap if speech-to-text fails.
 
         A stretch speech-to-text heard no words in adds nothing, and returns None. The audio is never written to disk.
-        A stretch said before its call ended is accepted until the transcript message is posted; one said while
-        transcription was paused never is.
+        A stretch said before its call ended is accepted until MindRoom starts writing the transcript message, and not
+        after the message's notes are written; one said while transcription was paused never is.
         """
         call = await self._call_for(call_id, user_id)
         seconds = _speech_seconds(audio)
@@ -446,8 +446,11 @@ class CallTranscriptService:
             raise CallRefusedError(code="paused", message="Transcription is paused.")
 
     async def _admit_to_ended_call(self, call: StoredCall, user_id: str, said_at: float, ended_at: float) -> None:
-        """Take late speech said before the end from someone whose app was in the call, until the message is posted."""
-        if call.transcript_done_at is not None or call.id in self._posting:
+        """Take late speech said before the end from someone whose app was in the call, until the message is begun.
+
+        Once its notes are written that stays so while a failed post waits, so the notes cover what is posted.
+        """
+        if call.transcript_done_at is not None or call.id in self._posting or call.id in self._written_notes:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
         if said_at >= ended_at:
             raise CallRefusedError(code="forbidden", message="That was said after the call ended.")
