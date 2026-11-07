@@ -11,7 +11,8 @@ from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves de
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import presented_session
 from mindroom.api.config_lifecycle import require_api_state
-from mindroom.plugin_context import PLUGIN_NAME_SCOPE_KEY, PluginContext, build_plugin_context
+from mindroom.plugin_context import PluginContext, build_plugin_context
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

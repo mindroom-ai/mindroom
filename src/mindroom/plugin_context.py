@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.plugins import PluginInactiveError, config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -16,16 +16,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.plugin import PluginEntryConfig
     from mindroom.constants import RuntimePaths
-
-# The scope key naming the plugin whose routes serve a request, which ``mindroom.plugin_http.plugin_context`` reads.
-PLUGIN_NAME_SCOPE_KEY = "mindroom.plugin_name"
-
-
-class PluginInactiveError(RuntimeError):
-    """A plugin's context was used after a config reload disabled or removed the plugin; plugin routes answer 503."""
-
-    def __init__(self, plugin_name: str) -> None:
-        super().__init__(f"Plugin {plugin_name!r} is no longer active: a config reload disabled or removed it.")
 
 
 @dataclass(frozen=True, eq=False)

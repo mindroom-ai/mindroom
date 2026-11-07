@@ -16,8 +16,8 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
 from mindroom.plugin_api import PluginContext, current_plugin_context
-from mindroom.plugin_context import PluginInactiveError
 from mindroom.plugin_http import plugin_context
+from mindroom.tool_system.plugins import PluginInactiveError
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, publish_test_plugins
 from tests.test_plugin_routes import _app, _write_plugin
@@ -177,7 +177,7 @@ def test_a_reload_that_disables_or_removes_the_plugin_fails_its_route_closed(tmp
     response = client.get("/api/plugins/demo/reload-then-read")
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Plugin 'demo' is no longer active: a config reload disabled or removed it."}
+    assert response.json() == {"detail": "Plugin 'demo' is not active: the current config does not load it."}
     assert "secret" not in response.text
 
 
@@ -209,7 +209,7 @@ def test_a_websocket_reads_its_plugins_settings_again_after_a_reload(tmp_path: P
             websocket.receive_json()
 
     assert closed.value.code == 1013
-    assert closed.value.reason == "Plugin 'demo' is no longer active: a config reload disabled or removed it."
+    assert closed.value.reason == "Plugin 'demo' is not active: the current config does not load it."
 
 
 def test_plugin_context_outside_a_plugin_route_names_its_misuse() -> None:
@@ -242,7 +242,7 @@ def test_a_plugin_tool_reads_its_plugins_context_until_a_reload_disables_it(tmp_
 
     with tool_runtime_context(runtime):
         ctx = current_plugin_context("demo")
-        with pytest.raises(PluginInactiveError, match="Plugin 'nope' is no longer active"):
+        with pytest.raises(PluginInactiveError, match="Plugin 'nope' is not active"):
             current_plugin_context("nope")
 
     assert isinstance(ctx, PluginContext)
@@ -255,7 +255,7 @@ def test_a_plugin_tool_reads_its_plugins_context_until_a_reload_disables_it(tmp_
     current[0] = _bound(runtime_paths, {"name": "demo", "enabled": False})
     assert not ctx.is_active()
     for member in ("settings", "config", "state_root"):
-        with pytest.raises(PluginInactiveError, match="Plugin 'demo' is no longer active"):
+        with pytest.raises(PluginInactiveError, match="Plugin 'demo' is not active"):
             getattr(ctx, member)
     assert not (runtime_paths.storage_root / "plugins" / "demo").exists()
     with pytest.raises(RuntimeError, match="needs an active tool call"):

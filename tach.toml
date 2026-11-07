@@ -5786,7 +5786,6 @@ depends_on = [
     "mindroom.egress_broker",
     "mindroom.hooks",
     "mindroom.mcp.registry",
-    "mindroom.plugin_context",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry",
 ]
@@ -8228,6 +8227,7 @@ depends_on = [
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
     "mindroom.plugin_context",
+    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]

@@ -155,6 +155,16 @@ class _ConfiguredPlugin:
 
 _PUBLISHED = PluginGeneration()
 
+# The scope key naming the plugin whose routes serve a request, which ``mindroom.plugin_http.plugin_context`` reads.
+PLUGIN_NAME_SCOPE_KEY = "mindroom.plugin_name"
+
+
+class PluginInactiveError(RuntimeError):
+    """A plugin's context was used while the current config does not load the plugin; plugin routes answer 503."""
+
+    def __init__(self, plugin_name: str) -> None:
+        super().__init__(f"Plugin {plugin_name!r} is not active: the current config does not load it.")
+
 
 @dataclass(frozen=True, eq=False)
 class ConfigPlugins:
@@ -794,7 +804,6 @@ def _plugin_routes_app(plugin_name: str, module: ModuleType) -> ASGIApp:
     from fastapi.responses import JSONResponse  # noqa: PLC0415
 
     from mindroom.api.validation_errors import validation_error_response  # noqa: PLC0415
-    from mindroom.plugin_context import PLUGIN_NAME_SCOPE_KEY, PluginInactiveError  # noqa: PLC0415
 
     router = vars(module).get("router")
     if not isinstance(router, APIRouter):
@@ -802,7 +811,7 @@ def _plugin_routes_app(plugin_name: str, module: ModuleType) -> ASGIApp:
         raise plugin_imports.PluginValidationError(msg)
 
     async def plugin_inactive(connection: HTTPConnection, error: Exception) -> JSONResponse | None:
-        """Answer a route that used its context after a reload disabled the plugin with 503, or close its websocket."""
+        """Answer a route that used its context while its plugin is not active with 503, or close its websocket."""
         if isinstance(connection, WebSocket):
             await connection.close(status.WS_1013_TRY_AGAIN_LATER, str(error))
             return None
