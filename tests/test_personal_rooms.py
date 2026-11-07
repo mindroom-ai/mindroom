@@ -1555,14 +1555,18 @@ async def test_reconciliation_gives_an_older_room_the_managed_state_power_levels
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A personal room created before the router could publish a state type there lets it on the next reconcile."""
+    """A personal room created before the router could publish its accounts there gets the power level, then the list."""
     server = MatrixServer()
     room_id = await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
     power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
     del power["events"]["io.mindroom.accounts"]
+    server.state[room_id] = [event for event in server.state[room_id] if event["type"] != "io.mindroom.accounts"]
     await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
     power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
     assert power["events"]["io.mindroom.accounts"] == 0
+    accounts = next(event for event in server.state[room_id] if event["type"] == "io.mindroom.accounts")
+    assert accounts["state_key"] == server.user_id
+    assert accounts["content"] == {"accounts": [server.user_id]}
 
 
 @pytest.mark.asyncio
@@ -3208,7 +3212,11 @@ async def test_personal_service_does_not_override_departed_agent_membership(
     owner = service(tmp_path, server, monkeypatch)
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     server.set_member(room_id, server.user_id, membership)
-    member = next(event for event in server.state[room_id] if event["state_key"] == server.user_id)
+    member = next(
+        event
+        for event in server.state[room_id]
+        if (event["type"], event["state_key"]) == ("m.room.member", server.user_id)
+    )
     member["sender"] = sender
 
     async def change_membership(room_id: str, value: str) -> bool:
@@ -3218,7 +3226,11 @@ async def test_personal_service_does_not_override_departed_agent_membership(
     owner.change_membership = change_membership
     with pytest.raises(RuntimeError, match="ownership"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
-    member = next(event for event in server.state[room_id] if event["state_key"] == server.user_id)
+    member = next(
+        event
+        for event in server.state[room_id]
+        if (event["type"], event["state_key"]) == ("m.room.member", server.user_id)
+    )
     assert member["content"]["membership"] == membership
     assert member["sender"] == sender
     assert len(server.messages) == 1
