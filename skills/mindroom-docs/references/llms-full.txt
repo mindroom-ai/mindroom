@@ -9439,7 +9439,7 @@ Instead of the whole desktop, a client can show just the agent's browser page as
 The stream shows the tab the agent's `browser` tool works in, and moves within about a second when the agent switches tabs or profiles, without reconnecting.
 Until the agent's browser starts, and after it closes, the stream has no page and sends no frames.
 A tab or window that a page opens itself, such as a sign-in popup, appears in the stream only once the agent switches to it; until then, use the desktop stream to work in it.
-The open list of a `<select>` element does not show in the stream either; choose an option with the arrow keys and Enter, or use the desktop stream.
+The browser's own menus and pickers, such as the open list of a `<select>` element, a right-click menu, or a file chooser, do not show in the stream either; choose a `<select>` option with the arrow keys and Enter, or use the desktop stream.
 `browser_mcp` runs its browser in another process, so its page cannot be streamed; use the desktop stream with it.
 Watching needs no control; input needs **Take control**, which pauses the agent's browser calls as it does for the desktop, and input sent without it is dropped.
 
