@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from agno.media import Video as AgnoVideo
 
     from mindroom.tool_system.invocation import ToolCallContext
+    from mindroom.tool_system.sandbox_proxy import WorkerStandIns
 
 logger = get_logger(__name__)
 
@@ -76,7 +77,7 @@ class _Finishing:
 
     offered: frozenset[str] | None = None
     output_files: ToolOutputFilePolicy | None = None
-    to_worker: Callable[[str, Callable[..., object]], Callable[..., object]] | None = None
+    to_worker: WorkerStandIns | None = None
 
     def finished(self, function: ToolFunction) -> ToolFunction:
         """Return ``function``, adapted, with output files and through its worker stand-in where configured."""
@@ -96,7 +97,7 @@ def configure_toolkit_functions[T: AnyToolkit](
     *,
     offered: Collection[str] | None = None,
     output_files: ToolOutputFilePolicy | None = None,
-    to_worker: Callable[[str, Callable[..., object]], Callable[..., object]] | None = None,
+    to_worker: WorkerStandIns | None = None,
 ) -> T:
     """Record how whoever built ``toolkit`` offers its functions; every adaptation of the toolkit applies it.
 
@@ -106,6 +107,11 @@ def configure_toolkit_functions[T: AnyToolkit](
     """
     _FINISHING[toolkit] = _Finishing(None if offered is None else frozenset(offered), output_files, to_worker)
     return toolkit
+
+
+def toolkit_worker_stand_ins(toolkit: AnyToolkit) -> WorkerStandIns | None:
+    """Return the stand-ins that send ``toolkit``'s calls to a worker, or None when its calls run here."""
+    return _FINISHING.get(toolkit, _Finishing()).to_worker
 
 
 def rename_toolkit_functions(toolkit: AnyToolkit, aliases: Mapping[str, str]) -> None:
@@ -760,6 +766,7 @@ __all__ = [
     "requires_connect",
     "toolkit_function",
     "toolkit_function_names",
+    "toolkit_worker_stand_ins",
     "warm_agno_tool_imports",
     "with_offered_instructions",
 ]

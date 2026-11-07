@@ -13,7 +13,7 @@ import math
 import secrets
 import weakref
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -44,6 +44,7 @@ from mindroom.tool_system.worker_proxy_client import (
     post_worker_proxy_request,
     record_proxy_response_failure_for_worker,
     to_json_compatible,
+    worker_request_headers,
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -52,7 +53,14 @@ from mindroom.tool_system.worker_routing import (
     subagent_worker_key,
 )
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import (
+    SANDBOX_RUNNER_API_ROOT,
+    ProgressSink,
+    WorkerHandle,
+    WorkerReadyProgress,
+    WorkerSpec,
+    worker_api_root,
+)
 from mindroom.workers.placements import placement_for_session
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -297,11 +305,13 @@ def _worker_route(
     worker_manager: WorkerBackend,
     base_dir: str | None,
     progress_sink: ProgressSink | None = None,
+    start: bool = True,
 ) -> tuple[WorkerRoute, WorkerHandle | None]:
     """Return the route of one request, ensuring the dedicated worker that serves it.
 
     ``base_dir`` is the calling agent's tool workspace in this primary's paths; a request that names a worker
     carries it relative to the shared storage root, which the worker mounts at its own path.
+    Without ``start``, a dedicated worker is only looked up, never started: its handle, None while it is unknown.
     """
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
@@ -351,7 +361,12 @@ def _worker_route(
             resource_profile=placement.resource_profile,
         )
     worker_key = spec.worker_key if spec is not None else None
-    worker_handle = worker_manager.ensure_worker(spec, progress_sink=progress_sink) if spec is not None else None
+    if spec is None:
+        worker_handle = None
+    elif start or not worker_backend_kind(runtime_paths).dedicated:
+        worker_handle = worker_manager.ensure_worker(spec, progress_sink=progress_sink)
+    else:
+        worker_handle = worker_manager.touch_worker(spec.worker_key)
     route = WorkerRoute(
         protocol=WORKER_PROTOCOL_VERSION,
         worker_key=worker_key,
@@ -716,6 +731,88 @@ def _worker_call_arguments(
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
+def _build_execute_request(
+    *,
+    worker_manager: WorkerBackend,
+    runtime_paths: RuntimePaths,
+    tool_name: str,
+    function_name: str,
+    wire_args: list[object],
+    wire_kwargs: dict[str, object],
+    tool_config_overrides: dict[str, object] | None,
+    tool_init_overrides: dict[str, object] | None,
+    execution_env: dict[str, str] | None,
+    extra_env_passthrough: str | None,
+    worker_target: ResolvedWorkerTarget | None,
+    runtime_config: Config | None,
+    progress_sink: ProgressSink | None = None,
+    start: bool = True,
+) -> tuple[ExecuteRequest, WorkerHandle | None]:
+    """Build one call's request, unsent, and return it with the handle of the worker that serves it.
+
+    That worker starts unless ``start`` is False, as ``_worker_route`` describes.
+    """
+    # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
+    init_overrides = dict(tool_init_overrides or {})
+    base_dir = init_overrides.pop("base_dir", None)
+    route, worker_handle = _worker_route(
+        runtime_paths=runtime_paths,
+        runtime_config=runtime_config,
+        tool_name=tool_name,
+        function_name=function_name,
+        worker_target=worker_target,
+        worker_manager=worker_manager,
+        base_dir=str(base_dir) if base_dir is not None else None,
+        progress_sink=progress_sink,
+        start=start,
+    )
+    # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
+    # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
+    call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
+    execution_env = call_environment.applied(execution_env or {}, runtime_paths.process_env)
+    extra_env_passthrough = ",".join(filter(None, (extra_env_passthrough, *call_environment.pass_through))) or None
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
+    if (
+        tool_name in EXECUTION_ENV_TOOL_NAMES
+        and egress_broker_enabled(runtime_paths)
+        and runtime_config is not None
+        and agent_name is not None
+        and egress_agent_scope(runtime_config, agent_name, runtime_paths) is not None
+    ):
+        # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
+        from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
+
+        execution_env = {
+            **execution_env,
+            **execution_env_for_worker(
+                runtime_paths,
+                config=runtime_config,
+                worker_target=worker_target,
+                call_env=execution_env,
+            ),
+        }
+    request = ExecuteRequest(
+        **dict(route),
+        tool_name=tool_name,
+        function_name=function_name,
+        args=wire_args,
+        kwargs=wire_kwargs,
+        tool_config_overrides=cast("dict[str, Any]", to_json_compatible(tool_config_overrides or {})),
+        tool_init_overrides=cast("dict[str, Any]", to_json_compatible(init_overrides)),
+        execution_env=execution_env,
+        # The call's set and removed names apply over the worker's own environment and workspace script too,
+        # except where the worker's own composition changes them; a set name takes its value from execution_env.
+        environment=CallEnvironment(
+            set_names=sorted(name for name, value in call_environment.values.items() if value is not None),
+            unset_names=sorted(call_environment.removed),
+            path_prepend=list(call_environment.path_prepend),
+        ),
+        extra_env_passthrough=extra_env_passthrough,
+    )
+    return request, worker_handle
+
+
 def _call_proxy_sync(
     *,
     runtime_paths: RuntimePaths,
@@ -755,63 +852,21 @@ def _call_proxy_sync(
         if pump is not None or reply_timing is not None
         else None
     )
-    # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
-    init_overrides = dict(tool_init_overrides or {})
-    base_dir = init_overrides.pop("base_dir", None)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = _worker_route(
-            runtime_paths=runtime_paths,
-            runtime_config=runtime_config,
-            tool_name=tool_name,
-            function_name=function_name,
-            worker_target=worker_target,
+        request, worker_handle = _build_execute_request(
             worker_manager=worker_manager,
-            base_dir=str(base_dir) if base_dir is not None else None,
-            progress_sink=progress_sink,
-        )
-        # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
-        # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
-        call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
-        execution_env = call_environment.applied(execution_env or {}, runtime_paths.process_env)
-        extra_env_passthrough = ",".join(filter(None, (extra_env_passthrough, *call_environment.pass_through))) or None
-        agent_name = worker_target.routing_agent_name if worker_target is not None else None
-        # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
-        if (
-            tool_name in EXECUTION_ENV_TOOL_NAMES
-            and egress_broker_enabled(runtime_paths)
-            and runtime_config is not None
-            and agent_name is not None
-            and egress_agent_scope(runtime_config, agent_name, runtime_paths) is not None
-        ):
-            # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
-            from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
-
-            execution_env = {
-                **execution_env,
-                **execution_env_for_worker(
-                    runtime_paths,
-                    config=runtime_config,
-                    worker_target=worker_target,
-                    call_env=execution_env,
-                ),
-            }
-        request = ExecuteRequest(
-            **dict(route),
+            runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
-            args=wire_args,
-            kwargs=wire_kwargs,
-            tool_config_overrides=cast("dict[str, Any]", to_json_compatible(tool_config_overrides or {})),
-            tool_init_overrides=cast("dict[str, Any]", to_json_compatible(init_overrides)),
+            wire_args=wire_args,
+            wire_kwargs=wire_kwargs,
+            tool_config_overrides=tool_config_overrides,
+            tool_init_overrides=tool_init_overrides,
             execution_env=execution_env,
-            # The call's set and removed names apply over the worker's own environment and workspace script too,
-            # except where the worker's own composition changes them; a set name takes its value from execution_env.
-            environment=CallEnvironment(
-                set_names=sorted(name for name, value in call_environment.values.items() if value is not None),
-                unset_names=sorted(call_environment.removed),
-                path_prepend=list(call_environment.path_prepend),
-            ),
             extra_env_passthrough=extra_env_passthrough,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            progress_sink=progress_sink,
         )
         result = execute_worker_proxy_request(
             config=_worker_proxy_client_config(
@@ -864,70 +919,77 @@ async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     return await run_async_entrypoint_blocking_call(call, executor=WORKER_PROXY_CALL_EXECUTOR)
 
 
-def _worker_stand_in(
-    function_name: str,
-    local: Callable[..., object],
-    *,
-    tool_name: str,
-    runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager | None,
-    tool_config_overrides: dict[str, object] | None = None,
-    tool_init_overrides: dict[str, object] | None = None,
-    execution_env: dict[str, str] | None = None,
-    extra_env_passthrough: str | None = None,
-    worker_target: ResolvedWorkerTarget | None = None,
-    runtime_config: Config | None = None,
-    primary_placement: weakref.ref[SupportsPrimaryCallPlacement] | None = None,
-    tools: ToolRegistry,
-) -> Callable[..., object]:
-    """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
+@dataclass(frozen=True, eq=False)
+class WorkerStandIns:
+    """The stand-ins that send the calls of one toolkit, built to run in a worker, there, and what each call carries.
 
-    ``local`` is the finished entrypoint: output files, then validation, then the function. A call goes to the worker
-    with its arguments as sent, where the worker's own finished function handles and validates them; a call the
-    toolkit (``primary_placement``, when it places calls) keeps here runs ``local``. A synchronous function keeps the
-    completion ownership its own body has; an async one keeps prompt cancellation.
+    Given a function's name and finished entrypoint, it returns the stand-in that sends that function's calls there.
+    ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
+    ``tools`` is the registry the toolkit was built from.
     """
-    # The toolkit being adapted, which the stand-in keeps for as long as its function lives.
-    placement = None if primary_placement is None else primary_placement()
-    local_is_async = inspect.iscoroutinefunction(local)
-    run_blocking = _run_in_worker_proxy_executor if local_is_async else _run_sync_tool_call
 
-    @functools.wraps(local)
-    async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
-        if placement is not None and placement.runs_on_primary(
-            function_name,
-            inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments,
-        ):
-            if local_is_async:
-                return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
-            return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
-        cancellation = WorkerCallCancellation()
-        call = functools.partial(
-            _call_proxy_sync,
-            function_entrypoint=local,
-            runtime_paths=runtime_paths,
-            tool_name=tool_name,
-            function_name=function_name,
-            args=args,
-            kwargs=dict(kwargs),
-            credentials_manager=credentials_manager,
-            tool_config_overrides=tool_config_overrides,
-            tool_init_overrides=tool_init_overrides,
-            execution_env=execution_env,
-            extra_env_passthrough=extra_env_passthrough,
-            worker_target=worker_target,
-            runtime_config=runtime_config,
-            tools=tools,
-            cancellation=cancellation,
-        )
-        try:
-            return await run_blocking(call)
-        except asyncio.CancelledError:
-            # The blocking request keeps running after this await is cancelled; stop it at the worker too.
-            cancellation.cancel()
-            raise
+    tool_name: str
+    runtime_paths: RuntimePaths
+    credentials_manager: CredentialsManager | None
+    tools: ToolRegistry
+    tool_config_overrides: dict[str, object] | None = None
+    tool_init_overrides: dict[str, object] | None = None
+    execution_env: dict[str, str] | None = None
+    extra_env_passthrough: str | None = None
+    worker_target: ResolvedWorkerTarget | None = None
+    runtime_config: Config | None = None
+    # The toolkit, when it keeps some calls here; weak, because the toolkit keeps its stand-ins as long as it lives.
+    primary_placement: weakref.ref[SupportsPrimaryCallPlacement] | None = None
 
-    return proxy_entrypoint
+    def __call__(self, function_name: str, local: Callable[..., object]) -> Callable[..., object]:
+        """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
+
+        ``local`` is the finished entrypoint: output files, then validation, then the function. A call goes to the
+        worker with its arguments as sent, where the worker's own finished function handles and validates them; a call
+        the toolkit (``primary_placement``, when it places calls) keeps here runs ``local``. A synchronous function
+        keeps the completion ownership its own body has; an async one keeps prompt cancellation.
+        """
+        # The toolkit being adapted, which the stand-in keeps for as long as its function lives.
+        placement = None if self.primary_placement is None else self.primary_placement()
+        local_is_async = inspect.iscoroutinefunction(local)
+        run_blocking = _run_in_worker_proxy_executor if local_is_async else _run_sync_tool_call
+
+        @functools.wraps(local)
+        async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
+            if placement is not None and placement.runs_on_primary(
+                function_name,
+                inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments,
+            ):
+                if local_is_async:
+                    return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
+                return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
+            cancellation = WorkerCallCancellation()
+            call = functools.partial(
+                _call_proxy_sync,
+                function_entrypoint=local,
+                runtime_paths=self.runtime_paths,
+                tool_name=self.tool_name,
+                function_name=function_name,
+                args=args,
+                kwargs=dict(kwargs),
+                credentials_manager=self.credentials_manager,
+                tool_config_overrides=self.tool_config_overrides,
+                tool_init_overrides=self.tool_init_overrides,
+                execution_env=self.execution_env,
+                extra_env_passthrough=self.extra_env_passthrough,
+                worker_target=self.worker_target,
+                runtime_config=self.runtime_config,
+                tools=self.tools,
+                cancellation=cancellation,
+            )
+            try:
+                return await run_blocking(call)
+            except asyncio.CancelledError:
+                # The blocking request keeps running after this await is cancelled; stop it at the worker too.
+                cancellation.cancel()
+                raise
+
+        return proxy_entrypoint
 
 
 def worker_stand_ins(
@@ -942,18 +1004,13 @@ def worker_stand_ins(
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
     tools: ToolRegistry,
-) -> Callable[[str, Callable[..., object]], Callable[..., object]]:
-    """Return the factory of the stand-ins that send the calls of ``toolkit``, built to run in a worker, there.
-
-    Given a function's name and finished entrypoint, the factory returns the stand-in that sends its calls there.
-    ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
-    ``tools`` is the registry the toolkit was built from.
-    """
-    return functools.partial(
-        _worker_stand_in,
+) -> WorkerStandIns:
+    """Return the stand-ins that send the calls of ``toolkit``, built to run in a worker, there."""
+    return WorkerStandIns(
         tool_name=tool_name,
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
+        tools=tools,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=tool_init_overrides,
         execution_env=_execution_env_payload(
@@ -964,7 +1021,83 @@ def worker_stand_ins(
         extra_env_passthrough=extra_env_passthrough,
         worker_target=worker_target,
         runtime_config=runtime_config,
-        # Weak, because the toolkit keeps this factory as long as it lives; a strong reference would keep it forever.
         primary_placement=weakref.ref(toolkit) if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
-        tools=tools,
     )
+
+
+@dataclass(frozen=True)
+class WorkerCall:
+    """A call as its worker would receive it, unsent, and how to reach that worker's sandbox runner."""
+
+    request: ExecuteRequest
+    # The runner's API root, such as ``http://worker:8766/api/sandbox-runner``, under which it serves each operation.
+    api_root: str
+    headers: dict[str, str] = field(repr=False)
+
+
+def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = True) -> WorkerCall | None:
+    """Build the call of ``function_name`` that ``stand_ins`` would send, without sending it.
+
+    The call carries no arguments; otherwise it is the request a sent call carries, for the worker that would serve it.
+    That worker starts unless ``start`` is False; then a dedicated worker that is not running stays stopped, and the
+    answer is None.
+    """
+    runtime_paths = stand_ins.runtime_paths
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+        request, worker_handle = _build_execute_request(
+            worker_manager=worker_manager,
+            runtime_paths=runtime_paths,
+            tool_name=stand_ins.tool_name,
+            function_name=function_name,
+            wire_args=[],
+            wire_kwargs={},
+            tool_config_overrides=stand_ins.tool_config_overrides,
+            tool_init_overrides=stand_ins.tool_init_overrides,
+            execution_env=stand_ins.execution_env,
+            extra_env_passthrough=stand_ins.extra_env_passthrough,
+            worker_target=stand_ins.worker_target,
+            runtime_config=stand_ins.runtime_config,
+            start=start,
+        )
+    if (
+        not start
+        and worker_backend_kind(runtime_paths).dedicated
+        and (worker_handle is None or worker_handle.status != "ready")
+    ):
+        return None
+    if worker_handle is None and proxy_config.proxy_url is None:
+        msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
+        raise RuntimeError(msg)
+    return WorkerCall(
+        request=request,
+        # Without a worker of its own, the call goes to the shared runner at the proxy URL.
+        api_root=(
+            worker_api_root(worker_handle)
+            if worker_handle is not None
+            else f"{proxy_config.proxy_url}{SANDBOX_RUNNER_API_ROOT}"
+        ),
+        headers=worker_request_headers(
+            worker_handle,
+            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+        ),
+    )
+
+
+__all__ = [
+    "INLINE_ATTACHMENT_BYTES_ENV",
+    "ToolPlacement",
+    "WorkerAttachmentSaveReceipt",
+    "WorkerCall",
+    "WorkerStandIns",
+    "decode_attachment_save_bytes",
+    "inline_attachment_byte_limit",
+    "primary_owns_tool_settings",
+    "runner_config_snapshot",
+    "sandbox_proxy_config",
+    "save_attachment_to_worker",
+    "tool_placement",
+    "view_file_from_worker",
+    "worker_call",
+    "worker_stand_ins",
+]

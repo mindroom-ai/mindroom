@@ -4095,8 +4095,9 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
         worker_manager: object | None = None,
         base_dir: str | None,
         progress_sink: object = None,
+        start: bool = True,
     ) -> tuple[WorkerRoute, WorkerHandle | None]:
-        _ = runtime_config, worker_target, base_dir, progress_sink
+        _ = runtime_config, worker_target, base_dir, progress_sink, start
         assert runtime_paths is not None
         assert tool_name == "calculator"
         assert function_name == "add"
@@ -4201,8 +4202,9 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
         worker_manager: object | None = None,
         base_dir: str | None,
         progress_sink: object = None,
+        start: bool = True,
     ) -> tuple[WorkerRoute, WorkerHandle | None]:
-        _ = runtime_paths, runtime_config, worker_target, base_dir, progress_sink
+        _ = runtime_paths, runtime_config, worker_target, base_dir, progress_sink, start
         assert tool_name == "calculator"
         assert function_name == "add"
         assert worker_manager is worker_manager_ref

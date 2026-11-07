@@ -152,13 +152,15 @@ def worker_api_endpoint(
     ],
 ) -> str:
     """Return the API endpoint for one worker operation."""
-    api_root = handle.debug_metadata.get("api_root")
-    if api_root is None:
-        api_root = handle.endpoint.removesuffix("/execute").rstrip("/")
-
     if operation == "execute":
         return handle.endpoint
-    return f"{api_root}/{_API_ROUTES.get(operation, operation)}"
+    return f"{worker_api_root(handle)}/{_API_ROUTES.get(operation, operation)}"
+
+
+def worker_api_root(handle: WorkerHandle) -> str:
+    """Return the root of one worker's sandbox runner API, under which it serves each operation."""
+    api_root = handle.debug_metadata.get("api_root")
+    return handle.endpoint.removesuffix("/execute").rstrip("/") if api_root is None else api_root
 
 
 def process_worker_key(base_worker_key: str, *, process_id: UUID) -> str:
