@@ -95,7 +95,7 @@ plugins:
 | `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
 | `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
 | `required` | bool | `false` | Set to `true` to make startup fail, and a reload be refused, when the plugin is skipped for any reason, instead of running without it; see [Broken plugins](#broken-plugins) |
-| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module; masked as secret in the dashboard |
+| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module, and read by its routes and tools through its [plugin context](#plugin-context); masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
 Each hook override supports:
@@ -1100,6 +1100,7 @@ async def greetings(websocket: WebSocket) -> None:
 ```
 
 A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call of an agent run on the primary; anywhere else it raises `RuntimeError`.
+A plugin that uses its context states `"mindroom_plugin_api": "1.2"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 | Member | Value |
 |--------|-------|
@@ -1107,12 +1108,12 @@ A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` wi
 | `settings` | The `settings` of the plugin's entry in `config`, as a read-only mapping |
 | `config` | The config the request or tool call runs under |
 | `runtime_paths` | The runtime's paths |
-| `state_root` | `<storage root>/plugins/<plugin name>/`, the same directory as a hook's `ctx.state_root`, created on first use and kept at mode 0700 |
+| `state_root` | The plugin's [state directory](hooks.md#plugin-state), the one its hooks get as `ctx.state_root`; reading it here sets its mode to 0700 |
 | `is_active()` | Whether the config MindRoom runs now still loads the plugin |
 
 A context keeps the settings of the config it was made under, so a long-lived websocket or task gets a new context to see a later reload's settings.
-Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error, so nothing keeps using the plugin's settings.
-A route that meets that error answers 503 with `Plugin '<name>' is no longer active: a config reload disabled or removed it.`, and a websocket closes with code 1013 and that reason.
+Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error.
+A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket closes with code 1013 and that reason.
 
 ## Plugin skills
 
