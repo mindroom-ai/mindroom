@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -717,13 +716,13 @@ async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
     )
     assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     target = _target(thread_id="$thread")
-    resumed = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+    agent_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+    team_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
 
     with (
         patch.object(runner.deps.tool_runtime, "build_turn_context", return_value=tool_context),
-        patch.object(runner.approvals, "_approval_execution", new=SimpleNamespace(continue_run=resumed)),
-        patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=resumed),
-        patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=agent_resume),
+        patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=team_resume),
     ):
         async with resumed_approval(bot, continuation) as claimed:
             await runner.approvals._continue_entity_call(
@@ -738,4 +737,6 @@ async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
     [ctx] = seen
     assert (ctx.target_entity_name, ctx.target_member_names) == ("general", member_names)
     assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("$source", "corr-resume")
+    resumed, skipped = (team_resume, agent_resume) if member_names else (agent_resume, team_resume)
+    skipped.assert_not_awaited()
     assert resumed.await_args.kwargs["system_enrichment_items"] == (_MARKER,)

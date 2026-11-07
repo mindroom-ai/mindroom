@@ -298,7 +298,7 @@ Use stable keys and deterministic text for persisted items.
 
 `system:enrich` runs after `message:enrich` and adds instructions to the agent's system prompt for the current turn.
 For teams, the same instructions go to the team and to each member agent.
-A reply resumed after a tool approval runs the hook again, and its instructions reach every run the resume starts, while a run that paused keeps the system prompt it paused with.
+A reply resumed after a tool approval runs the hook again, and its instructions reach the agent's or team's new runs, while a run that paused keeps the system prompt it paused with.
 Add items with `ctx.add_instruction()`, or return `EnrichmentItem` objects as with `message:enrich`:
 
 ```python

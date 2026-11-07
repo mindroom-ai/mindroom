@@ -1282,7 +1282,7 @@ async def test_a_member_first_run_after_an_approval_resume_holds_the_resume_s_sy
     team.models["default"] = ScriptedModel([delegate("call-polish", "writer", "Polish it"), answer("Done.")])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
     team.models["writer-model"] = ScriptedModel([answer("Polished.")])
-    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.", cache_policy="stable")
+    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.")
 
     result = await team.resume(
         raised.paused,

@@ -1100,7 +1100,7 @@ async def test_a_fresh_attempt_after_an_approved_run_sends_its_resume_s_system_e
     model = _CheckedModel([_add("approved", 10, 1), _continue_call("continue"), answer("Done.")])
     install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
-    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.", cache_policy="stable")
+    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.")
 
     result = await _approve_add(tmp_path, config, paths, identity, paused, "approved", (instruction,))
 

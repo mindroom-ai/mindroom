@@ -1182,7 +1182,7 @@ class ApprovalContinuationRunner:
         tool_context = replace(tool_context, tool_calls_shown=continuation.show_tool_calls and not request.quiet)
         if cli_approval_handler is not None:
             tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
-        # The runs the resume starts get the hook's instructions; a run that paused keeps the system prompt it stored.
+        # The agent's or team's new runs get the hook's instructions; a run that paused keeps the system prompt it stored.
         request = await self.deps.request_preparer.with_system_enrichment(
             request,
             target_member_names=continuation.team_member_names or None,

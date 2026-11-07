@@ -404,7 +404,6 @@ class AgentApprovalExecution:
 
         ``progress``, when given, shows the resumed presentation live in the
         reply being continued; the terminal delivery stays with the caller.
-        Every fresh attempt of the continued turn runs with ``system_enrichment_items``.
         """
         config = self.config()
         execution_identity = tool_context.execution_identity
