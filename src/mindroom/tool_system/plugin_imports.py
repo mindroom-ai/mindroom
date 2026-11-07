@@ -18,7 +18,7 @@ from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.plugin_identity import validate_plugin_name
-from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, record_plugin_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -115,6 +115,8 @@ def _collect_plugin_bases(
         root: Path | None = None
         try:
             root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
+            # Before the next entry resolves, which can import this plugin's modules.
+            record_plugin_root(root)
             plugin_base = _load_plugin_base(root)
         except Exception as exc:
             _log_skipped_plugin_entry(plugin_entry.path, root, exc)
