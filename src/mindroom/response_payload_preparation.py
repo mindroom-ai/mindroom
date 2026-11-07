@@ -93,7 +93,6 @@ class ResponsePayloadPreparer:
         """
         preparation = request.payload_preparation
         assert preparation is not None
-        dispatch = preparation.dispatch
         pipeline_timing = request.pipeline_timing
         if pipeline_timing is not None:
             pipeline_timing.mark("response_payload_start")
@@ -101,7 +100,7 @@ class ResponsePayloadPreparer:
         payload = await self._build_payload(preparation, thread_history=request.thread_history)
 
         prepared_payload = await self.ingress_hook_runner.apply_message_enrichment(
-            dispatch,
+            preparation.dispatch,
             payload,
             target_entity_name=self.agent_name,
             target_member_names=preparation.target_member_names,
@@ -134,9 +133,7 @@ class ResponsePayloadPreparer:
     ) -> ResponseRequest:
         """Return ``request`` with what its ``system:enrich`` hooks add, ahead of its own system enrichment.
 
-        Every turn runs these hooks, also one whose prompt was built before it reached the runner, such as an edit's
-        regeneration, an interactive selection's answer, or a job follow-up. ``target_member_names`` names a team
-        turn's members and is None for an agent turn.
+        ``target_member_names`` names a team turn's members and is None for an agent turn.
         """
         items = await self.ingress_hook_runner.apply_system_enrichment(
             request.response_envelope,
