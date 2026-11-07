@@ -397,12 +397,12 @@ def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> 
     assert result.exception is not None
 
 
+@pytest.mark.usefixtures("wide_cli_consoles")
 def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None:
     """A missing plugin path fails the check, naming the path, without a traceback."""
     missing_plugin = tmp_path / "missing-plugin"
 
-    # The console wraps at the terminal width, which could split the message around a long temporary path.
-    result = runner.invoke(app, ["plugins", "check", str(missing_plugin)], env={"COLUMNS": "1000"})
+    result = runner.invoke(app, ["plugins", "check", str(missing_plugin)])
 
     assert result.exit_code == 1
     assert f"Configured plugin path does not exist: {missing_plugin.resolve()}" in result.stdout

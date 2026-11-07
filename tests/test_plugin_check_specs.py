@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
+pytestmark = pytest.mark.usefixtures("wide_cli_consoles")
+
 
 def _write_manifest(root: Path, name: str) -> None:
     root.mkdir(parents=True)
@@ -66,12 +68,7 @@ def test_plugins_check_cli_prefers_a_working_directory_plugin_over_a_package(wor
 @pytest.mark.usefixtures("working_directory")
 def test_plugins_check_cli_reports_a_package_spec_that_does_not_resolve() -> None:
     """A package spec naming no importable package fails with the loader's reason and no traceback."""
-    # The console wraps at the terminal width, which would split the message.
-    result = runner.invoke(
-        app,
-        ["plugins", "check", "pkg:missing_check_demo_pkg:plugins/demo"],
-        env={"COLUMNS": "1000"},
-    )
+    result = runner.invoke(app, ["plugins", "check", "pkg:missing_check_demo_pkg:plugins/demo"])
 
     assert result.exit_code == 1
     assert "Configured plugin module could not be resolved: pkg:missing_check_demo_pkg:plugins/demo" in result.stdout
