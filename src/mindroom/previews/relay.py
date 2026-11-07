@@ -13,9 +13,17 @@ if TYPE_CHECKING:
     from starlette.websockets import WebSocket
 
 
+# The protocol's close codes a close frame may carry (RFC 6455 7.4); applications add 3000 to 4999.
+_SENDABLE_CLOSE_CODES = frozenset({1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014})
+
+
 def _close_code(code: int | None) -> int:
-    """Return a close code either side may send: an application's 3000 to 4999, else a normal 1000."""
-    return code if code is not None and 3000 <= code <= 4999 else 1000
+    """Return the close code to pass on: one a close frame may carry, 1000 for a close without one, else 1011."""
+    # A close frame without a code reads as 1005 from the caller and 0 from the app.
+    if code in {None, 0, 1005}:
+        return 1000
+    # 1006 and the other codes no frame carries stand for a lost connection.
+    return code if code in _SENDABLE_CLOSE_CODES or 3000 <= code <= 4999 else 1011
 
 
 async def _client_to_upstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> int:
@@ -30,14 +38,15 @@ async def _client_to_upstream(websocket: WebSocket, upstream: aiohttp.ClientWebS
 
 
 async def _upstream_to_client(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> int:
-    async for message in upstream:
+    while True:
+        message = await upstream.receive()
         if message.type == aiohttp.WSMsgType.TEXT:
             await websocket.send_text(message.data)
         elif message.type == aiohttp.WSMsgType.BINARY:
             await websocket.send_bytes(message.data)
         else:
-            break
-    return _close_code(upstream.close_code)
+            # A close frame carries its own code, which aiohttp replaces once the connection drops; else it was lost.
+            return _close_code(message.data if message.type == aiohttp.WSMsgType.CLOSE else upstream.close_code)
 
 
 async def relay_websocket(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:

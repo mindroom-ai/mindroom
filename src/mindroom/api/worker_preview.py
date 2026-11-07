@@ -55,11 +55,13 @@ _HOP_HEADERS = frozenset(
 _WEBSOCKET_HEADERS = frozenset({"accept-language", "authorization", "cookie", "origin", "user-agent"})
 # uvicorn's limit on the messages the relay receives from the primary, applied to the app's messages too.
 _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
-# Each /proc/net table, the loopback address its listening sockets are reached at, and that address in a URL.
-_TABLES = (
-    ("tcp", ipaddress.ip_address("127.0.0.1"), "127.0.0.1"),
-    ("tcp6", ipaddress.ip_address("::1"), "[::1]"),
-)
+# The addresses a socket listening at loopback is bound to, each with the loopback host in a URL that reaches it.
+_LOOPBACK_HOSTS = {
+    ipaddress.ip_address("127.0.0.1"): "127.0.0.1",
+    ipaddress.ip_address("0.0.0.0"): "127.0.0.1",  # noqa: S104 - every address, loopback included
+    ipaddress.ip_address("::1"): "[::1]",
+    ipaddress.ip_address("::"): "[::1]",
+}
 _TCP_LISTEN = "0A"
 
 
@@ -68,15 +70,18 @@ def _refused(status_code: int, detail: str) -> HTTPException:
 
 
 def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    """Decode a /proc/net address: 32-bit words in hex, each in host byte order."""
+    """Decode a /proc/net address: 32-bit words in hex, each in host byte order; an IPv4-mapped one as IPv4."""
     words = (int(hex_words[start : start + 8], 16) for start in range(0, len(hex_words), 8))
-    return ipaddress.ip_address(b"".join(word.to_bytes(4, sys.byteorder) for word in words))
+    address = ipaddress.ip_address(b"".join(word.to_bytes(4, sys.byteorder) for word in words))
+    # A dual-stack socket bound to an IPv4 address, as Java binds localhost, shows in tcp6 as ::ffff:<address>.
+    mapped = address.ipv4_mapped if isinstance(address, ipaddress.IPv6Address) else None
+    return mapped if mapped is not None else address
 
 
 def _loopback_ports() -> dict[int, str]:
     """Return each port a TCP socket listens on at loopback or every address, with the loopback host that reaches it."""
     ports: dict[int, str] = {}
-    for table, loopback, host in _TABLES:
+    for table in ("tcp", "tcp6"):
         try:
             lines = Path("/proc/net", table).read_text(encoding="ascii").splitlines()[1:]
         except OSError:  # No IPv6 in this network namespace.
@@ -84,8 +89,8 @@ def _loopback_ports() -> dict[int, str]:
         for line in lines:
             _, local, _, state, *_ = line.split()
             hex_address, _, hex_port = local.partition(":")
-            address = _address(hex_address)
-            if state == _TCP_LISTEN and (address == loopback or address.is_unspecified):
+            host = _LOOPBACK_HOSTS.get(_address(hex_address))
+            if state == _TCP_LISTEN and host is not None:
                 ports.setdefault(int(hex_port, 16), host)
     return ports
 
@@ -125,7 +130,8 @@ class _AppResponse(StreamingResponse):
         self.raw_headers = [
             (name.encode("latin-1"), value.encode("latin-1"))
             for name, value in _end_to_end(
-                (name.decode("latin-1"), value.decode("latin-1")) for name, value in upstream.raw_headers
+                ((name.decode("latin-1"), value.decode("latin-1")) for name, value in upstream.raw_headers),
+                frozenset({_REFUSED_HEADER}),
             )
         ]
         self._upstream = upstream
@@ -162,7 +168,7 @@ async def relay(request: Request, port: int) -> StreamingResponse:
             headers=_end_to_end(request.headers.items(), frozenset({"host", _TOKEN_HEADER})),
             data=request.stream() if has_body else None,
             allow_redirects=False,
-            skip_auto_headers=("User-Agent", "Accept-Encoding", "Content-Type"),
+            skip_auto_headers=("Accept", "User-Agent", "Accept-Encoding", "Content-Type"),
         )
     except (aiohttp.ClientError, TimeoutError, OSError):
         await session.close()
