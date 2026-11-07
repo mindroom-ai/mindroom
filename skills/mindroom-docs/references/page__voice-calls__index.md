@@ -344,7 +344,7 @@ What people see in MindRoom Chat:
 
 - When a call starts, the router posts a `Call started` row in the room, which shows who is in the call, with Join and Transcript.
 - Transcript opens the live transcript: each person's words under their name as they speak, and a gap for a paused or untranscribed stretch.
-- Anyone in the call can hold Pause; while anyone holds it, nothing anyone says is transcribed, and the transcript shows one gap for the pause.
+- Anyone in the call can pause transcription for everyone, and anyone in it can resume it; while paused, nothing anyone says is transcribed, and the transcript shows one gap for each pause.
 - When the call ends, the router edits the row to `Call ended · N min`.
 - About 20 seconds after the end, the router posts one message in the row's thread: the notes (what the call was about, decisions, action items with who will do them, and open questions) above the full transcript, or `Call · N min` above it without a notes model; the row then links to it.
 - The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
@@ -353,9 +353,10 @@ The rules:
 
 - Starting or joining a call needs permission to post messages in the room; reading the live call needs room membership.
 - A person's app is in the call while it checks in at least every 60 seconds, which it does every 20 seconds; leaving takes it out at once.
-- Leaving from one device takes the person out of the call and releases their hold on Pause; their other device in the call rejoins with its next check-in.
-- People in the call from other Matrix apps are listed as in it, but not transcribed.
-- A call ends when nobody is in it, and a call membership a crashed client left behind does not keep it going.
+- Leaving from one device takes the person out of the call; their other device in the call rejoins with its next check-in.
+- Only people whose MindRoom Chat takes part are in the call: people in it from other Matrix apps are neither listed nor transcribed.
+- A call ends when nobody is in it, checked when someone leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
+- A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
 - A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB; each person has one stretch at a time at speech-to-text, and at most 240 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
 - A failed post or failed notes are tried again a minute later; after that, the transcript is posted without notes.
@@ -376,18 +377,17 @@ Clients reach the transcripts under `/api/call-transcripts/v1` with a client ses
 |-------|--------|
 | `POST /rooms/{room_id}/calls.join` | `{"call": Call}`: the room's live call, started if there is none; also the heartbeat |
 | `POST /calls/{call_id}/leave` | `{}` |
-| `POST /calls/{call_id}/pause` with `{"holding": true}` or `{"holding": false}` | `{"call": Call}` |
+| `POST /calls/{call_id}/pause` with `{"paused": true}` or `{"paused": false}` | `{"call": Call}` |
 | `POST /calls/{call_id}/speech`, multipart form data with `audio` (WAV) and `startedAt` (ISO 8601 time with its time zone) | `{"line": Line or null}`: a line, a gap, or null when speech-to-text heard no words |
-| `GET /rooms/{room_id}/calls.live` | `{"call": Call or null, "lines": [Line], "names": {user ID: display name or null}}` |
-| `GET /rooms/{room_id}/calls.events` | Server-sent events, each with JSON `data`: `ready` (what `calls.live` answers), `call` (a Call), `line` (a Line), and `ended` (`{"callId"}`), with a comment every 20 seconds |
+| `GET /rooms/{room_id}/calls.live`, optionally with `?after=<line ID>` | `{"call": Call or null, "lines": [Line], "names": {user ID: display name or null}}`; `lines` are those added after `after`, or all without it |
 
-A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members`, `holds` (who holds Pause), and `transcribedBy` (whose apps transcribe them), with times in ISO 8601 UTC.
+A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members` (whose apps are in the call now), and `pausedBy` (who paused, or null while not paused), with times in ISO 8601 UTC.
 A `Line` has `id`, `callId`, `userId`, `saidAt`, `seconds`, `kind` (`speech` or `gap`), and either `text` or, for a gap, `reason` (`paused` or `not-transcribed`).
 Every route answers 404 while `calls.transcripts.enabled` is off.
 A call's routes take the room from the call and answer 404 to anyone not in that room.
 Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 403 `forbidden`, 404 `not-found`, 409 `paused`, 413 `too-large`, 429 `too-many-requests` with `Retry-After`, or 503 `unavailable` while the room cannot be checked.
 A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.
-An event stream ends when its session expires or is revoked, its reader leaves the room, call transcripts are turned off, or MindRoom stops, and a client reconnects for a new `ready`; each person can have 10 streams open at once.
+Clients poll `calls.live` for new lines and the paused state: `lines` come in the order they were added, so the last one's ID is the next `after`, and an `after` that is not one of the live call's lines answers all of them.
 The row's content is `io.mindroom.call: {"call_id"}`; its edits add `ended_at`, `duration_seconds`, and, once the message is posted, `transcript_event_id`.
 The message carries `io.mindroom.call_transcript` (see [Calling an agent about a thread](#calling-an-agent-about-a-thread)) and `io.mindroom.call_notes: {"call_id"}`.
 

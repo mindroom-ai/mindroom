@@ -1056,8 +1056,6 @@ class TestAgentBot(AgentBotTestBase):
                 assert api_main.app.state.script_tool_broker is runtime.script_runtime.broker
                 assert lent.script_worker_keepalive == runtime.script_runtime.touch_live_workers
                 assert lent.call_transcripts == runtime._call_transcripts_runtime.service
-                # Responses that stream until told to stop, such as call event streams, end once shutdown begins.
-                assert app_state.shutdown_requested is shutdown_requested
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
@@ -1068,7 +1066,6 @@ class TestAgentBot(AgentBotTestBase):
             await _run_api_server("127.0.0.1", 8765, "INFO", runtime, shutdown_requested)
 
         assert app_state.embedded is None
-        assert app_state.shutdown_requested is None
         assert app_state.agent_cli_registry is None
         assert api_main.app.state.script_tool_broker is None
 

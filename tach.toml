@@ -9776,7 +9776,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.room_power",
-    "mindroom.matrix_rtc.events",
 ]
 
 [[modules]]
@@ -9785,5 +9784,4 @@ depends_on = [
     "mindroom.call_transcripts",
     "mindroom.call_transcripts.router_room",
     "mindroom.constants",
-    "mindroom.entity_resolution",
 ]

@@ -14,7 +14,6 @@ from mindroom.call_transcripts.service import CallTranscriptService
 from mindroom.call_transcripts.store import CallTranscriptStore
 from mindroom.call_transcripts.transcriber import SpeechTranscriber
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -74,10 +73,7 @@ class CallTranscriptsRuntimeCoordinator:
         if self._service is None:
             self._service = CallTranscriptService(
                 CallTranscriptStore(self.runtime_paths.storage_root),
-                RouterCallRoom(
-                    client=self._router_client,
-                    bot_user_ids=lambda: persisted_bot_user_ids(self.runtime_paths),
-                ),
+                RouterCallRoom(client=self._router_client),
                 SpeechTranscriber(self.config_provider, self.runtime_paths),
                 ModelNotesWriter(self.config_provider, self.runtime_paths),
                 clock=self.clock,

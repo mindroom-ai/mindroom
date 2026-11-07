@@ -475,11 +475,11 @@ Matrix sync callback
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, the speech-to-text call transcripts share |
 | `voice/openai_realtime_speech.py` | OpenAI text-to-speech through the Realtime API, shared by voice messages, the `openai` toolkit, and cascaded calls |
-| `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, the live stream's events, the one transcript message it leaves, and its row's edits for the end and that message |
-| `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, whose apps were in each call, who holds Pause, and when each person's app was last in a call in each room |
+| `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, the one transcript message it leaves, and its row's edits for the end and that message |
+| `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, who paused each call, and when each person's app last checked in to each call |
 | `call_transcripts/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
-| `call_transcripts/router_room.py` | The router's side of calls between people: who is in a room and its MatrixRTC call, who may post there, display names, and the row, its edits and the transcript message it posts, each at most once per call |
-| `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, the live call, and its server-sent event stream; 404 while call transcripts are off |
+| `call_transcripts/router_room.py` | The router's side of calls between people: who is in a room, who may post there, display names, and the row, its edits and the transcript message it posts, each at most once per call |
+| `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, and the live call with the lines added since the last poll; 404 while call transcripts are off |
 | `call_transcripts/transcriber.py` | Speech-to-text of one stretch of a call through `transcribe_speech`, recording its usage |
 | `call_transcripts/notes.py` | A finished call's notes from `calls.transcripts.notes_model`: what it was about, decisions, action items, and open questions |
 | `matrix_rtc/realtime_tts.py` | LiveKit TTS for cascaded calls on `gpt-realtime` models |
@@ -646,4 +646,4 @@ A database converted from the Agno layout keeps its pre-conversion copy beside i
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.
 `tracking/contacts.json` holds the contacts between personal agents and people, written only by the primary.
 `tracking/listening_markers.json` holds where each listening agent has heard each listened room up to.
-`call_transcripts/calls.db` holds live and recently ended calls between people, each call's lines until its transcript message is posted, what each call's row was last edited to say, whose apps were in each call, who holds Pause and since when, and when each person's app was last in a call in each room.
+`call_transcripts/calls.db` holds live and recently ended calls between people, each call's lines until its transcript message is posted, what each call's row was last edited to say, who paused each call and since when, and when each person's app last checked in to each call.

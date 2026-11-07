@@ -14,23 +14,19 @@ import pytest
 from mindroom.call_transcripts import service as service_module
 from mindroom.call_transcripts.service import (
     Call,
-    CallEnded,
     CallRefusedError,
     CallTranscript,
     CallTranscriptService,
-    CallUpdated,
     EndedRow,
-    LineAdded,
     TranscriptMessage,
     _Turn,
 )
-from mindroom.call_transcripts.store import CallTranscriptStore, StoredCall
+from mindroom.call_transcripts.store import CallTranscriptStore
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Collection
     from pathlib import Path
 
-    from mindroom.call_transcripts.service import CallEvent
     from mindroom.call_transcripts.store import StoredLine
 
 ROOM = "!room:example.org"
@@ -69,11 +65,10 @@ class FakeClock:
 
 @dataclass
 class FakeRoom:
-    """The router's view of the rooms: who is in them, who may post, the MatrixRTC call, and what it posted."""
+    """The router's view of the rooms: who is in them, who may post, and what it posted."""
 
     members: set[str] = field(default_factory=lambda: {ANN, BOB, CAROL})
     posters: set[str] = field(default_factory=lambda: {ANN, BOB, CAROL})
-    rtc: dict[str, float] | None = field(default_factory=dict)
     names: dict[str, str] = field(default_factory=lambda: {ANN: "Ann", BOB: "Bob"})
     readable: bool = True
     ready: bool = True
@@ -109,12 +104,6 @@ class FakeRoom:
         del room_id
         self._read()
         return user_id in self.posters if self.readable else None
-
-    async def call_members(self, room_id: str) -> Mapping[str, float] | None:
-        """Return the MatrixRTC memberships, None while the state or the room cannot be read."""
-        del room_id
-        self._read()
-        return None if self.rtc is None or not self.readable else dict(self.rtc)
 
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> dict[str, str | None] | None:
         """Return the names known for ``user_ids``, or nothing while the room cannot be read or the router is away."""
@@ -211,7 +200,6 @@ class World:
     room: FakeRoom = field(default_factory=FakeRoom)
     transcriber: FakeTranscriber = field(default_factory=FakeTranscriber)
     notes: FakeNotes = field(default_factory=FakeNotes)
-    events: list[CallEvent] = field(default_factory=list)
     service: CallTranscriptService = field(init=False)
 
     def __post_init__(self) -> None:
@@ -310,15 +298,14 @@ async def test_an_app_is_in_the_call_while_it_checks_in_at_least_every_60_second
         started_at=START,
         ended_at=None,
         members=(ANN, BOB),
-        holds=(),
-        transcribed_by=(ANN, BOB),
+        paused_by=None,
     )
 
     world.clock.advance(1)
     await world.service.tick()
     live = (await world.service.live(ROOM, BOB)).call
     assert live is not None
-    assert (live.members, live.transcribed_by) == ((BOB,), (BOB,))
+    assert live.members == (BOB,)
 
 
 @pytest.mark.asyncio
@@ -329,7 +316,7 @@ async def test_any_request_from_an_app_to_the_call_is_a_check_in(world: World) -
 
     world.clock.advance(50)
     await world.say(call.id, ANN)
-    await world.service.pause(call.id, BOB, holding=False)
+    await world.service.pause(call.id, BOB, paused=False)
     world.clock.advance(50)
     await world.service.tick()
 
@@ -342,75 +329,17 @@ async def test_any_request_from_an_app_to_the_call_is_a_check_in(world: World) -
 
 
 @pytest.mark.asyncio
-async def test_people_in_the_matrixrtc_call_without_this_feature_are_listed_but_not_transcribed(world: World) -> None:
-    """Someone on another Matrix app is in the call; only people whose apps check in are transcribed."""
-    world.room.rtc = {CAROL: START - 30, ANN: START - 1}
-    call = await world.service.join(ROOM, ANN)
-
-    assert call.members == (ANN, CAROL)
-    assert call.transcribed_by == (ANN,)
-    await _refused("forbidden", lambda: world.say(call.id, CAROL))
-
-
-@pytest.mark.asyncio
-async def test_a_crashed_apps_leftover_membership_does_not_keep_its_call_live(world: World) -> None:
-    """An app that stops checking in without leaving is out after 60 seconds, its MatrixRTC membership with it."""
-    world.room.rtc = {ANN: START - 1}
-    call = await world.service.join(ROOM, ANN)
-    world.clock.advance(20)
-    await world.service.join(ROOM, ANN)
-
-    world.clock.advance(60)
-    await world.service.tick()
-    assert (await world.service.live(ROOM, ANN)).call is not None
-
-    with world.service.listen(ROOM, world.events.append):
-        world.clock.advance(1)
-        await world.service.tick()
-
-    assert (await world.service.live(ROOM, ANN)).call is None
-    assert world.events == [CallEnded(call_id=call.id)]
-
-
-@pytest.mark.asyncio
-async def test_a_leftover_membership_does_not_count_in_a_later_call_but_a_new_one_does(world: World) -> None:
-    """A MatrixRTC membership older than that person's app's last call in the room never keeps a call live."""
-    world.room.rtc = {ANN: START - 1}
-    await world.service.join(ROOM, ANN)
-    world.clock.advance(61)
-    await world.service.tick()
-    assert (await world.service.live(ROOM, BOB)).call is None
-
-    world.clock.advance(600)
-    later = await world.service.join(ROOM, BOB)
-    assert later.members == (BOB,)
-    await world.service.leave(later.id, BOB)
-    assert (await world.service.live(ROOM, BOB)).call is None
-
-    world.room.rtc = {ANN: world.clock.now + 5}
-    world.clock.advance(10)
-    third = await world.service.join(ROOM, BOB)
-    assert third.members == (ANN, BOB)
-    await world.service.leave(third.id, BOB)
-    live = (await world.service.live(ROOM, BOB)).call
-    assert live is not None
-    assert (live.id, live.members, live.transcribed_by) == (third.id, (ANN,), ())
-
-
-@pytest.mark.asyncio
 async def test_an_app_that_leaves_is_out_at_once(world: World) -> None:
-    """Leaving takes the person out of the call immediately, even with their MatrixRTC membership still there."""
-    world.room.rtc = {ANN: START - 1, BOB: START - 1}
+    """Leaving takes the person out of the call immediately, not 60 seconds later."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(5)
 
-    with world.service.listen(ROOM, world.events.append):
-        await world.service.leave(call.id, ANN)
+    await world.service.leave(call.id, ANN)
 
-    [update] = world.events
-    assert isinstance(update, CallUpdated)
-    assert (update.call.members, update.call.transcribed_by) == ((BOB,), (BOB,))
+    live = (await world.service.live(ROOM, BOB)).call
+    assert live is not None
+    assert live.members == (BOB,)
     await _refused("forbidden", lambda: world.say(call.id, ANN))
 
 
@@ -433,35 +362,6 @@ async def test_a_restart_does_not_end_a_call_whose_apps_check_in_again(world: Wo
     assert (await world.service.live(ROOM, ANN)).call is None
 
 
-@pytest.mark.parametrize("restarted", [True, False], ids=["after-a-restart", "while-running"])
-@pytest.mark.asyncio
-async def test_a_room_that_cannot_be_read_for_a_while_ends_no_call(world: World, *, restarted: bool) -> None:
-    """Apps cannot check in while the room cannot be read; once it can, they get a full 60 seconds to check in again."""
-    call = await world.service.join(ROOM, ANN)
-    await world.service.join(ROOM, BOB)
-    if restarted:
-        world.restart()
-    world.room.readable = False
-    for _ in range(6):
-        world.clock.advance(15)
-        await world.service.tick()
-    await _refused("unavailable", lambda: world.service.join(ROOM, ANN))
-
-    world.room.readable = True
-    with world.service.listen(ROOM, world.events.append):
-        await world.service.tick()
-        world.clock.advance(20)
-        again = await world.service.join(ROOM, ANN)
-
-    assert not any(isinstance(event, CallEnded) for event in world.events)
-    assert (again.id, again.members) == (call.id, (ANN, BOB))
-    world.clock.advance(41)
-    await world.service.tick()
-    live = (await world.service.live(ROOM, ANN)).call
-    assert live is not None
-    assert (live.id, live.members) == (call.id, (ANN,))
-
-
 # Ending
 
 
@@ -474,10 +374,8 @@ async def test_the_call_ends_when_the_last_person_leaves(world: World) -> None:
     await world.service.leave(call.id, ANN)
     assert (await world.service.live(ROOM, BOB)).call is not None
 
-    with world.service.listen(ROOM, world.events.append):
-        await world.service.leave(call.id, BOB)
+    await world.service.leave(call.id, BOB)
 
-    assert world.events == [CallEnded(call_id=call.id)]
     assert (await world.service.live(ROOM, BOB)).call is None
     ended = world.store.call(call.id)
     assert ended is not None
@@ -500,23 +398,6 @@ async def test_a_live_call_is_checked_every_15_seconds(world: World) -> None:
     assert world.room.transcripts[0].call_id == call_id
 
 
-@pytest.mark.asyncio
-async def test_a_failed_state_read_never_ends_a_call(world: World) -> None:
-    """While the room's MatrixRTC state cannot be read, nobody being in the call is not believed."""
-    call = await world.service.join(ROOM, ANN)
-    await world.service.join(ROOM, BOB)
-    world.room.rtc = None
-    await world.service.leave(call.id, ANN)
-    world.clock.advance(61)
-    await world.service.tick()
-    await world.service.leave(call.id, BOB)
-
-    assert (await world.service.live(ROOM, ANN)).call is not None
-    world.room.rtc = {}
-    await world.service.tick()
-    assert (await world.service.live(ROOM, ANN)).call is None
-
-
 # The row
 
 
@@ -535,7 +416,7 @@ async def test_the_row_is_posted_when_the_call_starts(world: World) -> None:
 
 @pytest.mark.asyncio
 async def test_the_row_is_posted_once_the_router_is_ready(world: World) -> None:
-    """A call started while the router is not ready gets its row on a later check, announced to the room."""
+    """A call started while the router is not ready gets its row on a later check."""
     world.room.ready = False
     call = await world.service.join(ROOM, ANN)
     await world.service.tick()
@@ -543,13 +424,12 @@ async def test_the_row_is_posted_once_the_router_is_ready(world: World) -> None:
     assert world.room.rows == []
 
     world.room.ready = True
-    with world.service.listen(ROOM, world.events.append):
-        await world.service.tick()
+    await world.service.tick()
 
     assert world.room.rows == [(ROOM, call.id)]
-    [update] = world.events
-    assert isinstance(update, CallUpdated)
-    assert update.call.row_event_id == "$row-1"
+    live = (await world.service.live(ROOM, ANN)).call
+    assert live is not None
+    assert live.row_event_id == "$row-1"
     await world.service.tick()
     assert world.room.rows == [(ROOM, call.id)]
 
@@ -681,7 +561,7 @@ async def test_the_transcript_message_is_posted_about_20_seconds_after_the_end(w
     await world.say(call.id, BOB, ago=8)
     world.transcriber.text = "I'll write the release notes."
     await world.say(call.id, BOB, ago=4)
-    await world.service.pause(call.id, ANN, holding=True)
+    await world.service.pause(call.id, ANN, paused=True)
     world.clock.advance(30)
     await world.service.leave(call.id, ANN)
     await world.service.leave(call.id, BOB)
@@ -726,8 +606,8 @@ async def test_consecutive_stretches_of_one_speaker_are_one_turn(world: World) -
     for user_id, text, ago in [(ANN, "One.", 50), (ANN, "Two.", 45), (BOB, "Three.", 40), (ANN, "Four.", 35)]:
         world.transcriber.text = text
         await world.say(call.id, user_id, ago=ago)
-    await world.service.pause(call.id, BOB, holding=True)
-    await world.service.pause(call.id, BOB, holding=False)
+    await world.service.pause(call.id, BOB, paused=True)
+    await world.service.pause(call.id, BOB, paused=False)
     world.clock.advance(5)
     world.transcriber.text = "Five."
     await world.say(call.id, ANN, ago=2, seconds=1)
@@ -772,7 +652,7 @@ async def test_a_call_with_no_speech_posts_nothing(world: World) -> None:
     world.clock.advance(30)
     world.transcriber.text = None
     await world.say(call.id, ANN)
-    await world.service.pause(call.id, ANN, holding=True)
+    await world.service.pause(call.id, ANN, paused=True)
     await world.service.leave(call.id, ANN)
     world.clock.advance(20)
 
@@ -989,55 +869,42 @@ async def test_a_transcript_due_before_a_restart_is_posted_after_it(world: World
 
 
 @pytest.mark.asyncio
-async def test_while_anyone_holds_pause_speech_is_refused(world: World) -> None:
-    """A hold stops everyone's speech, including a stretch said before it began but arriving during it."""
+async def test_anyone_in_the_call_pauses_for_everyone_and_anyone_resumes(world: World) -> None:
+    """While paused, everyone's speech is refused, including a stretch said before the pause but arriving during it."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(30)
 
-    held = await world.service.pause(call.id, ANN, holding=True)
-    assert held.holds == (ANN,)
+    paused = await world.service.pause(call.id, ANN, paused=True)
+    assert paused.paused_by == ANN
     await _refused("paused", lambda: world.say(call.id, BOB, ago=20))
     await _refused("paused", lambda: world.say(call.id, ANN, ago=20))
 
     world.clock.advance(10)
-    released = await world.service.pause(call.id, ANN, holding=False)
-    assert released.holds == ()
+    resumed = await world.service.pause(call.id, BOB, paused=False)
+    assert resumed.paused_by is None
     world.clock.advance(5)
     line = await world.say(call.id, BOB, ago=3)
     assert line.kind == "speech"
 
 
 @pytest.mark.asyncio
-async def test_a_pause_lasts_until_the_last_hold_is_released_and_shows_once_as_a_gap(world: World) -> None:
-    """Overlapping holds are one pause; the gap is announced once, from the first hold to the last release."""
+async def test_each_pause_shows_once_as_a_gap_under_whoever_paused(world: World) -> None:
+    """Pausing a paused call changes nothing; resuming writes one gap from when the pause began."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(30)
 
-    with world.service.listen(ROOM, world.events.append):
-        await world.service.pause(call.id, ANN, holding=True)
-        world.clock.advance(5)
-        both = await world.service.pause(call.id, BOB, holding=True)
-        world.clock.advance(5)
-        await world.service.pause(call.id, ANN, holding=False)
-        await _refused("paused", lambda: world.say(call.id, ANN, ago=0.5, seconds=0.5))
-        world.clock.advance(5)
-        await world.service.pause(call.id, BOB, holding=False)
-        await world.service.pause(call.id, BOB, holding=False)
+    await world.service.pause(call.id, ANN, paused=True)
+    world.clock.advance(5)
+    again = await world.service.pause(call.id, BOB, paused=True)
+    world.clock.advance(5)
+    await world.service.pause(call.id, BOB, paused=False)
+    await world.service.pause(call.id, ANN, paused=False)
 
-    assert both.holds == (ANN, BOB)
-    gaps = [event.line for event in world.events if isinstance(event, LineAdded)]
-    assert [(gap.user_id, gap.said_at, gap.seconds, gap.kind, gap.reason) for gap in gaps] == [
-        (ANN, START + 30, 15.0, "gap", "paused"),
-    ]
-    assert [event.call.holds for event in world.events if isinstance(event, CallUpdated)] == [
-        (ANN,),
-        (ANN, BOB),
-        (BOB,),
-        (),
-    ]
-    assert world.store.lines(call.id) == gaps
+    assert again.paused_by == ANN
+    [gap] = world.store.lines(call.id)
+    assert (gap.user_id, gap.said_at, gap.seconds, gap.kind, gap.reason) == (ANN, START + 30, 10.0, "gap", "paused")
 
 
 @pytest.mark.asyncio
@@ -1048,9 +915,9 @@ async def test_a_stretch_that_overlapped_a_pause_is_refused_whenever_it_arrives(
     world.clock.advance(28)
     before = await world.say(call.id, BOB, ago=1, seconds=1)
     world.clock.advance(2)
-    await world.service.pause(call.id, ANN, holding=True)
+    await world.service.pause(call.id, ANN, paused=True)
     world.clock.advance(10)
-    await world.service.pause(call.id, ANN, holding=False)
+    await world.service.pause(call.id, ANN, paused=False)
     world.clock.advance(20)
     await world.service.join(ROOM, BOB)
 
@@ -1067,76 +934,70 @@ async def test_a_stretch_that_overlapped_a_pause_is_refused_whenever_it_arrives(
 
 
 @pytest.mark.asyncio
-async def test_leaving_releases_a_hold(world: World) -> None:
-    """Someone who leaves while holding Pause no longer holds it, and the pause shows as a gap."""
+async def test_a_pause_lasts_until_someone_resumes_or_the_call_ends(world: World) -> None:
+    """Whoever paused leaving or dropping out changes nothing; the end of the call ends the pause with its gap."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
-    await world.service.pause(call.id, ANN, holding=True)
+    await world.service.pause(call.id, ANN, paused=True)
     world.clock.advance(10)
-
     await world.service.leave(call.id, ANN)
-
-    live = await world.service.live(ROOM, BOB)
-    assert live.call is not None
-    assert live.call.holds == ()
-    assert [(line.reason, line.seconds) for line in live.lines] == [("paused", 10.0)]
-    world.clock.advance(5)
-    assert (await world.say(call.id, BOB, ago=1, seconds=0.5)).kind == "speech"
-
-
-@pytest.mark.asyncio
-async def test_the_hold_of_an_app_that_stopped_checking_in_is_released(world: World) -> None:
-    """A crashed app cannot keep the call paused: its hold goes when it is out of the call."""
-    call = await world.service.join(ROOM, ANN)
-    await world.service.join(ROOM, BOB)
-    await world.service.pause(call.id, ANN, holding=True)
     for _ in range(4):
         world.clock.advance(20)
         await world.service.join(ROOM, BOB)
-
     await world.service.tick()
 
     live = await world.service.live(ROOM, BOB)
     assert live.call is not None
-    assert (live.call.members, live.call.holds) == ((BOB,), ())
-    assert [(line.user_id, line.reason, line.seconds) for line in live.lines] == [(ANN, "paused", 80.0)]
+    assert (live.call.members, live.call.paused_by) == ((BOB,), ANN)
+    assert live.names == {ANN: "Ann", BOB: "Bob"}
+    await _refused("paused", lambda: world.say(call.id, BOB, ago=1, seconds=0.5))
+
+    await world.service.leave(call.id, BOB)
+
+    [gap] = world.store.lines(call.id)
+    assert (gap.user_id, gap.reason, gap.said_at, gap.seconds) == (ANN, "paused", START, 90.0)
+    stored = world.store.call(call.id)
+    assert stored is not None
+    assert stored.paused_by is None
 
 
 @pytest.mark.asyncio
-async def test_holds_survive_a_restart_and_the_pause_is_marked_once(world: World) -> None:
-    """After a restart speech is still refused during a hold, and its release writes the one gap from its start."""
+async def test_a_pause_survives_a_restart_and_shows_once(world: World) -> None:
+    """After a restart speech is still refused while paused, and resuming writes the one gap from its start."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(10)
-    await world.service.pause(call.id, ANN, holding=True)
+    await world.service.pause(call.id, ANN, paused=True)
     world.clock.advance(10)
 
     world.restart()
     await _refused("paused", lambda: world.say(call.id, BOB, ago=2))
     live = await world.service.live(ROOM, BOB)
     assert live.call is not None
-    assert live.call.holds == (ANN,)
+    assert live.call.paused_by == ANN
     world.clock.advance(10)
-    await world.service.pause(call.id, ANN, holding=False)
-    await world.service.pause(call.id, ANN, holding=False)
+    await world.service.pause(call.id, ANN, paused=False)
+    await world.service.pause(call.id, ANN, paused=False)
 
     lines = (await world.service.live(ROOM, BOB)).lines
     assert [(line.reason, line.said_at, line.seconds) for line in lines] == [("paused", START + 10, 20.0)]
 
 
 @pytest.mark.asyncio
-async def test_only_someone_in_the_call_can_take_a_hold(world: World) -> None:
-    """A room member whose app is not in the call cannot pause it; releasing a hold they lack does nothing."""
+async def test_only_someone_in_the_call_can_pause_or_resume_it(world: World) -> None:
+    """A room member whose app is not in the call can do neither, and an ended call cannot be paused."""
     call = await world.service.join(ROOM, ANN)
+    await world.service.pause(call.id, ANN, paused=True)
 
-    await _refused("forbidden", lambda: world.service.pause(call.id, CAROL, holding=True))
-    unchanged = await world.service.pause(call.id, CAROL, holding=False)
+    await _refused("forbidden", lambda: world.service.pause(call.id, CAROL, paused=False))
+    await _refused("forbidden", lambda: world.service.pause(call.id, CAROL, paused=True))
 
-    assert (unchanged.members, unchanged.holds) == ((ANN,), ())
+    live = (await world.service.live(ROOM, ANN)).call
+    assert live is not None
+    assert (live.members, live.paused_by) == ((ANN,), ANN)
     await world.service.leave(call.id, ANN)
-    await _refused("forbidden", lambda: world.service.pause(call.id, ANN, holding=True))
-    ended = await world.service.pause(call.id, ANN, holding=False)
-    assert (ended.ended_at, ended.holds) == (START, ())
+    await _refused("forbidden", lambda: world.service.pause(call.id, ANN, paused=True))
+    await _refused("forbidden", lambda: world.service.pause(call.id, ANN, paused=False))
 
 
 # Speech
@@ -1148,8 +1009,7 @@ async def test_speech_from_someone_in_the_call_becomes_a_line(world: World) -> N
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(30)
 
-    with world.service.listen(ROOM, world.events.append):
-        line = await world.say(call.id, ANN, ago=5, seconds=2.5)
+    line = await world.say(call.id, ANN, ago=5, seconds=2.5)
 
     assert (line.call_id, line.user_id, line.said_at, line.seconds, line.kind, line.text, line.reason) == (
         call.id,
@@ -1161,7 +1021,6 @@ async def test_speech_from_someone_in_the_call_becomes_a_line(world: World) -> N
         None,
     )
     assert world.transcriber.requests == [(call.id, ANN, 2.5)]
-    assert world.events == [LineAdded(line=line)]
     assert world.store.lines(call.id) == [line]
 
 
@@ -1279,17 +1138,15 @@ async def test_a_stretch_that_fails_to_transcribe_becomes_a_gap(world: World) ->
 
 @pytest.mark.asyncio
 async def test_a_stretch_in_which_speech_to_text_heard_no_words_adds_nothing(world: World) -> None:
-    """No words is not a failure: no line and no gap is written or announced, and the call goes on."""
+    """No words is not a failure: no line and no gap is written, and the call goes on."""
     world.transcriber.text = ""
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(30)
 
-    with world.service.listen(ROOM, world.events.append):
-        nothing = await world.service.speech(call.id, ANN, audio=_wav(1.0), started_at=world.clock.now - 2)
+    nothing = await world.service.speech(call.id, ANN, audio=_wav(1.0), started_at=world.clock.now - 2)
 
     assert nothing is None
     assert world.store.lines(call.id) == []
-    assert world.events == []
     world.transcriber.text = "Still here."
     assert (await world.say(call.id, ANN, ago=1, seconds=0.5)).text == "Still here."
 
@@ -1371,11 +1228,11 @@ async def test_people_outside_the_room_cannot_read_or_act_on_its_call(world: Wor
     await _refused("not-found", lambda: world.service.join(ROOM, OUTSIDER))
     await _refused("not-found", lambda: world.service.live(ROOM, OUTSIDER))
     await _refused("not-found", lambda: world.service.leave(call.id, OUTSIDER))
-    await _refused("not-found", lambda: world.service.pause(call.id, OUTSIDER, holding=True))
+    await _refused("not-found", lambda: world.service.pause(call.id, OUTSIDER, paused=True))
     await _refused("not-found", lambda: world.say(call.id, OUTSIDER))
     for operation in (
         lambda: world.service.leave("unknown", ANN),
-        lambda: world.service.pause("unknown", ANN, holding=False),
+        lambda: world.service.pause("unknown", ANN, paused=False),
         lambda: world.say("unknown", ANN),
     ):
         await _refused("not-found", operation)
@@ -1396,63 +1253,43 @@ async def test_a_room_whose_membership_cannot_be_read_is_unavailable(world: Worl
     await _refused("unavailable", lambda: world.service.live(ROOM, ANN))
 
 
-# The live call and its changes
+# The live call
 
 
 @pytest.mark.asyncio
 async def test_the_live_call_has_its_lines_and_everyones_names(world: World) -> None:
-    """Reading the live call gives the call, its lines in order, and the names of everyone in it or in its lines."""
+    """Reading the live call gives the call, its lines in the order they were added, and everyone's names."""
     assert (await world.service.live(ROOM, CAROL)).call is None
-    world.room.rtc = {CAROL: START + 1}
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(30)
     second = await world.say(call.id, BOB, ago=3)
     first = await world.say(call.id, ANN, ago=10)
+    await world.service.pause(call.id, BOB, paused=True)
     await world.service.leave(call.id, BOB)
 
     live = await world.service.live(ROOM, CAROL)
 
     assert live.call is not None
-    assert (live.call.id, live.call.members, live.call.transcribed_by) == (call.id, (ANN, CAROL), (ANN,))
-    assert live.lines == (first, second)
-    assert live.names == {ANN: "Ann", BOB: "Bob", CAROL: None}
+    assert (live.call.id, live.call.members, live.call.paused_by) == (call.id, (ANN,), BOB)
+    assert live.lines == (second, first)
+    assert live.names == {ANN: "Ann", BOB: "Bob"}
 
 
 @pytest.mark.asyncio
-async def test_changes_are_announced_after_they_are_written(world: World) -> None:
-    """Each event reaches the room's listeners once its change can be read back, and only that room's."""
-    seen: list[tuple[CallEvent, object]] = []
-    other: list[CallEvent] = []
+async def test_a_poll_gets_only_the_lines_added_after_the_last_it_has(world: World) -> None:
+    """With ``after``, the live call has only the lines added since, whenever they were said."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    world.clock.advance(30)
+    first = await world.say(call.id, ANN, ago=3)
+    late = await world.say(call.id, BOB, ago=20)
 
-    def listener(event: CallEvent) -> None:
-        store = world.store
-        if isinstance(event, CallUpdated):
-            seen.append((event, store.call(event.call.id)))
-        elif isinstance(event, LineAdded):
-            seen.append((event, store.lines(event.line.call_id)))
-        else:
-            seen.append((event, store.call(event.call_id)))
-
-    with world.service.listen(ROOM, listener), world.service.listen(OTHER_ROOM, other.append):
-        call = await world.service.join(ROOM, ANN)
-        world.clock.advance(10)
-        line = await world.say(call.id, ANN)
-        await world.service.leave(call.id, ANN)
-    await world.service.join(ROOM, ANN)
-
-    assert len(seen) == 4
-    (started, started_row), (row_posted, row_posted_row), said, (ended, ended_row) = seen
-    assert started == CallUpdated(call=replace(call, row_event_id=None))
-    assert isinstance(started_row, StoredCall)
-    assert row_posted == CallUpdated(call=call)
-    assert isinstance(row_posted_row, StoredCall)
-    assert row_posted_row.row_event_id == call.row_event_id == "$row-1"
-    assert said == (LineAdded(line=line), [line])
-    assert ended == CallEnded(call_id=call.id)
-    assert isinstance(ended_row, StoredCall)
-    assert ended_row.ended_at == START + 10
-    assert other == []
+    assert (await world.service.live(ROOM, ANN, after=first.id)).lines == (late,)
+    newer = await world.service.live(ROOM, ANN, after=late.id)
+    assert newer.lines == ()
+    assert newer.names == {ANN: "Ann", BOB: "Bob"}
+    assert (await world.service.live(ROOM, ANN, after="unknown")).lines == (first, late)
 
 
 @pytest.mark.asyncio
@@ -1483,7 +1320,7 @@ async def test_the_store_is_used_off_the_event_loop(world: World) -> None:
     )
     call = await world.service.join(ROOM, ANN)
     await world.say(call.id, ANN)
-    await world.service.pause(call.id, ANN, holding=True)
+    await world.service.pause(call.id, ANN, paused=True)
     await world.service.live(ROOM, ANN)
     await world.service.leave(call.id, ANN)
     world.clock.advance(20)
@@ -1503,7 +1340,7 @@ async def test_someone_never_in_the_call_cannot_add_to_it_by_leaving_it(world: W
     await world.say(call.id, ANN)
 
     await world.service.leave(call.id, CAROL)
-    assert CAROL not in world.store.app_presence(ROOM)
+    assert CAROL not in world.store.presence(call.id)
     await world.service.leave(call.id, ANN)
     world.clock.advance(5)
     await _refused("forbidden", lambda: world.say(call.id, CAROL, ago=8))
@@ -1529,14 +1366,14 @@ async def test_someone_only_in_a_later_call_cannot_add_late_speech_to_an_earlier
 
 
 @pytest.mark.asyncio
-async def test_a_stretch_from_a_clock_behind_that_arrives_after_a_hold_is_refused(world: World) -> None:
+async def test_a_stretch_from_a_clock_behind_that_arrives_after_a_pause_is_refused(world: World) -> None:
     """A device clock a second behind cannot place a stretch said during a short pause before it."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(30.5)
-    await world.service.pause(call.id, ANN, holding=True)
+    await world.service.pause(call.id, ANN, paused=True)
     world.clock.advance(0.75)
-    await world.service.pause(call.id, ANN, holding=False)
+    await world.service.pause(call.id, ANN, paused=False)
     world.clock.advance(0.25)
 
     # Said from START + 30 to + 31 by the server's clock; Bob's device, a second behind, says it began at + 29.
@@ -1640,45 +1477,10 @@ async def test_a_stuck_transcription_becomes_a_gap_and_does_not_hold_back_the_me
 
 
 @pytest.mark.asyncio
-async def test_a_failing_listener_neither_fails_the_request_nor_starves_the_others(world: World) -> None:
-    """One broken stream listener is logged and skipped."""
-
-    def broken(event: CallEvent) -> None:
-        msg = f"cannot send {event}"
-        raise RuntimeError(msg)
-
-    with world.service.listen(ROOM, broken), world.service.listen(ROOM, world.events.append):
-        call = await world.service.join(ROOM, ANN)
-
-    assert world.events == [CallUpdated(call=replace(call, row_event_id=None)), CallUpdated(call=call)]
-
-
-@pytest.mark.asyncio
-async def test_a_membership_a_few_seconds_older_by_the_homeservers_clock_still_counts(world: World) -> None:
-    """The homeserver's clock may lag MindRoom's: a membership dated up to 5 s before the app's last check-in counts."""
-    call = await world.service.join(ROOM, ANN)
-    await world.service.join(ROOM, BOB)
-    world.clock.advance(30)
-    await world.service.leave(call.id, ANN)
-
-    world.room.rtc = {ANN: world.clock.now - 3}
-    await world.service.tick()
-    live = (await world.service.live(ROOM, BOB)).call
-    assert live is not None
-    assert live.members == (ANN, BOB)
-
-    world.room.rtc = {ANN: world.clock.now - 10}
-    await world.service.tick()
-    live = (await world.service.live(ROOM, BOB)).call
-    assert live is not None
-    assert live.members == (BOB,)
-
-
-@pytest.mark.asyncio
 async def test_join_decides_whether_to_check_posting_with_the_call_it_joins(world: World) -> None:
     """Someone whose app dropped out while the room was being read is checked for permission to post again."""
     await world.service.join(ROOM, ANN)
-    world.clock.advance(59)
+    world.clock.advance(60)
     world.room.posters = set()
     world.room.on_read = lambda: world.clock.advance(1)
 

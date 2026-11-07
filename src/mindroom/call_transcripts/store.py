@@ -1,4 +1,4 @@
-"""The SQLite store of calls between people, their lines, whose apps were in them, Pause, and app check-ins.
+"""The SQLite store of calls between people, their lines, Pause, and their apps' check-ins.
 
 A call's lines are kept only until its transcript message is posted; after that the call keeps only what stops the
 message, or an edit of its row, being posted twice, until it is forgotten. Times are seconds since the epoch. Every
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import Iterator
     from pathlib import Path
 
 type _LineKind = Literal["speech", "gap"]
@@ -35,7 +35,11 @@ _UPGRADES: tuple[tuple[str, ...], ...] = (
             row_event_id TEXT,
             transcript_due_at REAL,
             transcript_attempts INTEGER NOT NULL DEFAULT 0,
-            transcript_done_at REAL
+            transcript_done_at REAL,
+            transcript_event_id TEXT,
+            row_edit TEXT,
+            paused_since REAL,
+            paused_by TEXT
         )
         """,
         "CREATE UNIQUE INDEX calls_one_live_call_per_room ON calls(room_id) WHERE ended_at IS NULL",
@@ -57,35 +61,14 @@ _UPGRADES: tuple[tuple[str, ...], ...] = (
         """,
         "CREATE INDEX lines_by_call ON lines(call_id, said_at)",
         """
-        CREATE TABLE app_presence (
-            room_id TEXT NOT NULL,
+        CREATE TABLE presence (
+            call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
             user_id TEXT NOT NULL,
             present_at REAL NOT NULL,
             has_left INTEGER NOT NULL,
-            PRIMARY KEY (room_id, user_id)
-        )
-        """,
-    ),
-    (
-        """
-        CREATE TABLE holds (
-            call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
-            user_id TEXT NOT NULL,
-            since REAL NOT NULL,
             PRIMARY KEY (call_id, user_id)
         )
         """,
-        "ALTER TABLE calls ADD COLUMN paused_since REAL",
-        "ALTER TABLE calls ADD COLUMN paused_by TEXT",
-        """
-        CREATE TABLE call_apps (
-            call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
-            user_id TEXT NOT NULL,
-            PRIMARY KEY (call_id, user_id)
-        )
-        """,
-        "ALTER TABLE calls ADD COLUMN transcript_event_id TEXT",
-        "ALTER TABLE calls ADD COLUMN row_edit TEXT",
     ),
 )
 
@@ -111,6 +94,10 @@ class StoredCall:
     """The posted transcript message, None until it is posted or when there was nothing to post."""
     row_edit: RowEdit | None
     """What the row was last edited to say, None while it is unedited."""
+    paused_since: float | None
+    """When the current pause began, None while transcription is not paused."""
+    paused_by: str | None
+    """Who paused, None while transcription is not paused."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,15 +117,15 @@ class StoredLine:
 
 
 @dataclass(frozen=True, slots=True)
-class AppPresence:
-    """When one person's app was last in a call in a room, and whether it left then."""
+class _AppPresence:
+    """When one person's app last checked in to a call, and whether it left then."""
 
     present_at: float
     left: bool
 
 
 class CallTranscriptStore:
-    """Calls, their lines and app presence in ``<storage_root>/call_transcripts/calls.db``."""
+    """Calls, their lines and their apps' check-ins in ``<storage_root>/call_transcripts/calls.db``."""
 
     def __init__(self, storage_root: Path) -> None:
         self.path = storage_root / "call_transcripts" / "calls.db"
@@ -165,6 +152,8 @@ class CallTranscriptStore:
                 transcript_done_at=None,
                 transcript_event_id=None,
                 row_edit=None,
+                paused_since=None,
+                paused_by=None,
             )
             connection.execute("INSERT INTO calls (id, room_id, started_at) VALUES (?, ?, ?)", (call.id, room_id, at))
             return call, True
@@ -187,11 +176,16 @@ class CallTranscriptStore:
         return None if row is None else _call(row)
 
     def end_call(self, call_id: str, *, at: float, transcript_due_at: float) -> bool:
-        """End a live call at ``at`` with its transcript message due at ``transcript_due_at``; False if not live."""
-        return self._write(
-            "UPDATE calls SET ended_at = ?, transcript_due_at = ? WHERE id = ? AND ended_at IS NULL",
-            (at, transcript_due_at, call_id),
-        )
+        """End a live call and its pause at ``at``, with its message due at ``transcript_due_at``; False if not live."""
+        with self._transaction() as connection:
+            _end_pause(connection, call_id, at=at)
+            return (
+                connection.execute(
+                    "UPDATE calls SET ended_at = ?, transcript_due_at = ? WHERE id = ? AND ended_at IS NULL",
+                    (at, transcript_due_at, call_id),
+                ).rowcount
+                == 1
+            )
 
     def set_row_event_id(self, call_id: str, event_id: str) -> None:
         """Record the event ID of the call's posted row."""
@@ -303,85 +297,20 @@ class CallTranscriptStore:
             ),
         )
 
-    def record_call_app(self, call_id: str, user_id: str) -> None:
-        """Record that ``user_id``'s app was in the call."""
-        self._write("INSERT OR IGNORE INTO call_apps (call_id, user_id) VALUES (?, ?)", (call_id, user_id))
+    def set_pause(self, call_id: str, paused_by: str | None, *, at: float) -> None:
+        """Pause a live call from ``at`` as ``paused_by`` unless it is paused, or with None resume it at ``at``.
 
-    def call_apps(self, call_id: str) -> frozenset[str]:
-        """Return the people whose apps were in the call at any time."""
-        with closing(self._connect()) as connection:
-            rows = connection.execute("SELECT user_id FROM call_apps WHERE call_id = ?", (call_id,)).fetchall()
-        return frozenset(row["user_id"] for row in rows)
-
-    def take_hold(self, call_id: str, user_id: str, *, at: float) -> bool:
-        """Record that ``user_id`` holds Pause in a live call from ``at``, beginning a pause if none is on.
-
-        Returns False if they already hold it or the call is not live.
+        Resuming adds the pause's one ``paused`` gap, from when it began under the person who began it.
         """
         with self._transaction() as connection:
-            live = connection.execute("SELECT 1 FROM calls WHERE id = ? AND ended_at IS NULL", (call_id,)).fetchone()
-            if live is None:
-                return False
-            added = connection.execute(
-                "INSERT OR IGNORE INTO holds (call_id, user_id, since) VALUES (?, ?, ?)",
-                (call_id, user_id, at),
-            ).rowcount
-            if added:
-                connection.execute(
-                    "UPDATE calls SET paused_since = ?, paused_by = ? WHERE id = ? AND paused_since IS NULL",
-                    (at, user_id, call_id),
-                )
-        return added == 1
-
-    def release_holds(
-        self,
-        call_id: str,
-        *,
-        at: float,
-        user_ids: Collection[str] | None = None,
-    ) -> StoredLine | None:
-        """Release the holds of ``user_ids`` (everyone's when None) at ``at``.
-
-        When that leaves nobody holding Pause, the pause ends: its one ``paused`` gap, from its first hold to ``at``
-        under the person who began it, is added in the same transaction and returned.
-        """
-        with self._transaction() as connection:
-            if user_ids is None:
-                connection.execute("DELETE FROM holds WHERE call_id = ?", (call_id,))
+            if paused_by is None:
+                _end_pause(connection, call_id, at=at)
             else:
-                connection.executemany(
-                    "DELETE FROM holds WHERE call_id = ? AND user_id = ?",
-                    [(call_id, user_id) for user_id in user_ids],
+                connection.execute(
+                    "UPDATE calls SET paused_since = ?, paused_by = ?"
+                    " WHERE id = ? AND ended_at IS NULL AND paused_since IS NULL",
+                    (at, paused_by, call_id),
                 )
-            if connection.execute("SELECT 1 FROM holds WHERE call_id = ?", (call_id,)).fetchone() is not None:
-                return None
-            pause = connection.execute(
-                "SELECT paused_since, paused_by FROM calls WHERE id = ? AND paused_since IS NOT NULL",
-                (call_id,),
-            ).fetchone()
-            if pause is None:
-                return None
-            connection.execute("UPDATE calls SET paused_since = NULL, paused_by = NULL WHERE id = ?", (call_id,))
-            gap = StoredLine(
-                id=uuid.uuid4().hex,
-                call_id=call_id,
-                user_id=pause["paused_by"],
-                said_at=pause["paused_since"],
-                seconds=max(0.0, at - pause["paused_since"]),
-                kind="gap",
-                text=None,
-                reason="paused",
-            )
-            return gap if _insert_line(connection, gap) else None
-
-    def holds(self, call_id: str) -> list[str]:
-        """Return who holds Pause in the call, the longest held first."""
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                "SELECT user_id FROM holds WHERE call_id = ? ORDER BY since, user_id",
-                (call_id,),
-            ).fetchall()
-        return [row["user_id"] for row in rows]
 
     def overlaps_pause(self, call_id: str, *, start: float, end: float) -> bool:
         """Return whether a stretch said from ``start`` to ``end`` overlaps one of the call's ended pauses."""
@@ -393,36 +322,40 @@ class CallTranscriptStore:
             ).fetchone()
         return row is not None
 
-    def lines(self, call_id: str) -> list[StoredLine]:
-        """Return the call's lines in the order they were said, ties in the order they were added."""
+    def lines(self, call_id: str, *, after: str | None = None) -> list[StoredLine]:
+        """Return the call's lines in the order they were added: all, or those added after the line ``after``.
+
+        A line ``after`` that is not one of the call's counts as none, so all are returned.
+        """
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM lines WHERE call_id = ? ORDER BY said_at, rowid",
-                (call_id,),
+                "SELECT * FROM lines WHERE call_id = ?"
+                " AND rowid > coalesce((SELECT rowid FROM lines WHERE id = ? AND call_id = ?), 0) ORDER BY rowid",
+                (call_id, after, call_id),
             ).fetchall()
         return [_line(row) for row in rows]
 
-    def record_app_presence(self, room_id: str, user_id: str, *, at: float, left: bool = False) -> None:
-        """Record that ``user_id``'s app was in a call in the room at ``at``, and whether it left then.
+    def record_presence(self, call_id: str, user_id: str, *, at: float, left: bool = False) -> None:
+        """Record that ``user_id``'s app checked in to the call at ``at``, and whether it left then.
 
         A record older than the one kept changes nothing, so an overtaken request cannot undo a later one.
         """
         self._write(
-            "INSERT INTO app_presence (room_id, user_id, present_at, has_left) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT (room_id, user_id) DO UPDATE"
+            "INSERT INTO presence (call_id, user_id, present_at, has_left) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (call_id, user_id) DO UPDATE"
             " SET present_at = excluded.present_at, has_left = excluded.has_left"
-            " WHERE excluded.present_at >= app_presence.present_at",
-            (room_id, user_id, at, left),
+            " WHERE excluded.present_at >= presence.present_at",
+            (call_id, user_id, at, left),
         )
 
-    def app_presence(self, room_id: str) -> dict[str, AppPresence]:
-        """Return when each person's app was last in a call in the room, by user ID."""
+    def presence(self, call_id: str) -> dict[str, _AppPresence]:
+        """Return when each person's app last checked in to the call, by user ID, for everyone whose app was in it."""
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT user_id, present_at, has_left FROM app_presence WHERE room_id = ?",
-                (room_id,),
+                "SELECT user_id, present_at, has_left FROM presence WHERE call_id = ?",
+                (call_id,),
             ).fetchall()
-        return {row["user_id"]: AppPresence(present_at=row["present_at"], left=bool(row["has_left"])) for row in rows}
+        return {row["user_id"]: _AppPresence(present_at=row["present_at"], left=bool(row["has_left"])) for row in rows}
 
     def _add_line(self, line: StoredLine) -> StoredLine | None:
         with closing(self._connect()) as connection:
@@ -465,6 +398,30 @@ def _upgrade(connection: sqlite3.Connection, path: Path) -> None:
     connection.execute(f"PRAGMA user_version = {len(_UPGRADES)}")
 
 
+def _end_pause(connection: sqlite3.Connection, call_id: str, *, at: float) -> None:
+    """End the call's pause at ``at``, if it is paused, adding its one ``paused`` gap under the person who began it."""
+    pause = connection.execute(
+        "SELECT paused_since, paused_by FROM calls WHERE id = ? AND paused_since IS NOT NULL",
+        (call_id,),
+    ).fetchone()
+    if pause is None:
+        return
+    connection.execute("UPDATE calls SET paused_since = NULL, paused_by = NULL WHERE id = ?", (call_id,))
+    _insert_line(
+        connection,
+        StoredLine(
+            id=uuid.uuid4().hex,
+            call_id=call_id,
+            user_id=pause["paused_by"],
+            said_at=pause["paused_since"],
+            seconds=max(0.0, at - pause["paused_since"]),
+            kind="gap",
+            text=None,
+            reason="paused",
+        ),
+    )
+
+
 def _insert_line(connection: sqlite3.Connection, line: StoredLine) -> bool:
     """Add a line unless its call's transcript message is done or the call is gone; return whether it was added."""
     return (
@@ -505,6 +462,8 @@ def _call(row: sqlite3.Row) -> StoredCall:
         transcript_done_at=row["transcript_done_at"],
         transcript_event_id=row["transcript_event_id"],
         row_edit=cast("RowEdit | None", row["row_edit"]),
+        paused_since=row["paused_since"],
+        paused_by=row["paused_by"],
     )
 
 

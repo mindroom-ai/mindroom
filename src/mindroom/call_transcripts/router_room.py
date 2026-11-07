@@ -1,4 +1,4 @@
-"""The router's side of the rooms calls are in: who is in a room and its call, who may post, what the router posts.
+"""The router's side of the rooms calls are in: who is in a room, who may post, what the router posts.
 
 Everything is read and sent through the router's own Matrix client, and nothing while the router is not ready. One
 full read of a room's state answers every question about that room for a few seconds, however many heartbeats ask.
@@ -21,10 +21,9 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_power import privileged_creators, user_power_level
-from mindroom.matrix_rtc.events import active_call_memberships
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Mapping
 
     from mindroom.call_transcripts.service import EndedRow, TranscriptMessage
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -79,10 +78,6 @@ class RouterCallRoom:
 
     client: Callable[[], nio.AsyncClient | None]
     """The router's client while it runs and has synced, else None."""
-    bot_user_ids: Callable[[], Collection[str]]
-    """MindRoom's own accounts, which are never people in a call."""
-    clock: Callable[[], float] = time.time
-    """Wall-clock time, which MatrixRTC memberships' expiry is in."""
     monotonic: Callable[[], float] = time.monotonic
     """A clock that never jumps, which times how long one read of a room's state is reused."""
     _reads: dict[str, _StateRead] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -116,26 +111,6 @@ class RouterCallRoom:
         power_levels = state.content("m.room.power_levels")
         required = _message_power_level(power_levels)
         return user_id in state.creators() or user_power_level(power_levels, user_id) >= required
-
-    async def call_members(self, room_id: str) -> Mapping[str, float] | None:
-        """Return the people in the room's MatrixRTC call, each with when their newest membership was created.
-
-        Memberships that expired, of people no longer joined to the room, and of MindRoom's own accounts are left out.
-        A room the router is not in has nobody in its call; None when the room's state cannot be read.
-        """
-        client = self.client()
-        if client is None:
-            return None
-        if room_id not in client.rooms:
-            return {}
-        state = await self._state(client, room_id)
-        if state is None:
-            return None
-        return _call_members(
-            state.events.values(),
-            bots=frozenset(self.bot_user_ids()),
-            now_ms=int(self.clock() * 1000),
-        )
 
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> Mapping[str, str | None] | None:
         """Return each person's display name from their membership in the room, None for someone without one.
@@ -305,20 +280,6 @@ def _message_power_level(power_levels: Mapping[str, object]) -> int:
         return level
     default = power_levels.get("events_default")
     return default if type(default) is int else 0
-
-
-def _call_members(events: Iterable[dict[str, Any]], *, bots: frozenset[str], now_ms: int) -> dict[str, float]:
-    """Return who is in the room call, without MindRoom's accounts, each from their newest membership in seconds.
-
-    A crashed device's membership can stay behind beside a newer one, so a person counts from their newest.
-    """
-    members: dict[str, float] = {}
-    for member in active_call_memberships(events, now_ms):
-        if member.user_id in bots:
-            continue
-        created_at = member.created_ts / 1000
-        members[member.user_id] = max(created_at, members.get(member.user_id, created_at))
-    return members
 
 
 def _display_name(member: Mapping[str, object]) -> str | None:

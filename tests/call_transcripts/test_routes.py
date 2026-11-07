@@ -6,7 +6,7 @@ import asyncio
 import json
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -16,7 +16,6 @@ import pytest_asyncio
 import starlette.formparsers
 
 from mindroom.api import main
-from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import _client_session_store
 from mindroom.call_transcripts import routes
 from mindroom.constants import resolve_runtime_paths
@@ -49,6 +48,23 @@ class Api:
     async def join(self, user_id: str, room_id: str = ROOM) -> httpx.Response:
         """Join or check in to the room's call."""
         return await self.client.post(f"{PREFIX}/rooms/{quote(room_id)}/calls.join", headers=self.headers(user_id))
+
+    async def pause(self, call_id: str, user_id: str, *, paused: bool) -> httpx.Response:
+        """Pause or resume transcription in the call."""
+        return await self.client.post(
+            f"{PREFIX}/calls/{call_id}/pause",
+            headers=self.headers(user_id),
+            json={"paused": paused},
+        )
+
+    async def live(self, user_id: str, *, after: str | None = None) -> httpx.Response:
+        """Read the room's live call, as MindRoom Chat polls it."""
+        params = {} if after is None else {"after": after}
+        return await self.client.get(
+            f"{PREFIX}/rooms/{quote(ROOM)}/calls.live",
+            headers=self.headers(user_id),
+            params=params,
+        )
 
     async def speech(
         self,
@@ -105,7 +121,6 @@ ROUTES = [
     ("POST", "/calls/call1/pause"),
     ("POST", "/calls/call1/speech"),
     ("GET", f"/rooms/{quote(ROOM)}/calls.live"),
-    ("GET", f"/rooms/{quote(ROOM)}/calls.events"),
 ]
 
 
@@ -185,8 +200,7 @@ async def test_join_answers_the_live_call_and_is_also_the_heartbeat(api: Api) ->
         "startedAt": "1970-01-01T00:16:45.000Z",
         "endedAt": None,
         "members": [ANN],
-        "holds": [],
-        "transcribedBy": [ANN],
+        "pausedBy": None,
     }
     assert again.json()["call"]["id"] == call["id"]
     assert other.json()["call"]["members"] == [ANN, BOB]
@@ -213,37 +227,32 @@ async def test_call_routes_take_the_room_from_the_call_and_404_outsiders(api: Ap
     for user_id, target in ((OUTSIDER, call_id), (ANN, "unknown")):
         headers = api.headers(user_id)
         _refusal(await api.client.post(f"{PREFIX}/calls/{target}/leave", headers=headers), 404, "not-found")
-        _refusal(
-            await api.client.post(f"{PREFIX}/calls/{target}/pause", headers=headers, json={"holding": True}),
-            404,
-            "not-found",
-        )
+        _refusal(await api.pause(target, user_id, paused=True), 404, "not-found")
         _refusal(await api.speech(target, user_id), 404, "not-found")
-    assert api.world.store.holds(call_id) == []
+    stored = api.world.store.call(call_id)
+    assert stored is not None
+    assert stored.paused_by is None
     assert api.world.store.lines(call_id) == []
 
 
 @pytest.mark.asyncio
-async def test_pause_holds_and_releases_and_refuses_speech_meanwhile(api: Api) -> None:
-    """A hold shows in the call and refuses speech with 409; releasing it answers the call without it."""
+async def test_pause_toggles_for_everyone_and_refuses_speech_meanwhile(api: Api) -> None:
+    """Pausing shows who paused and refuses speech with 409; anyone in the call resumes it."""
     call_id = (await api.join(ANN)).json()["call"]["id"]
-    held = await api.client.post(f"{PREFIX}/calls/{call_id}/pause", headers=api.headers(ANN), json={"holding": True})
-    refused = await api.speech(call_id, ANN)
-    released = await api.client.post(
-        f"{PREFIX}/calls/{call_id}/pause",
-        headers=api.headers(ANN),
-        json={"holding": False},
-    )
+    await api.join(BOB)
+    paused = await api.pause(call_id, ANN, paused=True)
+    refused = await api.speech(call_id, BOB)
+    resumed = await api.pause(call_id, BOB, paused=False)
 
-    assert held.json()["call"]["holds"] == [ANN]
+    assert paused.json()["call"]["pausedBy"] == ANN
     _refusal(refused, 409, "paused")
-    assert released.json()["call"]["holds"] == []
+    assert resumed.json()["call"]["pausedBy"] is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", [b"", b"{}", b'{"holding": "yes"}', b'{"holding": 1}', b"not json", b"[true]"])
-async def test_pause_needs_holding_true_or_false(api: Api, body: bytes) -> None:
-    """Anything but a JSON object with a boolean ``holding`` is invalid, and takes no hold."""
+@pytest.mark.parametrize("body", [b"", b"{}", b'{"paused": "yes"}', b'{"paused": 1}', b"not json", b"[true]"])
+async def test_pause_needs_paused_true_or_false(api: Api, body: bytes) -> None:
+    """Anything but a JSON object with a boolean ``paused`` is invalid, and pauses nothing."""
     call_id = (await api.join(ANN)).json()["call"]["id"]
 
     response = await api.client.post(
@@ -253,7 +262,9 @@ async def test_pause_needs_holding_true_or_false(api: Api, body: bytes) -> None:
     )
 
     _refusal(response, 400, "invalid")
-    assert api.world.store.holds(call_id) == []
+    stored = api.world.store.call(call_id)
+    assert stored is not None
+    assert stored.paused_by is None
 
 
 @pytest.mark.asyncio
@@ -473,15 +484,16 @@ async def test_speech_is_never_written_to_disk(api: Api, monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_the_live_call_has_its_lines_and_names(api: Api) -> None:
     """A member reads the call, its lines and everyone's names; with no call, nothing."""
-    empty = await api.client.get(f"{PREFIX}/rooms/{quote(ROOM)}/calls.live", headers=api.headers(ANN))
+    empty = await api.live(ANN)
     call_id = (await api.join(ANN)).json()["call"]["id"]
     api.world.clock.advance(10)
     line = (await api.speech(call_id, ANN)).json()["line"]
 
-    live = await api.client.get(f"{PREFIX}/rooms/{quote(ROOM)}/calls.live", headers=api.headers(BOB))
-    outsider = await api.client.get(f"{PREFIX}/rooms/{quote(ROOM)}/calls.live", headers=api.headers(OUTSIDER))
+    live = await api.live(BOB)
+    outsider = await api.live(OUTSIDER)
 
     assert empty.json() == {"call": None, "lines": [], "names": {}}
+    assert live.headers["cache-control"] == "no-store"
     body = live.json()
     assert body["call"]["id"] == call_id
     assert body["lines"] == [line]
@@ -489,309 +501,19 @@ async def test_the_live_call_has_its_lines_and_names(api: Api) -> None:
     _refusal(outsider, 404, "not-found")
 
 
-# The events stream
-
-
-@dataclass
-class EventStream:
-    """One ``calls.events`` request through the API app: its answer as it arrives, and a way to hang up."""
-
-    task: asyncio.Task[None]
-    start: asyncio.Future[Message]
-    body: asyncio.Queue[bytes | None]
-    hang_up: asyncio.Event
-    stall: asyncio.Event = field(default_factory=asyncio.Event)
-    buffer: bytes = b""
-
-    async def status(self) -> int:
-        """Return the answer's status."""
-        async with asyncio.timeout(5):
-            return (await self.start)["status"]
-
-    async def headers(self) -> dict[str, str]:
-        """Return the answer's headers."""
-        async with asyncio.timeout(5):
-            start = await self.start
-        return {name.decode(): value.decode() for name, value in start["headers"]}
-
-    async def block(self) -> bytes | None:
-        """Return the next event or comment block as sent, None once the stream has ended."""
-        async with asyncio.timeout(5):
-            while b"\n\n" not in self.buffer:
-                chunk = await self.body.get()
-                if chunk is None:
-                    return None
-                self.buffer += chunk
-        block, self.buffer = self.buffer.split(b"\n\n", 1)
-        return block
-
-    async def event(self) -> tuple[str, Any]:
-        """Return the next event's name and JSON data, skipping comments."""
-        while True:
-            block = await self.block()
-            assert block is not None, "the stream ended"
-            if not block.startswith(b":"):
-                break
-        fields = dict(line.split(": ", 1) for line in block.decode().split("\n"))
-        return fields["event"], json.loads(fields["data"])
-
-    async def ended(self) -> bool:
-        """Return whether the stream ends within a few seconds, after any events still on their way."""
-        async with asyncio.timeout(5):
-            while (block := await self.block()) is not None:
-                del block
-            await self.task
-        return True
-
-    async def close(self) -> None:
-        """Hang up and wait for the app to finish the request."""
-        self.hang_up.set()
-        self.stall.set()
-        async with asyncio.timeout(5):
-            await self.task
-
-
-def _open_stream(headers: dict[str, str], room_id: str = ROOM) -> EventStream:
-    """Start a ``calls.events`` request through the API app."""
-    path = f"{PREFIX}/rooms/{room_id}/calls.events"
-    loop = asyncio.get_running_loop()
-    start: asyncio.Future[Message] = loop.create_future()
-    body: asyncio.Queue[bytes | None] = asyncio.Queue()
-    hang_up = asyncio.Event()
-    request_sent = False
-
-    async def receive() -> Message:
-        nonlocal request_sent
-        if not request_sent:
-            request_sent = True
-            return {"type": "http.request", "body": b"", "more_body": False}
-        await hang_up.wait()
-        return {"type": "http.disconnect"}
-
-    stream: EventStream
-
-    async def send(message: Message) -> None:
-        if message["type"] == "http.response.start":
-            start.set_result(message)
-            return
-        if start.result()["status"] == 200 and message.get("body"):
-            await stream.stall.wait()
-        if message.get("body"):
-            await body.put(message["body"])
-        if not message.get("more_body", False):
-            await body.put(None)
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "server": ("mindroom.test", 80),
-        "client": ("127.0.0.1", 50000),
-        "root_path": "",
-        "path": path,
-        "raw_path": quote(path).encode(),
-        "query_string": b"",
-        "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
-    }
-    stream = EventStream(asyncio.create_task(main.app(scope, receive, send)), start, body, hang_up)
-    stream.stall.set()
-    return stream
-
-
-@pytest.fixture
-def quick_checks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Write the stream's comment, and check who is reading it, every few milliseconds instead of every 20 s."""
-    monkeypatch.setattr(routes, "_KEEPALIVE_SECONDS", 0.02)
-
-
 @pytest.mark.asyncio
-async def test_the_stream_starts_ready_then_sends_each_change_as_json(api: Api) -> None:
-    """``ready`` is what ``calls.live`` answers; then each change as ``call``, ``line`` and ``ended``."""
-    stream = _open_stream(api.headers(BOB))
-    assert await stream.status() == 200
-    headers = await stream.headers()
-    assert headers["content-type"].startswith("text/event-stream")
-    assert headers["cache-control"] == "no-store"
-    assert headers["access-control-allow-origin"] == CHAT
-    assert await stream.event() == ("ready", {"call": None, "lines": [], "names": {}})
-
+async def test_polling_after_a_line_answers_only_the_lines_added_since(api: Api) -> None:
+    """``after`` names the last line the app has; the answer has the call and only what was added after it."""
     call_id = (await api.join(ANN)).json()["call"]["id"]
     api.world.clock.advance(10)
-    line = (await api.speech(call_id, ANN)).json()["line"]
-    await api.client.post(f"{PREFIX}/calls/{call_id}/leave", headers=api.headers(ANN))
+    first = (await api.speech(call_id, ANN)).json()["line"]
 
-    events = []
-    while not events or events[-1][0] != "ended":
-        events.append(await stream.event())
-    await stream.close()
+    nothing_new = (await api.live(BOB, after=first["id"])).json()
+    second = (await api.speech(call_id, ANN)).json()["line"]
+    await api.pause(call_id, ANN, paused=True)
+    polled = (await api.live(BOB, after=first["id"])).json()
 
-    names = [name for name, _ in events]
-    assert names[: names.index("line")] == ["call"] * names.index("line")
-    assert events[names.index("line")] == ("line", line)
-    assert events[-1] == ("ended", {"callId": call_id})
-    calls = [data for name, data in events if name == "call"]
-    assert calls[-1]["rowEventId"] == "$row-1"
-    assert {call["id"] for call in calls} == {call_id}
-
-
-@pytest.mark.asyncio
-async def test_the_stream_is_ready_with_the_live_call(api: Api) -> None:
-    """Opened during a call, the first event has the call, its lines so far and names."""
-    call_id = (await api.join(ANN)).json()["call"]["id"]
-    api.world.clock.advance(10)
-    line = (await api.speech(call_id, ANN)).json()["line"]
-
-    stream = _open_stream(api.headers(BOB))
-    name, ready = await stream.event()
-    await stream.close()
-
-    assert name == "ready"
-    assert ready["call"]["id"] == call_id
-    assert ready["lines"] == [line]
-    assert ready["names"] == {ANN: "Ann"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("quick_checks")
-async def test_the_stream_writes_a_comment_while_nothing_happens(api: Api) -> None:
-    """A quiet stream still writes a comment every interval, so the app knows it is alive."""
-    stream = _open_stream(api.headers(ANN))
-    await stream.event()
-
-    comments = [await stream.block() for _ in range(2)]
-    await stream.close()
-
-    assert all(comment is not None and comment.startswith(b":") for comment in comments)
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("quick_checks")
-async def test_the_stream_ends_once_its_reader_leaves_the_room_but_not_while_the_room_cannot_be_read(
-    api: Api,
-) -> None:
-    """Membership is checked again while the stream is open: a room that cannot be read keeps it, leaving ends it."""
-    stream = _open_stream(api.headers(BOB))
-    await stream.event()
-    api.world.room.readable = False
-    for _ in range(3):
-        assert await stream.block() is not None
-
-    api.world.room.readable = True
-    api.world.room.members.discard(BOB)
-
-    assert await stream.ended()
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("quick_checks")
-async def test_a_busy_stream_still_checks_its_reader_on_schedule(api: Api) -> None:
-    """Changes waiting to be sent never put off the check that the reader is still in the room once it is due."""
-    call_id = (await api.join(ANN)).json()["call"]["id"]
-    stream = _open_stream(api.headers(BOB))
-    await stream.event()
-    stream.stall.clear()
-    api.world.room.members.discard(BOB)
-    for _ in range(10):
-        await api.world.service.pause(call_id, ANN, holding=True)
-        await api.world.service.pause(call_id, ANN, holding=False)
-    await asyncio.sleep(0.1)
-    stream.stall.set()
-
-    sent = []
-    while (block := await stream.block()) is not None:
-        sent.append(block)
-
-    # At most the change already on its way when the check fell due; none of those still waiting.
-    assert len(sent) <= 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("quick_checks")
-async def test_the_stream_ends_with_its_session(api: Api) -> None:
-    """A stream outlives neither the session it was opened with nor call transcripts being on."""
-    stream = _open_stream(api.headers(BOB))
-    await stream.event()
-    store = _client_session_store(main.app)
-    store.clock = lambda: time.time() + 3601
-    try:
-        assert await stream.ended()
-    finally:
-        store.clock = time.time
-
-    switched_off = _open_stream(api.headers(BOB))
-    await switched_off.event()
-    api.enabled = False
-    assert await switched_off.ended()
-
-
-@pytest.mark.asyncio
-async def test_the_stream_ends_as_soon_as_mindroom_shuts_down(api: Api) -> None:
-    """Shutting down ends open streams at once, rather than waiting for them; one opened after that ends at once."""
-    shutdown_requested = asyncio.Event()
-    ensure_app_state(main.app).shutdown_requested = shutdown_requested
-    try:
-        stream = _open_stream(api.headers(BOB))
-        await stream.event()
-        shutdown_requested.set()
-        assert await stream.ended()
-
-        late = _open_stream(api.headers(BOB))
-        assert await late.ended()
-    finally:
-        ensure_app_state(main.app).shutdown_requested = None
-
-
-@pytest.mark.asyncio
-async def test_a_stream_is_refused_like_the_live_call(api: Api) -> None:
-    """Outsiders and a room that cannot be checked get their refusal before any event."""
-    outsider = _open_stream(api.headers(OUTSIDER))
-    assert await outsider.status() == 404
-    assert await outsider.ended()
-    api.world.room.readable = False
-    unreadable = _open_stream(api.headers(ANN))
-    assert await unreadable.status() == 503
-    assert await unreadable.ended()
-    assert api.world.service._listeners == {}
-
-
-@pytest.mark.asyncio
-async def test_each_person_has_a_few_streams_at_most(api: Api, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Past the cap a person's next stream is refused with 429 and Retry-After; hanging up frees a place."""
-    monkeypatch.setattr(routes, "_STREAMS_PER_USER", 2)
-    first, second = _open_stream(api.headers(ANN)), _open_stream(api.headers(ANN))
-    for stream in (first, second):
-        await stream.event()
-    others = _open_stream(api.headers(BOB))
-    await others.event()
-
-    third = _open_stream(api.headers(ANN))
-    assert await third.status() == 429
-    assert (await third.headers())["retry-after"]
-    await third.ended()
-    await first.close()
-    fourth = _open_stream(api.headers(ANN))
-    assert (await fourth.event())[0] == "ready"
-
-    for stream in (second, others, fourth):
-        await stream.close()
-    assert api.world.service._listeners == {}
-    assert not any(ensure_app_state(main.app).call_event_streams.values())
-
-
-@pytest.mark.asyncio
-async def test_a_stream_too_far_behind_ends_so_its_app_reconnects(api: Api, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Changes pile up only so far for a reader that stopped reading; past that its stream ends."""
-    monkeypatch.setattr(routes, "_STREAM_BACKLOG", 2)
-    stream = _open_stream(api.headers(BOB))
-    await stream.event()
-    stream.stall.clear()
-    call_id = (await api.join(ANN)).json()["call"]["id"]
-    for _ in range(3):
-        await api.client.post(f"{PREFIX}/calls/{call_id}/pause", headers=api.headers(ANN), json={"holding": True})
-        await api.client.post(f"{PREFIX}/calls/{call_id}/pause", headers=api.headers(ANN), json={"holding": False})
-    stream.stall.set()
-
-    assert await stream.ended()
-    assert api.world.service._listeners == {}
+    assert (nothing_new["call"]["id"], nothing_new["lines"]) == (call_id, [])
+    assert polled["lines"] == [second]
+    assert polled["call"]["pausedBy"] == ANN
+    assert polled["names"] == {ANN: "Ann"}

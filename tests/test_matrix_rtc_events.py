@@ -8,7 +8,6 @@ import pytest
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
-    active_call_memberships,
     build_key_to_device_content,
     build_membership_content,
     membership_state_key,
@@ -48,46 +47,6 @@ def test_membership_content_round_trip() -> None:
     assert member.created_ts == 1_000
     assert not member.is_expired(1_000 + DEFAULT_MEMBERSHIP_EXPIRES_MS - 1)
     assert member.is_expired(1_000 + DEFAULT_MEMBERSHIP_EXPIRES_MS)
-
-
-def test_active_call_memberships_are_unexpired_and_of_people_joined_to_the_room() -> None:
-    """Full room state yields the call memberships still valid now, of people still joined, in state order."""
-
-    def member(user_id: str, membership: str) -> dict:
-        return {"type": "m.room.member", "state_key": user_id, "sender": user_id, "content": {"membership": membership}}
-
-    def call(user_id: str, device_id: str, *, created_ts: int, expires_ms: int = 60_000) -> dict:
-        content = build_membership_content(
-            user_id=user_id,
-            device_id=device_id,
-            livekit_service_url=SERVICE_URL,
-            expires_ms=expires_ms,
-            created_ts=created_ts,
-        )
-        return {
-            "type": CALL_MEMBER_EVENT_TYPE,
-            "state_key": membership_state_key(user_id, device_id),
-            "sender": user_id,
-            "origin_server_ts": created_ts,
-            "content": content,
-        }
-
-    bob = "@bob:example.org"
-    carol = "@carol:example.org"
-    state = [
-        member(USER, "join"),
-        member(bob, "join"),
-        member(carol, "leave"),
-        call(USER, "PHONE", created_ts=50_000),
-        call(USER, "LAPTOP", created_ts=10_000, expires_ms=20_000),
-        call(bob, "PHONE", created_ts=40_000),
-        call(carol, "PHONE", created_ts=40_000),
-        {**call(bob, "OLD", created_ts=1_000), "content": {}},
-    ]
-
-    members = active_call_memberships(iter(state), now_ms=60_000)
-
-    assert [(member.user_id, member.device_id) for member in members] == [(USER, "PHONE"), (bob, "PHONE")]
 
 
 def test_membership_content_matches_element_call_shape() -> None:

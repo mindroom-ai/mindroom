@@ -342,16 +342,9 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     config_lifecycle.register_api_app(api_app)
 
 
-def bind_embedded_runtime(
-    api_app: FastAPI,
-    runtime: EmbeddedRuntime,
-    *,
-    shutdown_requested: asyncio.Event | None = None,
-) -> None:
-    """Lend the dashboard API what `mindroom run` shares with it, and its shutdown signal, until `unbind_embedded_runtime`."""
-    state = ensure_app_state(api_app)
-    state.embedded = runtime
-    state.shutdown_requested = shutdown_requested
+def bind_embedded_runtime(api_app: FastAPI, runtime: EmbeddedRuntime) -> None:
+    """Lend the dashboard API what `mindroom run` shares with it, until `unbind_embedded_runtime`."""
+    ensure_app_state(api_app).embedded = runtime
     bind_agent_cli_registry(api_app, runtime.agent_cli_registry)
     bind_script_tool_broker(api_app, runtime.script_broker)
 
@@ -360,9 +353,7 @@ def unbind_embedded_runtime(api_app: FastAPI) -> None:
     """Withdraw what the runtime lent, once its embedded server stopped serving."""
     bind_script_tool_broker(api_app, None)
     bind_agent_cli_registry(api_app, None)
-    state = ensure_app_state(api_app)
-    state.embedded = None
-    state.shutdown_requested = None
+    ensure_app_state(api_app).embedded = None
 
 
 @asynccontextmanager

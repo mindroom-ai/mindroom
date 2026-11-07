@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Awaitable, Callable
     from contextlib import AbstractAsyncContextManager
 
@@ -97,11 +96,6 @@ class _MindroomAppState:
     # Bound while `mindroom run` serves this app; plugin routes read live room membership through it.
     room_members: Callable[[str], Awaitable[frozenset[str]]] | None = None
     usage_export_runner: UsageExportRunner | None = None
-    # Bound while `mindroom run` serves this app, and set once it begins to shut down: responses that would stream
-    # until told to stop end then, so the server's shutdown does not wait for them.
-    shutdown_requested: asyncio.Event | None = None
-    # How many call event streams each user has open, for the per-user cap.
-    call_event_streams: dict[str, int] = field(default_factory=dict)
 
     @property
     def runtime(self) -> EmbeddedRuntime:

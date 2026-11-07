@@ -1,4 +1,4 @@
-"""Tests for the store of live and recently ended calls, their lines, and app presence."""
+"""Tests for the store of live and recently ended calls, their lines, Pause, and app presence."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.call_transcripts import store as call_transcript_store
-from mindroom.call_transcripts.store import AppPresence, CallTranscriptStore, StoredCall, StoredLine
+from mindroom.call_transcripts.store import CallTranscriptStore, StoredCall, StoredLine, _AppPresence
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,7 +40,7 @@ def test_a_new_database_is_at_the_latest_schema_version(tmp_path: Path) -> None:
     """A fresh database records the version of the schema it was created with."""
     store = CallTranscriptStore(tmp_path)
 
-    assert _schema_version(store.path) == len(call_transcript_store._UPGRADES) == 2
+    assert _schema_version(store.path) == len(call_transcript_store._UPGRADES) == 1
 
 
 def test_reopening_a_database_from_before_a_schema_change_upgrades_it(
@@ -50,7 +50,7 @@ def test_reopening_a_database_from_before_a_schema_change_upgrades_it(
     """A database at the previous version gets only the new step, once, and keeps its calls and presence."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
-    store.record_app_presence(ROOM, ANN, at=100.0)
+    store.record_presence(call.id, ANN, at=100.0)
     monkeypatch.setattr(
         call_transcript_store,
         "_UPGRADES",
@@ -66,44 +66,23 @@ def test_reopening_a_database_from_before_a_schema_change_upgrades_it(
     upgraded = CallTranscriptStore(tmp_path)
     CallTranscriptStore(tmp_path)  # A step that ran again would fail on its duplicate table and column.
 
-    assert _schema_version(upgraded.path) == 3
+    assert _schema_version(upgraded.path) == 2
     with closing(sqlite3.connect(upgraded.path)) as connection:
         assert "topic" in {row[1] for row in connection.execute("PRAGMA table_info(calls)")}
         assert connection.execute("SELECT count(*) FROM notes").fetchone() == (0,)
     assert upgraded.call(call.id) == call
-    assert upgraded.app_presence(ROOM) == {ANN: AppPresence(present_at=100.0, left=False)}
+    assert upgraded.presence(call.id) == {ANN: _AppPresence(present_at=100.0, left=False)}
 
 
 def test_a_database_from_a_newer_mindroom_is_refused(tmp_path: Path) -> None:
     """A schema this code does not know is never opened, so it cannot be written in an old shape."""
     store = CallTranscriptStore(tmp_path)
     with closing(sqlite3.connect(store.path)) as connection:
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 2")
 
-    with pytest.raises(RuntimeError, match="has schema version 3, newer than this MindRoom's 2"):
+    with pytest.raises(RuntimeError, match="has schema version 2, newer than this MindRoom's 1"):
         CallTranscriptStore(tmp_path)
-    assert _schema_version(store.path) == 3
-
-
-def test_a_database_from_before_holds_were_kept_gains_them(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A database at version 1 keeps its calls and gets holds and the current pause, nobody holding."""
-    with monkeypatch.context() as patched:
-        patched.setattr(call_transcript_store, "_UPGRADES", call_transcript_store._UPGRADES[:1])
-        old = CallTranscriptStore(tmp_path)
-        call, _ = old.ensure_live_call(ROOM, at=100.0)
-
-    upgraded = CallTranscriptStore(tmp_path)
-
-    assert _schema_version(upgraded.path) == 2
-    assert upgraded.call(call.id) == call
-    assert upgraded.holds(call.id) == []
-    assert upgraded.take_hold(call.id, ANN, at=110.0)
-    gap = upgraded.release_holds(call.id, at=115.0)
-    assert gap is not None
-    assert (gap.user_id, gap.said_at, gap.seconds) == (ANN, 110.0, 5.0)
+    assert _schema_version(store.path) == 2
 
 
 def test_a_room_has_at_most_one_live_call(tmp_path: Path) -> None:
@@ -128,6 +107,8 @@ def test_a_room_has_at_most_one_live_call(tmp_path: Path) -> None:
         transcript_done_at=None,
         transcript_event_id=None,
         row_edit=None,
+        paused_since=None,
+        paused_by=None,
     )
     assert other.id != first.id
     assert store.live_call(ROOM) == first
@@ -174,8 +155,8 @@ def test_the_call_row_is_remembered(tmp_path: Path) -> None:
     assert CallTranscriptStore(tmp_path).call(call.id) == replace(call, row_event_id="$row")
 
 
-def test_lines_are_read_in_the_order_they_were_said(tmp_path: Path) -> None:
-    """Stretches uploaded out of order read back by when they were said, ties in the order they arrived."""
+def test_lines_are_read_in_the_order_they_were_added_all_or_those_after_one(tmp_path: Path) -> None:
+    """A poll gets the lines added after the last one it has, whenever they were said; an unknown line gets all."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
 
@@ -194,10 +175,18 @@ def test_lines_are_read_in_the_order_they_were_said(tmp_path: Path) -> None:
         text="First",
         reason=None,
     )
+    assert later is not None
     assert gap is not None
     assert (gap.kind, gap.text, gap.reason) == ("gap", None, "paused")
-    assert store.lines(call.id) == [earlier, later, gap]
+    assert store.lines(call.id) == [later, earlier, gap]
     assert len({line.id for line in store.lines(call.id)}) == 3
+    assert store.lines(call.id, after=later.id) == [earlier, gap]
+    assert store.lines(call.id, after=gap.id) == []
+    assert store.lines(call.id, after="unknown") == [later, earlier, gap]
+    other, _ = store.ensure_live_call(OTHER_ROOM, at=100.0)
+    elsewhere = store.add_speech(other.id, user_id=ANN, said_at=101.0, seconds=1.0, text="Elsewhere")
+    assert elsewhere is not None
+    assert store.lines(call.id, after=elsewhere.id) == [later, earlier, gap]
     assert store.lines("unknown") == []
 
 
@@ -278,119 +267,109 @@ def test_finished_calls_are_forgotten_after_a_while(tmp_path: Path) -> None:
     assert store.call(live.id) is not None
 
 
-def test_app_presence_is_kept_across_reopening(tmp_path: Path) -> None:
-    """When each person's app was last in a call in each room survives a restart."""
+def test_app_presence_is_kept_for_each_call_across_reopening_until_it_is_forgotten(tmp_path: Path) -> None:
+    """When each person's app last checked in to each call survives a restart, and goes with its call."""
     store = CallTranscriptStore(tmp_path)
-    store.record_app_presence(ROOM, ANN, at=100.0)
-    store.record_app_presence(ROOM, ANN, at=120.0)
-    store.record_app_presence(ROOM, BOB, at=110.0, left=True)
-    store.record_app_presence(OTHER_ROOM, ANN, at=90.0)
+    call, _ = store.ensure_live_call(ROOM, at=100.0)
+    other, _ = store.ensure_live_call(OTHER_ROOM, at=100.0)
+    store.record_presence(call.id, ANN, at=100.0)
+    store.record_presence(call.id, ANN, at=120.0)
+    store.record_presence(call.id, BOB, at=110.0, left=True)
+    store.record_presence(other.id, ANN, at=90.0)
 
     reopened = CallTranscriptStore(tmp_path)
 
-    assert reopened.app_presence(ROOM) == {
-        ANN: AppPresence(present_at=120.0, left=False),
-        BOB: AppPresence(present_at=110.0, left=True),
+    assert reopened.presence(call.id) == {
+        ANN: _AppPresence(present_at=120.0, left=False),
+        BOB: _AppPresence(present_at=110.0, left=True),
     }
-    assert reopened.app_presence(OTHER_ROOM) == {ANN: AppPresence(present_at=90.0, left=False)}
-    assert reopened.app_presence("!empty:example.org") == {}
+    assert reopened.presence(other.id) == {ANN: _AppPresence(present_at=90.0, left=False)}
+    assert reopened.presence("unknown") == {}
+    store.end_call(call.id, at=130.0, transcript_due_at=150.0)
+    store.finish_transcript(call.id, at=151.0)
+    store.forget_finished_calls(before=200.0)
+    assert store.presence(call.id) == {}
+    assert store.presence(other.id) == {ANN: _AppPresence(present_at=90.0, left=False)}
 
 
 def test_an_older_check_in_does_not_overwrite_a_newer_one(tmp_path: Path) -> None:
     """A request that was overtaken (a heartbeat after the leave it preceded) changes nothing."""
     store = CallTranscriptStore(tmp_path)
-    store.record_app_presence(ROOM, ANN, at=120.0, left=True)
+    call, _ = store.ensure_live_call(ROOM, at=100.0)
+    store.record_presence(call.id, ANN, at=120.0, left=True)
 
-    store.record_app_presence(ROOM, ANN, at=115.0)
-    assert store.app_presence(ROOM) == {ANN: AppPresence(present_at=120.0, left=True)}
+    store.record_presence(call.id, ANN, at=115.0)
+    assert store.presence(call.id) == {ANN: _AppPresence(present_at=120.0, left=True)}
 
-    store.record_app_presence(ROOM, ANN, at=130.0)
-    assert store.app_presence(ROOM) == {ANN: AppPresence(present_at=130.0, left=False)}
+    store.record_presence(call.id, ANN, at=130.0)
+    assert store.presence(call.id) == {ANN: _AppPresence(present_at=130.0, left=False)}
 
 
-def test_a_pause_runs_from_the_first_hold_to_the_last_release_and_is_one_gap(tmp_path: Path) -> None:
-    """Holds overlap into one pause, begun by the first holder; only the last release writes its gap."""
+def test_a_pause_runs_from_pausing_to_resuming_and_is_one_gap(tmp_path: Path) -> None:
+    """Pausing a paused call changes nothing; resuming writes one gap under whoever paused, from when they did."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
 
-    assert store.take_hold(call.id, ANN, at=110.0)
-    assert not store.take_hold(call.id, ANN, at=111.0)
-    assert store.take_hold(call.id, BOB, at=112.0)
-    assert store.holds(call.id) == [ANN, BOB]
+    store.set_pause(call.id, ANN, at=110.0)
+    store.set_pause(call.id, BOB, at=112.0)
+    paused = store.call(call.id)
+    assert paused is not None
+    assert (paused.paused_since, paused.paused_by) == (110.0, ANN)
 
-    assert store.release_holds(call.id, at=115.0, user_ids=[ANN]) is None
-    assert store.holds(call.id) == [BOB]
-    gap = store.release_holds(call.id, at=120.0, user_ids=[BOB])
+    store.set_pause(call.id, None, at=120.0)
 
-    assert gap is not None
+    [gap] = store.lines(call.id)
     assert (gap.user_id, gap.said_at, gap.seconds, gap.kind, gap.reason) == (ANN, 110.0, 10.0, "gap", "paused")
-    assert store.lines(call.id) == [gap]
-    assert store.holds(call.id) == []
-    assert store.release_holds(call.id, at=125.0, user_ids=[BOB]) is None
-    assert store.take_hold(call.id, BOB, at=130.0)
-    next_gap = store.release_holds(call.id, at=131.0, user_ids=[BOB])
-    assert next_gap is not None
+    assert store.call(call.id) == call
+    store.set_pause(call.id, None, at=125.0)
+    store.set_pause(call.id, BOB, at=130.0)
+    store.set_pause(call.id, None, at=131.0)
+    next_gap = store.lines(call.id)[-1]
     assert (next_gap.user_id, next_gap.said_at, next_gap.seconds) == (BOB, 130.0, 1.0)
-    assert store.lines(call.id) == [gap, next_gap]
+    assert len(store.lines(call.id)) == 2
 
 
-def test_releasing_everyone_ends_the_pause(tmp_path: Path) -> None:
-    """Releasing every hold at once (the call ending) marks the pause too."""
+def test_ending_a_call_ends_its_pause(tmp_path: Path) -> None:
+    """A call paused when it ends gets its pause's gap, up to the end, and is no longer paused."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
-    store.take_hold(call.id, ANN, at=110.0)
-    store.take_hold(call.id, BOB, at=111.0)
+    store.set_pause(call.id, ANN, at=110.0)
 
-    gap = store.release_holds(call.id, at=130.0)
+    store.end_call(call.id, at=130.0, transcript_due_at=150.0)
 
-    assert gap is not None
-    assert (gap.said_at, gap.seconds) == (110.0, 20.0)
-    assert store.holds(call.id) == []
-    assert store.release_holds(call.id, at=140.0) is None
+    [gap] = store.lines(call.id)
+    assert (gap.user_id, gap.said_at, gap.seconds) == (ANN, 110.0, 20.0)
+    ended = store.call(call.id)
+    assert ended is not None
+    assert (ended.paused_since, ended.paused_by) == (None, None)
 
 
-def test_holds_are_kept_across_reopening(tmp_path: Path) -> None:
-    """A restart keeps who holds Pause and when the pause began."""
+def test_a_pause_is_kept_across_reopening(tmp_path: Path) -> None:
+    """A restart keeps who paused and when."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
-    store.take_hold(call.id, ANN, at=110.0)
+    store.set_pause(call.id, ANN, at=110.0)
 
     reopened = CallTranscriptStore(tmp_path)
 
-    assert reopened.holds(call.id) == [ANN]
-    gap = reopened.release_holds(call.id, at=150.0, user_ids=[ANN])
-    assert gap is not None
+    assert reopened.call(call.id) == replace(call, paused_since=110.0, paused_by=ANN)
+    reopened.set_pause(call.id, None, at=150.0)
+    [gap] = reopened.lines(call.id)
     assert (gap.said_at, gap.seconds) == (110.0, 40.0)
 
 
-def test_whose_apps_were_in_a_call_is_kept_until_it_is_forgotten(tmp_path: Path) -> None:
-    """Each call keeps the people whose apps were in it, across a restart, and loses them with the call."""
-    store = CallTranscriptStore(tmp_path)
-    call, _ = store.ensure_live_call(ROOM, at=100.0)
-    later, _ = store.ensure_live_call(OTHER_ROOM, at=100.0)
-    store.record_call_app(call.id, ANN)
-    store.record_call_app(call.id, ANN)
-    store.record_call_app(call.id, BOB)
-    store.record_call_app(later.id, BOB)
-
-    assert CallTranscriptStore(tmp_path).call_apps(call.id) == {ANN, BOB}
-    assert store.call_apps(later.id) == {BOB}
-    store.end_call(call.id, at=110.0, transcript_due_at=130.0)
-    store.finish_transcript(call.id, at=131.0)
-    store.forget_finished_calls(before=200.0)
-    assert store.call_apps(call.id) == frozenset()
-    assert store.call_apps(later.id) == {BOB}
-
-
-def test_only_a_live_call_can_be_held(tmp_path: Path) -> None:
-    """An ended or unknown call takes no hold."""
+def test_only_a_live_call_can_be_paused(tmp_path: Path) -> None:
+    """An ended or unknown call is never paused."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
     store.end_call(call.id, at=110.0, transcript_due_at=130.0)
 
-    assert not store.take_hold(call.id, ANN, at=111.0)
-    assert not store.take_hold("unknown", ANN, at=111.0)
-    assert store.holds(call.id) == []
+    store.set_pause(call.id, ANN, at=111.0)
+    store.set_pause("unknown", ANN, at=111.0)
+
+    paused = store.call(call.id)
+    assert paused is not None
+    assert paused.paused_by is None
 
 
 @pytest.mark.parametrize(
@@ -410,8 +389,8 @@ def test_a_stretch_overlapping_a_past_pause_is_found(tmp_path: Path, start: floa
     """A stretch said during any part of a past pause overlaps it; one touching its ends does not."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
-    store.take_hold(call.id, ANN, at=110.0)
-    store.release_holds(call.id, at=120.0, user_ids=[ANN])
+    store.set_pause(call.id, ANN, at=110.0)
+    store.set_pause(call.id, None, at=120.0)
     store.add_gap(call.id, user_id=BOB, said_at=130.0, seconds=5.0, reason="not-transcribed")
 
     assert store.overlaps_pause(call.id, start=start, end=end) is overlaps

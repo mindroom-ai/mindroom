@@ -1586,7 +1586,7 @@ async def _run_api_server(
     runtime_paths = orchestrator.runtime_paths
     script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
-    api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime(), shutdown_requested=shutdown_requested)
+    api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime())
     # The reader picks a running bot at each call, so restarts and reloads never need to withdraw it.
     bind_room_members(api_main.app, orchestrator.agent_bots)
     config = uvicorn.Config(

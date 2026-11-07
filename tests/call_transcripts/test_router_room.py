@@ -15,7 +15,6 @@ import pytest
 from mindroom.call_transcripts.router_room import RouterCallRoom
 from mindroom.call_transcripts.service import CallTranscript, EndedRow, TranscriptMessage, _Turn
 from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
-from mindroom.matrix_rtc.events import CALL_MEMBER_EVENT_TYPE, build_membership_content, membership_state_key
 from tests.test_journal_ingress import TestAdmittedWorkReachesItsCallback as _AdmittedWork
 
 if TYPE_CHECKING:
@@ -27,12 +26,10 @@ if TYPE_CHECKING:
 ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
 ROUTER = "@mindroom_router:example.org"
-AGENT = "@mindroom_helper:example.org"
 ANN = "@ann:example.org"
 BOB = "@bob:example.org"
 CAROL = "@carol:example.org"
 NOW_MS = 1_800_000_000_000
-HOUR_MS = 3_600_000
 
 
 def _member(user_id: str, membership: str = "join", displayname: str | None = None) -> dict[str, Any]:
@@ -46,32 +43,6 @@ def _member(user_id: str, membership: str = "join", displayname: str | None = No
         "content": content,
         "event_id": f"$member-{user_id}",
         "origin_server_ts": 0,
-    }
-
-
-def _call_member(
-    user_id: str,
-    device_id: str = "PHONE",
-    *,
-    created_ms: int,
-    expires_ms: int = 4 * HOUR_MS,
-    content: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    if content is None:
-        content = build_membership_content(
-            user_id=user_id,
-            device_id=device_id,
-            livekit_service_url="https://livekit.example.org",
-            expires_ms=expires_ms,
-            created_ts=created_ms,
-        )
-    return {
-        "type": CALL_MEMBER_EVENT_TYPE,
-        "state_key": membership_state_key(user_id, device_id),
-        "sender": user_id,
-        "content": content,
-        "event_id": f"$call-{user_id}-{device_id}",
-        "origin_server_ts": created_ms,
     }
 
 
@@ -188,20 +159,8 @@ class FakeRouterClient:
         return nio.UploadResponse(f"mxc://example.org/upload-{len(self.uploads)}"), None
 
 
-def _room(
-    client: FakeRouterClient | None,
-    *,
-    bots: frozenset[str] = frozenset({ROUTER, AGENT}),
-    now_ms: int = NOW_MS,
-    clock: Callable[[], float] | None = None,
-    monotonic: Callable[[], float] = lambda: 0.0,
-) -> RouterCallRoom:
-    return RouterCallRoom(
-        client=lambda: cast("nio.AsyncClient | None", client),
-        bot_user_ids=lambda: bots,
-        clock=clock or (lambda: now_ms / 1000),
-        monotonic=monotonic,
-    )
+def _room(client: FakeRouterClient | None, *, monotonic: Callable[[], float] = lambda: 0.0) -> RouterCallRoom:
+    return RouterCallRoom(client=lambda: cast("nio.AsyncClient | None", client), monotonic=monotonic)
 
 
 def _ended_row(*, transcript_event_id: str | None = None) -> EndedRow:
@@ -234,104 +193,7 @@ def _message(*, body: str = "Call · 2 min", turns: tuple[_Turn, ...] | None = N
     )
 
 
-# Who is in the room's call
-
-
-@pytest.mark.asyncio
-async def test_call_members_are_the_people_in_the_rooms_matrixrtc_call_with_when_each_joined_it() -> None:
-    """Each person in the room's call is listed with when their membership was created, in seconds."""
-    client = FakeRouterClient(
-        state={
-            ROOM: [
-                _member(ANN),
-                _member(BOB),
-                _call_member(ANN, created_ms=NOW_MS - 30_000),
-                _call_member(BOB, created_ms=NOW_MS - 5_000),
-            ],
-        },
-    )
-
-    assert await _room(client).call_members(ROOM) == {ANN: (NOW_MS - 30_000) / 1000, BOB: (NOW_MS - 5_000) / 1000}
-
-
-@pytest.mark.asyncio
-async def test_a_person_on_two_devices_counts_from_their_newest_membership() -> None:
-    """A membership a crashed device left behind does not hide one the person made since."""
-    client = FakeRouterClient(
-        state={
-            ROOM: [
-                _member(ANN),
-                _call_member(ANN, "NEW", created_ms=NOW_MS - 10_000),
-                _call_member(ANN, "OLD", created_ms=NOW_MS - 2 * HOUR_MS),
-            ],
-        },
-    )
-
-    assert await _room(client).call_members(ROOM) == {ANN: (NOW_MS - 10_000) / 1000}
-
-
-@pytest.mark.asyncio
-async def test_expired_left_and_stale_memberships_and_mindrooms_agents_are_not_in_the_call() -> None:
-    """Expired memberships, leave events, memberships of people no longer in the room, and agents are left out."""
-    client = FakeRouterClient(
-        state={
-            ROOM: [
-                _member(ANN),
-                _member(BOB),
-                _member(CAROL, "leave"),
-                _member(AGENT),
-                _member(ROUTER),
-                # Expired: created five hours ago with the four-hour default.
-                _call_member(ANN, created_ms=NOW_MS - 5 * HOUR_MS),
-                # A leave event: the membership's content is emptied.
-                _call_member(BOB, created_ms=NOW_MS - 1_000, content={}),
-                # Someone who left the room keeps a membership in state.
-                _call_member(CAROL, created_ms=NOW_MS - 1_000),
-                # MindRoom's own accounts.
-                _call_member(AGENT, created_ms=NOW_MS - 1_000),
-                _call_member(ROUTER, created_ms=NOW_MS - 1_000),
-            ],
-        },
-    )
-
-    assert await _room(client).call_members(ROOM) == {}
-
-
-@pytest.mark.asyncio
-async def test_a_membership_counts_until_the_expiry_it_names() -> None:
-    """A membership that names its own validity counts until then, and not from then on."""
-    state = {ROOM: [_member(ANN), _call_member(ANN, created_ms=NOW_MS - 60_000, expires_ms=90_000)]}
-
-    assert await _room(FakeRouterClient(state=state)).call_members(ROOM) == {ANN: (NOW_MS - 60_000) / 1000}
-    assert await _room(FakeRouterClient(state=state), now_ms=NOW_MS + 30_000).call_members(ROOM) == {}
-
-
-@pytest.mark.asyncio
-async def test_a_membership_of_another_kind_of_call_is_not_this_rooms_call() -> None:
-    """Only the room's own call counts, not a membership for another application or call."""
-    content = build_membership_content(
-        user_id=ANN,
-        device_id="PHONE",
-        livekit_service_url="https://livekit.example.org",
-        expires_ms=4 * HOUR_MS,
-        created_ts=NOW_MS - 1_000,
-    )
-    other = {**content, "application": "m.other"}
-    client = FakeRouterClient(state={ROOM: [_member(ANN), _call_member(ANN, created_ms=NOW_MS, content=other)]})
-
-    assert await _room(client).call_members(ROOM) == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "unreadable",
-    [nio.ErrorResponse("Internal server error", "M_UNKNOWN"), aiohttp.ClientConnectionError("down")],
-)
-async def test_unreadable_state_is_not_an_empty_call(unreadable: BaseException | nio.ErrorResponse) -> None:
-    """A failed state read answers None, never an empty call."""
-    client = FakeRouterClient(state={ROOM: [_member(ANN), _call_member(ANN, created_ms=NOW_MS)]}, unreadable=unreadable)
-
-    assert await _room(client).call_members(ROOM) is None
+# Reading the room
 
 
 @pytest.mark.asyncio
@@ -340,7 +202,6 @@ async def test_without_a_ready_router_nothing_can_be_told() -> None:
     room = _room(None)
 
     assert room.router_joined(ROOM) is None
-    assert await room.call_members(ROOM) is None
     assert await room.is_member(ROOM, ANN) is None
     assert await room.may_post(ROOM, ANN) is None
     assert await room.display_names(ROOM, [ANN]) is None
@@ -350,16 +211,15 @@ async def test_without_a_ready_router_nothing_can_be_told() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_room_the_router_is_not_in_has_nobody_in_its_call_and_no_members() -> None:
-    """The router reads only rooms it is in: in any other, nobody is in a call and nobody is a member."""
-    client = FakeRouterClient(state={ROOM: [_member(ANN), _call_member(ANN, created_ms=NOW_MS)]})
+async def test_a_room_the_router_is_not_in_has_no_members() -> None:
+    """The router reads only rooms it is in: in any other, nobody is a member or may post."""
+    client = FakeRouterClient(state={ROOM: [_member(ANN)]})
     assert _room(client).router_joined(ROOM) is True
     client.rooms.clear()
 
     room = _room(client)
 
     assert room.router_joined(ROOM) is False
-    assert await room.call_members(ROOM) == {}
     assert await room.is_member(ROOM, ANN) is False
     assert await room.may_post(ROOM, ANN) is False
     assert await room.display_names(ROOM, [ANN]) is None
@@ -368,28 +228,19 @@ async def test_a_room_the_router_is_not_in_has_nobody_in_its_call_and_no_members
 
 @pytest.mark.asyncio
 async def test_heartbeats_together_share_one_read_of_the_rooms_state_for_five_seconds() -> None:
-    """Many people asking at once, about members, posting and the call, cause one full state read per five seconds."""
-    client = FakeRouterClient(
-        state={ROOM: [_create("11"), _member(ANN), _member(BOB), _call_member(ANN, created_ms=NOW_MS)]},
-    )
+    """Many people asking at once, about members and posting, cause one full state read per five seconds."""
+    client = FakeRouterClient(state={ROOM: [_create("11"), _member(ANN), _member(BOB)]})
     now = [0.0]
-    wall = [NOW_MS / 1000]
-    room = _room(client, clock=lambda: wall[0], monotonic=lambda: now[0])
+    room = _room(client, monotonic=lambda: now[0])
 
     async def heartbeat(user_id: str) -> tuple[object, ...]:
-        return (
-            await room.is_member(ROOM, user_id),
-            await room.may_post(ROOM, user_id),
-            await room.call_members(ROOM),
-        )
+        return (await room.is_member(ROOM, user_id), await room.may_post(ROOM, user_id))
 
     answers = await asyncio.gather(*(heartbeat(user_id) for user_id in (ANN, BOB) * 5))
 
     assert client.state_reads == 1
-    assert {answer[:2] for answer in answers} == {(True, True)}
+    assert set(answers) == {(True, True)}
     now[0] += 4.9
-    # The wall clock jumping, as when the system clock is set, neither ends nor stretches the five seconds.
-    wall[0] += 3600
     await heartbeat(ANN)
     assert client.state_reads == 1
     now[0] += 0.1
@@ -468,7 +319,6 @@ async def test_a_read_that_raises_cannot_tell_and_never_raises(error: BaseExcept
 
     assert await room.may_post(ROOM, ANN) is None
     assert await room.is_member(ROOM, ANN) is None
-    assert await room.call_members(ROOM) is None
     assert await room.display_names(ROOM, [ANN]) is None
 
 
