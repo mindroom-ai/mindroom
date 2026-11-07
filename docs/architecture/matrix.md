@@ -4,7 +4,7 @@ icon: lucide/message-square
 
 # Matrix Integration
 
-This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant, the custom key namespace, the room-level reply relation, and the model-selection wire protocol that external clients implement.
+This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant, the custom key namespace, the room-level reply relation, the conversation-notice marker, and the model-selection wire protocol that external clients implement.
 User-facing Matrix behavior is on [Matrix Integration](../matrix.md), event-journal decisions and homeserver behaviour are on [Matrix Event-Journal Contracts](matrix-event-journal-contracts.md), and invites and delivery epochs are on [Bot Runtime](bot-runtime.md#durable-dispatch-boundary).
 
 ## Identity Invariant
@@ -22,6 +22,12 @@ A reply outside a thread, such as every reply in `thread_mode: room`, names its 
 The link stays inside `m.relates_to` rather than in a top-level content key because every path that handles an event's relation already carries or drops that object whole: nio copies it into the cleartext of an encrypted event, and long-message previews and segments, attachment-backed content, queued edits, and the room-level relation strip in dispatch treat it as one unit.
 A top-level key would need its own handling in each of those paths, and the reply would stop counting as a relation, so it would become eligible as a thread root.
 Clients, bridges, and homeservers treat a relation with neither `rel_type` nor `m.in_reply_to` as no relation, so the reply shows as a plain message.
+
+## Conversation Notices
+
+A notice that asks its reader to reply in its thread, such as a contact request asking its owner to accept or decline, carries `"io.mindroom.conversation": true` in its content, and in the `m.new_content` of any edit to it.
+MindRoom Chat lists an agent's notice as a conversation, and lets it make its room unread, only when the notice carries this key or its thread has replies, so an unmarked notice that asks for a reply would leave its room looking read.
+Informational notices stay unmarked.
 
 ## Model Selection Protocol
 
