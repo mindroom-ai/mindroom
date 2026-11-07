@@ -134,6 +134,10 @@ class ToolRuntimeContext:
     # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
     hooks: HookBindings = field(default_factory=HookBindings)
     correlation_id: str | None = None
+    # The agent turn the calls run in, which its hooks carry too; a delegated child's turn has an ID of its own and
+    # names its caller's turn as its parent. None outside a turn.
+    turn_id: str | None = None
+    parent_turn_id: str | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[ToolFunction], bool] | None = None
@@ -342,6 +346,7 @@ class ToolRuntimeSupport:
         attachment_ids: list[str] | tuple[str, ...] | None = None,
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
+        turn_id: str | None = None,
     ) -> ToolRuntimeContext | None:
         """Build shared runtime context for all tool calls."""
         client = self.runtime.client
@@ -366,6 +371,7 @@ class ToolRuntimeSupport:
             attachment_ids=tuple(attachment_ids or ()),
             hooks=replace(self.hook_context.bindings(), registry=plugins.hooks),
             correlation_id=correlation_id,
+            turn_id=turn_id,
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
             orchestrator=self.runtime.orchestrator,
             membership=self.membership,
@@ -386,8 +392,9 @@ class ToolRuntimeSupport:
         attachment_ids: list[str] | tuple[str, ...] | None = None,
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
+        turn_id: str,
     ) -> ToolRuntimeContext:
-        """Build the tool context of a turn this bot runs now; a bot without a Matrix client is restarting."""
+        """Build the tool context of turn ``turn_id`` this bot runs now; a bot without a Matrix client is restarting."""
         context = self.build_context(
             target,
             user_id=user_id,
@@ -396,6 +403,7 @@ class ToolRuntimeSupport:
             attachment_ids=attachment_ids,
             correlation_id=correlation_id,
             source_envelope=source_envelope,
+            turn_id=turn_id,
         )
         if context is None:
             msg = f"Agent runtime '{self.agent_name}' is restarting."
@@ -499,6 +507,8 @@ def scope_hook_context_kwargs(
             runtime_paths=context.runtime_paths,
             correlation_id=correlation_id,
         ),
+        "turn_id": context.turn_id,
+        "parent_turn_id": context.parent_turn_id,
         "agent_name": scope.scope_id if scope.kind == "team" else context.agent_name,
         "scope": scope,
         "session_id": session_id,
@@ -633,6 +643,8 @@ async def emit_custom_event(
             runtime_paths=context.runtime_paths,
             correlation_id=context.correlation_id or f"{event_name}:{uuid4().hex}",
         ),
+        turn_id=context.turn_id,
+        parent_turn_id=context.parent_turn_id,
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,

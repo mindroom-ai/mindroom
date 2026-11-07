@@ -1172,6 +1172,7 @@ class ApprovalContinuationRunner:
             attachment_ids=continuation.attachment_ids,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
+            turn_id=request.turn_id,
         )
         if tool_context.execution_identity != execution_identity:
             msg = "Approval continuation execution identity no longer matches its target"

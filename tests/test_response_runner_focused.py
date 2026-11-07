@@ -4836,6 +4836,7 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
         correlation_id="correlation-original",
     )
     observed: list[str | None] = []
+    turn_ids: list[str | None] = []
     receipts: list[str] = []
     progress = AsyncMock()
     forwarded_progress: list[object] = []
@@ -4843,9 +4844,11 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
     def build_turn_context(
         *_args: object,
         correlation_id: str | None = None,
+        turn_id: str | None = None,
         **_kwargs: object,
     ) -> ToolRuntimeContext:
         observed.append(correlation_id)
+        turn_ids.append(turn_id)
         return turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity)
 
     async def continue_run(*_args: object, **kwargs: object) -> CompletedApprovalRun:
@@ -4875,6 +4878,8 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
             )
 
     assert observed == ["correlation-original"]
+    # The resumed reply is a turn of its own, whose tools run under its request's turn ID.
+    assert turn_ids == [request.turn_id]
     assert forwarded_progress == [progress]
     assert receipts == [
         "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
@@ -7575,7 +7580,11 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(
+            target,
+            user_id=request.user_id,
+            turn_id=request.turn_id,
+        ),
     )
     started = asyncio.Event()
 
@@ -7630,7 +7639,11 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(
+            target,
+            user_id=request.user_id,
+            turn_id=request.turn_id,
+        ),
     )
     progress = TurnProgress(ending=AwaitingApproval())
     with patch.object(
@@ -7667,7 +7680,11 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(
+            target,
+            user_id=request.user_id,
+            turn_id=request.turn_id,
+        ),
     )
     tool = ToolExecution(
         tool_call_id="inner",
@@ -7884,7 +7901,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    tool_context = runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id)
+    tool_context = runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id, turn_id=request.turn_id)
     tool = ToolExecution(
         tool_call_id="hidden",
         tool_name="dangerous",

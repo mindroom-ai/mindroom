@@ -110,8 +110,9 @@ class IngressHookRunner:
         *,
         target_entity_name: str,
         target_member_names: tuple[str, ...] | None,
+        turn_id: str,
     ) -> _PreparedHookedPayload:
-        """Run message:enrich and return the model-facing payload."""
+        """Run message:enrich for turn ``turn_id`` and return the model-facing payload."""
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
         item_count = 0
@@ -130,6 +131,7 @@ class IngressHookRunner:
         if hook_registered:
             context = MessageEnrichContext(
                 **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
+                turn_id=turn_id,
                 envelope=envelope,
                 target_entity_name=target_entity_name,
                 target_member_names=target_member_names,
@@ -166,8 +168,9 @@ class IngressHookRunner:
         *,
         target_entity_name: str,
         target_member_names: tuple[str, ...] | None,
+        turn_id: str,
     ) -> list[EnrichmentItem]:
-        """Run system:enrich and return system-prompt enrichment items."""
+        """Run system:enrich for turn ``turn_id`` and return system-prompt enrichment items."""
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH)
 
@@ -186,6 +189,7 @@ class IngressHookRunner:
             return finish([])
         context = SystemEnrichContext(
             **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
+            turn_id=turn_id,
             envelope=envelope,
             target_entity_name=target_entity_name,
             target_member_names=target_member_names,

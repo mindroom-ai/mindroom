@@ -764,6 +764,63 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
 
 
 @pytest.mark.asyncio
+async def test_each_transcript_of_a_call_runs_its_tools_under_a_turn_id_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call's transcripts are separate turns, so the tool calls of each carry a turn ID the other's do not."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={AGENT: AgentConfig(display_name="Helper")},
+            models={"default": ModelConfig(provider="ollama", id="test")},
+        ),
+        runtime_paths,
+    )
+    turn_ids: list[str | None] = []
+
+    async def respond(*_args: object, **_kwargs: object) -> TurnResult:
+        turn_ids.append(_bound_tool_context().turn_id)
+        return TurnResult("Sure.")
+
+    monkeypatch.setattr("mindroom.ai.ai_response", respond)
+    support = SimpleNamespace(
+        build_context=lambda target, *, user_id, **_kwargs: make_test_tool_runtime_context(
+            agent_name=AGENT,
+            target=target,
+            requester_id=user_id,
+            client=MagicMock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            relations=make_relation_lookup(),
+            conversation_reader=make_conversation_reader_mock(),
+            hooks=HookBindings(registry=MagicMock()),
+        ),
+    )
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=support,
+        room_id="!call:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        reconcile_spoken_response=False,
+    )
+    assert tooling.close is not None
+    try:
+        assert tooling.responder is not None
+        await tooling.responder("What time is it?", None)
+        await tooling.responder("And the weather?", None)
+    finally:
+        await tooling.close()
+
+    assert len(turn_ids) == 2
+    assert len(set(turn_ids) - {None}) == 2
+
+
+@pytest.mark.asyncio
 async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

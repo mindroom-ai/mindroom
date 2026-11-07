@@ -740,6 +740,8 @@ async def _run_authorized_call_agent(
             TurnBudget(monitor=context.budget_monitor, requester_id=requester_id),
         ).model_name
         context = replace(context, active_model_name=active_model_name)
+    # Each transcript is a turn of its own.
+    context = replace(context, turn_id=uuid4().hex)
     # Seeded here too: a cancellation before the turn driver starts still stores the transcript it answered.
     recorder = TurnRecorder(user_message=transcript)
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
