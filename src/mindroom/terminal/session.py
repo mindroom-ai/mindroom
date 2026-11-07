@@ -105,11 +105,6 @@ def _set_size(fd: int, cols: int, rows: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-def _take_controlling_terminal() -> None:
-    """Make the pty, already on stdin, the new session's controlling terminal (runs in the child before exec)."""
-    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-
-
 class _Scrollback:
     """The last ``_SCROLLBACK_BYTES`` of output."""
 
@@ -337,8 +332,7 @@ def _spawn(launch: TerminalLaunch, *, owner: str, cols: int, rows: int) -> Termi
         _set_size(slave_fd, cols, rows)
         os.set_blocking(master_fd, False)
         try:
-            # Not asyncio's subprocess: event loops differ in when a child runs preexec_fn (uvloop's before its
-            # stdio is in place), and the controlling terminal must be taken once the pty is on stdin.
+            # The shell leads a new session, and interactive Bash takes the pty as its controlling terminal.
             process = subprocess.Popen(
                 launch.argv,
                 stdin=slave_fd,
@@ -348,7 +342,6 @@ def _spawn(launch: TerminalLaunch, *, owner: str, cols: int, rows: int) -> Termi
                 env=launch.env,
                 close_fds=True,
                 start_new_session=True,
-                preexec_fn=_take_controlling_terminal,  # noqa: PLW1509 - a pty needs its controlling terminal set
             )
         except (OSError, subprocess.SubprocessError) as error:
             os.close(master_fd)

@@ -13,6 +13,7 @@ import pytest_asyncio
 
 from mindroom.terminal import session as session_module
 from mindroom.terminal.session import TerminalError, TerminalLaunch, TerminalManager
+from tests.conftest import requires_linux
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -123,6 +124,22 @@ async def test_a_session_ends_when_its_shell_exits_and_keeps_its_scrollback(
         session.write(b"echo again\n")
     assert refused.value.status_code == 409
     assert manager.sessions("owner") == [session]
+
+
+@requires_linux(reason="relies on a Linux pty holding more unread output than one read returns")
+async def test_output_that_arrives_with_the_exit_is_kept(tmp_path: Path, manager: TerminalManager) -> None:
+    """Output still unread when the shell's exit is noticed, more than one read takes, reaches viewers first."""
+    session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
+    _, viewer = session.attach()
+    # The first prompt shows the loop has run since the session started watching for the shell's exit.
+    await _read_until(viewer, b"$ ")
+    session.write(b"head -c 6000 /dev/zero | tr '\\0' q; exit 5\n")
+    # Block the loop until the shell has exited, so its last output and its exit wait together.
+    os.waitid(os.P_PID, session.pid, os.WEXITED | os.WNOWAIT)  # noqa: ASYNC222 - blocks the loop on purpose
+
+    assert await _exit_code(viewer) == 5
+    scrollback, _ = session.attach()
+    assert b"q" * 6000 in scrollback
 
 
 async def test_without_pidfds_a_session_still_ends(
@@ -282,7 +299,7 @@ async def test_closing_hangs_up_the_shell_and_its_foreground_job(tmp_path: Path,
 
     await manager.close("owner", running.id)
 
-    assert not running.alive
+    assert running.exit_code == -signal.SIGHUP
     assert manager.sessions("owner") == [other]
     await manager.close_all()
     assert not other.alive

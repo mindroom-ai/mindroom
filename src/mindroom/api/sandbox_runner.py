@@ -1125,33 +1125,32 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
         if shell.execution_identity is not None
         else None
     )
-    with bind_detached_execution_identity(identity):
-        try:
-            toolkit, _ = _resolve_entrypoint(
-                runtime_paths=prepared.runtime_paths,
-                config=route.config,
-                tools=tools,
-                tool_name=shell.tool_name,
-                function_name=shell.function_name,
-                execution_identity=identity,
-                credential_overrides=shell.credential_overrides or None,
-                tool_config_overrides=shell.tool_config_overrides or None,
-                tool_init_overrides=shell.tool_init_overrides or None,
-                runtime_overrides=shell.runtime_overrides or None,
-                worker_scope=shell.worker_scope,
-                routing_agent_name=shell.routing_agent_name,
-                private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
-                tool_output_workspace_root=(
-                    Path(shell.tool_output_workspace_root) if shell.tool_output_workspace_root is not None else None
-                ),
-            )
-        except HTTPException as exc:
-            raise TerminalError(400, str(exc.detail)) from None
-        if not isinstance(toolkit, SupportsTerminalLaunch):
-            raise TerminalError(400, "This shell cannot start a terminal.")
-        call_environment = ToolEnvironment(values=shell.call_environment, path_prepend=tuple(shell.call_path_prepend))
-        with collected_tool_environment(call_environment):
-            return toolkit.terminal_launch(cwd, process_environ=process_environ)
+    try:
+        toolkit, _ = _resolve_entrypoint(
+            runtime_paths=prepared.runtime_paths,
+            config=route.config,
+            tools=tools,
+            tool_name=shell.tool_name,
+            function_name=shell.function_name,
+            execution_identity=identity,
+            credential_overrides=shell.credential_overrides or None,
+            tool_config_overrides=shell.tool_config_overrides or None,
+            tool_init_overrides=shell.tool_init_overrides or None,
+            runtime_overrides=shell.runtime_overrides or None,
+            worker_scope=shell.worker_scope,
+            routing_agent_name=shell.routing_agent_name,
+            private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
+            tool_output_workspace_root=(
+                Path(shell.tool_output_workspace_root) if shell.tool_output_workspace_root is not None else None
+            ),
+        )
+    except HTTPException as exc:
+        raise TerminalError(400, str(exc.detail)) from None
+    if not isinstance(toolkit, SupportsTerminalLaunch):
+        raise TerminalError(400, "This shell cannot start a terminal.")
+    call_environment = ToolEnvironment(values=shell.call_environment, path_prepend=tuple(shell.call_path_prepend))
+    with collected_tool_environment(call_environment):
+        return toolkit.terminal_launch(cwd, process_environ=process_environ)
 
 
 def _cancelled_response() -> ExecuteResponse:

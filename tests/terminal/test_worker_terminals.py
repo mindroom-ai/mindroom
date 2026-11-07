@@ -6,6 +6,7 @@ import asyncio
 import os
 import socket
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -27,7 +28,7 @@ from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.workers.runtime import reset_primary_worker_manager
@@ -173,7 +174,11 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     home.mkdir(parents=True, exist_ok=True)
     for startup_file in (".bashrc", ".bash_profile", ".profile"):
         (home / startup_file).write_text("export FROM_STARTUP_FILE=1\n")
-    with collected_tool_environment(ToolEnvironment(values={"HOME": str(home), "FROM_THE_CALL": "1"})):
+    call_environment = ToolEnvironment(
+        values={"HOME": str(home), "FROM_THE_CALL": "1"},
+        path_prepend=("/opt/from-the-call/bin",),
+    )
+    with collected_tool_environment(call_environment):
         cwd_line, _, command_listing = (await _run_shell_command(toolkit, "env | sort")).partition("\n")
         info = await terminals.open()
     workspace = cwd_line.removeprefix("[cwd: ").removesuffix("]")
@@ -185,6 +190,7 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     terminal_env = _env((home / "terminal.env").read_text())
     command_env = _env(command_listing)
     assert (terminal_env["HOME"], terminal_env["FROM_THE_CALL"]) == (str(home), "1")
+    assert terminal_env["PATH"].startswith("/opt/from-the-call/bin:")
     assert "FROM_STARTUP_FILE" not in terminal_env
     assert terminal_env.pop("TERM") == "xterm-256color"
     for name in ("TERM", "SHLVL", "_"):
@@ -200,14 +206,14 @@ async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resi
     terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
     info = await terminals.open(cols=80, rows=24)
     async with terminals.attach(info.id) as first:
-        await first.send_input("while true; do echo tick$((1+1)); sleep 0.05; done\r")
-        await _read_until(first, b"tick2")
+        await first.send_input("for i in $(seq 1 100000); do echo n$i; sleep 0.05; done\r")
+        await _read_until(first, b"n3\r\n")
 
     async with terminals.attach(info.id) as second:
         scrollback = await second.receive()
         assert scrollback.type == "output"
-        assert b"tick2" in scrollback.data
-        await _read_until(second, b"tick2")
+        assert b"n1\r\n" in scrollback.data
+        await _read_until(second, b"\r\n")
         await second.send_input("\x03")
         await second.resize(100, 30)
         await second.send_input("stty size; echo $((2*3))sized\r")
@@ -293,6 +299,34 @@ async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str)
         ) as response:
             assert response.status == 400
             assert (await response.json())["detail"] == "A terminal opens only with a shell call's request."
+
+
+async def test_a_terminal_s_stream_needs_the_runner_token_even_with_its_owner(tmp_path: Path, runner: str) -> None:
+    """Knowing a terminal's ID and owner is not enough to attach to it without the runner token."""
+    stand_ins = toolkit_worker_stand_ins(_shell(_primary_paths(tmp_path, runner)))
+    assert stand_ins is not None
+    info = await WorkerTerminals(stand_ins).open()
+    call = worker_call(stand_ins, "run_shell_command", start=False)
+    assert call is not None
+    stream = f"{call.api_root}/terminal/sessions/{info.id}/io"
+    params = {"owner": client_module._owner(call.request)}
+    async with aiohttp.ClientSession() as client:
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect(stream, params=params)
+        assert refused.value.status == 403
+        async with client.ws_connect(stream, params=params, headers=call.headers) as websocket:
+            assert (await websocket.receive()).type == aiohttp.WSMsgType.BINARY
+
+
+async def test_two_agents_in_one_workspace_keep_their_own_terminals(tmp_path: Path, runner: str) -> None:
+    """An agent's terminals are its own even where another agent's calls reach the same worker and workspace."""
+    stand_ins = toolkit_worker_stand_ins(_shell(_primary_paths(tmp_path, runner)))
+    assert stand_ins is not None
+    assert stand_ins.worker_target is not None
+    other = replace(stand_ins, worker_target=replace(stand_ins.worker_target, routing_agent_name="other"))
+    await WorkerTerminals(stand_ins).open()
+
+    assert await WorkerTerminals(other).sessions() == []
 
 
 async def test_a_stopping_runner_hangs_up_its_terminals(tmp_path: Path) -> None:
