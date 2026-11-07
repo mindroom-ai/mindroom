@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import sys
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
 from rich.markup import escape
 
-from .config import CONFIG_PATH_OPTION, activate_cli_runtime, call_quietly, console
+from .config import CONFIG_PATH_OPTION, activate_cli_runtime, console
 
 if TYPE_CHECKING:
     from mindroom.plugin_install import InstallResult
@@ -41,11 +41,8 @@ def plugin_check(
     from mindroom.plugin_check import check_plugin  # noqa: PLC0415
 
     try:
-        if json_output:
-            # stdout carries only the JSON document: warnings, errors, and anything the plugin prints go to stderr.
-            with redirect_stdout(sys.stderr):
-                result = call_quietly(lambda: check_plugin(path))
-        else:
+        # With --json, logs and anything the plugin prints go to stderr, so stdout carries only the JSON document.
+        with redirect_stdout(sys.stderr) if json_output else nullcontext():
             result = check_plugin(path)
     except Exception as exc:
         if json_output:
