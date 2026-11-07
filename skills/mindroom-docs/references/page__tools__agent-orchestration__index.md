@@ -480,7 +480,7 @@ get_workflow_run("brief-report", "run_...")
 Workflow participants cannot pause for human approval, so every toolkit a participant names must be pre-approved.
 `validate_workflow()`, `create_workflow()`, and `update_workflow()` refuse a participant tool that is not pre-approved, and a run fails before any participant starts if a pre-approval was removed after the workflow was saved.
 Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
-Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit, except a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function the participant does not also have pre-approved.
+Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
 
 ```yaml
 agents:
@@ -496,6 +496,7 @@ agents:
 Operator-authored [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first and the first match wins.
 A participant may name a single `toolkit.function` that a matching `auto_approve` rule allows even outside `allowed_tools`.
 A matching `require_approval` or script rule makes a function unavailable, and a participant that names such a function directly is refused the same way.
+The same holds for a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function the participant does not also have pre-approved.
 `allowed_tools`, including `"*"`, never auto-approves `claude_agent`, `config_manager`, or `scheduler`, but an explicit operator `auto_approve` rule can.
 Functions that ask for their own confirmation stay unavailable even under an operator `auto_approve` rule.
 A function name shared by several granted toolkits is auto-approved only when every owning toolkit is eligible.
