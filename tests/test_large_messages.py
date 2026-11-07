@@ -3,6 +3,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import aiohttp
 import nio
 import pytest
 from nio.crypto import OutboundGroupSession
@@ -461,6 +462,57 @@ async def test_prepare_large_message_upload_failure_falls_back_to_text() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outage",
+    [
+        aiohttp.ClientConnectionError("Connection refused"),
+        TimeoutError(),
+        nio.UploadError("Too many requests", "M_LIMIT_EXCEEDED"),
+    ],
+)
+@pytest.mark.parametrize("durable", [True, False])
+async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_truncated_text(
+    monkeypatch: pytest.MonkeyPatch,
+    outage: object,
+    durable: bool,
+) -> None:
+    """A payload frozen for later delivery keeps its sidecar when uploads fail past nio's retry bound, then recover."""
+    monkeypatch.setattr("mindroom.matrix.large_messages._DURABLE_SIDECAR_RETRY_SECONDS", 0)
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    recovered_upload = client.upload
+    attempts = 0
+
+    async def upload(**kwargs: object) -> tuple[object, None]:
+        nonlocal attempts
+        attempts += 1
+        if attempts > 3:
+            return await recovered_upload(**kwargs)
+        if isinstance(outage, BaseException):
+            raise outage
+        return outage, None
+
+    client.upload = upload  # type: ignore[method-assign]
+    content = _large_text_content("durable ")
+
+    result = await prepare_large_message(
+        client,
+        "!room:server",
+        content,
+        room_encrypted=False,
+        prepare_for_encrypted_delivery=durable,
+    )
+
+    if durable:
+        assert attempts == 4
+        assert result["msgtype"] == "m.file"
+        assert result["file"]["url"] == "mxc://server/sidecar"
+        assert _SIDECAR_UPLOAD_FALLBACK_TEXT not in result["body"]
+    else:
+        assert attempts == 1
+        _assert_text_sidecar_fallback(result, "durable ")
+
+
+@pytest.mark.asyncio
 async def test_prepare_large_message_missing_content_uri_falls_back_to_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -507,8 +559,10 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
         _full_content: dict[str, object],
         *,
         room_encrypted: bool,
+        durable: bool,
     ) -> tuple[str, dict[str, object] | None]:
         assert room_encrypted is False
+        assert durable is False
         return "mxc://server/missing-metadata", file_info
 
     monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", missing_file_metadata)
@@ -532,8 +586,10 @@ async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_ba
         _full_content: dict[str, object],
         *,
         room_encrypted: bool,
+        durable: bool,
     ) -> tuple[str, dict[str, object]]:
         assert room_encrypted is True
+        assert durable is False
         return "mxc://server/incomplete-encrypted-metadata", {
             "size": 123,
             "mimetype": "application/json",
@@ -573,8 +629,10 @@ async def test_prepare_large_message_encrypted_valid_sidecar_keeps_file_preview(
         _full_content: dict[str, object],
         *,
         room_encrypted: bool,
+        durable: bool,
     ) -> tuple[str, dict[str, object]]:
         assert room_encrypted is True
+        assert durable is False
         return mxc_uri, file_info
 
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))

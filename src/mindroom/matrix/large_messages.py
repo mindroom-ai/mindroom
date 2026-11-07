@@ -6,10 +6,12 @@ JSON and send a compact preview event with a pointer to that sidecar.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import nio
 
 from mindroom.constants import (
@@ -81,6 +83,7 @@ _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_S
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
 _PREVIEW_SHRINK_MARGIN = 0.9
 _MATRIX_EVENT_HARD_LIMIT = 64000
+_DURABLE_SIDECAR_RETRY_SECONDS = 10.0
 _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
 _MEGOLM_BASE64_KEY_LENGTH = 43
@@ -543,6 +546,7 @@ async def _build_file_content(
     size_limit: int,
     *,
     room_encrypted: bool,
+    durable: bool,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload full original content JSON and build preview ``m.file`` event."""
     mxc_uri, file_info = await upload_json_sidecar(
@@ -550,6 +554,7 @@ async def _build_file_content(
         room_id,
         full_content,
         room_encrypted=room_encrypted,
+        durable=durable,
     )
 
     available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
@@ -665,17 +670,51 @@ def fit_reasoning_to_ordinary_event(
     return with_text(f"{full_text[:kept]}…") if kept else base
 
 
+async def _upload_sidecar_bytes(
+    client: nio.AsyncClient,
+    data: bytes,
+    *,
+    content_type: str,
+    filename: str,
+    room_id: str,
+    durable: bool,
+) -> nio.UploadResponse | nio.UploadError:
+    """Upload once, or for a durable caller until the homeserver takes it after nio's retry bound gave up."""
+    while True:
+        try:
+            # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
+            upload_result, _encryption_dict = await upload_media_bytes(
+                client,
+                data,
+                content_type=content_type,
+                filename=filename,
+            )
+        except (aiohttp.ClientConnectionError, TimeoutError):
+            if not durable:
+                raise
+        else:
+            rate_limited = (
+                isinstance(upload_result, nio.UploadError) and upload_result.status_code == "M_LIMIT_EXCEEDED"
+            )
+            if not (durable and rate_limited):
+                return upload_result
+        logger.warning("large_message_sidecar_upload_waiting_for_homeserver", room_id=room_id)
+        await asyncio.sleep(_DURABLE_SIDECAR_RETRY_SECONDS)
+
+
 async def upload_json_sidecar(
     client: nio.AsyncClient,
     room_id: str,
     payload: dict[str, Any],
     *,
     room_encrypted: bool,
+    durable: bool = False,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``.
 
     ``room_encrypted`` is the authoritative room encryption state and decides whether the upload is encrypted.
-    Returns ``(None, None)`` on failure.
+    Returns ``(None, None)`` on failure. A ``durable`` caller freezes the result, so a homeserver that stays
+    down or rate limiting past nio's retry bound is waited out instead of failing the upload.
     """
     text_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     try:
@@ -691,12 +730,13 @@ async def upload_json_sidecar(
         return None, None
 
     try:
-        # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
-        upload_result, _encryption_dict = await upload_media_bytes(
+        upload_result = await _upload_sidecar_bytes(
             client,
             prepared.data,
             content_type=prepared.content_type,
             filename=prepared.filename,
+            room_id=room_id,
+            durable=durable,
         )
 
         # Check if upload was successful
@@ -830,7 +870,8 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative room encryption state from the delivery boundary
-        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery
+        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery,
+            waiting out a homeserver outage for the sidecar rather than freezing a truncated text
 
     Returns:
         The original content object when no preparation is needed, otherwise
@@ -923,6 +964,7 @@ async def prepare_large_message(
         preview_text,
         size_limit,
         room_encrypted=encrypted_delivery_safe,
+        durable=prepare_for_encrypted_delivery,
     )
 
     sidecar_usable = sidecar_upload_is_usable(
