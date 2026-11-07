@@ -314,12 +314,12 @@ async def test_child_callbacks_become_events() -> None:
         assert options.record_usage is not None
         assert options.on_session_error is not None
         assert options.on_session_terminated is not None
-        options.on_conversation_turn("user", "hi")
+        options.on_conversation_turn("user", "hi", 12.5)
         await options.record_usage(LiveVoiceUsage("sess", "gpt-live-1", 1.5, 12.0, finalized=False))
         options.on_session_error("x")
         options.on_session_terminated(True)
         assert [await channel.recv() for _ in range(4)] == [
-            {"type": "Turn", "speaker": "user", "text": "hi"},
+            {"type": "Turn", "speaker": "user", "text": "hi", "spoken_at": 12.5},
             {
                 "type": "Usage",
                 "provider_session_id": "sess",
@@ -341,7 +341,7 @@ async def test_events_do_not_wait_for_a_stalled_reader() -> None:
         assert options.on_conversation_turn is not None
         started = time.monotonic()
         for _ in range(2000):
-            options.on_conversation_turn("assistant", "x" * 500)
+            options.on_conversation_turn("assistant", "x" * 500, 0.0)
         assert time.monotonic() - started < 1.0
 
 
@@ -420,7 +420,7 @@ class InProcessChild:
 class MainSide:
     """Main-process callbacks for one ``ProcessLiveVoiceBridge`` call."""
 
-    turns: list[tuple[str, str]]
+    turns: list[tuple[str, str, float]]
     errors: list[str]
     terminated: list[bool]
     usage: list[LiveVoiceUsage]
@@ -485,7 +485,7 @@ class MainSide:
             record_usage=record_usage,
             close_responder=close_responder,
             greeting_instructions="say hi",
-            on_conversation_turn=lambda speaker, text: self.turns.append((speaker, text)),
+            on_conversation_turn=lambda speaker, text, spoken_at: self.turns.append((speaker, text, spoken_at)),
             on_tools_executed=on_tools_executed,
             on_session_terminated=self.terminated.append,
             on_session_error=self.errors.append,
@@ -609,12 +609,12 @@ async def test_proxy_callbacks_run_in_main() -> None:
         assert child_options.on_session_error is not None
         assert child_options.on_session_terminated is not None
         assert child_options.record_usage is not None
-        child_options.on_conversation_turn("user", "hi")
+        child_options.on_conversation_turn("user", "hi", 12.5)
         child_options.on_session_error("provider failed")
         await child_options.record_usage(LiveVoiceUsage("sess", "gpt-live-1", 1.0, 5.0, finalized=False))
         child_options.on_session_terminated(False)
         await _until(lambda: bool(main.terminated))
-        assert main.turns == [("user", "hi")]
+        assert main.turns == [("user", "hi", 12.5)]
         assert main.errors == ["provider failed"]
         assert main.terminated == [False]
         assert main.usage == []

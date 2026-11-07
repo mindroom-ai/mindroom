@@ -3313,9 +3313,37 @@ def _record_two_minute_exchange(bridge: FakeBridge) -> None:
     assert isinstance(on_turn, MethodType)
     transcript = on_turn.__self__
     assert isinstance(transcript, CallTranscript)
-    on_turn("user", "Book the train")
-    on_turn("assistant", "Booked")
-    transcript.started_at -= timedelta(minutes=2)
+    transcript._started_monotonic -= 120
+    started = transcript.started_at.timestamp()
+    on_turn("user", "Book the train", started + 5.5)
+    on_turn("assistant", "Booked", started + 11.5)
+
+
+class _SlowStartBridge(FakeBridge):
+    """Takes 30 seconds, on the transcript's clock, to start the voice agent."""
+
+    async def start_agent(self, options: CallVoiceAgentOptions) -> None:
+        await super().start_agent(options)
+        transcript = cast("MethodType", options.on_conversation_turn).__self__
+        transcript.started_at -= timedelta(seconds=30)
+        transcript._started_monotonic -= 30
+
+
+@pytest.mark.asyncio
+async def test_call_clock_starts_once_the_agent_listens(tmp_path: Path) -> None:
+    """Joining time before the agent can hear the caller is not part of the call's timeline."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = _SlowStartBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.agent_options is not None
+    transcript = cast("MethodType", bridge.agent_options.on_conversation_turn).__self__
+    assert isinstance(transcript, CallTranscript)
+    assert transcript.elapsed_seconds() < 5
+    assert time.time() - transcript.started_at.timestamp() < 5
+    await manager.shutdown()
 
 
 async def _drain_background_tasks(manager: CallManager) -> None:
@@ -3355,10 +3383,10 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
     body = post.await_args.kwargs["writeback"].body
     assert body.startswith("📞 Voice call · 2 min")
-    assert "@alice:example.org (Alice): Book the train" in body
-    assert "Helper: Booked" in body
-    senders = [turn["sender"] for turn in post.await_args.kwargs["writeback"].transcript["turns"]]
-    assert senders == ["@alice:example.org", BOT_USER]
+    assert "[0:05] @alice:example.org (Alice): Book the train" in body
+    assert "[0:11] Helper: Booked" in body
+    turns = post.await_args.kwargs["writeback"].transcript["turns"]
+    assert [(turn["sender"], turn["offset_seconds"]) for turn in turns] == [("@alice:example.org", 5), (BOT_USER, 11)]
     await manager.shutdown()
 
 

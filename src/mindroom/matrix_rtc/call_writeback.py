@@ -22,6 +22,11 @@ logger = get_logger(__name__)
 _MIN_WRITEBACK_SECONDS = 10
 
 
+def _call_time(seconds: int) -> str:
+    """Format whole seconds from the call start as ``[m:ss]``."""
+    return f"[{seconds // 60}:{seconds % 60:02}]"
+
+
 @dataclass(frozen=True)
 class _CallWriteback:
     """Plain and HTML bodies of one transcript message, and its turns by sender ID for clients."""
@@ -33,7 +38,7 @@ class _CallWriteback:
 
 def format_call_writeback(
     *,
-    turns: Sequence[tuple[str, str]],
+    turns: Sequence[tuple[str, str, int]],
     duration_seconds: float,
     caller_id: str,
     caller_label: str,
@@ -44,7 +49,7 @@ def format_call_writeback(
 
     Labels and spoken text are folded onto one line and HTML-escaped, so neither can start a speaker line or add markup.
     """
-    if duration_seconds < _MIN_WRITEBACK_SECONDS or not any(role == "user" for role, _ in turns):
+    if duration_seconds < _MIN_WRITEBACK_SECONDS or not any(role == "user" for role, _, _ in turns):
         return None
     minutes = max(1, round(duration_seconds / 60))
     heading = f"📞 Voice call · {minutes} min"
@@ -52,11 +57,13 @@ def format_call_writeback(
         "user": (caller_id, " ".join(caller_label.split())),
         "assistant": (agent_id, " ".join(agent_label.split())),
     }
-    lines = [(*speakers[role], " ".join(text.split())) for role, text in turns if role in speakers]
-    body = "\n\n".join([heading, "Transcript", *(f"{label}: {text}" for _, label, text in lines)])
-    transcript = "".join(f"<p><strong>{escape(label)}</strong>: {escape(text)}</p>" for _, label, text in lines)
+    lines = [(*speakers[role], " ".join(text.split()), at) for role, text, at in turns if role in speakers]
+    body = "\n\n".join([heading, "Transcript", *(f"{_call_time(at)} {label}: {text}" for _, label, text, at in lines)])
+    transcript = "".join(
+        f"<p>{_call_time(at)} <strong>{escape(label)}</strong>: {escape(text)}</p>" for _, label, text, at in lines
+    )
     formatted_body = f"<p>{heading}</p><details><summary>Transcript</summary>{transcript}</details>"
-    turns_by_sender = [{"sender": sender, "text": text} for sender, _, text in lines]
+    turns_by_sender = [{"sender": sender, "text": text, "offset_seconds": at} for sender, _, text, at in lines]
     return _CallWriteback(
         body=body,
         formatted_body=formatted_body,

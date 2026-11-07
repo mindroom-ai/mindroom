@@ -293,7 +293,7 @@ class ProcessLiveVoiceBridge:
         elif options is None:
             return
         elif kind == "Turn" and options.on_conversation_turn is not None:
-            options.on_conversation_turn(message["speaker"], message["text"])
+            options.on_conversation_turn(message["speaker"], message["text"], message["spoken_at"])
         elif kind == "SessionError" and options.on_session_error is not None:
             options.on_session_error(message["message"])
         elif kind == "Usage":

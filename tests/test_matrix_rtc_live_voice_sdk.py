@@ -220,7 +220,7 @@ async def test_live_sdk_routes_delegation_and_closes_owned_work(provider: _Provi
         voice="vesper",
         respond=respond,
         close_responder=close_responder,
-        on_conversation_turn=lambda speaker, text: transcript.append((speaker, text)),
+        on_conversation_turn=lambda speaker, text, _spoken_at: transcript.append((speaker, text)),
     )
     bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
     room = SimpleNamespace(disconnect=AsyncMock())
@@ -289,7 +289,7 @@ async def test_live_sdk_identical_spoken_retry_survives_delegate_failure(
         api_key="test-api-key",
         voice="marin",
         respond=respond,
-        on_conversation_turn=lambda speaker, text: transcript.append((speaker, text)),
+        on_conversation_turn=lambda speaker, text, _spoken_at: transcript.append((speaker, text)),
     )
     bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
     bridge._room = SimpleNamespace(disconnect=AsyncMock())

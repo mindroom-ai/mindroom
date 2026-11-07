@@ -127,7 +127,9 @@ class _AudioChild:
             respond=self._respond,
             record_usage=self._record_usage,
             greeting_instructions=message.get("greeting_instructions"),
-            on_conversation_turn=lambda speaker, text: self._send({"type": "Turn", "speaker": speaker, "text": text}),
+            on_conversation_turn=lambda speaker, text, spoken_at: self._send(
+                {"type": "Turn", "speaker": speaker, "text": text, "spoken_at": spoken_at},
+            ),
             on_session_terminated=lambda retryable: self._send({"type": "Terminated", "retryable": retryable}),
             on_session_error=lambda error: self._send({"type": "SessionError", "message": error}),
         )
