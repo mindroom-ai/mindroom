@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import importlib
-import re
 from typing import TYPE_CHECKING
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.conftest import runtime_paths_for
 from tests.test_plugins import (
     _bind_runtime_paths,
@@ -25,22 +25,29 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+# The tool each plugin helper registers, the helper, and a tools module that calls it.
 _HELPER_TOOLS_SOURCES = {
     "secondary_gmail": (
+        "register_google_workspace_tools",
         "from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools\n"
         "register_google_workspace_tools(GoogleWorkspaceConfig(name='secondary', display_name='Secondary', "
         "client_config_service='secondary_google_oauth_client', allowed_hosted_domains=('secondary.example',), "
-        "services=('gmail',)))\n"
+        "services=('gmail',)))\n",
     ),
     "partner_atlassian": (
+        "register_atlassian_connection_tools",
         "from mindroom.tool_system.atlassian_connections import (\n"
         "    AtlassianConnectionConfig,\n"
         "    register_atlassian_connection_tools,\n"
         ")\n"
         "register_atlassian_connection_tools(AtlassianConnectionConfig(name='partner', display_name='Partner', "
-        "site_url='https://partner.atlassian.net', products=('confluence',)))\n"
+        "site_url='https://partner.atlassian.net', products=('confluence',)))\n",
     ),
 }
+
+
+def _warnings(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [log for log in logs if log["log_level"] == "warning"]
 
 
 def _package_plugin_config(
@@ -68,19 +75,23 @@ def _package_plugin_config(
 
 
 @pytest.mark.usefixtures("restored_builtin_tools")
-def test_stray_import_of_a_loaded_plugin_tools_module_is_refused(
+def test_stray_import_of_a_loaded_plugin_tools_module_registers_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A plugin's tools module imported by its own name registers nothing, and the plugin keeps loading its tools."""
+    """A plugin's tools module imported by its own name works but registers nothing, and the plugin keeps its tools."""
     config, plugin_root = _package_plugin_config(tmp_path, monkeypatch)
 
     with _forgetting_modules("stray_pkg"):
         assert "stray_pkg_tool" in _load(config, runtime_paths_for(config)).tools
 
-        with pytest.raises(ToolMetadataValidationError, match=re.escape(str(plugin_root.resolve()))):
-            importlib.import_module("stray_pkg.tools")
+        with capture_logs() as logs:
+            stray_tools = importlib.import_module("stray_pkg.tools")
+        assert stray_tools.demo_plugin_tools().__name__ == "DemoTool"
         assert "stray_pkg_tool" not in builtin_tool_registry()
+        assert [(log["tool"], log["plugin_root"], log["module"]) for log in _warnings(logs)] == [
+            ("stray_pkg_tool", str(plugin_root.resolve()), "stray_pkg.tools"),
+        ]
 
         # The plugin's next load executes its tools module again and still registers the tool.
         assert "stray_pkg_tool" in _load(config, runtime_paths_for(config)).tools
@@ -110,25 +121,27 @@ def test_a_module_outside_loaded_plugins_still_registers_a_builtin(
 
 @pytest.mark.parametrize("tool_name", sorted(_HELPER_TOOLS_SOURCES))
 @pytest.mark.usefixtures("restored_builtin_tools")
-def test_stray_import_of_a_module_registering_through_a_plugin_helper_is_refused(
+def test_stray_import_of_a_module_registering_through_a_plugin_helper_registers_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
 ) -> None:
     """A plugin helper whose factories live in MindRoom's modules registers nothing outside a plugin load."""
-    config, _ = _package_plugin_config(tmp_path, monkeypatch, _HELPER_TOOLS_SOURCES[tool_name])
+    helper, tools_source = _HELPER_TOOLS_SOURCES[tool_name]
+    config, _ = _package_plugin_config(tmp_path, monkeypatch, tools_source)
 
     with _forgetting_modules("stray_pkg"):
         assert tool_name in _load(config, runtime_paths_for(config)).tools
 
-        with pytest.raises(ToolMetadataValidationError, match="only while a plugin module loads"):
+        with capture_logs() as logs:
             importlib.import_module("stray_pkg.tools")
         assert tool_name not in builtin_tool_registry()
+        assert [log["caller"] for log in _warnings(logs)] == [helper]
         assert tool_name in _load(config, runtime_paths_for(config)).tools
 
 
 @pytest.mark.usefixtures("restored_builtin_tools")
-def test_a_plugin_imported_while_a_later_plugin_entry_resolves_is_refused(
+def test_a_plugin_imported_while_a_later_plugin_entry_resolves_registers_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -147,7 +160,7 @@ def test_a_plugin_imported_while_a_later_plugin_entry_resolves_is_refused(
     with _forgetting_modules("first_pkg", "second_ns"):
         plugins = _load(config, runtime_paths)
 
-    assert [plugin.name for plugin in plugins.loaded_plugins] == ["first-pkg"]
-    assert [skipped.path for skipped in plugins.generation.skipped] == ["python:second_ns.plugin"]
+    assert [plugin.name for plugin in plugins.loaded_plugins] == ["first-pkg", "second"]
+    assert plugins.generation.skipped == ()
     assert "first_pkg_tool" in plugins.tools
     assert "first_pkg_tool" not in builtin_tool_registry()

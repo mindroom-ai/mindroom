@@ -12,12 +12,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import ToolMetadata, ToolValidationInfo
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
     from mindroom.tool_system.agno_toolkits import AnyToolkit
+
+logger = get_logger(__name__)
 
 # Canonical plugin modules, and the modules config validation executes for a candidate config.
 PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
@@ -38,11 +41,12 @@ def record_plugin_root(root: Path) -> None:
     _PLUGIN_ROOTS.add(root)
 
 
-def require_plugin_load(caller: str) -> None:
-    """Refuse ``caller``, which registers plugin tools whose factories live in MindRoom, outside a plugin load."""
-    if getattr(_REGISTRATION_SCOPE, "registrations", None) is None:
-        msg = f"{caller} registers plugin tools, so it may run only while a plugin module loads."
-        raise ToolMetadataValidationError(msg)
+def plugin_load_active(caller: str) -> bool:
+    """Return whether a plugin module is loading, for ``caller``, which registers plugin tools only then."""
+    if getattr(_REGISTRATION_SCOPE, "registrations", None) is not None:
+        return True
+    logger.warning("Ignoring plugin tools registered outside a plugin load", caller=caller)
+    return False
 
 
 def _plugin_root(module_name: str) -> Path | None:
@@ -54,7 +58,7 @@ def _plugin_root(module_name: str) -> Path | None:
 
 
 def register_tool(metadata: ToolMetadata) -> None:
-    """Record one tool: a plugin module's while that module loads, else a built-in, which no plugin's module may add."""
+    """Record one tool: a plugin module's while that module loads, else a built-in, which no plugin's module adds."""
     registrations = getattr(_REGISTRATION_SCOPE, "registrations", None)
     if registrations is not None:
         if metadata.name in _BUILTIN_TOOLS:
@@ -72,11 +76,14 @@ def register_tool(metadata: ToolMetadata) -> None:
         raise ToolMetadataValidationError(msg)
     plugin_root = _plugin_root(module_name)
     if plugin_root is not None:
-        msg = (
-            f"Plugin tool '{metadata.name}' must register while the plugin at {plugin_root} loads, "
-            f"not when its module is imported as '{module_name}'."
+        # Its plugin's load registers it; another import of the module only executes it again.
+        logger.warning(
+            "Ignoring a plugin tool registered outside its plugin's load",
+            tool=metadata.name,
+            plugin_root=str(plugin_root),
+            module=module_name,
         )
-        raise ToolMetadataValidationError(msg)
+        return
     _BUILTIN_TOOLS[metadata.name] = metadata
 
 
