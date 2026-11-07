@@ -2,12 +2,13 @@ name: Plugin fleet
 
 on:
   pull_request:
-    # Modules that a fleet plugin, mindroom.plugin_api, mindroom.hooks, or mindroom.plugin_check import from, and files this workflow runs.
+    # Modules that a fleet plugin, mindroom.plugin_api, mindroom.hooks, or mindroom.plugin_check import from, and files this workflow uses.
     # Extend the list when one of them imports another module; pushes to main and the nightly run test every change.
     paths:
       - ".github/plugin-fleet.json"
       - ".github/workflows/plugin-ci.yml"
       - ".github/workflows/plugin-fleet.yml"
+      - ".python-version"
       - "pyproject.toml"
       - "uv.lock"
       - "src/mindroom/agent_loop/helper.py"
