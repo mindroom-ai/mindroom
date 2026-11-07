@@ -415,7 +415,7 @@ def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[Plug
 
 def _raise_if_required_plugin_skipped(config: Config, generation: PluginGeneration) -> None:
     """Raise with each skipped plugin whose entry is required, ending the tasks ``generation`` started."""
-    required = {entry.path for entry in config.plugins if entry.required}
+    required = {entry.path for entry in config.plugins if entry.enabled and entry.required}
     failures = [
         f"Required plugin {plugin.path} failed to load: {plugin.error}"
         for plugin in generation.skipped

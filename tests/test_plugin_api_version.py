@@ -159,6 +159,15 @@ def test_a_plugin_skipped_for_any_reason_fails_the_load_only_when_its_entry_requ
         assert reason in str(skipped.error)
 
 
+def test_a_disabled_required_entry_requires_nothing(tmp_path: Path) -> None:
+    """A disabled entry loads nothing, so its `required` does not make another entry for the same path required."""
+    entries = [{"path": "./plugins/missing", "enabled": False, "required": True}, "./plugins/missing"]
+
+    [skipped] = _prepare(tmp_path, entries).skipped
+
+    assert "Configured plugin path does not exist" in str(skipped.error)
+
+
 def test_a_refused_load_names_every_required_plugin_that_did_not_load(tmp_path: Path) -> None:
     """Each required plugin that would be skipped is named with its reason, not only the first."""
     entries = [{"path": "./plugins/first", "required": True}, {"path": "./plugins/second", "required": True}]
