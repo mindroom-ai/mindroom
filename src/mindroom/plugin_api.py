@@ -1,17 +1,20 @@
 """The supported import surface for plugin code.
 
-Plugins import MindRoom's entry points from here; the modules that own them may change between releases.
+Plugins import MindRoom's entry points and the types they annotate with from here; the modules that own them may
+change between releases.
 `GoogleCloudToolkit` and the `mindroom.memory` helpers stay in their documented modules, because those modules load
 Agno at import and this one stays free of Agno and provider SDKs.
-`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, and each enum's member names,
-and fails on a change to them until the change is pinned there with `PLUGIN_API_VERSION`, this surface's version.
+`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, each enum's member names, the
+methods and properties the plugin docs use, and each constant's value, and fails on a change to them until the change
+is pinned there with `PLUGIN_API_VERSION`, this surface's version.
 """
 
 from __future__ import annotations
 
 from mindroom.agent_loop.helper import HelperResult, complete_prompt
 from mindroom.automations import Ask, AutomationContext, Done, automation, automation_threads
-from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, resolve_config_relative_path
+from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, RuntimePaths, resolve_config_relative_path
 from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.hooks import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -50,6 +53,8 @@ from mindroom.hooks import (
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookBindings,
+    HookContext,
+    HookMessageSender,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
@@ -96,6 +101,7 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolStatus,
 )
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.google_workspaces import (
     GoogleWorkspaceConfig,
     google_workspace_oauth_providers,
@@ -152,6 +158,7 @@ __all__ = [
     "BeforeResponseContext",
     "CancelledResponseContext",
     "CompactionHookContext",
+    "Config",
     "ConfigField",
     "ConfigReloadedContext",
     "ContactBeforeSendContext",
@@ -164,6 +171,8 @@ __all__ = [
     "GoogleWorkspaceConfig",
     "HelperResult",
     "HookBindings",
+    "HookContext",
+    "HookMessageSender",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -181,6 +190,7 @@ __all__ = [
     "ResponseResult",
     "RoomMemberJoinedContext",
     "RoomMemberLeftContext",
+    "RuntimePaths",
     "ScheduleFiredContext",
     "SenderKind",
     "SessionHookContext",
@@ -195,6 +205,7 @@ __all__ = [
     "ToolManagedInitArg",
     "ToolRuntimeContext",
     "ToolStatus",
+    "ToolTraceEntry",
     "ToolValue",
     "Toolkit",
     "TranscriptLine",
