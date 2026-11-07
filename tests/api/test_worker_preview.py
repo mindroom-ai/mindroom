@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import socket
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 _REFUSED = "x-mindroom-relay-refused"
 _TOKEN = "runner-secret"  # noqa: S105 - isolated test credential
 _AUTH = {"X-Mindroom-Sandbox-Token": _TOKEN}
+_CLOSE_CODES = web.AppKey("close_codes", asyncio.Queue[int | None])
 
 
 class _Runner:
@@ -61,7 +63,10 @@ async def _runner(tmp_path: Path, *, dedicated: bool = True) -> AsyncIterator[_R
 
 
 async def _echo(request: web.Request) -> web.Response:
-    """Answer with what the app received, two cookies, and a hop-by-hop header the relay must drop."""
+    """Answer with what the app received, two cookies, and a hop-by-hop header the relay must drop.
+
+    ``status`` sets the answer's status, ``location`` its Location header, and ``gzip`` compresses it.
+    """
     response = web.json_response(
         {
             "method": request.method,
@@ -74,26 +79,41 @@ async def _echo(request: web.Request) -> web.Response:
     response.headers.add("Set-Cookie", "a=1")
     response.headers.add("Set-Cookie", "b=2")
     response.headers["Proxy-Authenticate"] = "Basic"
+    if "location" in request.query:
+        response.headers["Location"] = request.query["location"]
+    if "gzip" in request.query:
+        response.enable_compression(web.ContentCoding.gzip)
     return response
 
 
 async def _socket(request: web.Request) -> web.WebSocketResponse:
-    """Greet with the handshake headers the app received, echo each message, and close with 4001 on "bye"."""
+    """Greet with the handshake headers the app received and echo each message.
+
+    "big" asks for a 5 MiB message, "bye" closes with 4001, and the client's own close code is recorded.
+    """
     websocket = web.WebSocketResponse(protocols=("chat",))
     await websocket.prepare(request)
     await websocket.send_json({name.lower(): value for name, value in request.headers.items()})
     async for message in websocket:
         if message.type == aiohttp.WSMsgType.TEXT and message.data == "bye":
             await websocket.close(code=4001)
+        elif message.type == aiohttp.WSMsgType.TEXT and message.data == "big":
+            await websocket.send_bytes(b"x" * 5 * 1024 * 1024)
         elif message.type == aiohttp.WSMsgType.TEXT:
             await websocket.send_str(message.data)
         elif message.type == aiohttp.WSMsgType.BINARY:
             await websocket.send_bytes(message.data)
+    request.app[_CLOSE_CODES].put_nowait(websocket.close_code)
     return websocket
 
 
 @asynccontextmanager
-async def _app(host: str = "127.0.0.1", *, released: asyncio.Event | None = None) -> AsyncIterator[int]:
+async def _app(
+    host: str = "127.0.0.1",
+    *,
+    released: asyncio.Event | None = None,
+    close_codes: asyncio.Queue[int | None] | None = None,
+) -> AsyncIterator[int]:
     """Serve the test app on ``host`` and yield its port."""
 
     async def stream(request: web.Request) -> web.StreamResponse:
@@ -106,6 +126,7 @@ async def _app(host: str = "127.0.0.1", *, released: asyncio.Event | None = None
         return response
 
     app = web.Application()
+    app[_CLOSE_CODES] = close_codes if close_codes is not None else asyncio.Queue()
     app.router.add_get("/socket", _socket)
     app.router.add_get("/stream", stream)
     app.router.add_route("*", "/{tail:.*}", _echo)
@@ -167,16 +188,25 @@ async def test_relay_streams_an_answer_as_the_app_writes_it(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_relay_passes_an_apps_own_error_unmarked(tmp_path: Path) -> None:
-    """An app's 502 reaches the caller as the app's answer, not as a refusal."""
-    async with (
-        _app() as port,
-        _runner(tmp_path) as runner,
-        aiohttp.ClientSession() as client,
-        client.get(f"{runner.root}/{port}/?status=502", headers=_AUTH) as response,
-    ):
-        assert response.status == 502
-        assert _REFUSED not in response.headers
+async def test_relay_passes_an_apps_answer_as_the_app_sent_it(tmp_path: Path) -> None:
+    """An app's own 502 stays unmarked, a redirect is not followed, and a compressed answer stays compressed."""
+    async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        async with client.get(f"{runner.root}/{port}/?status=502", headers=_AUTH) as response:
+            assert response.status == 502
+            assert _REFUSED not in response.headers
+            headers = dict((await response.json())["headers"])
+            # A request without a body goes out without one.
+            assert {"content-length", "transfer-encoding"}.isdisjoint(headers)
+        async with client.get(
+            f"{runner.root}/{port}/?status=302&location=/elsewhere",
+            headers=_AUTH,
+            allow_redirects=False,
+        ) as response:
+            assert response.status == 302
+            assert response.headers["Location"] == "/elsewhere"
+        async with client.get(f"{runner.root}/{port}/zipped?gzip=1", headers=_AUTH) as response:
+            assert response.headers["Content-Encoding"] == "gzip"
+            assert (await response.json())["path"] == "/zipped?gzip=1"
 
 
 @pytest.mark.asyncio
@@ -198,20 +228,24 @@ async def test_relay_reaches_an_app_listening_only_on_ipv6_loopback(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_port_list_shows_loopback_apps_and_leaves_out_the_runner_and_other_addresses(tmp_path: Path) -> None:
-    """The list holds an app on loopback, never the runner's own port or a server only on another address."""
+    """The list holds apps on loopback or every address, never the runner, a client socket, or another address."""
     async with (
         _app() as port,
+        _app("0.0.0.0") as everywhere,  # noqa: S104 - a server on every address is reached at loopback too
         _app("127.0.0.2") as elsewhere,
         _runner(tmp_path) as runner,
-        aiohttp.ClientSession() as client,
-        client.get(runner.root, headers=_AUTH) as response,
     ):
-        assert response.status == 200
-        ports = await response.json()
-        assert port in ports
-        assert runner.port not in ports
-        assert elsewhere not in ports
-        assert ports == sorted(ports)
+        _, connected = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            async with aiohttp.ClientSession() as client, client.get(runner.root, headers=_AUTH) as response:
+                assert response.status == 200
+                ports = await response.json()
+        finally:
+            connected.close()
+            await connected.wait_closed()
+    assert {port, everywhere} <= set(ports)
+    assert {runner.port, elsewhere, connected.get_extra_info("sockname")[1]}.isdisjoint(ports)
+    assert ports == sorted(ports)
 
 
 @pytest.mark.asyncio
@@ -252,7 +286,7 @@ async def test_relay_requires_the_runner_token(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_relay_passes_a_websocket_both_ways_without_the_runner_token(tmp_path: Path) -> None:
-    """Text and binary messages, the subprotocol, and the app's close code pass; the token does not."""
+    """Messages up to 16 MiB, the subprotocol, and the app's close code pass; the token does not."""
     async with (
         _app() as port,
         _runner(tmp_path) as runner,
@@ -261,6 +295,7 @@ async def test_relay_passes_a_websocket_both_ways_without_the_runner_token(tmp_p
             f"{runner.root}/{port}/socket?room=1",
             headers={**_AUTH, "Cookie": "session=app"},
             protocols=("chat",),
+            max_msg_size=16 * 1024 * 1024,
         ) as websocket,
     ):
         assert websocket.protocol == "chat"
@@ -272,15 +307,44 @@ async def test_relay_passes_a_websocket_both_ways_without_the_runner_token(tmp_p
         assert await websocket.receive_str() == "hello"
         await websocket.send_bytes(b"\x00\x01")
         assert await websocket.receive_bytes() == b"\x00\x01"
+        await websocket.send_str("big")
+        assert len(await websocket.receive_bytes()) == 5 * 1024 * 1024
         await websocket.send_str("bye")
         assert (await websocket.receive()).type == aiohttp.WSMsgType.CLOSE
         assert websocket.close_code == 4001
 
 
 @pytest.mark.asyncio
-async def test_relay_refuses_a_websocket_to_a_port_no_app_listens_on(tmp_path: Path) -> None:
-    """A WebSocket to a closed port is refused at the handshake."""
-    async with _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            await client.ws_connect(f"{runner.root}/{_free_port()}/socket", headers=_AUTH)
-        assert refused.value.status == 403
+async def test_relay_passes_the_callers_close_code_to_the_app(tmp_path: Path) -> None:
+    """A caller that closes with an application code closes the app's socket with the same code."""
+    close_codes: asyncio.Queue[int | None] = asyncio.Queue()
+    async with _app(close_codes=close_codes) as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        async with client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH) as websocket:
+            await websocket.receive_json()
+            await websocket.close(code=4002)
+        async with asyncio.timeout(5):
+            assert await close_codes.get() == 4002
+
+
+@pytest.mark.asyncio
+async def test_relay_refuses_a_websocket_nothing_answers(tmp_path: Path) -> None:
+    """A WebSocket to a closed port, or to an app path that takes none, is refused at the handshake."""
+    async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        for url in (f"{runner.root}/{_free_port()}/socket", f"{runner.root}/{port}/plain"):
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect(url, headers=_AUTH)
+            assert refused.value.status == 403
+
+
+@pytest.mark.asyncio
+async def test_relay_closes_its_app_connection_after_each_answer(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each relayed answer closes its connection to the app, so none is left for garbage collection to report."""
+    async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
+        for _ in range(3):
+            async with client.get(f"{runner.root}/{port}/", headers=_AUTH) as response:
+                await response.read()
+    gc.collect()
+    assert "Unclosed" not in caplog.text

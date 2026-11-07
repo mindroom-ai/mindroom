@@ -14,7 +14,7 @@ import secrets
 import sys
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
@@ -99,7 +99,7 @@ def _relay_ports(connection: HTTPConnection) -> dict[int, str]:
     return ports
 
 
-def _upstream_url(connection: HTTPConnection, port: int, scheme: Literal["http", "ws"]) -> URL:
+def _upstream_url(connection: HTTPConnection, port: int) -> URL:
     """Return the URL of the app on ``port`` that ``connection`` asks for."""
     host = _relay_ports(connection).get(port)
     if host is None:
@@ -107,7 +107,7 @@ def _upstream_url(connection: HTTPConnection, port: int, scheme: Literal["http",
     # The path below the port as the primary sent it, still percent-encoded.
     target = connection.scope["raw_path"].decode("latin-1").removeprefix(f"{router.prefix}/").partition("/")[2]
     query = connection.scope["query_string"].decode("latin-1")
-    return URL(f"{scheme}://{host}:{port}/{target}{'?' if query else ''}{query}", encoded=True)
+    return URL(f"http://{host}:{port}/{target}{'?' if query else ''}{query}", encoded=True)
 
 
 def _end_to_end(headers: Iterable[tuple[str, str]], drop: frozenset[str] = frozenset()) -> list[tuple[str, str]]:
@@ -149,11 +149,10 @@ async def listening_ports(request: Request) -> list[int]:
 @router.api_route("/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])
 async def relay(request: Request, port: int) -> StreamingResponse:
     """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
-    url = _upstream_url(request, port, "http")
+    url = _upstream_url(request, port)
     has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
     session = aiohttp.ClientSession(
         auto_decompress=False,
-        cookie_jar=aiohttp.DummyCookieJar(),
         timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
     )
     try:
@@ -179,7 +178,7 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
         await websocket.close(code=1008)
         return
     try:
-        url = _upstream_url(websocket, port, "ws")
+        url = _upstream_url(websocket, port)
     except HTTPException:
         await websocket.close(code=1008)
         return
