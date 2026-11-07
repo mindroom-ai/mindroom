@@ -73,6 +73,10 @@ class VoiceBridgeLike(Protocol):
         """Restrict media input and output to the current Matrix call roster."""
         ...
 
+    def vacate_roster(self) -> None:
+        """Keep the last roster's media after the Matrix roster emptied, ending once it leaves the SFU."""
+        ...
+
     async def connect(self, grant: SfuGrant) -> None:
         """Connect to the SFU with the granted credentials."""
         ...
@@ -215,6 +219,11 @@ class CallSession:
         # A roster change is a fresh delivery opportunity: restart the backoff.
         self._key_retry_attempt = 0
         await self._distribute_keys()
+
+    def vacate_roster(self) -> None:
+        """Keep this roster's media and frame keys while the caller's lapsed membership returns."""
+        if not self._stopped:
+            self.deps.bridge.vacate_roster()
 
     def on_key_received(self, received: ReceivedFrameKey) -> bool:
         """Install a current participant's frame key and report roster admission."""
