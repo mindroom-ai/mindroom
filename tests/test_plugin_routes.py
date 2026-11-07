@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -163,14 +164,14 @@ def _config(tmp_path: Path, *names: str) -> tuple[Config, RuntimePaths]:
     return config, runtime_paths
 
 
-def _api_state(config: Config, runtime_paths: RuntimePaths) -> config_lifecycle.ApiState:
+def _api_state(config: Config | None, runtime_paths: RuntimePaths) -> config_lifecycle.ApiState:
     return config_lifecycle.ApiState(
         threading.Lock(),
         config_lifecycle.ApiSnapshot(1, runtime_paths, runtime_config=config),
     )
 
 
-def _app(config: Config, runtime_paths: RuntimePaths) -> FastAPI:
+def _app(config: Config | None, runtime_paths: RuntimePaths) -> FastAPI:
     """Return an API app serving ``config`` with the plugin routes mounted, answering errors as the main app does."""
     app = FastAPI(exception_handlers={RequestValidationError: validation_error_response})
     ensure_app_state(app).api_state = _api_state(config, runtime_paths)
@@ -244,8 +245,8 @@ def test_unknown_plugin_404(tmp_path: Path) -> None:
     assert denied.value.json() == {"detail": "Not Found"}
 
 
-def _signed_in(app: FastAPI) -> dict[str, str]:
-    return {"Authorization": f"Bearer {_client_session_store(app).create(ALICE).token}"}
+def _signed_in(app: FastAPI, user_id: str = ALICE) -> dict[str, str]:
+    return {"Authorization": f"Bearer {_client_session_store(app).create(user_id).token}"}
 
 
 def _server_plugin_api() -> str:
@@ -304,12 +305,7 @@ def test_plugin_list_is_empty_before_a_config_loads(tmp_path: Path) -> None:
     _write_plugin(tmp_path, ROUTES)
     config, runtime_paths = _config(tmp_path)
     publish_test_plugins(config, runtime_paths)
-    app = FastAPI()
-    ensure_app_state(app).api_state = config_lifecycle.ApiState(
-        threading.Lock(),
-        config_lifecycle.ApiSnapshot(1, runtime_paths),
-    )
-    mount_plugin_routes(app)
+    app = _app(None, runtime_paths)
     client = TestClient(app)
 
     assert client.get("/api/plugins", headers=_signed_in(app)).json() == {
@@ -430,8 +426,12 @@ def test_worker_refresh_reads_a_changed_plugin_api_need(tmp_path: Path) -> None:
     config, runtime_paths = _config(tmp_path)
     [before] = refresh_plugins(config, runtime_paths).loaded_plugins
 
+    manifest_path = root / "mindroom.plugin.json"
     manifest = {"name": "demo", "tools_module": "tools.py", "mindroom_plugin_api": "1.0"}
-    (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # A refresh rereads a manifest only when its mtime moved, which two quick writes may not do.
+    mtime = manifest_path.stat().st_mtime + 5
+    os.utime(manifest_path, (mtime, mtime))
     [after] = refresh_plugins(config, runtime_paths).loaded_plugins
 
     assert after.modules == before.modules
@@ -441,13 +441,12 @@ def test_worker_refresh_reads_a_changed_plugin_api_need(tmp_path: Path) -> None:
 def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path) -> None:
     """Plugin routes see the main app's client sessions and room membership, so their checks pass and refuse."""
     app, client = _published_client(tmp_path)
-    token = _client_session_store(app).create(ALICE).token
+    bearer = _signed_in(app)
 
     async def room_members(room_id: str) -> frozenset[str]:
         return frozenset({ALICE}) if room_id == ROOM else frozenset()
 
     ensure_app_state(app).room_members = room_members
-    bearer = {"Authorization": f"Bearer {token}"}
 
     def me(room_id: str, headers: dict[str, str]) -> tuple[int, object]:
         response = client.get(f"/api/plugins/demo/rooms/{quote(room_id, safe='')}/me", headers=headers)
@@ -463,8 +462,7 @@ def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path
 def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_path: Path) -> None:
     """The query string never picks the user nor the room: the user is the session's own, the room the path's."""
     app, client = _published_client(tmp_path)
-    store = _client_session_store(app)
-    bob = {"Authorization": f"Bearer {store.create('@bob:example.org').token}"}
+    bob = _signed_in(app, "@bob:example.org")
 
     async def room_members(room_id: str) -> frozenset[str]:
         return frozenset({ALICE}) if room_id == ROOM else frozenset()
@@ -476,7 +474,7 @@ def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_pat
         assert client.get(url).status_code == 401, path
         assert client.get(url, headers=bob).status_code == 403, path
     # A route without ``{room_id}`` never checks a room the query string names, even one the caller is in.
-    alice = {"Authorization": f"Bearer {store.create(ALICE).token}"}
+    alice = _signed_in(app)
     assert client.get(f"/api/plugins/demo/me?room_id={quote(ROOM)}", headers=alice).status_code == 422
 
 
