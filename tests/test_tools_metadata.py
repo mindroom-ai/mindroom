@@ -35,6 +35,7 @@ import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.public_fetch import PublicFetchError
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
@@ -973,7 +974,7 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
     with _recording_loopback_server() as (url, connections):
         for function_name, parameter in _url_functions(tool_name):
             argument = [url] if parameter.endswith("urls") else url
-            with contextlib.suppress(ServerFetchUrlError):
+            with contextlib.suppress(ServerFetchUrlError, PublicFetchError):
                 getattr(toolkit, function_name)(**{parameter: argument})
 
     assert connections == []

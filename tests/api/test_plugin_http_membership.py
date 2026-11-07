@@ -4,10 +4,12 @@ The embedded API binds the reader as it serves, and entity restarts and reloads 
 """
 
 import asyncio
+import gc
+import weakref
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -25,6 +27,7 @@ from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
 from mindroom.orchestrator import _MultiAgentOrchestrator, _run_api_server
 from mindroom.plugin_http import ClientUser, require_room_member
+from tests.access_schema_support import joined_members_response
 from tests.conftest import install_bots
 
 ROOM = "!room:example.org"
@@ -50,10 +53,9 @@ def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
 
 def _client(*user_ids: str, rooms: tuple[str, ...] = (ROOM,)) -> SimpleNamespace:
     """A Matrix client joined to ``rooms`` that answers ``user_ids`` as the members of ``ROOM``."""
-    members = [nio.RoomMember(user_id, None, None) for user_id in user_ids]
     return SimpleNamespace(
         rooms={room_id: object() for room_id in rooms},
-        joined_members=AsyncMock(return_value=nio.JoinedMembersResponse(members, ROOM)),
+        joined_members=AsyncMock(return_value=joined_members_response(ROOM, *user_ids)),
     )
 
 
@@ -136,6 +138,144 @@ async def test_joined_members_that_never_answers_503(monkeypatch: pytest.MonkeyP
         async with asyncio.timeout(5):
             await require_room_member(_request(_bound(client)), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership lookup failed; try again.")
+
+
+@pytest.mark.asyncio
+async def test_callers_share_a_running_lookup_but_not_a_finished_one() -> None:
+    """Callers that ask while a room's lookup runs share it, each answered for their own user; a later one asks again."""
+    client = _client("@alice:example.org")
+    app = _bound(client)
+    users = ("@alice:example.org", "@bob:example.org", "@alice:example.org")
+    # All three ask before the lookup the first one starts gets to run.
+    callers = [asyncio.create_task(_membership_status(app, user_id)) for user_id in users]
+    assert await asyncio.gather(*callers) == [200, 403, 200]
+    client.joined_members.assert_awaited_once_with(ROOM)
+    client.joined_members.return_value = joined_members_response(ROOM, "@bob:example.org")
+    assert await _membership_status(app) == 403
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_after_a_lookup_answered_gets_a_fresh_answer() -> None:
+    """A caller that asks once a lookup answered starts a new one, even before the finished one is cleared away."""
+    late: list[asyncio.Task[int]] = []
+    release = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        if not late:
+            # This caller's first step runs after the lookup ends and before anything that ending scheduled.
+            late.append(asyncio.create_task(_membership_status(app)))
+            return joined_members_response(ROOM, "@alice:example.org")
+        await release.wait()
+        return joined_members_response(ROOM)
+
+    client = _client()
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    app = _bound(client)
+    assert await _membership_status(app) == 200
+    # Asks while the late caller's lookup runs, so it shares that one.
+    later = asyncio.create_task(_membership_status(app))
+    await asyncio.sleep(0)
+    release.set()
+    assert await asyncio.gather(late[0], later) == [403, 403]
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [(joined_members_response(ROOM, "@alice:example.org"), 200), (nio.JoinedMembersError("boom"), 503)],
+)
+async def test_a_finished_lookup_is_not_kept(
+    answer: nio.JoinedMembersResponse | nio.JoinedMembersError,
+    status: int,
+) -> None:
+    """Once a lookup answered or failed and its caller has the answer, the bound reader holds on to nothing of it."""
+    client = _client()
+    client.joined_members.return_value = answer
+    # Kept for the whole test: the reader, and whatever it holds, lives as long as the app it is bound to.
+    app = _bound(client)
+    caller = asyncio.create_task(_membership_status(app))
+    await asyncio.sleep(0)
+    (lookup,) = asyncio.all_tasks() - {caller, asyncio.current_task()}
+    finished = weakref.ref(lookup)
+    del lookup
+    assert await caller == status
+    gc.collect()
+    assert finished() is None
+    assert ensure_app_state(app).room_members is not None
+
+
+@pytest.mark.asyncio
+async def test_callers_for_another_room_get_its_own_lookup() -> None:
+    """A lookup answers only for its own room, even while a caller for another room waits at the same time."""
+    client = _client(rooms=(ROOM, OTHER_ROOM))
+    answers = {
+        ROOM: joined_members_response(ROOM, "@alice:example.org"),
+        OTHER_ROOM: joined_members_response(OTHER_ROOM),
+    }
+    client.joined_members.side_effect = answers.__getitem__
+    app = _bound(client)
+    callers = [asyncio.create_task(_membership_status(app, room_id=room_id)) for room_id in (ROOM, OTHER_ROOM)]
+    assert await asyncio.gather(*callers) == [200, 403]
+    assert client.joined_members.await_args_list == [call(ROOM), call(OTHER_ROOM)]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_fails_every_caller_sharing_it_and_is_not_kept() -> None:
+    """A lookup that fails answers 503 to every caller sharing it, and the next caller asks again."""
+    client = _client()
+    client.joined_members.return_value = nio.JoinedMembersError("boom")
+    app = _bound(client)
+    callers = [asyncio.create_task(_membership_status(app)) for _ in range(3)]
+    assert await asyncio.gather(*callers) == [503, 503, 503]
+    client.joined_members.return_value = joined_members_response(ROOM, "@alice:example.org")
+    assert await _membership_status(app) == 200
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_goes_away_leaves_the_lookup_to_the_others() -> None:
+    """Cancelling the caller that started a room's lookup does not cancel it for the callers sharing it."""
+    client = _client("@alice:example.org")
+    app = _bound(client)
+    first, second = (asyncio.create_task(_membership_status(app)) for _ in range(2))
+    # After one turn of the loop both have asked, and the lookup the first one started has not run yet.
+    await asyncio.sleep(0)
+    first.cancel()
+    assert await second == 200
+    assert first.cancelled()
+    client.joined_members.assert_awaited_once_with(ROOM)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_a_lookup_ending_after_its_callers_left_reports_no_error(cancelled: bool) -> None:
+    """A lookup that fails or is cancelled once every caller sharing it went away gives asyncio no error to report."""
+    reported: list[dict[str, object]] = []
+    asyncio.get_running_loop().set_exception_handler(lambda _loop, context: reported.append(context))
+    client = _client()
+    release = asyncio.Event()
+
+    async def fails_once_released(_room_id: str) -> nio.JoinedMembersError:
+        await release.wait()
+        return nio.JoinedMembersError("boom")
+
+    client.joined_members = fails_once_released
+    caller = asyncio.create_task(_membership_status(_bound(client)))
+    await asyncio.sleep(0)
+    (lookup,) = asyncio.all_tasks() - {caller, asyncio.current_task()}
+    caller.cancel()
+    await asyncio.wait([caller])
+    if cancelled:
+        lookup.cancel()
+    else:
+        release.set()
+    await asyncio.wait([lookup])
+    # The cancelled caller's traceback holds the lookup too; asyncio reports an unretrieved exception as it is freed.
+    del caller, lookup
+    gc.collect()
+    assert reported == []
 
 
 @pytest.mark.asyncio
@@ -260,10 +400,10 @@ def _running_bot(client: SimpleNamespace) -> MagicMock:
     return MagicMock(spec=AgentBot, running=True, client=client)
 
 
-async def _membership_status(app: FastAPI) -> int:
-    """Return 200 when Alice passes the membership check for ``ROOM``, else the status it answers."""
+async def _membership_status(app: FastAPI, user_id: str = "@alice:example.org", room_id: str = ROOM) -> int:
+    """Return 200 when ``user_id`` passes the membership check for ``room_id``, else the status it answers."""
     try:
-        await require_room_member(_request(app), ROOM)
+        await require_room_member(_request(app, user_id), room_id)
     except HTTPException as error:
         return error.status_code
     return 200
