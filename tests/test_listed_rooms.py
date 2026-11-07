@@ -284,6 +284,22 @@ async def test_a_room_taken_off_that_the_bot_is_not_in_is_not_read(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kept_as", ["configured", "personal"])
+async def test_a_room_taken_off_its_list_keeps_bots_configured_or_retained_there(tmp_path: Path, kept_as: str) -> None:
+    """Taking a room off a list never takes a bot out of a room it keeps for another reason."""
+    bot = _Bot(tmp_path, {PARENT: [_create()], ROOM: [_create(), _parent(PARENT)]})
+    bot.join(ROOM)
+    if kept_as == "configured":
+        bot.lifecycle.deps = replace(bot.lifecycle.deps, get_configured_rooms=lambda: [PARENT, ROOM])
+    else:
+        bot.lifecycle.deps = replace(bot.lifecycle.deps, get_retained_room_ids=lambda: {ROOM})
+
+    await bot.on_space_child(ROOM, listed=False)
+
+    assert bot.memberships == []
+
+
+@pytest.mark.asyncio
 async def test_a_room_taken_off_a_space_keeps_its_bots(tmp_path: Path) -> None:
     """Spaces keep their rooms' members: taking a room off a Space never takes a bot out of it."""
     bot = _Bot(tmp_path, {PARENT: [_create("m.space")], ROOM: [_create(), _parent(PARENT)]})
