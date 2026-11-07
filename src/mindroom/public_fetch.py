@@ -83,7 +83,6 @@ async def _fetch(url: str, max_bytes: int, use_env_proxy: bool) -> PublicFetchRe
     async with httpx.AsyncClient(
         transport=ServerFetchAsyncHTTPTransport(),
         mounts=_proxy_mounts() if use_env_proxy else None,
-        trust_env=False,
         headers={"Accept-Encoding": "identity"},
         timeout=None,  # noqa: S113 - the deadline around the client bounds every operation.
     ) as client:
