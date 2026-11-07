@@ -86,6 +86,7 @@ from mindroom.tool_system.atlassian_connections import (
 )
 from mindroom.tool_system.authoring import CurrentCall, Toolkit, current_call, tool, toolkit_functions
 from mindroom.tool_system.declarations import (
+    ApprovalAlias,
     ConfigField,
     SetupType,
     ToolCategory,
@@ -141,6 +142,7 @@ __all__ = [
     "VOICE_PREFIX",
     "AfterResponseContext",
     "AgentLifecycleContext",
+    "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
     "AutomationContext",

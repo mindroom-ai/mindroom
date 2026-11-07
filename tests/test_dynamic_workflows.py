@@ -2052,7 +2052,7 @@ def test_participant_tools_must_be_pre_approved_or_auto_approved(tmp_path: Path)
     context = replace(context, config=config)
 
     def problem(entry: str, allowed: set[str]) -> str | None:
-        return dynamic_workflow_module._tool_approval_problem(context, entry, frozenset(allowed))
+        return dynamic_workflow_module._tool_approval_problem(context, entry, frozenset(allowed), {})
 
     gated = (
         "requires approval, and workflow participants cannot pause for approval; "

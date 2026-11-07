@@ -1072,6 +1072,7 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
             tool_dict.pop("oauth_fallback_fields", None)
         if not metadata.requires_primary_runtime:
             tool_dict.pop("requires_primary_runtime", None)
+        tool_dict.pop("approval_aliases", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("worker_inert_agent_functions", None)
