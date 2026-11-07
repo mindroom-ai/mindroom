@@ -111,7 +111,7 @@ from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .router.duties import RouterDuties, RouterDutiesDeps
-from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event
+from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
 from .turn_policy import TurnPolicy, TurnPolicyDeps
@@ -545,6 +545,7 @@ class AgentBot:
             # The reply runtime and the delivery gateway hold each other through the reply-debt methods
             # `_settle_reply_debt_later` and `_reply_row_resolved`.
             approval_ended=self._settle_reply_debt_later,
+            reply_stopped=partial(cancel_stopped_reply_jobs, self.runtime_paths),
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(

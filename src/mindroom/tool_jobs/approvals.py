@@ -19,7 +19,7 @@ from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, resolve_
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import tool_job_run_id
 from mindroom.llm.runs import ToolExecution
-from mindroom.tool_jobs.control import job_stopped_by_shutdown
+from mindroom.tool_jobs.control import job_checkpoint, job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 
@@ -78,6 +78,7 @@ async def ask_job_approvals(
         raise
     if gated:
         await runtime.set_awaiting_approval(job_id, awaiting=False)
+    job_checkpoint(approval=True)
     return tuple(decided)
 
 
@@ -146,6 +147,7 @@ async def _decide(
     if manager is None or approver is None or owner.room_id is None or owner.requester_id is None:
         return False, approval_manager.RUNTIME_NOT_READY_REASON
     assert call.toolkit_name is not None
+    job_checkpoint(approval=True)
     decision = await manager.request_background_approval(
         origin=BackgroundScriptToolOrigin(
             run_id=tool_job_run_id(job_id),

@@ -20,6 +20,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.background_after import validate_wait_seconds
@@ -248,6 +249,8 @@ class _Entry:
     drain: asyncio.Task[BackgroundJob] | None = None
     # The latest progress its running tool reported, which snapshots of the running job carry.
     progress: str | None = None
+    # The reply whose call started the job, whose Stop refuses the job every later approval.
+    reply_id: str | None = None
 
     def notify_changed(self) -> None:
         """Wake existing state waiters while keeping the next wait fresh."""
@@ -457,12 +460,9 @@ class ToolJobRuntime:
                 await self._store.accept(job.job_id, job_json)
             else:
                 # A cancel request ends the job's approvals as its end does, so its save denies the pending cards.
-                await self._store.save(
-                    job.job_id,
-                    job_json,
-                    payload_json,
-                    ends_approvals=job.status in TERMINAL_STATUSES or job.status == "cancel_requested",
-                )
+                ends = job.status in TERMINAL_STATUSES or job.status == "cancel_requested"
+                reason = REPLY_STOPPED_REASON if entry.control.reply_stopped else JOB_ENDED_REASON
+                await self._store.save(job.job_id, job_json, payload_json, approval_end_reason=reason if ends else None)
             entry.job, entry.saved, entry.unsaved_payload = job, True, None
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
@@ -539,9 +539,12 @@ class ToolJobRuntime:
         operation: _Operation,
         cancel: _Cleanup | None = None,
         reattach: bool = False,
+        reply_id: str | None = None,
+        span_stopped: Callable[[], bool] | None = None,
     ) -> tuple[BackgroundJob, JobClaim | None]:
         """Durably accept exact operation ownership before spawning execution, claiming its outcome for the caller.
 
+        A job whose reply span ``span_stopped`` says a Stop reached is cancelled before it runs.
         The claim is taken after the last await, so a cancelled start leaves no claim its caller never received.
         """
         async with self._lock:
@@ -569,16 +572,20 @@ class ToolJobRuntime:
                     raise ValueError(msg)
                 if not owner.session_id or depth < 0 or self._grant(job) != "allowed":
                     raise JobAccessError(_UNAVAILABLE)
-                entry = _Entry(job, cancel=cancel)
-                await run_coroutine_until_complete(self._admit(entry, job, operation))
+                entry = _Entry(job, cancel=cancel, reply_id=reply_id)
+                await run_coroutine_until_complete(self._admit(entry, operation, span_stopped))
             snapshot = await self._snapshot(entry)
             return snapshot, entry.claim_for(None) if readable else None
 
-    async def _admit(self, entry: _Entry, job: BackgroundJob, operation: _Operation) -> None:
-        """Publish accepted ownership, then launch it; callers finish this before propagating cancellation."""
-        await self._publish(entry, job, accepted=True)
+    async def _admit(self, entry: _Entry, operation: _Operation, span_stopped: Callable[[], bool] | None) -> None:
+        """Publish accepted ownership, then launch it unless its reply span was stopped; callers finish this first."""
+        await self._publish(entry, entry.job, accepted=True)
         self._add_entry(entry)
-        entry.task = asyncio.create_task(self._run(entry, operation), name=f"tool-job:{job.job_id}")
+        if span_stopped is not None and span_stopped():
+            entry.control.reply_stopped = True
+            await self._request_cancel(entry)
+            return
+        entry.task = asyncio.create_task(self._run(entry, operation), name=f"tool-job:{entry.job.job_id}")
 
     def owns_execution(self, job_id: str, adapter: dict[str, Any]) -> bool:
         """Recognize exact accepted adapter ownership even if its former waiter was cancelled."""
@@ -602,7 +609,7 @@ class ToolJobRuntime:
                 entry.job.adapter.update(changes)
                 await self._publish(entry, _updated(entry.job))
 
-    async def _run(self, entry: _Entry, operation: _Operation) -> None:
+    async def _run(self, entry: _Entry, operation: _Operation) -> None:  # noqa: C901
         outcome = None
         returned = False
         loop = asyncio.get_running_loop()
@@ -640,6 +647,9 @@ class ToolJobRuntime:
             except asyncio.CancelledError:
                 if (task := asyncio.current_task()) is not None and task.cancelling():
                     raise  # Requested cancellation: runtime-owned, or external teardown.
+                if entry.control.reply_stopped:
+                    await self.request_cancel(entry.job.job_id)
+                    raise
                 # The operation raised cancellation itself; settle it so waiters and delivery see an outcome.
                 outcome = BackgroundOutcome("cancelled", _CANCELLED_REASON)
             async with self._lock:
@@ -820,6 +830,20 @@ class ToolJobRuntime:
                     await self._request_cancel(entry)
                 except Exception:
                     logger.exception("Tool job revocation failed", job_id=entry.job.job_id)
+
+    async def cancel_stopped_reply(self, reply_id: str) -> None:
+        """Refuse a stopped reply's jobs every later approval, and cancel those waiting on cards, which denies them.
+
+        A job whose approved call already runs keeps running; any other is cancelled when it next asks or is answered.
+        """
+        stopped = [entry for entry in self._entries.values() if entry.reply_id == reply_id]
+        # Marked before the lock, so a decision already waiting for the lock is refused too.
+        for entry in stopped:
+            entry.control.reply_stopped = True
+        async with self._lock:
+            for entry in stopped:
+                if entry.job.status == "awaiting_approval" and not self._closed and self._shutdown_task is None:
+                    await self._request_cancel(entry)
 
     async def _request_cancel(self, entry: _Entry) -> asyncio.Task[BackgroundJob]:
         """Durably request cancellation and return its one drain; the caller holds the runtime lock."""

@@ -294,10 +294,10 @@ def intercept_job_saves(
         job_json: str,
         result_payload_json: str | None = None,
         *,
-        ends_approvals: bool,
+        approval_end_reason: str | None,
     ) -> None:
         await hook(before, job_json, result_payload_json)
-        await original_save(store, job_id, job_json, result_payload_json, ends_approvals=ends_approvals)
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
         await hook(after, job_json, result_payload_json)
 
     monkeypatch.setattr(ToolJobStore, "accept", accept)
@@ -329,7 +329,7 @@ async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> Non
         store = journal.tool_jobs(uuid4().hex)
         await store.take_ownership()
         if job_id in {saved.job_id for saved in await journal.tool_jobs("reader").load_all()}:
-            await store.save(job_id, job_json, ends_approvals=False)
+            await store.save(job_id, job_json, approval_end_reason=None)
         else:
             await store.accept(job_id, job_json)
     finally:

@@ -56,6 +56,7 @@ from tests.conftest import (
     make_relation_lookup,
     request_envelope,
 )
+from tests.reply_span_helpers import no_reply_jobs
 from tests.reply_turn_helpers import runner_for
 from tests.runtime_fakes import ready_runtime
 
@@ -383,6 +384,7 @@ def _build_response_runner(
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
                 approval_ended=lambda _ended: None,
+                reply_stopped=no_reply_jobs,
             ),
         ),
     )

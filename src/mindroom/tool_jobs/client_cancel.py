@@ -1,4 +1,4 @@
-"""A person's cancel of background jobs from a client, and the jobs a bot leaves behind in a room it left."""
+"""A person's cancel of background jobs from a client or a reply's Stop, and the jobs a bot leaves in a room it left."""
 
 from __future__ import annotations
 
@@ -101,6 +101,13 @@ async def cancel_room_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id:
     """Cancel every live job of an agent in a room it left, where nobody can see or cancel them any more."""
     for job in _live_jobs(runtime, agent_name=agent_name, room_id=room_id):
         await runtime.request_cancel(job.job_id)
+
+
+async def cancel_stopped_reply_jobs(runtime_paths: RuntimePaths, reply_id: str) -> None:
+    """Cancel the jobs a stopped reply started that still await approval, so a later approval runs nothing."""
+    runtime = get_background_runtime(runtime_paths)
+    if runtime is not None:
+        await runtime.cancel_stopped_reply(reply_id)
 
 
 def conversation_jobs(runtime: ToolJobRuntime, *, room_id: str, thread_id: str | None) -> list[BackgroundJob]:

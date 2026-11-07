@@ -26,15 +26,17 @@ class JobControl:
 
     cancelled: bool = False
     shutdown: bool = False
+    # Set by a Stop of the reply that started the job, which then gets no further approval.
+    reply_stopped: bool = False
 
     def cancel(self, *, shutdown: bool = False) -> None:
         """Prevent tool entry even when the operation catches task cancellation; the first cause stands."""
         if not self.cancelled:
             self.cancelled, self.shutdown = True, shutdown
 
-    def checkpoint(self) -> None:
-        """Fail on cancellation without creating waiters on another event loop."""
-        if self.cancelled:
+    def checkpoint(self, *, approval: bool = False) -> None:
+        """Fail on cancellation, or on an approval step after the reply's Stop, without event-loop waiters."""
+        if self.cancelled or (approval and self.reply_stopped):
             raise asyncio.CancelledError
 
 
@@ -67,11 +69,11 @@ def job_control_context(control: JobControl) -> Iterator[None]:
         _control.reset(token)
 
 
-def job_checkpoint() -> None:
-    """Enforce the active job's cancellation immediately before tool execution."""
+def job_checkpoint(*, approval: bool = False) -> None:
+    """Enforce the active job's cancellation immediately before tool execution, or its reply's Stop at an approval."""
     control = _control.get()
     if control is not None:
-        control.checkpoint()
+        control.checkpoint(approval=approval)
 
 
 def job_owns_execution() -> bool:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,11 +14,18 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
+from mindroom.delegation import job_approvals, lifecycle
 from mindroom.event_journal import ToolJobStore
+from mindroom.llm.runs import RunStatus
+from mindroom.reply_scope import ReplyRuntime
+from mindroom.tool_jobs import runtime as job_runtime
+from mindroom.tool_jobs.client_cancel import cancel_stopped_reply_jobs
 from tests.delegation_job_fuzz import ChildScript, DelegationFuzzRunner, Step
+from tests.reply_span_helpers import reply_span
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
+
 
 _SCRIPTS = st.builds(
     ChildScript,
@@ -192,10 +201,10 @@ async def test_subagent_fuzz_oracle_detects_corruption(
                 job_json: str,
                 result_payload_json: str | None = None,
                 *,
-                ends_approvals: bool,
+                approval_end_reason: str | None,
             ) -> None:
-                del ends_approvals
-                await save(store, job_id, job_json, result_payload_json, ends_approvals=False)
+                del approval_end_reason
+                await save(store, job_id, job_json, result_payload_json, approval_end_reason=None)
 
             monkeypatch.setattr(ToolJobStore, "save", save_without_denial)
             with pytest.raises(AssertionError):
@@ -204,4 +213,108 @@ async def test_subagent_fuzz_oracle_detects_corruption(
         with pytest.raises(AssertionError):
             await runner.step(Step("release"))
     finally:
+        await runner.close()
+
+
+# Where each phase holds a subagent job: the function it wraps, and which of that function's calls it holds.
+_HOLDS: dict[str, tuple[object, str, Callable[..., bool]]] = {
+    # The job's admission serializes it on a thread before saving it.
+    "admitting": (asyncio, "to_thread", lambda function, *_args, **_kwargs: function is job_runtime._encoded),
+    "pausing": (
+        lifecycle,
+        "settle_child_response",
+        lambda _child, response, **_kwargs: response.status == RunStatus.paused,
+    ),
+    "settling": (lifecycle, "update_subagent_turn", lambda child, *_args, **_kwargs: child.status == "paused"),
+    "planning": (job_approvals, "plan_approval_calls", lambda *_args, **_kwargs: True),
+}
+
+
+def _hold_subagent(monkeypatch: pytest.MonkeyPatch, stop_while: str, hold: Callable[[], Awaitable[None]]) -> None:
+    """Hold a subagent job at one await of its life, where a Stop of its reply then lands."""
+    if stop_while not in _HOLDS:
+        return
+    module, name, held = _HOLDS[stop_while]
+    original = getattr(module, name)
+
+    async def holding(*args: object, **kwargs: object) -> object:
+        if held(*args, **kwargs):
+            await hold()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, holding)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stop_while",
+    ["admitting", "working", "pausing", "settling", "planning", "waiting"],
+)
+async def test_a_stop_refuses_the_reply_s_subagent_every_later_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_while: str,
+) -> None:
+    """Whenever a Stop reaches the reply that started a subagent, the child's gated call never runs after it.
+
+    The Stop lands while the job is being accepted, while its child still works, while its child's pause or its paused
+    state is being saved, while the policy decides the child's call, or while the card waits. The job ends cancelled,
+    no card stays answerable, and approving runs nothing.
+    """
+    runner = await _runner(tmp_path, monkeypatch)
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold() -> None:
+        # Only the first time the held await comes up, so the job runs on normally afterwards.
+        if not held.is_set():
+            held.set()
+            await release.wait()
+
+    _hold_subagent(monkeypatch, stop_while, hold)
+    principal = runner.runtime.journal.principal("leader@replies")
+    replies = ReplyRuntime(
+        store=principal,
+        entity_name="leader",
+        generation="gen-test",
+        retry_sources=lambda _room_id, _sources: None,
+        approval_ended=lambda _reply_id: None,
+        reply_stopped=partial(cancel_stopped_reply_jobs, runner.paths),
+    )
+    try:
+        async with reply_span(
+            principal,
+            source_event_id="$question",
+            room_id="!room:example.org",
+            placeholder_event_id="$answer",
+            runtime=replies,
+        ) as handle:
+            # The parent's turn runs in the reply's span, so its subagent call's job belongs to the reply.
+            await runner._delegate(
+                Step("delegate", script=ChildScript(approvals=1, hold_start=stop_while == "working")),
+            )
+            [parent] = runner.turns
+            replies.spans.register(handle.span_id, parent.task)
+            if stop_while in {"working", "waiting"}:
+                await runner._idle()
+            else:
+                await asyncio.wait_for(held.wait(), 10)
+            assert bool(runner.runtime.retained_jobs()) is (stop_while != "admitting")
+            assert bool(await runner.approvals.pending()) is (stop_while == "waiting")
+
+            stopped = await principal.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns())
+            assert stopped is not None
+            effects = asyncio.create_task(replies.run_effects(stopped.post_commit))
+            await runner._idle()
+            release.set()
+            runner.gate.set()
+            await asyncio.wait_for(effects, 10)
+            await asyncio.gather(parent.task, return_exceptions=True)
+            runner.turns.clear()
+            await runner.step(Step("approve"))
+
+            assert not await runner.approvals.pending()
+            assert [job.status for job in runner.runtime.retained_jobs()] == ["cancelled"]
+            assert not runner.executed
+    finally:
+        release.set()
         await runner.close()

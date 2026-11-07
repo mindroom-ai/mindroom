@@ -26,6 +26,7 @@ from mindroom.turn_store import TurnClaim, TurnStore
 from tests.conftest import seed_session
 from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
+from tests.reply_span_helpers import no_reply_jobs
 from tests.reply_turn_helpers import runner_for
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_turn_store import _in_room, _next_request, _seeded_storage, _store, _store_with_storage
@@ -51,6 +52,7 @@ def _redaction_callback_bot(journal_store: EventJournalStore) -> AgentBot:
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     return bot
 

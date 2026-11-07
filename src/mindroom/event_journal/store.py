@@ -336,9 +336,9 @@ class ToolJobStore:
         job_json: str,
         result_payload_json: str | None = None,
         *,
-        ends_approvals: bool,
+        approval_end_reason: str | None,
     ) -> None:
-        """Replace a job's snapshot, with its outcome payload when one is given; a save that ends the job's approvals denies its cards."""
+        """Replace a job's snapshot, with its outcome payload when one is given; a save that ends the job's approvals denies its cards with ``approval_end_reason``."""
         await self._backend.write(
             lambda transaction: tool_jobs.save(
                 transaction,
@@ -346,7 +346,7 @@ class ToolJobStore:
                 job_id,
                 job_json,
                 result_payload_json,
-                ends_approvals=ends_approvals,
+                approval_end_reason=approval_end_reason,
             ),
         )
 

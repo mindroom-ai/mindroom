@@ -33,6 +33,8 @@ type DecisionStatus = Literal["approved", "denied", "expired"]
 
 # What a job's pending cards say once the job ends without a decision, whether it was stopped or a restart ended it.
 JOB_ENDED_REASON = "The background job asking for this approval ended before a decision."
+# What they say when a Stop on the reply that started the job ended it.
+REPLY_STOPPED_REASON = "The reply that started this job was stopped, so this call did not run."
 JOB_RUN_PREFIX = "tool-job:"
 
 

@@ -17,6 +17,7 @@ from mindroom.interactive_models import InteractiveSelection
 from .approval_calls import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     JOB_ENDED_REASON,
+    REPLY_STOPPED_REASON,
     ApprovalCall,
     ApprovalDecision,
     BackgroundApprovalDecision,
@@ -104,6 +105,7 @@ from .views import (
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_ENDED_REASON",
+    "REPLY_STOPPED_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TIMEOUT_REASON",
     "TURN_BACKED_KINDS",

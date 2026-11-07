@@ -157,6 +157,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.reply_span_helpers import no_reply_jobs
 from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import make_test_turn, nothing_else_queued
 
@@ -680,6 +681,7 @@ def _build_harness(
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
                 approval_ended=lambda _ended: None,
+                reply_stopped=no_reply_jobs,
             ),
         ),
     )

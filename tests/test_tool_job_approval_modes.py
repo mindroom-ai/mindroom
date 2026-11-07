@@ -8,7 +8,8 @@ import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
-from typing import TYPE_CHECKING, Literal
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,6 +23,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.event_journal import (
     JOB_ENDED_REASON,
+    REPLY_STOPPED_REASON,
     ApprovalCall,
     BackgroundApprovalDecision,
     EventJournalStore,
@@ -29,23 +31,28 @@ from mindroom.event_journal import (
     tool_job_run_id,
 )
 from mindroom.llm.runs import RunStatus, ToolExecution
-from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
+from mindroom.reply_scope import ReplyRuntime, SpanHandle, SpanSlot, _current_slot
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
+from mindroom.tool_jobs import approvals as approvals_module
 from mindroom.tool_jobs.approvals import ask_job_approvals, end_tool_call_approval
-from mindroom.tool_jobs.control import JobControl, job_control_context, pending_human_messages_context
+from mindroom.tool_jobs.client_cancel import cancel_stopped_reply_jobs
+from mindroom.tool_jobs.control import JobControl, job_checkpoint, job_control_context, pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.reply_span_helpers import reply_span
 from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    awaiting_approval,
     job_actor,
     job_card_decision,
     job_owner,
@@ -55,6 +62,7 @@ from tests.tool_job_helpers import (
     run_job_turn,
     saved_job_card_decision,
     saved_jobs,
+    start_job,
     tool_job_runtime,
     toolkit_job_tools,
     wait_for_status,
@@ -65,6 +73,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.event_journal import PrincipalStore
     from mindroom.llm.runs import RunRecord
 
 
@@ -276,16 +285,40 @@ class _GatedRun:
     async def __aexit__(self, *_exc: object) -> None:
         await self.runtime.shutdown()
 
-    async def turn(self, *, generated: bool = False, **budget: float) -> RunRecord:
-        """Run the leader's reply that makes the gated call, its function a generated one when ``generated``."""
+    async def turn(
+        self,
+        *,
+        generated: bool = False,
+        run_id: str = "run",
+        titles: tuple[str, ...] = ("q3",),
+        **budget: float,
+    ) -> RunRecord:
+        """Run the leader's reply that makes a gated call per title at once, its function a generated one when asked."""
         toolkit = _GatedTools(self.effects, self.gate)
         [function] = gated_functions(toolkit, self.config, authored_as="report_writer", approvals_as_jobs=True).values()
         # Authored under a name of its own, so a card names the authored toolkit, not the one built for it.
         [tool] = toolkit_job_tools(toolkit, authored_name="report_writer").values()
-        model = ScriptedModel([calls(tool_call("write_report", "write-1", title="q3", **budget)), answer("done")])
+        made = [
+            tool_call("write_report", f"write-{index}", title=title, **budget) for index, title in enumerate(titles, 1)
+        ]
+        model = ScriptedModel([calls(*made), answer("done")])
+        middleware = (build_tool_hook_middleware(self.context.hooks, self.config, self.paths),)
         if generated:
-            return await run_job_turn(job_actor(), model, "Write", generated=(function,))
-        return await run_job_turn(job_actor(replace(tool, function=function)), model, "Write")
+            return await run_job_turn(
+                job_actor(),
+                model,
+                "Write",
+                generated=(function,),
+                run_id=run_id,
+                middleware=middleware,
+            )
+        return await run_job_turn(
+            job_actor(replace(tool, function=function)),
+            model,
+            "Write",
+            run_id=run_id,
+            middleware=middleware,
+        )
 
     def decide(self, status: Literal["approved", "denied"]) -> None:
         self.cards.decision.set_result(BackgroundApprovalDecision(status, None if status == "approved" else "No."))
@@ -341,6 +374,7 @@ async def test_a_job_card_names_the_reply_whose_call_started_the_job(
     """A gated call's card names the event of the reply that made the call, when that reply already shows one."""
     handle = MagicMock(spec=SpanHandle)
     handle.reply = MagicMock(event_id=reply_event_id)
+    handle.stopped.return_value = False
     token = _current_slot.set(SpanSlot(handle=handle) if in_reply else None)
     try:
         async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
@@ -397,7 +431,7 @@ async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeyp
 
     The cancel request's own save denies the card, so it is not answerable while the job winds down.
     """
-    saves: list[tuple[str, bool]] = []
+    saves: list[tuple[str, str | None]] = []
     original_save = ToolJobStore.save
 
     async def recording_save(
@@ -406,10 +440,10 @@ async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeyp
         job_json: str,
         result_payload_json: str | None = None,
         *,
-        ends_approvals: bool,
+        approval_end_reason: str | None,
     ) -> None:
-        saves.append((json.loads(job_json)["status"], ends_approvals))
-        await original_save(store, job_id, job_json, result_payload_json, ends_approvals=ends_approvals)
+        saves.append((json.loads(job_json)["status"], approval_end_reason))
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
 
     monkeypatch.setattr(ToolJobStore, "save", recording_save)
     async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=0) as run:
@@ -422,7 +456,434 @@ async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeyp
                 await wait_for_status(run.runtime, job_id, "cancelled")
             assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", JOB_ENDED_REASON)]
         assert run.effects == []
-    assert ("cancel_requested", True) in saves
+    assert ("cancel_requested", JOB_ENDED_REASON) in saves
+
+
+_REPLY_ROOM = "!replies:example.org"
+
+
+def _reply_runtime(run: _GatedRun) -> tuple[PrincipalStore, ReplyRuntime]:
+    """Return the leader's reply records and the bot instance that runs its replies, whose Stops reach its jobs."""
+    principal = run.runtime.journal.principal("leader@replies")
+    replies = ReplyRuntime(
+        store=principal,
+        entity_name="leader",
+        generation="gen-test",
+        retry_sources=lambda _room_id, _sources: None,
+        approval_ended=lambda _reply_id: None,
+        reply_stopped=partial(cancel_stopped_reply_jobs, run.paths),
+    )
+    return principal, replies
+
+
+async def _turn_in_reply(
+    run: _GatedRun,
+    principal: PrincipalStore,
+    replies: ReplyRuntime,
+    question: str,
+    titles: tuple[str, ...] = ("q3",),
+) -> RunRecord:
+    """Run the leader's gated calls in its reply to ``question``, shown as ``{question}:reply``, as a locked turn runs."""
+    async with reply_span(
+        principal,
+        source_event_id=question,
+        room_id=_REPLY_ROOM,
+        placeholder_event_id=f"{question}:reply",
+        runtime=replies,
+    ) as handle:
+        task = asyncio.current_task()
+        assert task is not None
+        # A Stop on the reply cancels this task, as it cancels a locked turn's.
+        replies.spans.register(handle.span_id, task)
+        return await run.turn(run_id=question, titles=titles)
+
+
+async def _stop_reply(principal: PrincipalStore, replies: ReplyRuntime, question: str, *, by: str) -> None:
+    """Stop the reply to ``question`` with the 🛑 reaction on its event, or as an edit of the question stops it."""
+    if by == "reaction":
+        stopped = await principal.replies.record_stop(
+            f"{question}:reply",
+            room_id=_REPLY_ROOM,
+            receipt_order=1,
+            may_wait=False,
+            now_ns=time.time_ns(),
+        )
+    else:
+        reply = await principal.replies.for_event(f"{question}:reply")
+        assert reply is not None
+        stopped = await principal.replies.stop(reply.reply_id, receipt_order=1, now_ns=time.time_ns())
+    assert not isinstance(stopped, bool)
+    assert stopped is not None
+    await replies.run_effects(stopped.post_commit)
+
+
+def _job_of(run: _GatedRun, question: str) -> BackgroundJob:
+    """Return the job the reply to ``question`` started for its gated call."""
+    [job] = [job for job in run.runtime.retained_jobs() if job.adapter["run_id"] == question]
+    return job
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by", ["reaction", "edit"])
+async def test_stopping_a_reply_denies_the_approvals_its_jobs_wait_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    by: str,
+) -> None:
+    """A Stop ends the jobs its reply started that still wait for approval, so approving their cards runs nothing.
+
+    The card's terminal decision says the reply was stopped, and another reply's job keeps waiting for its own card.
+    """
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+        principal, replies = _reply_runtime(run)
+        with tool_runtime_context(run.context):
+            other = asyncio.create_task(_turn_in_reply(run, principal, replies, "$other"))
+            await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+            run.cards.posted.clear()
+            stopped = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
+            await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+
+            await _stop_reply(principal, replies, "$question", by=by)
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
+            await asyncio.wait_for(wait_for_status(run.runtime, _job_of(run, "$question").job_id, "cancelled"), 5)
+            assert await run.cards.decisions() == [None, BackgroundApprovalDecision("denied", REPLY_STOPPED_REASON)]
+            assert _job_of(run, "$other").status == "awaiting_approval"
+            other.cancel()
+            await asyncio.gather(other, return_exceptions=True)
+        assert run.effects == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["require_approval", "auto_approve"])
+async def test_a_stop_before_the_job_posts_its_card_leaves_no_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+) -> None:
+    """A Stop that lands after the reply started the job, while the policy still decides its call, still ends the job.
+
+    The job posts no card, and a call the policy approves without one does not run either.
+    """
+    planning, plan = asyncio.Event(), asyncio.Event()
+    original_plan = approvals_module.plan_approval_calls
+
+    async def slow_plan(*args: object, **kwargs: object) -> object:
+        planning.set()
+        await plan.wait()
+        return await original_plan(*args, **kwargs)
+
+    monkeypatch.setattr(approvals_module, "plan_approval_calls", slow_plan)
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+        principal, replies = _reply_runtime(run)
+        with tool_runtime_context(run.context):
+            stopped = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
+            await asyncio.wait_for(planning.wait(), JOB_TEST_TIMEOUT)
+            run.config.tool_approval = ToolApprovalConfig(default=policy)
+
+            await _stop_reply(principal, replies, "$question", by="reaction")
+            plan.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
+            await asyncio.wait_for(wait_for_status(run.runtime, _job_of(run, "$question").job_id, "cancelled"), 5)
+        assert (run.cards.requested, run.effects) == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_reply_s_jobs_get_no_approval_after_the_stop(tmp_path: Path) -> None:
+    """A Stop cancels the reply's jobs that wait on their cards and refuses its other jobs every later approval.
+
+    A job whose call runs keeps running until it asks for an approval; another reply's jobs are untouched.
+    """
+    runtime = await tool_job_runtime(tmp_path)
+    ask = asyncio.Event()
+
+    async def forever() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def asks_later() -> BackgroundOutcome:
+        await ask.wait()
+        job_checkpoint(approval=True)
+        return await awaiting_approval(runtime, "asks later")
+
+    jobs = {
+        "waits": ("reply", partial(awaiting_approval, runtime, "waits")),
+        "runs": ("reply", forever),
+        "asks later": ("reply", asks_later),
+        "other": ("other", partial(awaiting_approval, runtime, "other")),
+    }
+    try:
+        for job_id, (reply_id, operation) in jobs.items():
+            await start_job(
+                runtime,
+                job_id,
+                tool_name="write_report",
+                depth=0,
+                adapter={},
+                owner=job_owner(),
+                operation=operation,
+                reply_id=reply_id,
+            )
+        for job_id in ("waits", "other"):
+            await asyncio.wait_for(wait_for_status(runtime, job_id, "awaiting_approval"), JOB_TEST_TIMEOUT)
+        await runtime.cancel_stopped_reply("reply")
+        await asyncio.wait_for(wait_for_status(runtime, "waits", "cancelled"), JOB_TEST_TIMEOUT)
+        ask.set()
+        await asyncio.wait_for(wait_for_status(runtime, "asks later", "cancelled"), JOB_TEST_TIMEOUT)
+        assert {job.job_id: job.status for job in runtime.retained_jobs()} == {
+            "waits": "cancelled",
+            "runs": "running",
+            "asks later": "cancelled",
+            "other": "awaiting_approval",
+        }
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_call_on_its_way_to_its_job_when_its_reply_stops_starts_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call the reply recorded before its Stop, whose job the Stop's look for the reply's jobs overtook, starts none.
+
+    The reply's second call queues for its job's start while the Stop saves the first job's cancel request, so its
+    start runs only after the Stop looked; its job is cancelled before it launches, so it posts no card to approve.
+    """
+    saving_cancel, second_waits = asyncio.Event(), asyncio.Event()
+    original_save, original_start = ToolJobStore.save, ToolJobRuntime.start
+
+    async def held_cancel(
+        store: ToolJobStore,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        approval_end_reason: str | None,
+    ) -> None:
+        if json.loads(job_json)["status"] == "cancel_requested":
+            saving_cancel.set()
+            await second_waits.wait()
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
+
+    async def second_starts_during_the_stop(runtime: ToolJobRuntime, job_id: str, **options: Any) -> object:  # noqa: ANN401
+        if options["adapter"]["tool_call_id"] == "write-2":
+            await saving_cancel.wait()
+            second_waits.set()
+        return await original_start(runtime, job_id, **options)
+
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+        monkeypatch.setattr(ToolJobStore, "save", held_cancel)
+        monkeypatch.setattr(ToolJobRuntime, "start", second_starts_during_the_stop)
+        principal, replies = _reply_runtime(run)
+        with tool_runtime_context(run.context):
+            stopped = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question", ("first", "second")))
+            await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+
+            await asyncio.wait_for(_stop_reply(principal, replies, "$question", by="reaction"), JOB_TEST_TIMEOUT)
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
+            assert second_waits.is_set()
+            jobs = run.runtime.retained_jobs()
+            for job in jobs:
+                await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
+            assert [job.adapter["tool_call_id"] for job in jobs] == ["write-1", "write-2"]
+            assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", REPLY_STOPPED_REASON)]
+        assert run.effects == []
+
+
+@pytest.mark.asyncio
+async def test_a_decision_that_reaches_the_runtime_before_its_replys_stop_runs_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval that arrived just before the Stop, and waits for the runtime lock ahead of it, still runs nothing.
+
+    Another job write holds the lock while the decision and then the Stop queue for it, so the job would pass its
+    approval before the Stop looks for the reply's jobs.
+    """
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+        principal, replies = _reply_runtime(run)
+        with tool_runtime_context(run.context):
+            stopped = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
+            await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+            job = _job_of(run, "$question")
+            execution = run.runtime._entries[job.job_id].task
+            assert execution is not None
+            lock = run.runtime._lock
+            await lock.acquire()
+            run.decide("approved")
+            while len(lock._waiters or ()) < 1:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            stop = asyncio.create_task(_stop_reply(principal, replies, "$question", by="reaction"))
+            while len(lock._waiters or ()) < 2:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+            lock.release()
+
+            await asyncio.wait_for(stop, JOB_TEST_TIMEOUT)
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
+            await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
+            assert run.effects == []
+            await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_whose_cancel_save_fails_still_runs_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job whose cancel request the Stop could not save never runs its call, and approving it saves the cancel.
+
+    The failed save surfaces from the Stop's effects as any failed effect does; the job stays marked, so approving its
+    card refuses the job, which denies the card, saying the reply was stopped, and settles the job cancelled.
+    """
+    original_save = ToolJobStore.save
+    failures: list[str] = []
+
+    async def failing_once(
+        store: ToolJobStore,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        approval_end_reason: str | None,
+    ) -> None:
+        if approval_end_reason == REPLY_STOPPED_REASON and not failures:
+            failures.append(job_id)
+            msg = "the journal is unavailable"
+            raise OSError(msg)
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
+
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+        principal, replies = _reply_runtime(run)
+        with tool_runtime_context(run.context):
+            stopped = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
+            await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+            monkeypatch.setattr(ToolJobStore, "save", failing_once)
+
+            with pytest.raises(OSError, match="the journal is unavailable"):
+                await _stop_reply(principal, replies, "$question", by="reaction")
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
+            job = _job_of(run, "$question")
+            assert (failures, job.status, await run.cards.decisions()) == ([job.job_id], "awaiting_approval", [None])
+            execution = run.runtime._entries[job.job_id].task
+            assert execution is not None
+            run.decide("approved")
+            await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
+
+            await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
+            assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", REPLY_STOPPED_REASON)]
+        assert run.effects == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["taking-decision", "taking-denial", "starting-wait"])
+async def test_stop_during_approval_state_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """A Stop during either approval-state save prevents card posting and gated tool entry."""
+    saving, release = asyncio.Event(), asyncio.Event()
+    original_save = ToolJobStore.save
+    target_status = "awaiting_approval" if phase == "starting-wait" else "running"
+
+    async def held_save(
+        store: ToolJobStore,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        approval_end_reason: str | None,
+    ) -> None:
+        status = json.loads(job_json)["status"]
+        if status == target_status and not saving.is_set():
+            saving.set()
+            await release.wait()
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
+
+    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
+        monkeypatch.setattr(ToolJobStore, "save", held_save)
+        principal, replies = _reply_runtime(run)
+        parent = stop = None
+        with tool_runtime_context(run.context):
+            try:
+                parent = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
+                if phase != "starting-wait":
+                    await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
+                    run.decide("denied" if phase == "taking-denial" else "approved")
+                await asyncio.wait_for(saving.wait(), JOB_TEST_TIMEOUT)
+                job = _job_of(run, "$question")
+                entry = run.runtime._entries[job.job_id]
+                execution = entry.task
+                assert execution is not None
+                stop = asyncio.create_task(_stop_reply(principal, replies, "$question", by="reaction"))
+                async with asyncio.timeout(JOB_TEST_TIMEOUT):
+                    while not entry.control.reply_stopped:  # noqa: ASYNC110
+                        await asyncio.sleep(0.001)
+                release.set()
+                await asyncio.wait_for(stop, JOB_TEST_TIMEOUT)
+                await asyncio.wait_for(asyncio.gather(parent, execution, return_exceptions=True), JOB_TEST_TIMEOUT)
+                assert run.effects == [], "call executed after Stop marked it during the decision's save"
+                if phase == "starting-wait":
+                    assert run.cards.requested == [], "new approval card posted after Stop marked the job"
+                assert entry.control.cancelled
+                await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
+            finally:
+                release.set()
+                for task in (parent, stop):
+                    if task is not None and not task.done():
+                        task.cancel()
+                await asyncio.gather(*(task for task in (parent, stop) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_leaves_a_job_running_the_call_its_policy_approved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated job whose call the requester's auto-approve window passed without a card runs on after its reply's Stop.
+
+    The policy granted the approval before the Stop, and the job asks for no other, so nothing refuses it.
+    """
+    async with (
+        _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None, gate=asyncio.Event()) as run,
+        execution_resources(),
+    ):
+        threaded = replace(run.owner, thread_id="$thread", resolved_thread_id="$thread")
+        run.context = _delegate_runtime_context(run.config, run.paths, execution_identity=threaded)
+        assert threaded.requester_id is not None
+        start_auto_approve(
+            run.paths,
+            room_id=run.context.room_id,
+            thread_id="$thread",
+            requester_id=threaded.requester_id,
+            duration=timedelta(minutes=5),
+        )
+        principal, replies = _reply_runtime(run)
+        with tool_runtime_context(run.context):
+            stopped = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
+            while not run.effects:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+
+            await _stop_reply(principal, replies, "$question", by="reaction")
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
+            job = _job_of(run, "$question")
+            assert job.status == "running"
+            assert run.gate is not None
+            run.gate.set()
+            await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "completed"), JOB_TEST_TIMEOUT)
+        assert (run.cards.requested, run.effects) == ([], ["q3"])
 
 
 @pytest.mark.asyncio
