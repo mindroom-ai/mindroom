@@ -6893,6 +6893,7 @@ expose = [
     "ToolMetadataValidationError",
     "ToolRegistry",
     "builtin_tool_registry",
+    "require_plugin_load",
 ]
 from = ["mindroom.tool_system.registry"]
 
@@ -6911,7 +6912,6 @@ expose = [
 ]
 from = ["mindroom.tool_system.registry"]
 visibility = [
-    "mindroom.tool_system.atlassian_connections",
     "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
