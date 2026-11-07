@@ -93,7 +93,7 @@ class RouterDuties:
         self._joined_room_ids.add(room_id)
 
     async def publish_joined_room_thread_modes(self) -> None:
-        """Reconcile the rooms the router joined before this sync frame; failures wait for a later trigger."""
+        """Reconcile the rooms the router joined and still holds; failures wait for a later trigger."""
         runtime = self.deps.runtime
         room_ids, self._joined_room_ids = self._joined_room_ids, set()
         if runtime.client is not None:
@@ -101,6 +101,7 @@ class RouterDuties:
                 *(
                     reconcile_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room_id)
                     for room_id in room_ids
+                    if room_id in runtime.client.rooms
                 ),
             )
 
