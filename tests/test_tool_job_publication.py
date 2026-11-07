@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -80,6 +82,37 @@ def test_a_subagent_job_is_published_under_its_agents_name() -> None:
     assert (jobs[0]["kind"], jobs[0]["tool"]) == ("subagent", "worker")
 
 
+def test_hundreds_of_live_jobs_with_the_longest_ids_fit_in_a_state_update_listing_the_newest() -> None:
+    """300 live jobs with maximum-length fields still make a state update the homeserver accepts, listing the newest.
+
+    Tuwunel counts the replaced state's content (``unsigned.prev_content``) toward the 65,535-byte event limit, and
+    reserves 10,240 bytes for the rest of an event, so two contents and that reserve must fit together.
+    """
+    owner = replace(
+        job_owner(),
+        requester_id="@" + "p" * 242 + ":example.org",
+        resolved_thread_id="$" + "e" * 43,
+    )
+    jobs = [
+        replace(
+            _job("job_0", status="awaiting_approval"),
+            job_id=hashlib.sha256(str(index).encode()).hexdigest(),
+            owner=owner,
+            tool_name="t" * 64,
+            created_at=f"2026-10-11T00:{index // 60:02d}:{index % 60:02d}.123456+00:00",
+        )
+        for index in range(300)
+    ]
+    content = _jobs_state_content(jobs)
+    assert 2 * len(json.dumps(content, separators=(",", ":"))) + 10_240 <= 65_535
+    assert content["total"] == 300
+    listed = content["jobs"]
+    assert isinstance(listed, list)
+    # Dozens of jobs still show at these lengths, and about twice as many at typical ones.
+    assert len(listed) >= 40
+    assert [job["job_id"] for job in listed] == [job.job_id for job in jobs[-len(listed) :]]
+
+
 @pytest.mark.asyncio
 async def test_each_agent_publishes_its_own_state_in_each_room() -> None:
     """Two agents with jobs in one room write two state events, each keyed by the agent's own account."""
@@ -110,7 +143,7 @@ async def test_a_room_whose_jobs_all_ended_is_cleared() -> None:
     publisher = JobStatePublisher()
     await publisher.publish(bots.get, [_job("job_1")])
     await publisher.publish(bots.get, [_job("job_1", status="completed")])
-    assert bots["agent_a"].client.room_put_state.await_args.kwargs["content"] == {"jobs": []}
+    assert bots["agent_a"].client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
 
 
 @pytest.mark.asyncio
@@ -141,7 +174,7 @@ async def test_recovered_interrupted_jobs_leave_the_published_state(tmp_path: Pa
         await JobStatePublisher().publish(bots.get, runtime.retained_jobs())
         call = bots[owner.recipient].client.room_put_state.await_args.kwargs
         assert call["room_id"] == owner.room_id
-        assert call["content"] == {"jobs": []}
+        assert call["content"] == {"jobs": [], "total": 0}
     finally:
         await runtime.shutdown()
 
@@ -164,7 +197,7 @@ async def test_an_orderly_shutdown_clears_the_published_jobs(tmp_path: Path) -> 
         await coordinator._publisher.publish(coordinator.bot_provider, runtime.retained_jobs())
         assert bot.client.room_put_state.await_args.kwargs["content"]["jobs"]
         await coordinator.quiesce()
-        assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": []}
+        assert bot.client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
     finally:
         await runtime.shutdown()
 
@@ -190,15 +223,16 @@ async def test_a_bot_that_rejoins_a_room_rewrites_its_state() -> None:
     bots["agent_a"].client.rooms = rooms
     await publisher.publish(bots.get, [])
     assert bots["agent_a"].client.room_put_state.await_count == 2
-    assert bots["agent_a"].client.room_put_state.await_args.kwargs["content"] == {"jobs": []}
+    assert bots["agent_a"].client.room_put_state.await_args.kwargs["content"] == {"jobs": [], "total": 0}
 
 
 @pytest.mark.asyncio
-async def test_a_forbidden_write_is_not_retried_until_the_jobs_change() -> None:
-    """A room where the bot may not write the state is left alone until its jobs change."""
+@pytest.mark.parametrize("status_code", ["M_FORBIDDEN", "M_TOO_LARGE"])
+async def test_a_refused_write_is_not_retried_until_the_jobs_change(status_code: str) -> None:
+    """A room that refuses the state, as not allowed or too large, is left alone until its jobs change."""
     bots = _bots("agent_a")
     put = bots["agent_a"].client.room_put_state
-    put.return_value = nio.RoomPutStateError("forbidden", status_code="M_FORBIDDEN")
+    put.return_value = nio.RoomPutStateError("refused", status_code=status_code)
     publisher = JobStatePublisher()
     await publisher.publish(bots.get, [_job("job_1")])
     await publisher.publish(bots.get, [_job("job_1")])
@@ -244,7 +278,7 @@ async def test_a_room_that_refuses_again_after_a_write_warns_again() -> None:
 @pytest.mark.asyncio
 async def test_forbidden_rooms_beyond_the_set_keep_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     """A full set keeps the rooms it holds quiet, and only rooms outside it warn on every refused write."""
-    monkeypatch.setattr(publication, "_MAX_FORBIDDEN_ROOMS", 1)
+    monkeypatch.setattr(publication, "_MAX_REFUSED_ROOMS", 1)
     bots = _bots("agent_a", "agent_b")
     for bot in bots.values():
         bot.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", status_code="M_FORBIDDEN")
