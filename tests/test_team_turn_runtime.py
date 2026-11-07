@@ -50,7 +50,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -1270,6 +1270,30 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     record, members = team.stored_runs()
     stored = {run.agent_id: [message.content for message in run.messages].count(receipt) for run in members}
     assert ([message.content for message in record.messages].count(receipt), stored) == (1, {"checker": 1, "writer": 0})
+
+
+@pytest.mark.asyncio
+async def test_a_member_first_run_after_an_approval_resume_holds_the_resume_s_system_enrichment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member the resumed leader hands a new task runs with the resume's system enrichment in its system prompt."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([delegate("call-polish", "writer", "Polish it"), answer("Done.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel([answer("Polished.")])
+    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.", cache_policy="stable")
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+        system_enrichment_items=(instruction,),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    [request] = team.models["writer-model"].requests
+    assert instruction.text in system_text(request.messages)
 
 
 @pytest.mark.asyncio

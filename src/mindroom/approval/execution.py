@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
+    from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -190,6 +191,7 @@ async def _continue_persisted_agent(
     tool_context: ToolRuntimeContext,
     progress: ProgressPublisher | None,
     model_name: str,
+    system_enrichment_items: tuple[EnrichmentItem, ...],
 ) -> CompletedApprovalRun | PausedAttempt:
     """Resume a persisted agent with event streaming so presentation order is retained."""
     runner = ResumeRunner(
@@ -276,6 +278,7 @@ async def _continue_persisted_agent(
         tool_trace_collector=tool_trace_collector,
         tool_context=tool_context,
         progress=progress,
+        system_enrichment_items=system_enrichment_items,
     )
 
 
@@ -314,6 +317,7 @@ async def _stream_continuation_turn(
     tool_context: ToolRuntimeContext,
     progress: ProgressPublisher | None,
     resume: TurnResume,
+    system_enrichment_items: tuple[EnrichmentItem, ...],
     reusable_build: AgentBuild | None = None,
     delegation_depth: int = 0,
     media: MediaInputs | None = None,
@@ -322,7 +326,8 @@ async def _stream_continuation_turn(
 
     The reply shows tool calls when ``presentation`` does. A recovered CLI call runs without a model request, so its
     follow-up, the turn whose ``resume`` restores no attempt, reads the approval receipt in its first attempt's run; a
-    resumed run already read it.
+    resumed run already read it. A resumed run keeps its stored system prompt; each fresh attempt renders
+    ``system_enrichment_items`` into its own.
     """
     if resume.attempt is None:
         run_id = str(uuid4())
@@ -335,6 +340,7 @@ async def _stream_continuation_turn(
             ctx,
             prompt=prompt,
             media=media,
+            system_enrichment_items=system_enrichment_items,
             show_tool_calls=presentation.show_tool_calls,
             execution_identity=tool_context.execution_identity,
             refresh_scheduler=refresh_scheduler,
@@ -392,11 +398,13 @@ class AgentApprovalExecution:
         tool_trace_collector: list[ToolTraceEntry],
         typing_log_context: Mapping[str, object],
         progress: ProgressPublisher | None,
+        system_enrichment_items: tuple[EnrichmentItem, ...],
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted paused run under ``tool_context``'s identity.
 
         ``progress``, when given, shows the resumed presentation live in the
         reply being continued; the terminal delivery stays with the caller.
+        Every fresh attempt of the continued turn runs with ``system_enrichment_items``.
         """
         config = self.config()
         execution_identity = tool_context.execution_identity
@@ -530,6 +538,7 @@ class AgentApprovalExecution:
                                 tool_trace_collector=tool_trace_collector,
                                 tool_context=tool_context,
                                 progress=progress,
+                                system_enrichment_items=system_enrichment_items,
                             )
 
                         operation = recover_cli_call
@@ -556,6 +565,7 @@ class AgentApprovalExecution:
                             tool_context=tool_context,
                             progress=progress,
                             model_name=model.model_name,
+                            system_enrichment_items=system_enrichment_items,
                         )
                     with tool_runtime_context(tool_context):
                         result = await operation()

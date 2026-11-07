@@ -372,6 +372,7 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
         tool_trace_collector=trace,
         typing_log_context={},
         progress=None,
+        system_enrichment_items=(),
     )
 
     assert isinstance(result, CompletedApprovalRun)
