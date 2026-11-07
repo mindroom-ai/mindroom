@@ -113,10 +113,10 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            # /usr/share/nginx/html is a symlink to /app in the client image,
-            # so the nginx aliases under html/ resolve to these mounts.
+            # The image serves its build from /usr/share/nginx/html. Images that
+            # link that path to /app (v2026.11.0 does) still get these mounts.
             - name: config
-              mountPath: /app/config.json
+              mountPath: /usr/share/nginx/html/config.json
               subPath: {{ .Values.config.key }}
               readOnly: true
             {{- if $nginxManaged }}
@@ -131,7 +131,7 @@ spec:
               readOnly: true
             {{- if .Values.rootServiceWorkerCleanup.enabled }}
             - name: nginx-config
-              mountPath: /app/root-cleanup-sw.js
+              mountPath: /usr/share/nginx/html/root-cleanup-sw.js
               subPath: {{ .Values.nginx.cleanupWorkerKey }}
               readOnly: true
             {{- end }}

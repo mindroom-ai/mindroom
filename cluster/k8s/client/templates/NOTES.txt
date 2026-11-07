@@ -11,5 +11,4 @@ Client:
 
 Route the full origin host to this Service: the client loads /runtime-config.js
 from the origin root even when basePath is not /.
-For production, point matrix.homeserverUrl at your homeserver and pin image.tag
-or image.digest.
+For production, point matrix.homeserverUrl at your homeserver.
