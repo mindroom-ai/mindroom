@@ -279,6 +279,49 @@ async def test_while_off_the_loop_gives_up_what_was_not_posted_and_reads_and_wri
 
 
 @pytest.mark.asyncio
+async def test_off_and_back_on_between_two_passes_still_ends_calls_and_gives_up_what_was_not_posted(
+    tmp_path: Path,
+) -> None:
+    """Turned off and on again within one wait, the next pass still holds the store to having been off."""
+    paths = test_runtime_paths(tmp_path)
+    config = _config(enabled=True)
+    slept = asyncio.Event()
+    woken = asyncio.Event()
+
+    async def sleep(_seconds: float) -> None:
+        slept.set()
+        await woken.wait()
+        woken.clear()
+
+    coordinator = CallTranscriptsRuntimeCoordinator(runtime_paths=paths, config_provider=lambda: config, sleep=sleep)
+    store = CallTranscriptStore(paths.storage_root)
+    heard_at = time.time() - 5
+    call, _ = store.ensure_live_call(ROOM, at=heard_at)
+    store.record_presence(call.id, ANN, at=heard_at)
+    store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
+    coordinator.bind_if_ready(config, {})
+    async with asyncio.timeout(5):
+        await slept.wait()
+    assert store.lines(call.id) != []
+
+    config = _config(enabled=False)
+    coordinator.bind_if_ready(config, {})
+    config = _config(enabled=True)
+    coordinator.bind_if_ready(config, {})
+    slept.clear()
+    woken.set()
+    async with asyncio.timeout(5):
+        await slept.wait()
+    await coordinator.stop()
+
+    ended = store.call(call.id)
+    assert ended is not None
+    assert (ended.ended_at, ended.transcript_event_id) == (heard_at, None)
+    assert ended.transcript_done_at is not None
+    assert store.lines(call.id) == []
+
+
+@pytest.mark.asyncio
 async def test_a_failing_pass_never_stops_the_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A pass that raises is logged; the loop waits 15 s and goes on."""
     paths = test_runtime_paths(tmp_path)
