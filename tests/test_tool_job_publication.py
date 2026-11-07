@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -78,6 +80,30 @@ def test_a_subagent_job_is_published_under_its_agents_name() -> None:
     jobs = content["jobs"]
     assert isinstance(jobs, list)
     assert (jobs[0]["kind"], jobs[0]["tool"]) == ("subagent", "worker")
+
+
+def test_hundreds_of_live_jobs_fit_in_one_state_event_listing_the_newest() -> None:
+    """A room with 300 live jobs keeps its state under the homeserver's 64 KiB event limit, with the newest listed."""
+    owner = replace(
+        job_owner(),
+        requester_id="@person.name:example.org",
+        resolved_thread_id="$" + "e" * 43,
+    )
+    jobs = [
+        replace(
+            _job("job_0"),
+            job_id=hashlib.sha256(str(index).encode()).hexdigest(),
+            owner=owner,
+            created_at=f"2026-10-11T00:{index // 60:02d}:{index % 60:02d}+00:00",
+        )
+        for index in range(300)
+    ]
+    content = _jobs_state_content(jobs)
+    assert len(json.dumps(content).encode()) < 64 * 1024
+    assert content["total"] == 300
+    listed = content["jobs"]
+    assert isinstance(listed, list)
+    assert [job["job_id"] for job in listed] == [job.job_id for job in jobs[-len(listed) :]]
 
 
 @pytest.mark.asyncio
@@ -194,11 +220,12 @@ async def test_a_bot_that_rejoins_a_room_rewrites_its_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_forbidden_write_is_not_retried_until_the_jobs_change() -> None:
-    """A room where the bot may not write the state is left alone until its jobs change."""
+@pytest.mark.parametrize("status_code", ["M_FORBIDDEN", "M_TOO_LARGE"])
+async def test_a_refused_write_is_not_retried_until_the_jobs_change(status_code: str) -> None:
+    """A room that refuses the state, as not allowed or too large, is left alone until its jobs change."""
     bots = _bots("agent_a")
     put = bots["agent_a"].client.room_put_state
-    put.return_value = nio.RoomPutStateError("forbidden", status_code="M_FORBIDDEN")
+    put.return_value = nio.RoomPutStateError("refused", status_code=status_code)
     publisher = JobStatePublisher()
     await publisher.publish(bots.get, [_job("job_1")])
     await publisher.publish(bots.get, [_job("job_1")])
