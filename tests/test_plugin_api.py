@@ -1,18 +1,21 @@
-"""`mindroom.plugin_api` exports exactly the supported plugin entry points, and their parameters change only on purpose.
+"""The plugin API exports exactly the supported plugin entry points, pinned together with `PLUGIN_API_VERSION`.
 
 Plugins import these names (docs/plugins.md, docs/hooks.md, docs/tools/atlassian.md), so removing a name or an enum
 member, or renaming, reordering, or changing the kind of a parameter, breaks them; update this pin together with the
-plugin docs and the fleet.
+plugin docs and the fleet, and bump `PLUGIN_API_VERSION` as docs/plugins.md says.
 """
 
 from __future__ import annotations
 
 import enum
+import hashlib
 import inspect
+import json
+import pkgutil
 
 import typing_extensions
 
-from mindroom import plugin_api
+from mindroom import plugin_api, plugin_http
 
 _EXPORTS = [
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
@@ -38,11 +41,13 @@ _EXPORTS = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "PLUGIN_API_VERSION",
     "ROUTER_AGENT_NAME",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "VOICE_PREFIX",
     "AfterResponseContext",
     "AgentLifecycleContext",
+    "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
     "AutomationContext",
@@ -128,6 +133,7 @@ _EXPORTS = [
     "resolve_turn_model",
     "tool",
     "toolkit_functions",
+    "write_agent_file",
     "write_file_within_root",
 ]
 
@@ -147,6 +153,7 @@ _SIGNATURES = {
     "AgentLifecycleContext": (
         f"({_HOOK}, entity_name, entity_type, rooms, matrix_user_id, joined_room_ids, stop_reason, *, {_HOOK_HELPERS})"
     ),
+    "ApprovalAlias": "(judged_as, judge)",
     "Ask": "(text, new_thread, then, summary)",
     "AutomationContext": (
         "(agent_name, config, runtime_paths, entry, options, settings, requester_id, execution_identity, workspace, "
@@ -288,7 +295,7 @@ _SIGNATURES = {
         "(*, name, display_name, description, category, status, setup_type, default_execution_target, "
         "requires_primary_runtime, consumes_workspace_paths, file_access, executes_code, requires_room_context, "
         "requires_conversation, icon, icon_color, config_fields, agent_override_fields, authored_override_validator, "
-        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, "
+        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, approval_aliases, "
         "worker_inert_agent_functions, managed_init_args, supports_toolkit_filters)"
     ),
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
@@ -296,6 +303,7 @@ _SIGNATURES = {
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
     "tool": "(function, /, *, name, description)",
     "toolkit_functions": "(toolkit)",
+    "write_agent_file": "(raw_path, payload, *, workspace_root, file_access)",
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
 }
 
@@ -347,6 +355,24 @@ _ENUM_MEMBERS = {
 }
 
 
+# What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
+# loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
+_HTTP_EXPORTS = ["ClientUser", "require_client_user", "require_room_member"]
+_ELSEWHERE_SIGNATURES = {
+    "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
+        "(*, name, tools, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs)"
+    ),
+    "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
+    "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
+    "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.require_client_user": "(request)",
+    "mindroom.plugin_http.require_room_member": "(request, room_id)",
+}
+
+# The plugin API version these pins describe, and their digest.
+_PINNED_VERSION = ((1, 0), "225acf7f458478fc98dab17333c7015c484a2a3520003b1b38ecd530770c7fc5")
+
+
 def _is_enum(obj: object) -> bool:
     return isinstance(obj, type) and issubclass(obj, enum.Enum)
 
@@ -386,3 +412,22 @@ def test_each_exported_enum_keeps_its_member_names() -> None:
     exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
     members = {name: list(obj.__members__) for name, obj in exported.items() if _is_enum(obj)}
     assert members == _ENUM_MEMBERS
+
+
+def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter_names_and_kinds() -> None:
+    """`mindroom.plugin_http` exports exactly the route helpers, and each named entry point keeps its parameters."""
+    shapes = {path: _parameter_shape(pkgutil.resolve_name(path)) for path in _ELSEWHERE_SIGNATURES}
+
+    assert plugin_http.__all__ == _HTTP_EXPORTS
+    assert shapes == _ELSEWHERE_SIGNATURES
+
+
+def test_the_pins_record_the_plugin_api_version_they_describe() -> None:
+    """A change to the pinned surface fails here until the version is bumped and pinned with the surface's digest."""
+    pins = json.dumps([_EXPORTS, _SIGNATURES, _ENUM_MEMBERS, _HTTP_EXPORTS, _ELSEWHERE_SIGNATURES], sort_keys=True)
+    digest = hashlib.sha256(pins.encode()).hexdigest()
+
+    assert (plugin_api.PLUGIN_API_VERSION, digest) == _PINNED_VERSION, (
+        "The plugin API changed: bump PLUGIN_API_VERSION in mindroom/tool_system/plugin_imports.py, the minor for an "
+        f"addition and the major for a breaking change, and set _PINNED_VERSION to (the new version, {digest!r})."
+    )

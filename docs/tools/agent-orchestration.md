@@ -500,6 +500,7 @@ agents:
 Operator-authored [`tool_approval`](../tool-approval.md) rules are checked first and the first match wins.
 A participant may name a single `toolkit.function` that a matching `auto_approve` rule allows even outside `allowed_tools`.
 A matching `require_approval` or script rule makes a function unavailable, and a participant that names such a function directly is refused the same way.
+The same holds for a function whose [approval alias](../plugins.md#approval-aliases) judges it as a function that would still need approval for that participant.
 `allowed_tools`, including `"*"`, never auto-approves `claude_agent`, `config_manager`, or `scheduler`, but an explicit operator `auto_approve` rule can.
 Functions that ask for their own confirmation stay unavailable even under an operator `auto_approve` rule.
 A function name shared by several granted toolkits is auto-approved only when every owning toolkit is eligible.

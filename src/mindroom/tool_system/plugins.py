@@ -385,8 +385,9 @@ def _mcp_tool_entries(mcp_servers: Mapping[str, MCPServerConfig]) -> dict[str, T
 def prepare_plugins(config: Config, runtime_paths: RuntimePaths) -> PluginGeneration:
     """Load ``config``'s plugins fresh into an unpublished generation, leaving the installed modules in place.
 
-    A plugin that fails to load is skipped. A structural error, such as two configured plugins with one manifest name
-    or two plugins registering one tool, raises, and nothing this preparation started keeps running.
+    A plugin that fails to load is skipped, unless its entry is required. A required plugin that fails, or a structural
+    error, such as two configured plugins with one manifest name or two plugins registering one tool, raises, and
+    nothing this preparation started keeps running.
     """
     with staged_plugins(config, runtime_paths) as generation:
         return generation
@@ -410,12 +411,26 @@ def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[Plug
             plugin_imports._PLUGIN_CACHE.clear()
             plugins, skipped = _load_plugins(config, runtime_paths, previous=None, routes=True)
             generation = _installed_generation(plugins, skipped)
+            _raise_if_required_plugin_skipped(config, generation)
             _log_loaded_plugins(generation)
             yield generation
         finally:
             _install_canonical_modules(installed_modules, installed_cache)
             plugin_imports._PLUGIN_CACHE.clear()
             plugin_imports._PLUGIN_CACHE.update(installed_manifests)
+
+
+def _raise_if_required_plugin_skipped(config: Config, generation: PluginGeneration) -> None:
+    """Raise with each skipped plugin whose entry is required, ending the tasks ``generation`` started."""
+    required = {entry.path for entry in config.plugins if entry.enabled and entry.required}
+    failures = [
+        f"Required plugin {plugin.path} failed to load: {plugin.error}"
+        for plugin in generation.skipped
+        if plugin.path in required
+    ]
+    if failures:
+        dispose_plugins(generation)
+        raise plugin_imports.PluginValidationError("; ".join(failures))
 
 
 def publish_plugins(generation: PluginGeneration) -> PluginReloadResult:

@@ -99,7 +99,7 @@ from tests.scheduling_helpers import joined_member_state, run_once_task, schedul
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
-from tests.tool_approval_helpers import gated_functions, scheduled_call_approvals
+from tests.tool_approval_helpers import gated_functions, judge_test_tool_function_as_shell, scheduled_call_approvals
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -1032,13 +1032,13 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
         await manager.shutdown()
 
 
-def _gated_config() -> Config:
+def _gated_config(match: str = "post_slack_message") -> Config:
     return _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
+                rules=[ApprovalRuleConfig(match=match, action="require_approval")],
             ),
         ),
     )
@@ -1425,6 +1425,24 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
 
     context.client.room_put_state.assert_not_awaited()
     request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_call_judged_as_a_gated_function_can_be_scheduled_pre_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No rule gates ``post_slack_message``, but its toolkit says its calls are shell commands, which a rule gates."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message")
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_awaited_once()
 
 
 _CARD_REFUSED = "Could not post an approvable approval card for this call; nothing was scheduled."

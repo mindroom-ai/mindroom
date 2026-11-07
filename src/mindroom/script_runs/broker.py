@@ -13,6 +13,7 @@ from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
     evaluate_tool_approval,
+    toolkit_approval_alias,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
@@ -789,6 +790,12 @@ def _build_background_approval_gate(
                 call.grant.function_name,
                 arguments,
                 run.agent_name,
+                toolkit_approval_alias(
+                    context.config,
+                    context.plugins.tools,
+                    call.grant.toolkit_name,
+                    call.grant.function_name,
+                ),
             )
             if policy_requires_approval:
                 decision = await runtime_resolver.request_approval(
@@ -819,12 +826,14 @@ async def _request_authored_confirmation(
     """Ask for a function-authored confirmation before the call's hooks and policy approval run."""
     if not required:
         return None
+    # The function asks whatever the rules say; its own rules only say how long the card stays open.
     _, timeout_seconds = await evaluate_tool_approval(
         approval_config,
         context.runtime_paths,
         call.grant.function_name,
         arguments,
         run.agent_name,
+        None,
     )
     return await runtime_resolver.request_approval(
         origin=origin,

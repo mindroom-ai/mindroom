@@ -117,6 +117,7 @@ visibility = [
     "mindroom.cli.connect",
     "mindroom.matrix.provisioning",
     "mindroom.script_runs.worker_client",
+    "mindroom.terminal.client",
 ]
 
 [[modules]]
@@ -1432,6 +1433,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.events",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.approval.continuation_runner",
@@ -2261,6 +2263,7 @@ depends_on = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.registry",
+    "mindroom.terminal.session",
 ]
 
 [[modules]]
@@ -2275,6 +2278,8 @@ depends_on = [
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_runner_scripts",
     "mindroom.api.validation_errors",
+    "mindroom.api.worker_preview",
+    "mindroom.api.worker_terminal",
 ]
 
 [[modules]]
@@ -3231,6 +3236,7 @@ depends_on = [
     "mindroom.scheduling.runtime",
     "mindroom.thread_export.workspace_sync",
     "mindroom.approval.tool_approval",
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
     "mindroom.automations.runner",
@@ -5266,6 +5272,7 @@ depends_on = [
     "mindroom.failure_text",
     "mindroom.config.resolution",
     "mindroom.scheduling.ownership",
+    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]
@@ -5423,6 +5430,7 @@ depends_on = [
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.metadata",
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registration",
     "mindroom.tool_system.runtime_context",
@@ -6811,6 +6819,7 @@ exclusive = true
 
 [[interfaces]]
 expose = [
+    "ApprovalAlias",
     "ConfigField",
     "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
@@ -6837,6 +6846,7 @@ expose = [
     "open_upload_source",
     "read_upload_source",
     "resolve_agent_file",
+    "write_agent_file",
 ]
 from = ["mindroom.file_access"]
 
@@ -7395,6 +7405,7 @@ expose = [
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "toolkit_approval_alias",
 ]
 from = ["mindroom.approval.tool_approval"]
 
@@ -7413,6 +7424,7 @@ expose = [
     "primary_owns_tool_settings",
     "view_file_from_worker",
     "to_json_compatible",
+    "worker_call",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
 
@@ -8134,6 +8146,18 @@ path = "mindroom.worker_computer.runtime"
 depends_on = ["mindroom.worker_computer.protocol"]
 
 [[modules]]
+path = "mindroom.api.worker_preview"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_runner",
+    "mindroom.previews.relay",
+]
+
+[[modules]]
+path = "mindroom.previews.relay"
+depends_on = []
+
+[[modules]]
 path = "mindroom.worker_computer.screencast"
 depends_on = ["mindroom.worker_computer.protocol"]
 
@@ -8145,6 +8169,26 @@ depends_on = [
     "mindroom.worker_computer.rfb",
     "mindroom.worker_computer.runtime",
     "mindroom.worker_computer.screencast",
+]
+
+[[modules]]
+path = "mindroom.api.worker_terminal"
+depends_on = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.terminal.session",
+]
+
+[[modules]]
+path = "mindroom.terminal.session"
+depends_on = []
+
+[[modules]]
+path = "mindroom.terminal.client"
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.http_error_detail",
+    "mindroom.terminal.session",
+    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]
