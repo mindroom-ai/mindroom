@@ -233,8 +233,8 @@ def test_a_toolkit_whose_calls_run_here_has_no_worker_stand_ins(tmp_path: Path) 
 
 
 @pytest.mark.usefixtures("current_static_runner")
-def test_an_unscoped_call_reaches_the_shared_runner_at_its_api_root(tmp_path: Path) -> None:
-    """A call without a worker of its own goes to the shared runner's API root, however its URL names the runner."""
+def test_an_unscoped_call_built_unsent_names_the_shared_runner_s_api_root(tmp_path: Path) -> None:
+    """A call built without a worker of its own names the shared runner's API root, however its URL names the runner."""
     paths = _paths(
         tmp_path,
         {
