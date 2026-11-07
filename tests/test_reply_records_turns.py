@@ -340,7 +340,12 @@ async def test_a_reply_ending_early_keeps_what_its_live_frames_showed(
     async def relays(_homeserver_url: str) -> bool:
         return True
 
-    async def send_frame(_client: object, _room_id: str, frame: dict[str, object], **_kwargs: object) -> LiveSendOutcome:
+    async def send_frame(
+        _client: object,
+        _room_id: str,
+        frame: dict[str, object],
+        **_kwargs: object,
+    ) -> LiveSendOutcome:
         frames.append(json.dumps(frame))
         return LiveSendOutcome.SENT
 

@@ -500,10 +500,7 @@ async def test_a_continued_reply_left_early_keeps_what_frames_showed(tmp_path: P
         while not any(text in json.dumps(frame) for frame in frames.sent):  # noqa: ASYNC110
             await asyncio.sleep(0.01)
 
-    with (
-        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=_Edits().edit)),
-        pytest.raises(asyncio.CancelledError),
-    ):
+    async def stopped_while_building() -> None:
         async with stream_progress_edits(
             make_matrix_client_mock(user_id="@mindroom_code:localhost"),
             MessageTarget.resolve(_ROOM_ID, None, "$question"),
@@ -518,6 +515,12 @@ async def test_a_continued_reply_left_early_keeps_what_frames_showed(tmp_path: P
             await publish(StructuredStreamChunk(content="Approved. Building now"))
             await asyncio.wait_for(frame_shows("Building now"), timeout=5)
             raise asyncio.CancelledError
+
+    with (
+        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=_Edits().edit)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await stopped_while_building()
 
     assert [write.kind for write in records.writes] == ["progress", "progress_delivered", "progress"]
     assert records.writes[-1].progress.text == "Approved. Building now"
