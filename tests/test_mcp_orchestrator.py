@@ -8,7 +8,9 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import orchestrator as orchestrator_module
 from mindroom.api import main as api_main
@@ -693,10 +695,26 @@ async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rooms_error", "finalize_error"),
+    [
+        (None, None),
+        (aiohttp.ClientConnectionError("homeserver down"), None),
+        (aiohttp.ClientConnectionError("homeserver down"), RuntimeError("bind failed")),
+        (aiohttp.ClientConnectionError("homeserver down"), asyncio.CancelledError()),
+        (asyncio.CancelledError(), None),
+    ],
+)
 async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_services(
     tmp_path: Path,
+    rooms_error: BaseException | None,
+    finalize_error: BaseException | None,
 ) -> None:
-    """Config reloads should finish with trigger runtime bound to the final API snapshot."""
+    """Config reloads finish with trigger runtime bound to the final API snapshot, even when room setup fails.
+
+    The room error stays the one raised when the bindings fail too, and a cancellation is never swallowed: a reload
+    cancelled during room setup binds nothing.
+    """
     current_config = _config_with_code_agent(tmp_path)
     new_config = _config_with_code_agent(tmp_path, role="Write better code")
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=current_config)
@@ -729,6 +747,8 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
 
     async def reconcile_rooms(_plan: ConfigUpdatePlan, _changed_entities: set[str]) -> None:
         call_order.append("rooms")
+        if rooms_error is not None:
+            raise rooms_error
 
     async def sync_support_services(_config: Config, *, previous_config: Config | None = None) -> None:
         assert previous_config is current_config
@@ -737,6 +757,8 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     def bind_runtime(_config: Config, _bots: object) -> None:
         assert _config is new_config
         call_order.append("bind")
+        if finalize_error is not None:
+            raise finalize_error
 
     with (
         patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
@@ -752,10 +774,25 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
+        capture_logs() as logs,
     ):
-        updated = await orchestrator._apply_config_update_plan(current_config, plan)
+        if rooms_error is None:
+            assert await orchestrator._apply_config_update_plan(current_config, plan) is True
+        else:
+            expected = finalize_error if isinstance(finalize_error, asyncio.CancelledError) else rooms_error
+            with pytest.raises(type(expected)) as raised:
+                await orchestrator._apply_config_update_plan(current_config, plan)
+            assert raised.value is expected
+            assert raised.value.__cause__ is None
 
-    assert updated is True
+    finalize_failures = [log for log in logs if log["event"] == "config_reload_finalize_failed_after_room_setup_failed"]
+    assert [log["log_level"] for log in finalize_failures] == (
+        ["error"] if isinstance(finalize_error, RuntimeError) else []
+    )
+
+    if isinstance(rooms_error, asyncio.CancelledError):
+        assert call_order == ["rooms"]
+        return
     assert call_order.count("bind") == 1
     assert call_order.index("rooms") < call_order.index("support") < call_order.index("bind")
 

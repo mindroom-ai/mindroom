@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from typing import Any, TypeGuard
 from urllib.parse import urlsplit
 
 import nio
-from aiohttp import ClientResponse
+from aiohttp import ClientConnectionError, ClientResponse
 from nio import crypto
 from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
@@ -38,6 +39,9 @@ _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
 _MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
+_DURABLE_UPLOAD_RETRY_SECONDS = 10.0
+# A rate limit, or a gateway that cannot reach the homeserver while it restarts.
+_DURABLE_UPLOAD_RETRY_STATUSES = frozenset({429, 502, 503, 504})
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
@@ -282,24 +286,59 @@ def prepare_media_upload(
     )
 
 
+def durable_session_closed(client: nio.AsyncClient) -> bool:
+    """Return whether ``client``'s durable sync session was closed, as a stopping bot's ingestion session is.
+
+    nio then refuses every request on it, so such a failure is its bot stopping. A session a failure poisoned is not
+    closed, so that failure still counts as one.
+    """
+    session = getattr(client, "_durable_session", None)
+    return session is not None and getattr(session, "_closed", False) is True
+
+
 async def upload_media_bytes(
     client: nio.AsyncClient,
     upload_bytes: bytes,
     *,
     content_type: str,
     filename: str,
+    durable: bool = False,
+    room_id: str | None = None,
 ) -> tuple[nio.UploadResponse | nio.UploadError, dict[str, object] | None]:
-    """Upload an in-memory byte payload through nio's callback-based upload API."""
+    """Upload an in-memory byte payload through nio's callback-based upload API.
+
+    A ``durable`` caller freezes what the upload produced, so a homeserver that stays unreachable or rate limiting
+    past nio's retry bound is waited out instead of failing the upload. ``room_id`` names the room in its log.
+    """
 
     def data_provider(_monitor: object, _data: object) -> io.BytesIO:
         return io.BytesIO(upload_bytes)
 
-    return await client.upload(
-        data_provider=data_provider,
-        content_type=content_type,
-        filename=filename,
-        filesize=len(upload_bytes),
-    )
+    while True:
+        try:
+            result = await client.upload(
+                data_provider=data_provider,
+                content_type=content_type,
+                filename=filename,
+                filesize=len(upload_bytes),
+            )
+        except (ClientConnectionError, TimeoutError) as error:
+            if not durable:
+                raise
+            error_type = type(error).__name__
+        else:
+            if not durable:
+                return result
+            response = result[0]
+            status = getattr(response.transport_response, "status", None)
+            if not (
+                isinstance(response, nio.UploadError)
+                and (response.status_code == "M_LIMIT_EXCEEDED" or status in _DURABLE_UPLOAD_RETRY_STATUSES)
+            ):
+                return result
+            error_type = response.status_code or f"HTTP {status}"
+        logger.warning("matrix_upload_waiting_for_homeserver", room_id=room_id, error_type=error_type)
+        await asyncio.sleep(_DURABLE_UPLOAD_RETRY_SECONDS)
 
 
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:

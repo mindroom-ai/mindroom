@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import json
+import sys
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
+from rich.markup import escape
 
 from .config import CONFIG_PATH_OPTION, activate_cli_runtime, console
 
 if TYPE_CHECKING:
+    from mindroom.plugin_check import OutsideImport
     from mindroom.plugin_install import InstallResult
 
 plugins_app = typer.Typer(help="Check, install, and update MindRoom plugins.")
+
+_OUTSIDE_IMPORTS = "imports from outside the plugin API can break in any MindRoom release"
 
 _PLUGINS_DIR_OPTION: Path | None = typer.Option(
     None,
@@ -31,21 +38,61 @@ def plugin_check(
         resolve_path=True,
         help="Plugin directory containing mindroom.plugin.json.",
     ),
+    strict: bool = typer.Option(False, "--strict", help="Treat imports from outside the plugin API as errors."),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
     """Strictly validate one plugin against this MindRoom version."""
-    from mindroom.plugin_check import check_plugin  # noqa: PLC0415
+    from mindroom.plugin_check import check_plugin, imports_outside_plugin_api  # noqa: PLC0415
 
+    outside_imports = imports_outside_plugin_api(path)
+    internal_imports = [
+        {"path": found.path.as_posix(), "line": found.line, "name": found.name} for found in outside_imports
+    ]
     try:
-        result = check_plugin(path)
+        # With --json, logs and anything the plugin prints go to stderr, so stdout carries only the JSON document.
+        with redirect_stdout(sys.stderr) if json_output else nullcontext():
+            result = check_plugin(path)
     except Exception as exc:
-        console.print(f"[red]Plugin check failed:[/red] {exc}")
+        if json_output:
+            typer.echo(json.dumps({"status": "failed", "detail": str(exc), "internal_imports": internal_imports}))
+        else:
+            console.print(f"[red]Plugin check failed:[/red] {escape(str(exc))}")
+            _print_outside_imports(outside_imports, strict=strict)
         raise typer.Exit(1) from None
 
+    strict_failure = strict and bool(outside_imports)
+    if json_output:
+        summary = {
+            "status": "compatible",
+            "name": result.name,
+            "tools": result.tool_names,
+            "hooks": result.hook_names,
+            "automations": result.automation_names,
+            "skills": result.skill_directories,
+            "internal_imports": internal_imports,
+        }
+        if strict_failure:
+            summary |= {"status": "failed", "detail": _OUTSIDE_IMPORTS}
+        typer.echo(json.dumps(summary))
+        if strict_failure:
+            raise typer.Exit(1)
+        return
     console.print(f"[green]Plugin is compatible:[/green] {result.name}")
     console.print(f"  Tools:       {', '.join(result.tool_names) or 'none'}")
     console.print(f"  Hooks:       {', '.join(result.hook_names) or 'none'}")
     console.print(f"  Automations: {', '.join(result.automation_names) or 'none'}")
     console.print(f"  Skills:      {', '.join(result.skill_directories) or 'none'}")
+    _print_outside_imports(outside_imports, strict=strict)
+    if strict_failure:
+        raise typer.Exit(1)
+
+
+def _print_outside_imports(outside_imports: list[OutsideImport], *, strict: bool) -> None:
+    if outside_imports:
+        label = "[red]Error:[/red]" if strict else "[yellow]Warning:[/yellow]"
+        console.print(f"{label} {_OUTSIDE_IMPORTS}:")
+        for found in outside_imports:
+            console.out(f"  {found.path}:{found.line}: {found.name}")
 
 
 @plugins_app.command("install")
