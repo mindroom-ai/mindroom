@@ -45,6 +45,7 @@ class _PluginManifest:
     oauth_module: str | None
     routes_module: str | None
     skills: list[str]
+    reserved_namespaces: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class _PluginBase:
     oauth_module_path: Path | None
     routes_module_path: Path | None
     skill_dirs: list[Path]
+    reserved_namespaces: tuple[str, ...]
 
 
 @dataclass
@@ -284,6 +286,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         oauth_module_path=oauth_module_path,
         routes_module_path=routes_module_path,
         skill_dirs=skill_dirs,
+        reserved_namespaces=manifest.reserved_namespaces,
     )
 
 
@@ -325,6 +328,14 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Plugin skills must be a list of strings", path=str(path))
         raise PluginValidationError(msg)
 
+    reserved_namespaces = data.get("reserved_namespaces", [])
+    if not isinstance(reserved_namespaces, list) or not all(
+        isinstance(namespace, str) and namespace for namespace in reserved_namespaces
+    ):
+        msg = f"Plugin reserved_namespaces must be a list of non-empty strings: {path}"
+        logger.error("Plugin reserved_namespaces must be a list of non-empty strings", path=str(path))
+        raise PluginValidationError(msg)
+
     return _PluginManifest(
         name=normalized_name,
         tools_module=tools_module,
@@ -332,6 +343,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         oauth_module=oauth_module,
         routes_module=routes_module,
         skills=raw_skills,
+        reserved_namespaces=tuple(reserved_namespaces),
     )
 
 

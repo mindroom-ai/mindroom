@@ -78,6 +78,8 @@ class _LoadedPlugin:
     name: str
     root: Path
     skill_dirs: tuple[Path, ...]
+    # The content-key and event-type prefixes its manifest reserves from agent tools.
+    reserved_namespaces: tuple[str, ...]
     # The modules' paths and mtimes when they executed, so validation knows when the source changed.
     source: tuple[tuple[Path, float], ...]
     tools: Mapping[str, ToolMetadata]
@@ -236,6 +238,11 @@ class ConfigPlugins:
                 for skill_dir in plugin.loaded.skill_dirs
             ),
         )
+
+    @cached_property
+    def reserved_namespaces(self) -> tuple[str, ...]:
+        """Return the content-key and event-type prefixes the configured plugins the generation loaded reserve."""
+        return tuple(namespace for plugin in self.loaded_plugins for namespace in plugin.reserved_namespaces)
 
     @cached_property
     def oauth_providers(self) -> Mapping[str, OAuthProvider]:
@@ -723,6 +730,7 @@ def _materialize_plugin(
         and previous.name == plugin.name
         and previous.modules == modules
         and previous.skill_dirs == tuple(plugin.skill_dirs)
+        and previous.reserved_namespaces == plugin.reserved_namespaces
     ):
         return previous
     hooks_module = hooks_entry.module if hooks_entry is not None else None
@@ -730,6 +738,7 @@ def _materialize_plugin(
         name=plugin.name,
         root=plugin.root,
         skill_dirs=tuple(plugin.skill_dirs),
+        reserved_namespaces=plugin.reserved_namespaces,
         source=tuple(source.items()),
         # A plugin's tools are the ones its tools module registers.
         tools=tools_entry.registrations if tools_entry is not None else MappingProxyType({}),
