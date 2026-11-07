@@ -36,7 +36,7 @@ from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, ProgressPermission, format_stream_error_note
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
@@ -322,6 +322,8 @@ async def test_a_progress_edit_written_ahead_after_a_stop_commits_is_never_sent(
     runner = unwrap_extracted_collaborator(bot._response_runner)
     write_ahead = ReplyStore.write_ahead
     hold = _FirstCallHold()
+    permit = reply_scope.ReplyRuntime.write_ahead
+    permissions: list[ProgressPermission] = []
 
     async def held_write_ahead(self: ReplyStore, **kwargs: object) -> object:
         # The edit carrying the later words reaches the records only once the Stop committed.
@@ -329,10 +331,84 @@ async def test_a_progress_edit_written_ahead_after_a_stop_commits_is_never_sent(
             await hold.wait_if_first()
         return await write_ahead(self, **kwargs)  # type: ignore[arg-type]
 
+    async def recorded_permit(self: reply_scope.ReplyRuntime, *args: object, **kwargs: object) -> ProgressPermission:
+        permissions.append(await permit(self, *args, **kwargs))  # type: ignore[arg-type]
+        return permissions[-1]
+
     async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         yield "Partial"
         await _wait_until_sent(bot, "Partial")
         yield " and the words after it"
+        await asyncio.Event().wait()
+        yield "never"
+
+    with (
+        patch.object(ReplyStore, "write_ahead", new=held_write_ahead),
+        patch.object(reply_scope.ReplyRuntime, "write_ahead", new=recorded_permit),
+        patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        await asyncio.wait_for(hold.holding.wait(), timeout=5)
+        reply = await _reply(bot)
+        assert reply.event_id is not None
+        stop = await _stop(bot, reply.event_id, 7)
+        hold.release.set()
+        await asyncio.wait_for(response, timeout=5)
+        assert await asyncio.wait_for(stop, timeout=5)
+
+    assert not any("words after it" in body for body in _sent_bodies(bot))
+    assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
+    assert (await _reply(bot)).state is rl.ReplyState.CANCELLED
+    # The refused edit waits for the Stop's ending; refusing it as a failure would log a stream error.
+    assert permissions == [ProgressPermission.SEND, ProgressPermission.DEFER]
+
+
+async def test_a_stop_before_the_catch_up_after_frames_stopped_keeps_what_frames_showed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frames that stop on their own queue a catch-up edit; a Stop before it is written ahead keeps their text."""
+    bot = await _streaming_bot(tmp_path)
+    streaming = bot.config.defaults.streaming
+    streaming.update_interval = 60
+    streaming.max_idle = 2.0
+    frames: list[str] = []
+
+    async def relays(_homeserver_url: str) -> bool:
+        return True
+
+    async def send_frame(_client: object, _room_id: str, frame: dict[str, object], **_kwargs: object) -> LiveSendOutcome:
+        frames.append(json.dumps(frame))
+        # The frame carrying the last words is refused, as one too large is: frames stop on their own.
+        return LiveSendOutcome.STOP if "plus more" in frames[-1] else LiveSendOutcome.SENT
+
+    monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", relays)
+    monkeypatch.setattr(live_publisher_module, "send_live_frame", send_frame)
+    monkeypatch.setattr(live_publisher_module, "_FRAME_INTERVAL_SECONDS", 0.01)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    write_ahead = ReplyStore.write_ahead
+    hold = _FirstCallHold()
+
+    async def held_write_ahead(self: ReplyStore, **kwargs: object) -> object:
+        # The catch-up edit reaches the records only once the Stop committed.
+        if "plus more" in str(kwargs["shown"]) and not kwargs.get("shown_live"):
+            await hold.wait_if_first()
+        return await write_ahead(self, **kwargs)  # type: ignore[arg-type]
+
+    async def frame_shows(text: str) -> None:
+        while not any(text in frame for frame in frames):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "Partial"
+        await frame_shows("Partial")
+        yield " and the words after it"
+        await frame_shows("words after it")
+        yield " plus more"
         await asyncio.Event().wait()
         yield "never"
 
@@ -353,9 +429,9 @@ async def test_a_progress_edit_written_ahead_after_a_stop_commits_is_never_sent(
         await asyncio.wait_for(response, timeout=5)
         assert await asyncio.wait_for(stop, timeout=5)
 
-    assert not any("words after it" in body for body in _sent_bodies(bot))
-    assert _sent_bodies(bot)[-1] == "Partial\n\n**[Response cancelled by user]**"
-    assert (await _reply(bot)).state is rl.ReplyState.CANCELLED
+    # Only frames showed the later words, and no edit followed the Stop.
+    assert not any("words after it" in body for body in _sent_bodies(bot)[:-1])
+    assert _sent_bodies(bot)[-1] == "Partial and the words after it plus more\n\n**[Response cancelled by user]**"
 
 
 @pytest.mark.parametrize(

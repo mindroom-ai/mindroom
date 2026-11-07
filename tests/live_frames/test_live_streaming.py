@@ -638,7 +638,8 @@ async def test_frames_are_recorded_only_after_the_edit_in_flight_landed(tmp_path
             # The checkpoint edit stays in flight while frames show more.
             await asyncio.wait_for(in_flight.wait(), timeout=5)
             await publish(StructuredStreamChunk(content="Approved. Building now"))
-            await asyncio.wait_for(_until(_shown_by(frames, "Building now")), timeout=5)
+            # The delta frame carries only the new words.
+            await asyncio.wait_for(_until(_shown_by(frames, " now")), timeout=5)
             asyncio.get_running_loop().call_later(0.05, release.set)
             raise asyncio.CancelledError
 
