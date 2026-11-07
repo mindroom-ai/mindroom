@@ -1,13 +1,16 @@
 """Tests for large message handling."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import aiohttp
 import nio
 import pytest
 from nio.crypto import OutboundGroupSession
 from nio.crypto.attachments import decrypt_attachment
+from nio.durable import open_durable_sync
 from structlog.testing import capture_logs
 
 from mindroom.constants import (
@@ -28,7 +31,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.interactive import parse_and_format_interactive
-from mindroom.matrix.client_session import _MatrixTransportShutdownError
+from mindroom.matrix.client_session import MindRoomAsyncClient, _MatrixTransportShutdownError
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
@@ -548,21 +551,39 @@ async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_tru
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("disposed", "log_level"), [(True, "warning"), (False, "error")])
-async def test_sidecar_upload_refused_by_a_disposed_client_logs_at_warning(disposed: bool, log_level: str) -> None:
-    """A stopping bot's closed sync session disposes its client; any other upload failure still logs at error.
+@pytest.mark.parametrize(
+    ("case", "log_level"),
+    [("stopped", "warning"), ("poisoned", "error"), ("logged_out", "error")],
+)
+async def test_sidecar_upload_refused_by_a_stopped_owner_logs_at_warning(
+    tmp_path: Path,
+    case: str,
+    log_level: str,
+) -> None:
+    """A stopping bot's closed sync session refuses its client's upload; that logs at warning without a traceback.
 
-    Both clients refuse the upload with nio's ``LocalProtocolError``: one is disposed, the other never logged in.
+    A session poisoned by a failure, and a client that never logged in, refuse with the same ``LocalProtocolError``
+    and still log at error.
     """
-    client = nio.AsyncClient("https://server", "@bot:server", device_id="DEVICE")
-    if disposed:
+    client = MindRoomAsyncClient("http://127.0.0.1:9", "@bot:server", "BOT", store_path=None)
+    session = None
+    if case != "logged_out":
+        client.restore_login("@bot:server", "BOT", "token")
+        session = open_durable_sync(client, consumer_id=uuid4(), store_path=tmp_path)
+    if case == "stopped":
+        await session.close()
+    if case == "poisoned":
         client._dispose()
 
     with capture_logs() as logs:
         result = await upload_json_sidecar(client, "!room:server", {"body": "full"}, room_encrypted=False, durable=True)
 
+    if session is not None:
+        await session.close()
     assert result == (None, None)
-    assert [(log["event"], log["log_level"]) for log in logs] == [("Failed to upload text", log_level)]
+    assert [(log["event"], log["log_level"], "exc_info" in log) for log in logs] == [
+        ("Failed to upload text", log_level, log_level == "error"),
+    ]
 
 
 @pytest.mark.asyncio
