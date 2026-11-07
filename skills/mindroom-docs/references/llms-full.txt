@@ -5856,11 +5856,14 @@ The rules:
 - Leaving from one device takes the person out of the call; their other device in the call rejoins with its next check-in.
 - Only people whose MindRoom Chat takes part are in the call: people in it from other Matrix apps are neither listed nor transcribed.
 - A call ends when nobody is in it, checked when someone leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
+- A call's length runs to the last check-in or leave of anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down still shows how long it really lasted.
 - A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
 - A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB; each person has one stretch at a time at speech-to-text, and at most 240 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
-- A failed post or failed notes are tried again a minute later; after that, the transcript is posted without notes.
-- A call in which nobody spoke posts no message.
+- A stretch said before the call ended that arrives late is still added until MindRoom starts writing the message; once the notes are written, later stretches are refused, so the posted notes always cover the posted transcript.
+- Notes that fail are tried once more a minute later; after that, the message is posted without notes.
+- A message that cannot be posted is tried again every minute, with any notes already written, for up to a day after the call.
+- A call in which nobody spoke posts no message; one in which people spoke but nothing could be transcribed posts `Call · N min. Nothing could be transcribed.` without a transcript.
 
 Privacy:
 
