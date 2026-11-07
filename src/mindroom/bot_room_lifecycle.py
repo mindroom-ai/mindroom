@@ -101,7 +101,7 @@ class BotRoomLifecycleDeps:
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
-    # Every successful join, configured or invited, so the bot restores the room's schedules.
+    # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
     get_conversation_reader: Callable[[], ConversationReader]
 
@@ -115,7 +115,7 @@ class BotRoomLifecycle:
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
         # The file is read wherever invited rooms are needed; reading it here makes an unreadable record fail the
-        # bot's construction, as it did when construction loaded the rooms, rather than its first room setup.
+        # bot's construction rather than its first room setup.
         self.invited_room_ids()
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
@@ -155,6 +155,10 @@ class BotRoomLifecycle:
     def _should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
         return should_accept_invites(self._config(), self.deps.agent_name)
+
+    def _inviter_allowed(self, sender: str) -> bool:
+        """Return whether this entity's invitation rule accepts an invitation from `sender`."""
+        return is_inviter_allowed(self._config(), self.deps.runtime_paths, self.deps.agent_name, sender)
 
     def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
@@ -236,7 +240,7 @@ class BotRoomLifecycle:
         return pending_room_invites_path(self.deps.runtime_paths, self.deps.agent_name)
 
     def invited_room_ids(self) -> frozenset[str]:
-        """Return the rooms this entity keeps across restarts because it accepted their invites.
+        """Return the rooms this entity keeps across restarts because it accepted their invites or followed their listing.
 
         A personal agent's contact rooms never count, though it may have accepted their invites: it keeps a contact
         room only while the contact is active and the agent has contacts.
@@ -256,12 +260,7 @@ class BotRoomLifecycle:
         if not self._should_persist_invited_rooms():
             return frozenset()
         for room_id, sender in self._pending_room_invites.items():
-            if self._client_has_joined_room(room_id) and is_inviter_allowed(
-                self._config(),
-                self.deps.runtime_paths,
-                self.deps.agent_name,
-                sender,
-            ):
+            if self._client_has_joined_room(room_id) and self._inviter_allowed(sender):
                 await self._remember_invited_room(room_id)
         return await asyncio.to_thread(self.invited_room_ids)
 
@@ -394,7 +393,6 @@ class BotRoomLifecycle:
                 continue
 
             if await self._join_room_with_decrypt_notice_fence(room_id):
-                current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
                 await self._room_joined(room_id)
                 await self.deps.on_configured_room_joined(room_id)
@@ -617,13 +615,7 @@ class BotRoomLifecycle:
             {
                 room.room_id: room.inviter
                 for room in tuple(client.invited_rooms.values())
-                if room.inviter is not None
-                and is_inviter_allowed(
-                    self._config(),
-                    self.deps.runtime_paths,
-                    self.deps.agent_name,
-                    room.inviter,
-                )
+                if room.inviter is not None and self._inviter_allowed(room.inviter)
             },
         )
         for room_id, sender in tuple(self._pending_room_invites.items()):
@@ -642,16 +634,7 @@ class BotRoomLifecycle:
         if current_invite is None or current_invite.inviter is None:
             return None
         sender = current_invite.inviter
-        return (
-            sender
-            if is_inviter_allowed(
-                self._config(),
-                self.deps.runtime_paths,
-                self.deps.agent_name,
-                sender,
-            )
-            else None
-        )
+        return sender if self._inviter_allowed(sender) else None
 
     async def _handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
         """Accept one recorded invite when its dedicated invitation policy allows it."""
@@ -663,16 +646,7 @@ class BotRoomLifecycle:
             allowed_sender = (
                 self._pending_room_invites.get(room.room_id) if joined else self._allowed_current_inviter(room.room_id)
             )
-            if (
-                joined
-                and allowed_sender is not None
-                and not is_inviter_allowed(
-                    self._config(),
-                    self.deps.runtime_paths,
-                    self.deps.agent_name,
-                    allowed_sender,
-                )
-            ):
+            if joined and allowed_sender is not None and not self._inviter_allowed(allowed_sender):
                 allowed_sender = None
             if allowed_sender is None:
                 self._logger().debug(
@@ -759,7 +733,7 @@ class BotRoomLifecycle:
         if not self._should_accept_invite():
             return
         for room_id, lister in (await _listed_rooms(self._client(), parent_id) or {}).items():
-            if is_inviter_allowed(self._config(), self.deps.runtime_paths, self.deps.agent_name, lister):
+            if self._inviter_allowed(lister):
                 await self._join_listed_room(parent_id, room_id)
 
     async def _join_listed_room(self, parent_id: str, room_id: str) -> None:

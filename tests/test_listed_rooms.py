@@ -21,7 +21,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     make_matrix_client_mock,
-    runtime_paths_for,
     test_runtime_paths,
 )
 
@@ -72,9 +71,10 @@ class _Bot:
         joined: Iterable[str] = (PARENT,),
     ) -> None:
         self.state = state
+        paths = test_runtime_paths(tmp_path)
         config = bind_runtime_paths(
             Config(agents={"helper": AgentConfig(display_name="Helper", accept_invites=accept_invites)}),
-            test_runtime_paths(tmp_path),
+            paths,
         )
         self.client = make_matrix_client_mock(user_id=HELPER)
         self.client.rooms = {room_id: self._synced_room(room_id) for room_id in joined}
@@ -85,7 +85,6 @@ class _Bot:
         self.memberships: list[tuple[str, str]] = []
         self.on_room_joined = AsyncMock()
         self.runtime = SimpleNamespace(client=self.client, config=config, agent_reply_memberships=MagicMock())
-        paths = runtime_paths_for(config)
         self.lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
                 agent_name="helper",
@@ -110,9 +109,7 @@ class _Bot:
         """Return a joined room as nio holds it once a sync delivered its state."""
         room = nio.MatrixRoom(room_id, HELPER)
         for event in self.state.get(room_id, []):
-            if event["type"] == "m.room.create":
-                room.room_type = event["content"].get("type")
-            elif event["type"] == "m.space.child" and event["content"].get("via"):
+            if event["type"] == "m.space.child" and event["content"].get("via"):
                 room.children.add(event["state_key"])
         return room
 
@@ -141,9 +138,6 @@ class _Bot:
             return False
         self.client.rooms.setdefault(room_id, self._synced_room(room_id))
         return True
-
-    def join(self, room_id: str) -> None:
-        self.client.rooms[room_id] = self._synced_room(room_id)
 
     async def on_space_child(self, room_id: str, *, listed: bool = True) -> None:
         """Deliver one listing event the way nio does, after applying it to the synced room."""
@@ -241,19 +235,17 @@ async def test_a_bot_that_accepts_no_invitations_follows_nothing(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_rooms_a_space_lists_are_not_followed(tmp_path: Path) -> None:
-    """A Space's rooms are its own: listing one brings no bot in."""
-    bot = _Bot(tmp_path, {PARENT: [_create("m.space"), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]})
-
-    await bot.on_space_child(ROOM)
-
-    assert bot.memberships == []
-
-
-@pytest.mark.asyncio
-async def test_a_listing_the_room_no_longer_holds_changes_nothing(tmp_path: Path) -> None:
-    """The room's current list decides, so a replayed or superseded listing brings no bot in."""
-    bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM, listed=False)], ROOM: [_create(), _parent(PARENT)]})
+@pytest.mark.parametrize(
+    "parent_state",
+    [[_create("m.space"), _child(ROOM)], [_create(), _child(ROOM, listed=False)]],
+    ids=["parent-is-a-space", "no-longer-listed"],
+)
+async def test_a_listing_brings_no_bot_in_unless_the_room_lists_it_now(
+    tmp_path: Path,
+    parent_state: list[dict],
+) -> None:
+    """A Space's rooms are its own, and the room's current list decides, so a superseded listing changes nothing."""
+    bot = _Bot(tmp_path, {PARENT: parent_state, ROOM: [_create(), _parent(PARENT)]})
 
     await bot.on_space_child(ROOM)
 
@@ -277,8 +269,11 @@ async def test_a_listing_in_a_room_the_bot_has_left_changes_nothing(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_a_room_taken_off_its_parents_list_is_left(tmp_path: Path) -> None:
     """A room still naming its parent, which no longer lists it, loses the bots in it."""
-    bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM, listed=False)], ROOM: [_create(), _parent(PARENT)]})
-    bot.join(ROOM)
+    bot = _Bot(
+        tmp_path,
+        {PARENT: [_create(), _child(ROOM, listed=False)], ROOM: [_create(), _parent(PARENT)]},
+        joined=(PARENT, ROOM),
+    )
 
     await bot.on_space_child(ROOM, listed=False)
 
@@ -297,26 +292,18 @@ async def test_a_room_taken_off_that_the_bot_is_not_in_is_not_read(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kept_as", ["configured", "personal"])
-async def test_a_room_taken_off_its_list_keeps_bots_configured_or_retained_there(tmp_path: Path, kept_as: str) -> None:
+@pytest.mark.parametrize(
+    "kept",
+    [{"get_configured_rooms": lambda: [PARENT, ROOM]}, {"get_retained_room_ids": lambda: {ROOM}}],
+    ids=["configured", "personal"],
+)
+async def test_a_room_taken_off_its_list_keeps_bots_configured_or_retained_there(
+    tmp_path: Path,
+    kept: dict[str, object],
+) -> None:
     """Taking a room off a list never takes a bot out of a room it keeps for another reason."""
-    bot = _Bot(tmp_path, {PARENT: [_create()], ROOM: [_create(), _parent(PARENT)]})
-    bot.join(ROOM)
-    if kept_as == "configured":
-        bot.lifecycle.deps = replace(bot.lifecycle.deps, get_configured_rooms=lambda: [PARENT, ROOM])
-    else:
-        bot.lifecycle.deps = replace(bot.lifecycle.deps, get_retained_room_ids=lambda: {ROOM})
-
-    await bot.on_space_child(ROOM, listed=False)
-
-    assert bot.memberships == []
-
-
-@pytest.mark.asyncio
-async def test_a_room_taken_off_a_space_keeps_its_bots(tmp_path: Path) -> None:
-    """Spaces keep their rooms' members: taking a room off a Space never takes a bot out of it."""
-    bot = _Bot(tmp_path, {PARENT: [_create("m.space")], ROOM: [_create(), _parent(PARENT)]})
-    bot.join(ROOM)
+    bot = _Bot(tmp_path, {PARENT: [_create()], ROOM: [_create(), _parent(PARENT)]}, joined=(PARENT, ROOM))
+    bot.lifecycle.deps = replace(bot.lifecycle.deps, **kept)
 
     await bot.on_space_child(ROOM, listed=False)
 
@@ -327,17 +314,17 @@ async def test_a_room_taken_off_a_space_keeps_its_bots(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "state",
     [
+        {PARENT: [_create("m.space")], ROOM: [_create(), _parent(PARENT)]},
         {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]},
         {PARENT: [_create()], ROOM: [_create(), _parent(OTHER_ROOM)]},
         {PARENT: [_create()], ROOM: [_create(), _parent(PARENT, canonical=False)]},
         {ROOM: [_create(), _parent(PARENT)]},
     ],
-    ids=["listed-again", "under-another-room", "not-canonical", "parent-unreadable"],
+    ids=["parent-is-a-space", "listed-again", "under-another-room", "not-canonical", "parent-unreadable"],
 )
 async def test_a_room_not_taken_off_its_parent_keeps_its_bots(tmp_path: Path, state: dict[str, list[dict]]) -> None:
-    """Only a room its canonical parent stopped listing is left; anything else, or doubt, keeps the bot."""
-    bot = _Bot(tmp_path, state)
-    bot.join(ROOM)
+    """Only a room its canonical parent stopped listing is left; a Space's rooms, anything else, or doubt keep the bot."""
+    bot = _Bot(tmp_path, state, joined=(PARENT, ROOM))
 
     await bot.on_space_child(ROOM, listed=False)
 
