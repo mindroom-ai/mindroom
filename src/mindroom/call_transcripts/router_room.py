@@ -18,15 +18,14 @@ import nio
 from mindroom.call_transcripts.service import iso_time
 from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from mindroom.call_transcripts.service import EndedRow, TranscriptMessage
-    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 
 logger = get_logger(__name__)
 
@@ -158,16 +157,10 @@ class RouterCallRoom:
             SKIP_MENTIONS_KEY: True,
         }
         edit = "ended" if row.transcript_event_id is None else "transcript"
-        return await self._send(
+        return await self._post(
             row.room_id,
-            lambda client: edit_message_result(
-                client,
-                row.room_id,
-                row.row_event_id,
-                content,
-                row.body,
-                transaction_id=f"mindroom-call-{row.call_id}-row-{edit}",
-            ),
+            build_edit_event_content(event_id=row.row_event_id, new_content=content, new_text=row.body),
+            transaction_id=f"mindroom-call-{row.call_id}-row-{edit}",
             operation="call_row_edit",
         )
 
@@ -228,33 +221,25 @@ class RouterCallRoom:
         operation: str,
         sidecar_required: bool = False,
     ) -> str | None:
-        """Send one message as a transaction derived from its call, so sending it again never posts a second one."""
-        return await self._send(
-            room_id,
-            lambda client: send_message_result(
+        """Send one message through the router's client while it is ready; return its event ID, None if not sent.
+
+        It is a transaction derived from its call, so sending it again never posts a second one. It goes out only if
+        that client is still the router's, checked last before the send, after any upload: once call transcripts are
+        off or the router stopped, a message being prepared is not sent.
+        """
+        client = self.client()
+        if client is None:
+            return None
+        try:
+            delivered = await send_message_result(
                 client,
                 room_id,
                 content,
                 operation=operation,
                 transaction_id=transaction_id,
+                write_allowed=lambda: self.client() is client,
                 sidecar_required=sidecar_required,
-            ),
-            operation=operation,
-        )
-
-    async def _send(
-        self,
-        room_id: str,
-        send: Callable[[nio.AsyncClient], Awaitable[DeliveredMatrixEvent | None]],
-        *,
-        operation: str,
-    ) -> str | None:
-        """Send through the router's client while it is ready; return the event's ID, None if it was not sent."""
-        client = self.client()
-        if client is None:
-            return None
-        try:
-            delivered = await send(client)
+            )
         except _MATRIX_ERRORS as error:
             logger.warning("call_transcript_post_failed", room_id=room_id, operation=operation, error=str(error))
             return None

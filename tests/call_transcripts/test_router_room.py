@@ -88,6 +88,8 @@ class FakeRouterClient:
     state_reads: int = 0
     reading: asyncio.Event = field(default_factory=asyncio.Event)  # Set once a room state read has started.
     gate: asyncio.Event | None = None  # When given, each room state read waits for it before it answers.
+    uploading: asyncio.Event = field(default_factory=asyncio.Event)  # Set once an upload has started.
+    upload_gate: asyncio.Event | None = None  # When given, each upload waits for it before it answers.
 
     def __post_init__(self) -> None:
         """The router has synced every room it has state for."""
@@ -157,6 +159,9 @@ class FakeRouterClient:
         del content_type, filename
         data = data_provider(None, None).read()
         assert len(data) == filesize
+        self.uploading.set()
+        if self.upload_gate is not None:
+            await self.upload_gate.wait()
         if self.upload_error is not None:
             return self.upload_error, None
         self.uploads.append(data)
@@ -577,6 +582,23 @@ async def test_a_transcript_whose_sidecar_cannot_be_uploaded_is_not_posted() -> 
     client.upload_error = None
     assert await room.post_transcript(_message(turns=turns)) == "$event-0"
     assert client.sent[0]["content"]["io.mindroom.long_text"]["is_complete_content"] is True
+
+
+@pytest.mark.asyncio
+async def test_switching_off_while_the_sidecar_uploads_sends_nothing() -> None:
+    """A transcript whose sidecar is still uploading when call transcripts go off is never sent."""
+    client = FakeRouterClient(state={ROOM: [_member(ANN)]}, upload_gate=asyncio.Event())
+    on = True
+    room = RouterCallRoom(client=lambda: cast("nio.AsyncClient", client) if on else None)
+    turns = tuple(_Turn(sender=ANN if index % 2 else BOB, text="word " * 400) for index in range(60))
+    posting = asyncio.ensure_future(room.post_transcript(_message(turns=turns)))
+    await client.uploading.wait()
+
+    on = False
+    client.upload_gate.set()
+
+    assert await posting is None
+    assert client.sent == []
 
 
 @pytest.mark.asyncio
