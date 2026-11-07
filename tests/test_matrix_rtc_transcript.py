@@ -143,26 +143,28 @@ async def test_same_speaker_fragments_continue_one_transcript_line(tmp_path: Pat
     )
 
 
-def test_posted_turns_carry_their_speech_start_within_the_call(tmp_path: Path) -> None:
-    """Each posted turn carries whole seconds from the call start to when its speech started, inside the call."""
+def test_posted_turns_carry_their_speech_start_in_spoken_order(tmp_path: Path) -> None:
+    """Posted turns read in the order they were spoken, each at whole seconds from the call start, inside the call."""
     transcript = _transcript(tmp_path)
     # Joining took 30 seconds; the call's clock starts once the agent can hear the caller.
     transcript.started_at -= timedelta(seconds=30)
     transcript._started_monotonic -= 30
     transcript.mark_call_active()
-    started = time.time()
-    # Turns arrive after they were spoken: here all of them once the call has run 80.4 seconds.
-    transcript._started_monotonic -= 80.4
+    started = transcript.started_at.timestamp()
+    # Turns arrive after they were spoken: here all of them once the call has run 80 seconds.
+    transcript._started_monotonic -= 80
     for speaker, text, spoken_after in (
         # A greeting can start just before the clock does.
         ("assistant", "Hello", -2.5),
         ("user", "Book the train", 5.9),
         ("user", "for tomorrow", 9.5),
         ("assistant", "Which time?", 11.5),
-        # A provider can withhold a caller's transcript until after the reply it prompted.
-        ("user", "Nine", 8.5),
+        ("user", "Nine", 14.5),
+        ("assistant", "Booked", 17.5),
+        # The caller spoke over the reply; a provider can withhold that transcript until the reply is done.
+        ("user", "in first class", 16.5),
         # A start after now (a clock step) still lands inside the call.
-        ("assistant", "Booked", 300.5),
+        ("assistant", "Anything else?", 300.5),
     ):
         transcript.record(speaker, text, started + spoken_after)
 
@@ -177,16 +179,30 @@ def test_posted_turns_carry_their_speech_start_within_the_call(tmp_path: Path) -
 
     assert writeback is not None
     offsets = [turn["offset_seconds"] for turn in writeback.transcript["turns"]]
-    assert offsets == [0, 5, 11, 11, 80]
-    assert offsets == sorted(offsets)
+    assert offsets == [0, 5, 11, 14, 16, 17, 80]
     assert offsets[-1] <= writeback.transcript["duration_seconds"] == 80
     assert writeback.body.split("\n\n")[2:] == [
         "[0:00] Helper: Hello",
         "[0:05] Alice: Book the train for tomorrow",
         "[0:11] Helper: Which time?",
-        "[0:11] Alice: Nine",
-        "[1:20] Helper: Booked",
+        "[0:14] Alice: Nine",
+        "[0:16] Alice: in first class",
+        "[0:17] Helper: Booked",
+        "[1:20] Helper: Anything else?",
     ]
+
+
+def test_turns_recorded_before_the_clock_starts_post_at_zero(tmp_path: Path) -> None:
+    """A turn recorded while joining started before the call's clock, so it stays at 0 and inside the call."""
+    transcript = _transcript(tmp_path)
+    transcript.started_at -= timedelta(seconds=30)
+    transcript._started_monotonic -= 30
+    transcript.record("user", "Hello?", transcript.started_at.timestamp() + 28.5)
+    transcript.mark_call_active()
+    transcript._started_monotonic -= 15
+    transcript.record("assistant", "Hi", transcript.started_at.timestamp() + 3.5)
+
+    assert transcript.spoken_turns == (("user", "Hello?", 0), ("assistant", "Hi", 3))
 
 
 def test_spoken_turns_keep_finalized_speech_in_order(tmp_path: Path) -> None:

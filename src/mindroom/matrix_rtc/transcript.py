@@ -8,6 +8,7 @@ call ends, recoverable context is stored through the configured memory backend.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import time
@@ -128,7 +129,7 @@ class CallTranscript:
         """Record one finalized item whose speech started at Unix time ``spoken_at`` (safe from sync callbacks).
 
         Consecutive items from the same speaker extend one turn, and its line stays open in the file until the turn ends.
-        A turn keeps its first item's start, held between the previous turn's start and now, so turns stay in order.
+        A turn keeps its first item's start, held between the call's start and now.
         """
         text = " ".join(text.split())
         if not text:
@@ -139,9 +140,8 @@ class CallTranscript:
             self._pending.append(continuation)
         else:
             self._end_open_line()
-            since_start = int(spoken_at - self.started_at.timestamp())
-            previous = self._spoken[-1][2] if self._spoken else 0
-            self._spoken.append((speaker, text, min(max(previous, since_start), int(self.elapsed_seconds()))))
+            since_start = max(0, math.floor(spoken_at - self.started_at.timestamp()))
+            self._spoken.append((speaker, text, min(since_start, int(self.elapsed_seconds()))))
             stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
             self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
             self._open_speaker = speaker
@@ -149,13 +149,17 @@ class CallTranscript:
 
     @property
     def spoken_turns(self) -> tuple[tuple[str, str, int], ...]:
-        """Return the finalized spoken turns so far, oldest first, each with its start in whole seconds."""
-        return tuple(self._spoken)
+        """Return the finalized spoken turns so far in spoken order, each with its start in whole seconds."""
+        return tuple(sorted(self._spoken, key=lambda turn: turn[2]))
 
     def mark_call_active(self) -> None:
-        """Start the call's clock now, when the agent can hear the caller, so joining time is not part of the call."""
+        """Start the call's clock now, when the agent can hear the caller, so joining time is not part of the call.
+
+        Turns recorded before this were spoken before the clock started, so they stay at 0.
+        """
         self.started_at = datetime.now(tz=UTC)
         self._started_monotonic = time.monotonic()
+        self._spoken = [(speaker, text, 0) for speaker, text, _ in self._spoken]
 
     def elapsed_seconds(self) -> float:
         """Return the seconds since the call started, on a clock that never goes back."""
