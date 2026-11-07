@@ -10,7 +10,7 @@ import asyncio
 import math
 import time
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -33,7 +33,7 @@ _SPEECH_WINDOW_SECONDS = 60.0
 _PRESENCE_SECONDS = 60.0
 _CHECK_SECONDS = 15.0
 _TRANSCRIPT_DELAY_SECONDS = 20.0
-# How long a transcript message or row edit that could not be posted waits before it is tried again.
+# How long a call's Matrix writes wait, after one could not be made, before they are tried again.
 _RETRY_SECONDS = 60.0
 _NOTES_ATTEMPTS = 2
 _SPEAKING_RETRY_AFTER_SECONDS = 3
@@ -42,8 +42,8 @@ _TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 _NOTES_TIMEOUT_SECONDS = 90.0
 _MIN_TICK_SECONDS = 1.0
 _FORGET_AFTER_SECONDS = 3600.0
-# A transcript message still not posted this long after its call ended is given up, and the call's lines deleted; a
-# finished call whose row still owes an edit is forgotten then too.
+# A transcript message still not posted this long after its call ended is given up, and the call's lines deleted; its
+# row is no longer posted or edited, and the call is forgotten.
 _GIVE_UP_AFTER_SECONDS = 86_400.0
 
 _NO_SUCH_CALL = "This call does not exist."
@@ -223,11 +223,8 @@ class CallTranscriptService:
         self._room_locks: dict[str, asyncio.Lock] = {}
         self._speaking: dict[str, _Stretch] = {}
         self._recent_speech: dict[str, deque[float]] = {}
-        self._posts: dict[str, asyncio.Task[None]] = {}
-        """The transcript messages being posted, each in a task of its own so no call waits for another, by call."""
-        self._rows_posting: set[str] = set()
-        self._rows_editing: set[str] = set()
-        self._row_edits_retry_at: dict[str, float] = {}
+        self._settling: dict[str, asyncio.Task[None]] = {}
+        """Each call's one task making its Matrix writes, by call, so no call's writes wait for another's."""
         self._written_notes: dict[str, str] = {}
 
     async def join(self, room_id: str, user_id: str) -> Call:
@@ -249,11 +246,8 @@ class CallTranscriptService:
             await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now)
             if started:
                 logger.info("call_transcript_call_started", room_id=room_id, call_id=call.id)
-            view = _call_view(call, await self._present(call, now))
-            post_row = self._claim_row(call)
-        if post_row and (event_id := await self._post_row(call)) is not None:
-            return replace(view, row_event_id=event_id)
-        return view
+            self._settle(call, now)
+            return _call_view(call, await self._present(call, now))
 
     async def leave(self, call_id: str, user_id: str) -> None:
         """Take the person's app out of the call at once; the last one out ends the call.
@@ -346,25 +340,21 @@ class CallTranscriptService:
         return LiveCall(call=view, lines=lines, names=dict.fromkeys(people) if names is None else names)
 
     async def tick(self) -> float:
-        """Check every live call, start posting the transcript messages that are due, edit rows, forget finished calls.
+        """Check every call in the store, reading and writing nothing in Matrix, and start the Matrix writes calls owe.
 
-        Each due message is posted in a task of its own, so neither notes that take their time nor a slow homeserver
-        hold up another call or the next checks. Returns the seconds to wait before the next tick: at most 15, less
-        when a transcript message falls due sooner.
+        Ends live calls nobody is in, gives up transcript messages that can no longer be posted, forgets finished
+        calls, and starts each call's writes in its one task, so no slow write holds up another call or the next check.
+        Returns the seconds to wait before the next tick: at most 15, less when a transcript message falls due sooner.
         """
-        for call in await asyncio.to_thread(self._store.live_calls):
+        due: list[float] = []
+        for call in await asyncio.to_thread(self._store.calls):
             try:
-                await self._check(call)
+                checked = await self._check(call)
             except Exception:
                 logger.exception("call_transcript_check_failed", room_id=call.room_id, call_id=call.id)
-        for call in await asyncio.to_thread(self._store.due_transcripts, now=self._clock()):
-            await self._start_posting(call)
-        owing = await asyncio.to_thread(self._store.rows_owing_edits)
-        for call in owing:
-            if self._row_edits_retry_at.get(call.id, 0.0) <= self._clock():
-                await self._try_edit_row(call)
-        owing_ids = {call.id for call in owing}
-        self._row_edits_retry_at = {key: at for key, at in self._row_edits_retry_at.items() if key in owing_ids}
+                continue
+            if checked is not None and (falls_due := self._falls_due_at(checked)) is not None:
+                due.append(falls_due)
         now = self._clock()
         await asyncio.to_thread(
             self._store.forget_finished_calls,
@@ -372,53 +362,70 @@ class CallTranscriptService:
             ended_before=now - _GIVE_UP_AFTER_SECONDS,
         )
         self._forget_quiet_speakers(now)
-        due_at = await asyncio.to_thread(self._store.next_transcript_due_at, besides=frozenset(self._posts))
-        if due_at is None:
-            return _CHECK_SECONDS
-        return min(_CHECK_SECONDS, max(_MIN_TICK_SECONDS, due_at - now))
+        return min(_CHECK_SECONDS, max(_MIN_TICK_SECONDS, min(due, default=math.inf) - now))
 
     async def stop(self) -> None:
-        """Cancel the transcript messages being posted: each is due again after the next start, and posted once."""
-        posts, self._posts = self._posts, {}
-        for post in posts.values():
-            post.cancel()
-        await asyncio.gather(*posts.values(), return_exceptions=True)
+        """Cancel the calls' Matrix writes in progress: each is made after the next start, and posted once."""
+        tasks = list(self._settling.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _try_edit_row(self, call: StoredCall) -> None:
-        """Edit the call's row if it owes an edit; one that fails is tried again a minute later."""
-        try:
-            await self._edit_row(call.id)
-        except Exception:
-            logger.exception("call_transcript_row_edit_failed", room_id=call.room_id, call_id=call.id)
-            self._row_edits_retry_at[call.id] = self._clock() + _RETRY_SECONDS
+    async def _check(self, call: StoredCall) -> StoredCall | None:
+        """End the call if nobody is in it, give up its message if it can no longer be posted, start its Matrix writes.
 
-    async def _check(self, call: StoredCall) -> None:
-        """End a live call nobody is in, or post its row if it is still missing."""
+        Returns the call as it is then, None if it is gone.
+        """
         async with self._room_lock(call.room_id):
+            now = self._clock()
             fresh = await asyncio.to_thread(self._store.call, call.id)
-            if fresh is None or fresh.ended_at is not None or await self._end_if_empty(fresh, self._clock()):
-                return
-            post_row = self._claim_row(fresh)
-        if post_row:
-            await self._post_row(fresh)
+            if fresh is None:
+                return None
+            if fresh.ended_at is None:
+                fresh = await self._end_if_empty(fresh, now)
+            if fresh.id not in self._settling and (reason := self._lost_cause(fresh, now)) is not None:
+                await self._give_up(fresh, reason=reason)
+                fresh = await self._fresh(fresh.id)
+            self._settle(fresh, now)
+            return fresh
 
-    async def _end_if_empty(self, call: StoredCall, now: float) -> bool:
-        """End a live call nobody is in, under the room's lock: its pause ends, and its message is due 20 seconds later.
+    def _lost_cause(self, call: StoredCall, now: float) -> str | None:
+        """Return why the ended call's pending message can no longer be posted, None if it still can be."""
+        if call.ended_at is None or call.transcript_done_at is not None:
+            return None
+        if now - call.ended_at >= _GIVE_UP_AFTER_SECONDS:
+            return "not-posted-for-a-day"
+        if self._transcript_due(call, now) and self._room.router_joined(call.room_id) is False:
+            return "router-not-in-room"
+        return None
+
+    def _falls_due_at(self, call: StoredCall) -> float | None:
+        """Return when the call's pending message is next due for a tick to start it, None if no tick needs to."""
+        if (
+            call.ended_at is None
+            or call.transcript_done_at is not None
+            or call.id in self._settling
+            or self._room.router_joined(call.room_id) is not True
+        ):
+            return None
+        return max(call.ended_at + _TRANSCRIPT_DELAY_SECONDS, call.retry_at or 0.0)
+
+    async def _end_if_empty(self, call: StoredCall, now: float) -> StoredCall:
+        """End a live call nobody is in, under the room's lock: its pause ends, and its message falls due 20 seconds later.
 
         It ended when an app in it last checked in or left, never before it started: not when that is noticed, which
-        may be hours later after MindRoom was down. Returns whether it ended.
+        may be hours later after MindRoom was down. Returns the call as it is then.
         """
         if await self._present(call, now):
-            return False
+            return call
         presence = await asyncio.to_thread(self._store.presence, call.id)
         await asyncio.to_thread(
             self._store.end_call,
             call.id,
             at=max([call.started_at, *(app.present_at for app in presence.values())]),
-            transcript_due_at=now + _TRANSCRIPT_DELAY_SECONDS,
         )
         logger.info("call_transcript_call_ended", room_id=call.room_id, call_id=call.id)
-        return True
+        return await self._fresh(call.id)
 
     async def _present(self, call: StoredCall, now: float) -> frozenset[str]:
         """Return whose apps are in the call now: checked in within the last 60 seconds and not left since.
@@ -517,44 +524,69 @@ class CallTranscriptService:
         for user_id in [user_id for user_id, recent in self._recent_speech.items() if recent[-1] <= quiet_since]:
             del self._recent_speech[user_id]
 
-    async def _start_posting(self, call: StoredCall) -> None:
-        """Start posting a due transcript message in a task of its own, unless it cannot be posted yet.
+    def _settle(self, call: StoredCall, now: float) -> None:
+        """Start the call's Matrix writes in a task of its own, unless none are owed, can be made now, or one is running."""
+        if call.id not in self._settling and self._can_settle(call, now):
+            self._settling[call.id] = create_background_task(self._settle_now(call.id), name="call_transcript_settle")
 
-        It waits while a stretch of the call is still being transcribed, or its message or row is being posted.
+    def _can_settle(self, call: StoredCall, now: float) -> bool:
+        """Return whether the router can make Matrix writes the call owes now: its row, its due message, a row edit.
+
+        Nothing is owed a day after the call's end, and nothing is tried while the writes wait after a failure.
         """
-        async with self._room_lock(call.room_id):
-            fresh = await asyncio.to_thread(self._store.call, call.id)
-            if (
-                fresh is None
-                or fresh.transcript_due_at is None
-                or fresh.transcript_due_at > self._clock()
-                or fresh.id in self._posts
-                or fresh.id in self._rows_posting
-                or any(stretch.call_id == fresh.id for stretch in self._speaking.values())
-            ):
-                return
-            self._posts[fresh.id] = create_background_task(self._post_transcript(fresh), name="call_transcript_post")
+        if self._room.router_joined(call.room_id) is not True or (call.retry_at is not None and call.retry_at > now):
+            return False
+        if call.ended_at is not None and now - call.ended_at >= _GIVE_UP_AFTER_SECONDS:
+            return False
+        return call.row_event_id is None or self._transcript_due(call, now) or _owed_row_edit(call) is not None
 
-    async def _post_transcript(self, call: StoredCall) -> None:
-        """Post the call's message, postponing it if that fails, then edit the row to say where it is.
+    async def _settle_now(self, call_id: str) -> None:
+        """Make the call's Matrix writes one at a time, in order: its row, its message once due, then the row's edits.
 
-        The message of a call in a room the router has left is given up.
+        Each is sent under a transaction of its own, so making it again never posts twice. A write that cannot be
+        made holds them all a minute, when a tick starts them again.
         """
+        call: StoredCall | None = None
         try:
-            if self._room.router_joined(call.room_id) is False:
-                await self._give_up(call, reason="router-not-in-room")
-            else:
-                await self._post_transcript_now(call)
+            while (call := await asyncio.to_thread(self._store.call, call_id)) is not None:
+                if not self._can_settle(call, self._clock()):
+                    return
+                await self._settle_step(call)
         except Exception:
-            logger.exception("call_transcript_post_failed", room_id=call.room_id, call_id=call.id)
-            await self._postpone(call)
-        else:
-            await self._try_edit_row(call)
+            logger.exception("call_transcript_write_failed", call_id=call_id)
+            if call is not None:
+                await self._postpone(call, reason="error")
         finally:
-            self._posts.pop(call.id, None)
+            self._settling.pop(call_id, None)
 
-    async def _post_transcript_now(self, call: StoredCall) -> None:
-        """Post the ended call's one message, with notes while they can be had; postpone it a minute on failure.
+    async def _settle_step(self, call: StoredCall) -> None:
+        """Make the first Matrix write the call owes, or hold its writes a minute if it cannot be made."""
+        if call.row_event_id is None:
+            event_id = await self._room.post_row(call.room_id, call.id)
+            if event_id is None:
+                await self._postpone(call, reason="row-not-posted", failed=False)
+            else:
+                await asyncio.to_thread(self._store.set_row_event_id, call.id, event_id)
+        elif self._transcript_due(call, self._clock()):
+            await self._post_transcript(call, call.row_event_id)
+        elif (owed := _owed_row_edit(call)) is not None:
+            edit, row = owed
+            if await self._room.edit_row(row) is None:
+                await self._postpone(call, reason="row-not-edited", failed=False)
+            else:
+                await asyncio.to_thread(self._store.record_row_edit, call.id, edit)
+
+    def _transcript_due(self, call: StoredCall, now: float) -> bool:
+        """Return whether the ended call's message is due: 20 seconds after the end, with none of its speech in flight."""
+        return (
+            call.ended_at is not None
+            and call.transcript_done_at is None
+            and now >= call.ended_at + _TRANSCRIPT_DELAY_SECONDS
+            and all(stretch.call_id != call.id for stretch in self._speaking.values())
+        )
+
+    async def _post_transcript(self, call: StoredCall, row_event_id: str) -> None:
+        """Post the ended call's one message in its row's thread, with notes while they can be had, or hold it a minute.
 
         A call in which people spoke but none of it could be transcribed posts a message that says so, without turns.
         """
@@ -572,7 +604,7 @@ class CallTranscriptService:
         # Only notes name people, by display name; until the room can be read they wait, without using an attempt.
         names = await self._room.display_names(call.room_id, {turn.sender for turn in turns}) if writes_notes else {}
         if names is None:
-            await self._postpone(call, failed=False)
+            await self._postpone(call, reason="names-unreadable", failed=False)
             return
         transcript = CallTranscript(
             call_id=call.id,
@@ -588,16 +620,10 @@ class CallTranscriptService:
             except Exception:
                 logger.exception("call_transcript_notes_failed", room_id=call.room_id, call_id=call.id)
                 if call.transcript_attempts + 1 < _NOTES_ATTEMPTS:
-                    await self._postpone(call)
+                    await self._postpone(call, reason="notes-failed")
                     return
             if notes is not None:
                 self._written_notes[call.id] = notes
-        row_event_id = call.row_event_id
-        if row_event_id is None and self._claim_row(call):
-            row_event_id = await self._post_row(call)
-        if row_event_id is None:
-            await self._postpone(call)
-            return
         message = TranscriptMessage(
             room_id=call.room_id,
             call_id=call.id,
@@ -607,7 +633,7 @@ class CallTranscriptService:
         )
         event_id = await self._room.post_transcript(message)
         if event_id is None:
-            await self._postpone(call)
+            await self._postpone(call, reason="transcript-not-posted")
             return
         await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock(), event_id=event_id)
         self._written_notes.pop(call.id, None)
@@ -621,71 +647,16 @@ class CallTranscriptService:
             speech_seconds=sum(line.seconds for line in lines if line.reason != "paused"),
         )
 
-    async def _postpone(self, call: StoredCall, *, failed: bool = True) -> None:
-        """Make the call's message due again in a minute, counting a failed attempt unless ``failed`` is False.
-
-        A message still not posted a day after its call ended is given up instead.
-        """
-        assert call.ended_at is not None
-        if self._clock() - call.ended_at >= _GIVE_UP_AFTER_SECONDS:
-            await self._give_up(call, reason="not-posted-for-a-day")
-            return
-        await asyncio.to_thread(
-            self._store.postpone_transcript,
-            call.id,
-            due_at=self._clock() + _RETRY_SECONDS,
-            failed=failed,
-        )
-        logger.warning("call_transcript_postponed", room_id=call.room_id, call_id=call.id, failed=failed)
+    async def _postpone(self, call: StoredCall, *, reason: str, failed: bool = True) -> None:
+        """Hold the call's Matrix writes a minute, counting a failed message attempt unless ``failed`` is False."""
+        await asyncio.to_thread(self._store.postpone, call.id, until=self._clock() + _RETRY_SECONDS, failed=failed)
+        logger.warning("call_transcript_postponed", room_id=call.room_id, call_id=call.id, reason=reason)
 
     async def _give_up(self, call: StoredCall, *, reason: str) -> None:
         """Finish an ended call without its transcript message, deleting its lines."""
         await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock())
         self._written_notes.pop(call.id, None)
         logger.warning("call_transcript_given_up", room_id=call.room_id, call_id=call.id, reason=reason)
-
-    def _claim_row(self, call: StoredCall) -> bool:
-        """Claim posting the call's row: only if it has none and nobody is posting it already."""
-        if call.row_event_id is not None or call.id in self._rows_posting:
-            return False
-        self._rows_posting.add(call.id)
-        return True
-
-    async def _post_row(self, call: StoredCall) -> str | None:
-        """Post a claimed row with the room's lock released, then record it under the lock; return its event ID."""
-        try:
-            event_id = await self._room.post_row(call.room_id, call.id)
-            if event_id is None:
-                logger.info("call_transcript_row_not_posted", room_id=call.room_id, call_id=call.id)
-                return None
-            async with self._room_lock(call.room_id):
-                await asyncio.to_thread(self._store.set_row_event_id, call.id, event_id)
-            return event_id
-        finally:
-            self._rows_posting.discard(call.id)
-
-    async def _edit_row(self, call_id: str) -> None:
-        """Edit an ended call's row until it says what it should, one edit at a time, so the last one sent is the latest.
-
-        An edit that could not be sent is tried again by a tick a minute later.
-        """
-        if call_id in self._rows_editing:
-            return
-        self._rows_editing.add(call_id)
-        try:
-            while (call := await asyncio.to_thread(self._store.call, call_id)) is not None:
-                owed = _owed_row_edit(call)
-                if owed is None:
-                    return
-                edit, row = owed
-                if await self._room.edit_row(row) is None:
-                    logger.info("call_transcript_row_not_edited", room_id=call.room_id, call_id=call.id, edit=edit)
-                    self._row_edits_retry_at[call.id] = self._clock() + _RETRY_SECONDS
-                    return
-                await asyncio.to_thread(self._store.record_row_edit, call.id, edit)
-                self._row_edits_retry_at.pop(call.id, None)
-        finally:
-            self._rows_editing.discard(call_id)
 
     async def _call_for(self, call_id: str, user_id: str) -> StoredCall:
         """Return the call, taking its room from the call itself; to anyone outside that room it does not exist."""
@@ -733,16 +704,17 @@ class CallTranscriptService:
             return True
 
     async def _leave(self, call: StoredCall, user_id: str) -> None:
-        """Take the person's app out of a live call at once, unless it was never in it; the last one out ends it."""
+        """Take the person's app out of a live call at once, unless it was never in it; the last one out ends it.
+
+        An ending edits the row at once, in the call's own task.
+        """
         async with self._room_lock(call.room_id):
             call = await self._fresh(call.id)
             if call.ended_at is not None or user_id not in await asyncio.to_thread(self._store.presence, call.id):
                 return
             now = self._clock()
             await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now, left=True)
-            ended = await self._end_if_empty(call, now)
-        if ended:
-            await self._edit_row(call.id)
+            self._settle(await self._end_if_empty(call, now), now)
 
     def _room_lock(self, room_id: str) -> asyncio.Lock:
         return self._room_locks.setdefault(room_id, asyncio.Lock())

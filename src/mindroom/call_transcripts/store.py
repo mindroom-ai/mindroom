@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterator
+    from collections.abc import Iterator
     from pathlib import Path
 
 type _LineKind = Literal["speech", "gap"]
@@ -30,7 +30,7 @@ _SCHEMA = (
         started_at REAL NOT NULL,
         ended_at REAL,
         row_event_id TEXT,
-        transcript_due_at REAL,
+        retry_at REAL,
         transcript_attempts INTEGER NOT NULL DEFAULT 0,
         transcript_done_at REAL,
         transcript_event_id TEXT,
@@ -80,8 +80,8 @@ class StoredCall:
     """None while the call is live."""
     row_event_id: str | None
     """The call's row notice, None until it is posted."""
-    transcript_due_at: float | None
-    """When the transcript message is next due: None while the call is live and once the message is done."""
+    retry_at: float | None
+    """When the call's Matrix writes may be tried again after one failed; None until one fails."""
     transcript_attempts: int
     """How many times posting the transcript message has failed."""
     transcript_done_at: float | None
@@ -144,7 +144,7 @@ class CallTranscriptStore:
                 started_at=at,
                 ended_at=None,
                 row_event_id=None,
-                transcript_due_at=None,
+                retry_at=None,
                 transcript_attempts=0,
                 transcript_done_at=None,
                 transcript_event_id=None,
@@ -160,10 +160,10 @@ class CallTranscriptStore:
         with closing(self._connect()) as connection:
             return _live_call(connection, room_id)
 
-    def live_calls(self) -> list[StoredCall]:
-        """Return every live call, oldest first."""
+    def calls(self) -> list[StoredCall]:
+        """Return every call, live or ended, that is not forgotten, oldest first."""
         with closing(self._connect()) as connection:
-            rows = connection.execute("SELECT * FROM calls WHERE ended_at IS NULL ORDER BY started_at").fetchall()
+            rows = connection.execute("SELECT * FROM calls ORDER BY started_at").fetchall()
         return [_call(row) for row in rows]
 
     def call(self, call_id: str) -> StoredCall | None:
@@ -172,14 +172,14 @@ class CallTranscriptStore:
             row = connection.execute("SELECT * FROM calls WHERE id = ?", (call_id,)).fetchone()
         return None if row is None else _call(row)
 
-    def end_call(self, call_id: str, *, at: float, transcript_due_at: float) -> bool:
-        """End a live call and its pause at ``at``, with its message due at ``transcript_due_at``; False if not live."""
+    def end_call(self, call_id: str, *, at: float) -> bool:
+        """End a live call and its pause at ``at``; False if it is not live."""
         with self._transaction() as connection:
             _end_pause(connection, call_id, at=at)
             return (
                 connection.execute(
-                    "UPDATE calls SET ended_at = ?, transcript_due_at = ? WHERE id = ? AND ended_at IS NULL",
-                    (at, transcript_due_at, call_id),
+                    "UPDATE calls SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+                    (at, call_id),
                 ).rowcount
                 == 1
             )
@@ -188,27 +188,11 @@ class CallTranscriptStore:
         """Record the event ID of the call's posted row."""
         self._write("UPDATE calls SET row_event_id = ? WHERE id = ?", (event_id, call_id))
 
-    def due_transcripts(self, *, now: float) -> list[StoredCall]:
-        """Return the ended calls whose transcript message is due by ``now``, the longest due first."""
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                "SELECT * FROM calls WHERE transcript_due_at <= ? ORDER BY transcript_due_at",
-                (now,),
-            ).fetchall()
-        return [_call(row) for row in rows]
-
-    def next_transcript_due_at(self, *, besides: Collection[str] = ()) -> float | None:
-        """Return when the soonest pending transcript message is due, but those of the calls ``besides``; None if none."""
-        with closing(self._connect()) as connection:
-            rows = connection.execute("SELECT id, transcript_due_at FROM calls WHERE transcript_due_at IS NOT NULL")
-            return min((row["transcript_due_at"] for row in rows if row["id"] not in besides), default=None)
-
-    def postpone_transcript(self, call_id: str, *, due_at: float, failed: bool = True) -> None:
-        """Make the call's transcript message due again at ``due_at``, counting a failed attempt unless ``failed`` is False."""
+    def postpone(self, call_id: str, *, until: float, failed: bool) -> None:
+        """Hold the call's Matrix writes until ``until``, counting a failed transcript attempt if ``failed``."""
         self._write(
-            "UPDATE calls SET transcript_due_at = ?, transcript_attempts = transcript_attempts + ?"
-            " WHERE id = ? AND transcript_due_at IS NOT NULL",
-            (due_at, int(failed), call_id),
+            "UPDATE calls SET retry_at = ?, transcript_attempts = transcript_attempts + ? WHERE id = ?",
+            (until, int(failed), call_id),
         )
 
     def finish_transcript(self, call_id: str, *, at: float, event_id: str | None = None) -> bool:
@@ -218,23 +202,13 @@ class CallTranscriptStore:
         """
         with self._transaction() as connection:
             finished = connection.execute(
-                "UPDATE calls SET transcript_due_at = NULL, transcript_done_at = ?, transcript_event_id = ?"
+                "UPDATE calls SET transcript_done_at = ?, transcript_event_id = ?"
                 " WHERE id = ? AND ended_at IS NOT NULL AND transcript_done_at IS NULL",
                 (at, event_id, call_id),
             ).rowcount
             if finished:
                 connection.execute("DELETE FROM lines WHERE call_id = ?", (call_id,))
         return finished == 1
-
-    def rows_owing_edits(self) -> list[StoredCall]:
-        """Return the ended calls whose posted row does not yet say what it should: the end, then the transcript."""
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                "SELECT * FROM calls WHERE ended_at IS NOT NULL AND row_event_id IS NOT NULL"
-                " AND (row_edit IS NULL OR (row_edit = 'ended' AND transcript_event_id IS NOT NULL))"
-                " ORDER BY ended_at",
-            ).fetchall()
-        return [_call(row) for row in rows]
 
     def record_row_edit(self, call_id: str, edit: RowEdit) -> None:
         """Record what the call's row was edited to say; an edit for the end never replaces one for the transcript."""
@@ -246,11 +220,11 @@ class CallTranscriptStore:
     def forget_finished_calls(self, *, before: float, ended_before: float) -> int:
         """Forget the calls whose transcript message was done before ``before``; return how many.
 
-        A call whose row still owes an edit is kept until the edit is made, unless it ended before ``ended_before``.
+        A call whose row is still to be posted or edited is kept until it is, unless it ended before ``ended_before``.
         """
         with closing(self._connect()) as connection:
             return connection.execute(
-                "DELETE FROM calls WHERE transcript_done_at < ? AND (ended_at < ? OR row_event_id IS NULL"
+                "DELETE FROM calls WHERE transcript_done_at < ? AND (ended_at < ?"
                 " OR row_edit = 'transcript' OR (row_edit = 'ended' AND transcript_event_id IS NULL))",
                 (before, ended_before),
             ).rowcount
@@ -449,7 +423,7 @@ def _call(row: sqlite3.Row) -> StoredCall:
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         row_event_id=row["row_event_id"],
-        transcript_due_at=row["transcript_due_at"],
+        retry_at=row["retry_at"],
         transcript_attempts=row["transcript_attempts"],
         transcript_done_at=row["transcript_done_at"],
         transcript_event_id=row["transcript_event_id"],

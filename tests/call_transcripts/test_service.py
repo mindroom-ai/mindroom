@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
+THIRD_ROOM = "!third:example.org"
 ANN = "@ann:example.org"
 BOB = "@bob:example.org"
 CAROL = "@carol:example.org"
@@ -74,9 +75,11 @@ class FakeRoom:
     ready: bool = True
     router_in_room: bool = True
     failed_transcript_posts: int = 0
+    lost_row_answers: int = 0
     failing_edits: bool = False
     crashing_rooms: set[str] = field(default_factory=set)
     on_read: Callable[[], None] | None = None
+    gated_rooms: set[str] | None = None  # The rooms whose row posts and edits wait for their gates; all while None.
     row_gate: asyncio.Event | None = None
     row_started: asyncio.Event = field(default_factory=asyncio.Event)
     row_attempts: int = 0
@@ -113,17 +116,27 @@ class FakeRoom:
             return None
         return {user_id: self.names.get(user_id) for user_id in user_ids}
 
+    def _gated(self, room_id: str) -> bool:
+        return self.gated_rooms is None or room_id in self.gated_rooms
+
     async def post_row(self, room_id: str, call_id: str) -> str | None:
-        """Post a row while the router is ready, after ``row_gate`` opens."""
+        """Post a row while the router is ready, after ``row_gate`` opens; posting it again finds the one posted.
+
+        The first ``lost_row_answers`` posts reach the room, but their answers are lost.
+        """
         self.row_attempts += 1
         self.row_started.set()
         await asyncio.sleep(0)
-        if self.row_gate is not None:
+        if self.row_gate is not None and self._gated(room_id):
             await self.row_gate.wait()
         if not self.ready:
             return None
-        self.rows.append((room_id, call_id))
-        return f"$row-{len(self.rows)}"
+        if (room_id, call_id) not in self.rows:
+            self.rows.append((room_id, call_id))
+        if self.lost_row_answers:
+            self.lost_row_answers -= 1
+            return None
+        return f"$row-{self.rows.index((room_id, call_id)) + 1}"
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
         """Post the message while the router is ready, after the failures asked for; crash for ``crashing_rooms``."""
@@ -143,7 +156,7 @@ class FakeRoom:
         """Edit the row while the router is ready, after ``edit_gate`` opens."""
         self.edit_started.set()
         await asyncio.sleep(0)
-        if self.edit_gate is not None:
+        if self.edit_gate is not None and self._gated(row.room_id):
             await self.edit_gate.wait()
         if not self.ready or self.failing_edits:
             return None
@@ -231,10 +244,14 @@ class World:
         return self.service
 
     async def tick(self) -> float:
-        """Run one check, then let the transcript messages it began posting finish; return the check's wait."""
+        """Run one check, then let the Matrix writes it started finish; return the check's wait."""
         wait = await self.service.tick()
-        await asyncio.gather(*self.service._posts.values())
+        await self.settled()
         return wait
+
+    async def settled(self, *, besides: Collection[str] = ()) -> None:
+        """Let the calls' Matrix writes in progress finish, but those of the calls ``besides``."""
+        await asyncio.gather(*(task for call_id, task in self.service._settling.items() if call_id not in besides))
 
     async def say(self, call_id: str, user_id: str, *, ago: float = 3.0, seconds: float = 2.0) -> StoredLine:
         """Upload a stretch of ``seconds`` that began ``ago`` seconds before now, which speech-to-text hears words in."""
@@ -248,7 +265,10 @@ class World:
         return line
 
     async def end_by_leaving(self, *user_ids: str) -> str:
-        """Start a call with ``user_ids``, let each say something, and have them all leave; return the call's id."""
+        """Start a call with ``user_ids``, let each say something, and have them all leave; return the call's id.
+
+        The Matrix writes the joins and the end started are made before time moves on.
+        """
         call = await self.service.join(ROOM, user_ids[0])
         for user_id in user_ids[1:]:
             await self.service.join(ROOM, user_id)
@@ -258,6 +278,7 @@ class World:
             self.clock.advance(5)
         for user_id in user_ids:
             await self.service.leave(call.id, user_id)
+        await self.settled()
         return call.id
 
 
@@ -282,6 +303,7 @@ async def test_two_people_starting_at_once_get_the_same_call(world: World) -> No
     """A room has at most one live call, and one row, however the joins interleave."""
     ann_call, bob_call = await asyncio.gather(world.service.join(ROOM, ANN), world.service.join(ROOM, BOB))
     other = await world.service.join(OTHER_ROOM, CAROL)
+    await world.settled()
 
     assert ann_call.id == bob_call.id
     assert other.id != ann_call.id
@@ -439,6 +461,7 @@ async def test_someone_removed_from_the_room_is_out_of_the_call_at_their_next_re
     assert (live.id, live.members) == (call.id, (ANN,))
     world.room.members.discard(ANN)
     await _refused("not-found", lambda: world.say(call.id, ANN))
+    await world.settled()
     stored = world.store.call(call.id)
     assert stored is not None
     assert stored.ended_at == START + 20
@@ -462,7 +485,7 @@ async def test_the_call_ends_when_the_last_person_leaves(world: World) -> None:
     assert (await world.service.live(ROOM, BOB)).call is None
     ended = world.store.call(call.id)
     assert ended is not None
-    assert (ended.ended_at, ended.transcript_due_at) == (START + 30, START + 50)
+    assert ended.ended_at == START + 30
     await world.service.leave(call.id, BOB)
 
 
@@ -488,9 +511,9 @@ async def test_a_call_ends_when_its_last_app_was_last_heard_from_not_when_that_i
     stored = world.store.call(call.id)
     assert stored is not None
     assert stored.ended_at == START + 120
-    [ended, linked] = world.room.row_edits
+    [ended] = world.room.row_edits
     assert (ended.body, ended.ended_at, ended.duration_seconds) == ("Call ended · 2 min", START + 120, 120)
-    assert linked.duration_seconds == 120
+    assert ended.transcript_event_id == "$transcript-1"
     [message] = world.room.transcripts
     assert message.transcript.duration_seconds == 120
     assert world.notes.transcripts[0].duration_seconds == 120
@@ -516,12 +539,14 @@ async def test_a_live_call_is_checked_every_15_seconds(world: World) -> None:
 
 @pytest.mark.asyncio
 async def test_the_row_is_posted_when_the_call_starts(world: World) -> None:
-    """The router posts the call's row once, and the call carries its event ID."""
+    """The router posts the call's row once, as the call starts, and the call carries its event ID from then on."""
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
+    await world.settled()
 
     assert world.room.rows == [(ROOM, call.id)]
-    assert call.row_event_id == "$row-1"
+    assert call.row_event_id is None
+    assert (await world.service.join(ROOM, ANN)).row_event_id == "$row-1"
     stored = world.store.call(call.id)
     assert stored is not None
     assert stored.row_event_id == "$row-1"
@@ -555,6 +580,7 @@ async def test_the_row_is_edited_when_the_call_ends_and_again_once_its_transcrip
     await world.say(call.id, ANN)
     world.clock.advance(70)
     await world.service.leave(call.id, ANN)
+    await world.settled()
 
     ended = EndedRow(
         room_id=ROOM,
@@ -595,24 +621,22 @@ async def test_the_row_of_a_call_without_speech_is_edited_only_for_its_end(world
 
 @pytest.mark.asyncio
 async def test_a_failed_row_edit_is_retried_by_the_loop_a_minute_later(world: World) -> None:
-    """An edit that could not be sent is tried again by a later check, after a restart too, and sent once."""
+    """An edit that could not be sent is tried again by a check a minute later, after a restart too, and sent once."""
     call = await world.service.join(ROOM, ANN)
-    world.room.ready = False
+    world.room.failing_edits = True
     world.clock.advance(30)
     await world.service.leave(call.id, ANN)
-    await world.tick()
-    assert world.room.row_edits == []
+    await world.settled()
+    world.room.failing_edits = False
 
-    world.room.ready = True
     world.clock.advance(15)
     await world.tick()
     assert world.room.row_edits == []
-    world.clock.advance(45)
-    world.room.ready = False
+    world.clock.advance(44)
     world.restart()
     await world.tick()
-    world.room.ready = True
-    world.clock.advance(60)
+    assert world.room.row_edits == []
+    world.clock.advance(1)
     await world.tick()
     world.clock.advance(60)
     await world.tick()
@@ -627,10 +651,9 @@ async def test_a_row_edit_owed_for_hours_is_still_made_and_given_up_only_a_day_a
     """A finished call is kept while its row cannot be edited, so the row never stays live; a day after its end it goes."""
     world.room.failing_edits = True
     first = await world.end_by_leaving(ANN)
-    world.clock.advance(20)
-    await world.tick()
-    world.clock.advance(2 * 3600)
-    await world.tick()
+    for _ in range(3):
+        world.clock.advance(3600)
+        await world.tick()
 
     world.room.failing_edits = False
     world.clock.advance(60)
@@ -640,14 +663,16 @@ async def test_a_row_edit_owed_for_hours_is_still_made_and_given_up_only_a_day_a
 
     world.room.failing_edits = True
     second = await world.end_by_leaving(BOB)
-    world.clock.advance(20)
-    await world.tick()
     world.clock.advance(86_370)
     await world.tick()
-    assert world.store.call(second) is not None
+    world.room.failing_edits = False
     world.clock.advance(60)
     await world.tick()
+    assert world.store.call(second) is not None
+    world.clock.advance(3600)
+    await world.tick()
     assert world.store.call(second) is None
+    assert [edit.call_id for edit in world.room.row_edits] == [first]
 
 
 @pytest.mark.asyncio
@@ -669,22 +694,72 @@ async def test_a_row_posted_after_the_end_is_edited_once_with_its_transcript(wor
 
 @pytest.mark.asyncio
 async def test_an_edit_for_the_end_is_never_sent_after_the_one_with_the_transcript(world: World) -> None:
-    """While the row's end is still being edited, the transcript's edit waits for it, so the last edit is the latest."""
+    """A call's writes go one at a time: the transcript message waits for the row's edit for the end, then edits it."""
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(5)
     await world.say(call.id, ANN)
     world.room.edit_gate = asyncio.Event()
-    leaving = asyncio.create_task(world.service.leave(call.id, ANN))
+    await world.service.leave(call.id, ANN)
     await world.room.edit_started.wait()
     world.clock.advance(20)
-    await world.tick()
-    assert len(world.room.transcripts) == 1
-    assert world.room.row_edits == []
+    await world.service.tick()
+    assert world.room.transcripts == []
 
     world.room.edit_gate.set()
-    await leaving
+    await world.tick()
 
+    assert len(world.room.transcripts) == 1
     assert [edit.transcript_event_id for edit in world.room.row_edits] == [None, "$transcript-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_row_write_holds_up_no_other_call_or_the_loop(world: World) -> None:
+    """While one call's row takes minutes to post, checks go on and other calls get their rows and edits."""
+    world.room.ready = False
+    slow = await world.service.join(ROOM, ANN)
+    other = await world.service.join(OTHER_ROOM, BOB)
+    quiet = await world.service.join(THIRD_ROOM, CAROL)
+    world.clock.advance(40)
+    await world.service.join(ROOM, ANN)
+    await world.service.join(OTHER_ROOM, BOB)
+    world.clock.advance(21)
+    world.room.ready = True
+    world.room.row_gate = asyncio.Event()
+    world.room.gated_rooms = {ROOM}
+
+    async with asyncio.timeout(5):
+        await world.service.tick()
+        await world.settled(besides={slow.id})
+
+    assert sorted(world.room.rows) == sorted([(OTHER_ROOM, other.id), (THIRD_ROOM, quiet.id)])
+    ended = world.store.call(quiet.id)
+    assert ended is not None
+    assert ended.ended_at == START
+    assert [edit.call_id for edit in world.room.row_edits] == [quiet.id]
+    world.room.row_gate.set()
+    await world.tick()
+    assert (ROOM, slow.id) in world.room.rows
+
+
+@pytest.mark.asyncio
+async def test_a_row_whose_answer_was_lost_is_found_again_and_edited_though_nobody_spoke(world: World) -> None:
+    """Posting the row again finds the one already up, and a call without speech still gets its end before it goes."""
+    world.room.lost_row_answers = 1
+    call = await world.service.join(ROOM, ANN)
+    await world.settled()
+    world.clock.advance(5)
+    await world.service.leave(call.id, ANN)
+    for _ in range(10):
+        world.clock.advance(15)
+        await world.tick()
+
+    assert world.room.rows == [(ROOM, call.id)]
+    [ended] = world.room.row_edits
+    assert (ended.row_event_id, ended.body, ended.transcript_event_id) == ("$row-1", "Call ended · 1 min", None)
+    assert world.room.transcripts == []
+    world.clock.advance(3600)
+    await world.tick()
+    assert world.store.call(call.id) is None
 
 
 # The transcript message
@@ -1583,7 +1658,7 @@ async def test_a_stretch_from_a_clock_behind_that_arrives_after_a_pause_is_refus
 async def test_a_slow_row_post_does_not_hold_up_heartbeats_or_end_the_call(world: World) -> None:
     """While the router takes minutes to post the row, heartbeats and checks go on and nothing is posted twice."""
     world.room.row_gate = asyncio.Event()
-    first_join = asyncio.create_task(world.service.join(ROOM, ANN))
+    first = await world.service.join(ROOM, ANN)
     await world.room.row_started.wait()
 
     async with asyncio.timeout(5):
@@ -1591,15 +1666,15 @@ async def test_a_slow_row_post_does_not_hold_up_heartbeats_or_end_the_call(world
             world.clock.advance(20)
             heartbeat = await world.service.join(ROOM, ANN)
             await world.service.join(ROOM, BOB)
-            await world.tick()
+            await world.service.tick()
 
-    assert heartbeat.ended_at is None
-    assert [call.id for call in world.store.live_calls()] == [heartbeat.id]
+    assert (heartbeat.id, heartbeat.ended_at, heartbeat.row_event_id) == (first.id, None, None)
+    assert [call.id for call in world.store.calls()] == [first.id]
     assert world.room.row_attempts == 1
     world.room.row_gate.set()
-    started = await first_join
-    assert (started.id, started.row_event_id) == (heartbeat.id, "$row-1")
-    assert world.room.rows == [(ROOM, heartbeat.id)]
+    await world.settled()
+    assert (await world.service.join(ROOM, ANN)).row_event_id == "$row-1"
+    assert world.room.rows == [(ROOM, first.id)]
 
 
 @pytest.mark.asyncio
@@ -1643,7 +1718,7 @@ async def test_a_slow_transcript_message_holds_up_no_other_call_or_check(world: 
 
     async with asyncio.timeout(5):
         await world.service.tick()
-        if (posting := world.service._posts.get(quick.id)) is not None:
+        if (posting := world.service._settling.get(quick.id)) is not None:
             await posting
         world.clock.advance(41)
         await world.service.tick()
@@ -1664,7 +1739,7 @@ async def test_stopping_cancels_the_messages_being_posted_and_a_restart_posts_th
     call_id = await world.end_by_leaving(ANN)
     world.clock.advance(20)
     await world.service.tick()
-    [posting] = world.service._posts.values()
+    [posting] = world.service._settling.values()
     await world.notes.started.wait()
 
     await world.service.stop()

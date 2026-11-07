@@ -187,6 +187,7 @@ async def test_retry_after_is_readable_from_chats_origin_on_these_routes_only(ap
 async def test_join_answers_the_live_call_and_is_also_the_heartbeat(api: Api) -> None:
     """The first join starts the call; later ones from anyone answer the same call, with times in ISO 8601."""
     first = await api.join(ANN)
+    await api.world.settled()
     api.world.clock.advance(10)
     again = await api.join(ANN)
     other = await api.join(BOB)
@@ -196,13 +197,13 @@ async def test_join_answers_the_live_call_and_is_also_the_heartbeat(api: Api) ->
     assert call == {
         "id": call["id"],
         "roomId": ROOM,
-        "rowEventId": "$row-1",
+        "rowEventId": None,
         "startedAt": "1970-01-01T00:16:45.000Z",
         "endedAt": None,
         "members": [ANN],
         "pausedBy": None,
     }
-    assert again.json()["call"]["id"] == call["id"]
+    assert (again.json()["call"]["id"], again.json()["call"]["rowEventId"]) == (call["id"], "$row-1")
     assert other.json()["call"]["members"] == [ANN, BOB]
     assert first.headers["cache-control"] == "no-store"
     assert first.headers["access-control-allow-origin"] == CHAT
