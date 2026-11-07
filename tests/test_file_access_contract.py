@@ -27,11 +27,11 @@ import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.file_access as file_access_module
 import mindroom.media_delivery as media_delivery_module
+import mindroom.path_safety as path_safety_module
 import mindroom.tools.agno_compat_airflow as airflow_module
 import mindroom.tools.agno_compat_groq as groq_module
 import mindroom.tools.agno_compat_openai as openai_module
 import mindroom.tools.file as file_tool_module
-import mindroom.tools.path_safety as path_safety_module
 from mindroom.attachments.storage import load_attachment
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools

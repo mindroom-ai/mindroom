@@ -17,7 +17,7 @@ from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
 from mindroom.file_access import resolve_agent_file
-from mindroom.tools.path_safety import write_agent_file
+from mindroom.path_safety import write_agent_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable
