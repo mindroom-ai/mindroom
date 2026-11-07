@@ -19,7 +19,8 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
   A follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
-  A cancelled job is reported like any other ended job, because its reply still shows the call as started and other people in the room never saw the cancel; a silent schedule's jobs get no follow-up, so the schedule stays silent.
+  A cancellation gets no follow-up, since the person who cancelled already knows and no cancel, a Stop included, may make the agent speak; a silent schedule's jobs get none, so the schedule stays silent.
+  The next reply still collects a cancellation like any ended job, so the agent learns that a call its reply showed as started never completed.
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
   They bind timed approvals to the same scope as a paused reply's cards, so one grant covers a conversation's gated calls whether they run as jobs or pause the reply.
