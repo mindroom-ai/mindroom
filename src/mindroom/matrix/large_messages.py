@@ -702,6 +702,7 @@ async def upload_json_sidecar(
             content_type=prepared.content_type,
             filename=prepared.filename,
             durable=durable,
+            room_id=room_id,
         )
 
         # Check if upload was successful
@@ -877,6 +878,7 @@ async def prepare_large_message(
             room_id,
             content,
             room_encrypted=encrypted_delivery_safe,
+            durable=prepare_for_encrypted_delivery,
         )
         if not sidecar_upload_is_usable(
             mxc_uri,
