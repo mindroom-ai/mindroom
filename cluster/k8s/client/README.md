@@ -18,7 +18,7 @@ helm upgrade --install mindroom-client ./cluster/k8s/client \
 
 The default values render a Deployment, Service, a client `config.json` ConfigMap, and an nginx ConfigMap.
 The Deployment carries checksum annotations for both chart-managed ConfigMaps, so config changes roll pods on upgrade.
-For production, pin `image.tag` or `image.digest` instead of the default `latest`.
+The default `image.tag` is a [MindRoom Chat release](https://github.com/mindroom-ai/mindroom-chat/releases) (`vYYYY.M.N`); set `image.tag` or `image.digest` to run another one.
 
 ## Homeserver Configuration
 
@@ -152,6 +152,7 @@ Set `basePath` to serve the client under a URL prefix instead of the origin root
 basePath: /mindroom
 ```
 
+MindRoom Chat releases do not work under a sub-path yet: their asset URLs and `config.json` request start at `/`, so keep `basePath` at `/` with them.
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
 It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
 The bundled Element Call under `public/element-call/` resolves to its own `assets/` directory.
@@ -271,6 +272,7 @@ When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also pr
 ## Notes
 
 - The chart does not create ingress, TLS, or a Matrix homeserver.
+- The chart runs nginx without the image's start scripts and replaces its nginx config, so an image must be based on the official nginx image and serve its build from `/usr/share/nginx/html`, where the chart mounts `config.json`.
 - The container runs as the unprivileged nginx user with a read-only root filesystem, so `nginx.port` must stay at 1024 or higher unless you grant extra privileges through `securityContext` or lower `net.ipv4.ip_unprivileged_port_start`.
 - The chart-managed nginx ConfigMap also replaces the image's main `nginx.conf`: nginx logs only warnings and errors, and the config sets the `user` directive, which only a root master can apply, only when `podSecurityContext` and `securityContext` may run nginx as root.
   With `nginx.existingConfigMap`, nginx keeps the image's main config.

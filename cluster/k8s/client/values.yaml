@@ -9,9 +9,10 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/mindroom-ai/mindroom-chat
-  tag: latest
+  # A MindRoom Chat release (vYYYY.M.N), from https://github.com/mindroom-ai/mindroom-chat/releases.
+  tag: v2026.11.0
   digest: ""
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
 
 imagePullSecrets: []
 
