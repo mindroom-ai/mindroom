@@ -83,7 +83,7 @@ class StoredCall:
     retry_at: float | None
     """When the call's Matrix writes may be tried again after one failed; None until one fails."""
     transcript_attempts: int
-    """How many times posting the transcript message has failed."""
+    """How many times the call's notes have failed."""
     transcript_done_at: float | None
     """When the transcript message was posted, or found to have nothing to post; its lines are gone from then on."""
     transcript_event_id: str | None
@@ -189,7 +189,7 @@ class CallTranscriptStore:
         self._write("UPDATE calls SET row_event_id = ? WHERE id = ?", (event_id, call_id))
 
     def postpone(self, call_id: str, *, until: float, failed: bool) -> None:
-        """Hold the call's Matrix writes until ``until``, counting a failed transcript attempt if ``failed``."""
+        """Hold the call's Matrix writes until ``until``, counting a failed notes attempt if ``failed``."""
         self._write(
             "UPDATE calls SET retry_at = ?, transcript_attempts = transcript_attempts + ? WHERE id = ?",
             (until, int(failed), call_id),

@@ -79,6 +79,7 @@ class FakeRoom:
     failed_transcript_posts: int = 0
     lost_row_answers: int = 0
     failing_edits: bool = False
+    crashing_edits: int = 0
     crashing_rooms: set[str] = field(default_factory=set)
     on_read: Callable[[], None] | None = None
     gated_rooms: set[str] | None = None  # The rooms whose row posts and edits wait for their gates; all while None.
@@ -155,9 +156,13 @@ class FakeRoom:
         return f"$transcript-{len(self.transcripts)}"
 
     async def edit_row(self, row: EndedRow) -> str | None:
-        """Edit the row while the router is ready, after ``edit_gate`` opens."""
+        """Edit the row while the router is ready, after ``edit_gate`` opens; the first ``crashing_edits`` crash."""
         self.edit_started.set()
         await asyncio.sleep(0)
+        if self.crashing_edits:
+            self.crashing_edits -= 1
+            msg = "A bug in the room side."
+            raise RuntimeError(msg)
         if self.edit_gate is not None and self._gated(row.room_id):
             await self.edit_gate.wait()
         if not self.ready or self.failing_edits:
@@ -973,6 +978,29 @@ async def test_notes_that_fail_once_are_used_when_the_retry_works(world: World) 
     await world.tick()
 
     world.notes.failing = False
+    world.clock.advance(60)
+    await world.tick()
+
+    [message] = world.room.transcripts
+    assert message.body == "## About\nThe launch."
+
+
+@pytest.mark.parametrize("failure", ["row-edit-crashes", "post-fails"])
+@pytest.mark.asyncio
+async def test_only_failed_notes_use_up_the_notes_attempts(world: World, failure: str) -> None:
+    """Other writes that fail, as expected or not, leave the notes both attempts, after a restart too."""
+    if failure == "row-edit-crashes":
+        world.room.crashing_edits = 2
+    else:
+        world.room.failed_transcript_posts = 2
+    await world.end_by_leaving(ANN)
+    world.clock.advance(20)
+    await world.tick()
+    world.clock.advance(60)
+    await world.tick()
+    assert world.room.transcripts == []
+
+    world.restart()
     world.clock.advance(60)
     await world.tick()
 

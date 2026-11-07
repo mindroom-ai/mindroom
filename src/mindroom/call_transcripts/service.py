@@ -598,13 +598,13 @@ class CallTranscriptService:
         if call.row_event_id is None:
             event_id = await self._room.post_row(call.room_id, call.id)
             if event_id is None:
-                await self._postpone(call, reason="row-not-posted", failed=False)
+                await self._postpone(call, reason="row-not-posted")
             else:
                 await asyncio.to_thread(self._store.set_row_event_id, call.id, event_id)
         elif (owed := _owed_row_edit(call)) is not None:
             edit, row = owed
             if await self._room.edit_row(row) is None:
-                await self._postpone(call, reason="row-not-edited", failed=False)
+                await self._postpone(call, reason="row-not-edited")
             else:
                 await asyncio.to_thread(self._store.record_row_edit, call.id, edit)
         else:
@@ -641,7 +641,7 @@ class CallTranscriptService:
         # Only notes name people, by display name; until the room can be read they wait, without using an attempt.
         names = await self._room.display_names(call.room_id, {turn.sender for turn in turns}) if writes_notes else {}
         if names is None:
-            await self._postpone(call, reason="names-unreadable", failed=False)
+            await self._postpone(call, reason="names-unreadable")
             return
         transcript = CallTranscript(
             call_id=call.id,
@@ -657,7 +657,7 @@ class CallTranscriptService:
             except Exception:
                 logger.exception("call_transcript_notes_failed", room_id=call.room_id, call_id=call.id)
                 if call.transcript_attempts + 1 < _NOTES_ATTEMPTS:
-                    await self._postpone(call, reason="notes-failed")
+                    await self._postpone(call, reason="notes-failed", failed=True)
                     return
             if notes is not None:
                 self._written_notes[call.id] = notes
@@ -674,8 +674,8 @@ class CallTranscriptService:
             return
         await self._finish(call, event_id=event_id, with_notes=notes is not None, turns=len(turns))
 
-    async def _postpone(self, call: StoredCall, *, reason: str, failed: bool = True) -> None:
-        """Hold the call's Matrix writes a minute, counting a failed message attempt unless ``failed`` is False."""
+    async def _postpone(self, call: StoredCall, *, reason: str, failed: bool = False) -> None:
+        """Hold the call's Matrix writes a minute, counting a failed notes attempt if ``failed``."""
         await asyncio.to_thread(self._store.postpone, call.id, until=self._clock() + _RETRY_SECONDS, failed=failed)
         logger.warning("call_transcript_postponed", room_id=call.room_id, call_id=call.id, reason=reason)
 
