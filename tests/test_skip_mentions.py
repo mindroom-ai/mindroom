@@ -503,6 +503,7 @@ async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(
                         response_kind="ai",
                         response_envelope=_delivery_envelope(),
                         correlation_id="corr-stream",
+                        turn_id="turn-1",
                         sources=ResponseSources(
                             (_delivery_envelope().source_event_id,),
                             (_delivery_envelope().source_event_id,),
@@ -611,6 +612,7 @@ async def test_delivery_gateway_deliver_final_routes_through_the_gateway_helper(
                         response_kind="ai",
                         response_envelope=envelope,
                         correlation_id="corr-final",
+                        turn_id="turn-1",
                         sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
                     ),
                     tool_trace=None,

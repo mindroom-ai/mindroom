@@ -764,6 +764,44 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
 
 
 @pytest.mark.asyncio
+async def test_each_transcript_of_a_call_runs_its_tools_under_a_turn_id_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call's transcripts are separate turns, so the tool calls of each carry a turn ID the other's do not."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _ollama_config(runtime_paths)
+    turn_ids: list[str | None] = []
+
+    async def respond(*_args: object, **_kwargs: object) -> TurnResult:
+        turn_ids.append(_bound_tool_context().turn_id)
+        return TurnResult("Sure.")
+
+    monkeypatch.setattr("mindroom.ai.ai_response", respond)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),
+        room_id="!call:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        reconcile_spoken_response=False,
+    )
+    assert tooling.close is not None
+    try:
+        assert tooling.responder is not None
+        await tooling.responder("What time is it?", None)
+        await tooling.responder("And the weather?", None)
+    finally:
+        await tooling.close()
+
+    assert len(turn_ids) == 2
+    assert len(set(turn_ids) - {None}) == 2
+
+
+@pytest.mark.asyncio
 async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1468,6 +1506,54 @@ def _completed_run_state(run_id: str) -> _CallAgentRunState:
         outcome="completed",
         original_status=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_realtime_tooling_finishes_its_agent_build_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that stops while its realtime agent is built waits for the build, so no build outlives the call."""
+    config = Config(agents={AGENT: AgentConfig(display_name="Helper")})
+    runtime_paths = test_runtime_paths(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_create_agent(*_args: object, **_kwargs: object) -> AgentBuild:
+        started.set()
+        release.wait(timeout=5)
+        return _build()
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
+
+    async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", blocked_create_agent)
+    building = asyncio.create_task(
+        build_call_tools(
+            agent_name=AGENT,
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_support=ToolSupport(),  # type: ignore[arg-type]
+            room_id="!room:example.org",
+            requester_id=REQUESTER,
+            authorize_operation=_authorized_call_operation,
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        building.cancel()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not building.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(building, timeout=5)
 
 
 @pytest.mark.asyncio

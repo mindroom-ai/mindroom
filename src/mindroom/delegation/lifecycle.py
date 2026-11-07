@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -74,6 +74,8 @@ class ChildRunObservation:
     response: RunRecord | None = None
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
+    # The ID the child's turn carries in its hooks and tool calls, also across a continuation that starts a new run.
+    turn_id: str = field(default_factory=lambda: uuid4().hex)
 
     def owns(self, record: AnyRunRecord) -> TypeGuard[RunRecord]:
         """Return whether a terminal record is of the child's current run and session, the run this context streams."""
@@ -109,16 +111,21 @@ def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, st
 
 
 def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:
-    """Rebind a caller's tool context to one child turn, carrying its persona as the cap on copies it authors.
+    """Rebind a caller's tool context to the child turn running here, carrying its persona as the cap on copies it authors.
 
-    The child's turn hides its tool calls whatever its caller's reply shows, so they never read as shown.
+    The child's turn carries the ID of its child run and names the caller's turn as its parent. It hides its tool calls
+    whatever its caller's reply shows, so they never read as shown.
     """
+    observation = _CHILD_RUN.get()
+    assert observation is not None, "A child's tool context is built inside the child's run"
     return replace(
         context,
         agent_name=child.child_agent_name,
         active_model_name=child.model_name,
         target=replace(context.target, session_id=child.session_id),
         persona=child.persona,
+        turn_id=observation.turn_id,
+        parent_turn_id=context.turn_id,
         tool_calls_shown=False,
     )
 

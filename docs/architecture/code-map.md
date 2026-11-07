@@ -443,6 +443,7 @@ Matrix sync callback
 | `credentials/environment.py` | Credentials the environment declares (provider keys, bootstrap values, seeds), read by the primary under its saved ones |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/room_thread_mode.py` | Router-owned effective room thread-mode state for client view selection |
+| `matrix/room_accounts.py` | Router-owned room state listing the joined MindRoom accounts, so clients recognize agents by any user name |
 | `matrix/state.py` | `matrix_state.yaml` accounts, rooms, space, and server emoji room, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/server_features.py` | The unstable features a homeserver lists in `/_matrix/client/versions` |

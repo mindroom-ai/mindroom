@@ -18,7 +18,7 @@ from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.plugin_identity import validate_plugin_name
-from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, record_plugin_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
-PLUGIN_API_VERSION = (1, 0)
+PLUGIN_API_VERSION = (1, 1)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -120,6 +120,8 @@ def _collect_plugin_bases(
         root: Path | None = None
         try:
             root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
+            # Before its manifest loads, so a plugin whose manifest fails still adds no built-in tools.
+            record_plugin_root(root)
             plugin_base = _load_plugin_base(root)
         except Exception as exc:
             _log_skipped_plugin_entry(plugin_entry.path, root, exc)
