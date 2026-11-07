@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import inspect
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
@@ -23,14 +25,31 @@ CANDIDATE_PLUGIN_MODULE_PREFIX = "mindroom_candidate_"
 
 _BUILTIN_TOOLS: dict[str, ToolMetadata] = {}
 _REGISTRATION_SCOPE = threading.local()
+# The directories this process loaded plugins from.
+_PLUGIN_ROOTS: set[Path] = set()
 
 
 class ToolMetadataValidationError(ValueError):
     """Raised when runtime tool metadata derived from authored config is invalid."""
 
 
+def record_plugin_root(root: Path) -> None:
+    """Remember that a plugin loads from ``root``: a module there registers tools only inside a plugin load."""
+    _PLUGIN_ROOTS.add(root)
+
+
+def _plugin_root(module_name: str) -> Path | None:
+    """Return the recorded plugin directory holding module ``module_name``'s file, if any."""
+    module_file = getattr(sys.modules.get(module_name), "__file__", None)
+    if not isinstance(module_file, str):
+        return None
+    module_path = Path(module_file).resolve()
+    # A copy: another thread may record a plugin directory meanwhile.
+    return next((root for root in tuple(_PLUGIN_ROOTS) if module_path.is_relative_to(root)), None)
+
+
 def register_tool(metadata: ToolMetadata) -> None:
-    """Record one tool: a plugin module's while that module loads, else a built-in."""
+    """Record one tool: a plugin module's while that module loads, else a built-in, which no plugin's module may add."""
     registrations = getattr(_REGISTRATION_SCOPE, "registrations", None)
     if registrations is not None:
         if metadata.name in _BUILTIN_TOOLS:
@@ -45,6 +64,13 @@ def register_tool(metadata: ToolMetadata) -> None:
     module_name = metadata.factory.__module__ if metadata.factory is not None else ""
     if module_name.startswith((PLUGIN_MODULE_PREFIX, CANDIDATE_PLUGIN_MODULE_PREFIX)):
         msg = f"Plugin tool '{metadata.name}' must register while its plugin module loads, not later."
+        raise ToolMetadataValidationError(msg)
+    plugin_root = _plugin_root(module_name)
+    if plugin_root is not None:
+        msg = (
+            f"Plugin tool '{metadata.name}' must register while the plugin at {plugin_root} loads, "
+            f"not when its module is imported as '{module_name}'."
+        )
         raise ToolMetadataValidationError(msg)
     _BUILTIN_TOOLS[metadata.name] = metadata
 

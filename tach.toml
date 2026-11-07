@@ -6905,6 +6905,7 @@ expose = [
     "builtin_tool_registry",
     "compose_tool_registry",
     "plugin_module_registrations",
+    "record_plugin_root",
     "register_tool",
 ]
 from = ["mindroom.tool_system.registry"]
