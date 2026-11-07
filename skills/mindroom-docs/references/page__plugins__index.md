@@ -151,8 +151,8 @@ Keep in mind:
 ### Broken plugins
 
 `mindroom run` startup does not crash on a broken plugin unless its entry sets `required: true`, which stops startup with `Required plugin <path> failed to load: <reason>`.
-Only the primary process enforces `required`; a worker that cannot load the plugin skips it like any other.
 It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
+Only the primary process enforces `required`; a worker that cannot load the plugin skips it like any other.
 If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
 Agents keep a disabled tool in their config, including the tools a generated agent's owner chose, and offer it again once the plugin loads.
 Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.

@@ -181,11 +181,14 @@ def test_a_refused_load_names_every_required_plugin_that_did_not_load(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_a_refused_load_ends_the_tasks_its_loaded_plugins_started(tmp_path: Path) -> None:
+async def test_a_refused_load_ends_the_tasks_its_loaded_plugins_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Nothing a load refused for a required plugin started keeps running."""
     probe = ModuleType(f"mindroom_test_probe_{uuid.uuid4().hex}")
     probe.tasks = []
-    sys.modules[probe.__name__] = probe
+    monkeypatch.setitem(sys.modules, probe.__name__, probe)
     _write_plugin(
         tmp_path / "plugins" / "starts-task",
         manifest={"name": "starts-task", "hooks_module": "hooks.py"},

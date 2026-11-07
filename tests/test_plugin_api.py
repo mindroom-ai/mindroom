@@ -1,4 +1,4 @@
-"""The plugin API exports exactly the supported plugin entry points, and they change only with `PLUGIN_API_VERSION`.
+"""The plugin API exports exactly the supported plugin entry points, pinned together with `PLUGIN_API_VERSION`.
 
 Plugins import these names (docs/plugins.md, docs/hooks.md, docs/tools/atlassian.md), so removing a name or an enum
 member, or renaming, reordering, or changing the kind of a parameter, breaks them; update this pin together with the
