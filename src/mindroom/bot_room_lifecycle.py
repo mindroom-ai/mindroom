@@ -480,8 +480,8 @@ class BotRoomLifecycle:
     async def _rooms_to_leave(self) -> list[str]:
         """Return joined rooms this bot should now leave before DM filtering.
 
-        A room listed, as this bot would follow it, by a room this bot stays in stays too and is kept as followed from then
-        on, so taking a listed room out of the configuration never makes this bot leave it.
+        A room that one of the rooms this bot stays in lists, as this bot would follow it, is not left but kept as followed
+        from then on, so a listed room taken out of the configuration is not left.
         """
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
@@ -770,8 +770,14 @@ class BotRoomLifecycle:
                 self._logger().warning("Failed to join listed room", room_id=room_id, parent_id=parent_id)
 
     async def _keep_listed_room(self, room_id: str, parent_ids: set[str]) -> bool:
-        """Keep a joined room as followed when one of `parent_ids` lists it as this bot would follow it."""
-        async with self._lock_for_room(self._invite_join_locks, room_id):
+        """Keep a joined room as followed when one of `parent_ids` lists it as this bot would follow it.
+
+        A room another task is handling is not kept, so a cleanup never waits on work that a config reload holds back.
+        """
+        lock = self._lock_for_room(self._invite_join_locks, room_id)
+        if lock.locked():
+            return False
+        async with lock:
             client = self._client()
             for parent_id in parent_ids:
                 parent = client.rooms.get(parent_id)
@@ -781,6 +787,11 @@ class BotRoomLifecycle:
                     and room_id in await self._admitted_listed_rooms(parent_id)
                     and await _names_parent(client, room_id, parent_id)
                 ):
+                    self._logger().info(
+                        "Keeping listed room taken out of the configuration",
+                        room_id=room_id,
+                        parent_id=parent_id,
+                    )
                     await self._remember_invited_room(room_id)
                     return True
             return False

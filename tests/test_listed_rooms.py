@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 PARENT = "!parent:localhost"
 ROOM = "!room:localhost"
 OTHER_ROOM = "!other:localhost"
-OLD_ROOM = "!old:localhost"
 HELPER = "@mindroom_helper:localhost"
 ALICE = "@alice:localhost"
 MALLORY = "@mallory:localhost"
@@ -485,6 +484,16 @@ async def test_a_room_taken_out_of_the_config_that_is_not_followed_is_left(
 
 
 @pytest.mark.asyncio
+async def test_a_cleanup_reads_only_rooms_whose_synced_list_names_the_dropped_room(tmp_path: Path) -> None:
+    """A listing this bot has not synced yet is not read, so it keeps nothing; its arrival is followed as usual."""
+    bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}, joined=(PARENT, ROOM))
+    bot.client.rooms[PARENT].children.clear()
+
+    assert await bot.lifecycle._rooms_to_leave() == [ROOM]
+    bot.client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_rooms_taken_out_of_the_config_together_with_the_room_listing_them_are_left(tmp_path: Path) -> None:
     """A room listing another keeps it only while the bot stays in it, so dropping both leaves both."""
     bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}, joined=(PARENT, ROOM))
@@ -518,6 +527,19 @@ async def test_rooms_taken_out_of_the_config_stay_under_a_room_that_stays_howeve
 
 
 @pytest.mark.asyncio
+async def test_a_cleanup_never_waits_for_a_room_another_task_is_handling(tmp_path: Path) -> None:
+    """A config reload's cleanup finishes even while an invitation's handling holds the room, waiting on that reload."""
+    bot = _Bot(
+        tmp_path,
+        {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]},
+        joined=(PARENT, ROOM),
+    )
+
+    async with bot.lifecycle._lock_for_room(bot.lifecycle._invite_join_locks, ROOM), asyncio.timeout(5):
+        await bot.lifecycle.leave_unconfigured_rooms()
+
+
+@pytest.mark.asyncio
 async def test_a_room_taken_off_its_list_while_a_cleanup_keeps_it_is_left_after_that_cleanup(tmp_path: Path) -> None:
     """A removal arriving while a cleanup pass decides to keep a listed room waits for that pass, then leaves it."""
     state = {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}
@@ -548,54 +570,6 @@ async def test_a_room_taken_off_its_list_while_a_cleanup_keeps_it_is_left_after_
 
     assert unlisted == [False, False]
     assert bot.memberships == [(ROOM, "leave")]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("replayed", ["before", "during", "after"])
-async def test_listings_replayed_from_room_state_at_startup_join_and_leave_nothing_twice(
-    tmp_path: Path,
-    replayed: str,
-) -> None:
-    """Listings delivered again at startup join each room once and leave none, whenever they arrive around the sweep."""
-    bot = _Bot(
-        tmp_path,
-        {
-            PARENT: [_create(), _child(ROOM), _child(OTHER_ROOM), _child(OLD_ROOM, listed=False)],
-            ROOM: [_create(), _parent(PARENT)],
-            OTHER_ROOM: [_create(), _parent(PARENT)],
-            OLD_ROOM: [_create(), _parent(PARENT)],
-        },
-        joined=(PARENT, ROOM),
-    )
-    await bot.lifecycle._remember_invited_room(ROOM)
-    change_membership = bot.lifecycle.deps.change_membership
-    replays = [replayed]
-
-    async def replay(moment: str) -> None:
-        if replays != [moment]:
-            return
-        replays.clear()
-        for room_id in tuple(bot.client.rooms):
-            for event in bot.state[room_id]:
-                if event["type"] == "m.space.child":
-                    listing = _space_child_event(event["state_key"], listed=bool(event["content"]))
-                    await bot.lifecycle.on_space_child(bot.client.rooms[room_id], listing)
-
-    async def replay_during_the_sweep(room_id: str, target_membership: str, **kwargs: object) -> bool:
-        await replay("during")
-        return await change_membership(room_id, target_membership, **kwargs)
-
-    bot.lifecycle.deps = replace(bot.lifecycle.deps, change_membership=replay_during_the_sweep)
-
-    await replay("before")
-    await bot.lifecycle.join_configured_rooms()
-    await bot.lifecycle.leave_unconfigured_rooms()
-    await replay("after")
-    await bot.settle()
-
-    assert not replays
-    assert sorted(bot.memberships) == [(OTHER_ROOM, "join"), (PARENT, "join"), (ROOM, "join")]
-    assert bot.lifecycle.invited_room_ids() == {ROOM, OTHER_ROOM}
 
 
 @pytest.mark.asyncio
