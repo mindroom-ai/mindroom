@@ -1,0 +1,338 @@
+"""An agent's terminals in the sandbox runner where its shell commands run, reached from the primary."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import socket
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any
+
+import aiohttp
+import pytest
+import pytest_asyncio
+import uvicorn
+
+from mindroom.agents import build_agent_toolkit
+from mindroom.api import sandbox_runner
+from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
+from mindroom.terminal import client as client_module
+from mindroom.terminal.client import TerminalDetachedError, WorkerTerminals
+from mindroom.terminal.session import TerminalError
+from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
+from mindroom.workers.runtime import reset_primary_worker_manager
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.terminal.client import TerminalStream
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
+
+pytestmark = pytest.mark.asyncio
+
+_TOKEN = "runner-token"  # noqa: S105
+_IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_primary_worker_manager() -> Iterator[None]:
+    reset_primary_worker_manager()
+    yield
+    reset_primary_worker_manager()
+
+
+async def _serve(tmp_path: Path, execution_mode: str) -> tuple[uvicorn.Server, asyncio.Task[None], str]:
+    """Serve the sandbox runner app on a free port, sharing the primary's storage, as a shared runner does."""
+    seed = tmp_path / "seed" / "config.yaml"
+    seed.parent.mkdir(exist_ok=True)
+    seed.write_text("agents: {}\n", encoding="utf-8")
+    runner_paths = resolve_runtime_paths(
+        config_path=seed,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": execution_mode,
+        },
+    )
+    sandbox_runner.initialize_sandbox_runner_app(sandbox_runner_app, runner_paths, runner_token=_TOKEN)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(sandbox_runner_app, ws="websockets-sansio", log_level="error"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    async with asyncio.timeout(30):
+        while not server.started:
+            if serving.done():
+                await serving
+            await asyncio.sleep(0.01)
+    return server, serving, f"http://127.0.0.1:{listener.getsockname()[1]}"
+
+
+@pytest_asyncio.fixture
+async def runner(tmp_path: Path, request: pytest.FixtureRequest) -> AsyncIterator[str]:
+    """Return the URL of a running sandbox runner; ``request.param`` is its execution mode."""
+    server, serving, url = await _serve(tmp_path, getattr(request, "param", "inprocess"))
+    yield url
+    server.should_exit = True
+    await serving
+
+
+def _primary_paths(tmp_path: Path, runner_url: str) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_SANDBOX_PROXY_URL": runner_url,
+            "MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN,
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+            "MINDROOM_SANDBOX_PROXY_TOOLS": "shell",
+        },
+    )
+
+
+def _shell(paths: RuntimePaths, agent_name: str = "code") -> AnyToolkit:
+    """Build the agent's worker-routed shell toolkit as a reply to ``_IDENTITY`` builds it."""
+    config = Config(agents={agent_name: AgentConfig(display_name=agent_name.title(), tools=["shell"])})
+    toolkit = build_agent_toolkit(
+        "shell",
+        agent_tools=resolve_agent_tools(config, agent_name, builtin_tool_registry()),
+        placement=tool_placement(paths, builtin_tool_registry()),
+        runtime_paths=paths,
+        execution_identity=_IDENTITY,
+    )
+    assert toolkit is not None
+    return toolkit
+
+
+def _terminals(toolkit: AnyToolkit) -> WorkerTerminals:
+    stand_ins = toolkit_worker_stand_ins(toolkit)
+    assert stand_ins is not None
+    return WorkerTerminals(stand_ins)
+
+
+async def _run_shell_command(toolkit: AnyToolkit, command: str) -> str:
+    function = toolkit_function(toolkit, "run_shell_command")
+    assert function is not None
+    result = await function.entrypoint(command, tail=1000)
+    assert isinstance(result, str)
+    return result
+
+
+async def _read_until(stream: TerminalStream, marker: bytes, seen: bytes = b"") -> bytes:
+    """Return ``seen`` and the output until ``marker``, which a command's echo never holds."""
+    async with asyncio.timeout(20):
+        while marker not in seen:
+            event = await stream.receive()
+            assert event.type == "output", event
+            seen += event.data
+    return seen
+
+
+async def _exit_code(stream: TerminalStream) -> int | None:
+    async with asyncio.timeout(20):
+        while (event := await stream.receive()).type != "exit":
+            pass
+    return event.code
+
+
+def _env(listing: str) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in listing.splitlines() if "=" in line)
+
+
+@pytest.mark.parametrize("runner", ["inprocess", "subprocess"], indirect=True)
+async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s_commands(
+    tmp_path: Path,
+    runner: str,
+) -> None:
+    """The terminal's shell sees what the agent's shell commands see, whether the runner runs them here or in a child."""
+    toolkit = _shell(_primary_paths(tmp_path, runner))
+    terminals = _terminals(toolkit)
+    cwd_line, _, command_listing = (await _run_shell_command(toolkit, "env | sort")).partition("\n")
+    workspace = cwd_line.removeprefix("[cwd: ").removesuffix("]")
+
+    info = await terminals.open()
+    async with terminals.attach(info.id) as stream:
+        await stream.send_input("env | sort > terminal.env; exit\r")
+        assert await _exit_code(stream) == 0
+
+    terminal_env = _env((agent_workspace_root_path(tmp_path / "storage", "code") / "terminal.env").read_text())
+    command_env = _env(command_listing)
+    assert terminal_env.pop("TERM") == "xterm-256color"
+    for name in ("TERM", "SHLVL", "_"):
+        command_env.pop(name, None)
+        terminal_env.pop(name, None)
+    assert terminal_env == command_env
+    assert terminal_env["MINDROOM_AGENT_WORKSPACE"] == workspace
+    assert terminal_env["PWD"] == workspace == str(agent_workspace_root_path(tmp_path / "storage", "code").resolve())
+
+
+async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resize(tmp_path: Path, runner: str) -> None:
+    """A second viewer gets the scrollback, then live output; its keys and size reach the shell, and exit ends it."""
+    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    info = await terminals.open(cols=80, rows=24)
+    async with terminals.attach(info.id) as first:
+        await first.send_input("while true; do echo tick$((1+1)); sleep 0.05; done\r")
+        await _read_until(first, b"tick2")
+
+    async with terminals.attach(info.id) as second:
+        scrollback = await second.receive()
+        assert scrollback.type == "output"
+        assert b"tick2" in scrollback.data
+        await _read_until(second, b"tick2")
+        await second.send_input("\x03")
+        await second.resize(100, 30)
+        await second.send_input("stty size; echo $((2*3))sized\r")
+        assert b"30 100" in await _read_until(second, b"6sized")
+        await second.send_input("exit 3\r")
+        assert await _exit_code(second) == 3
+        with pytest.raises(TerminalDetachedError):
+            await second.receive()
+
+    [ended] = await terminals.sessions()
+    assert (ended.id, ended.alive, ended.exit_code, ended.cols, ended.rows) == (info.id, False, 3, 100, 30)
+    await terminals.close(info.id)
+    assert await terminals.sessions() == []
+
+
+async def test_a_terminal_answers_only_the_agent_and_workspace_it_serves(tmp_path: Path, runner: str) -> None:
+    """Another agent's terminals are its own; a session ID names only a session; a terminal starts in the workspace."""
+    paths = _primary_paths(tmp_path, runner)
+    terminals = _terminals(_shell(paths))
+    other = _terminals(_shell(paths, "other"))
+    info = await terminals.open()
+
+    assert await other.sessions() == []
+    for refused in (other.close(info.id), terminals.close("../../execute")):
+        with pytest.raises(TerminalError) as hidden:
+            await refused
+        assert hidden.value.status_code == 404
+    for session_id in (info.id, "x/../../execute"):
+        with pytest.raises(TerminalError) as hidden:
+            async with other.attach(session_id):
+                pass
+        assert hidden.value.status_code == 404
+    for cwd in ("..", "missing"):
+        with pytest.raises(TerminalError) as outside:
+            await terminals.open(cwd=cwd)
+        assert outside.value.status_code == 400
+
+    (agent_workspace_root_path(tmp_path / "storage", "code") / "sub").mkdir()
+    inside = await terminals.open(cwd="sub")
+    async with terminals.attach(inside.id) as stream:
+        await stream.send_input("pwd; echo $((5+5))here\r")
+        assert b"/workspace/sub\r\n" in await _read_until(stream, b"10here")
+    assert [session.id for session in await terminals.sessions()] == [info.id, inside.id]
+
+
+async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str) -> None:
+    """Without the runner token nothing answers; a terminal opens only from a shell call's request."""
+    sessions = f"{runner}/api/sandbox-runner/terminal/sessions"
+    async with aiohttp.ClientSession() as client:
+        async with client.get(sessions, params={"owner": "x"}) as response:
+            assert response.status == 401
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect(f"{sessions}/abc/io", params={"owner": "x"})
+        assert refused.value.status == 403
+        body = {"request": {"protocol": 1, "tool_name": "python", "function_name": "run_python_code"}}
+        async with client.post(
+            sessions,
+            params={"owner": "x"},
+            json=body,
+            headers={"x-mindroom-sandbox-token": _TOKEN},
+        ) as response:
+            assert response.status == 400
+            assert (await response.json())["detail"] == "A terminal opens only with a shell call's request."
+
+
+async def test_a_stopping_runner_hangs_up_its_terminals(tmp_path: Path) -> None:
+    """Every terminal's shell ends when its runner stops."""
+    server, serving, url = await _serve(tmp_path, "inprocess")
+    try:
+        terminals = _terminals(_shell(_primary_paths(tmp_path, url)))
+        info = await terminals.open()
+        async with terminals.attach(info.id) as stream:
+            await stream.send_input("echo $$ > shell.pid; echo $((9*9))saved\r")
+            await _read_until(stream, b"81saved")
+    finally:
+        server.should_exit = True
+        await serving
+
+    pid = int((agent_workspace_root_path(tmp_path / "storage", "code") / "shell.pid").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+async def test_an_attached_viewer_keeps_marking_the_worker_used(
+    tmp_path: Path,
+    runner: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While a viewer watches, the client looks the worker up again and again, which marks a dedicated one used."""
+    monkeypatch.setattr(client_module, "_KEEPALIVE_SECONDS", 0.01)
+    lookups: list[bool] = []
+    real_worker_call = client_module.worker_call
+
+    def recorded(*args: Any, start: bool) -> object:  # noqa: ANN401
+        lookups.append(start)
+        return real_worker_call(*args, start=start)
+
+    monkeypatch.setattr(client_module, "worker_call", recorded)
+    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    info = await terminals.open()
+    async with terminals.attach(info.id):
+        async with asyncio.timeout(10):
+            while lookups.count(False) < 3:  # noqa: ASYNC110 - lookups run in a thread with no event to await
+                await asyncio.sleep(0.01)
+
+    # Opening starts the worker; attaching and every keepalive only look it up.
+    assert lookups[0] is True
+    assert set(lookups[1:]) == {False}
+
+
+class _StoppedDedicatedWorkers:
+    """A dedicated backend whose worker is not running: a lookup finds nothing, and nothing may start one."""
+
+    cleanup_locator = None
+
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
+    def ensure_worker(self, spec: object, *, progress_sink: object = None) -> object:
+        raise AssertionError(spec, progress_sink)
+
+    def touch_worker(self, worker_key: str) -> None:
+        self.touched.append(worker_key)
+
+
+async def test_a_stopped_dedicated_worker_has_no_terminals_and_is_not_started(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing, attaching and closing look a dedicated worker up without starting it, and find no terminals."""
+    workers = _StoppedDedicatedWorkers()
+    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_args, **_kwargs: nullcontext(workers))
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN, "MINDROOM_WORKER_BACKEND": "kubernetes"},
+    )
+    terminals = _terminals(_shell(paths))
+
+    assert await terminals.sessions() == []
+    with pytest.raises(TerminalError) as closed:
+        await terminals.close("abc")
+    assert closed.value.status_code == 404
+    with pytest.raises(TerminalError) as attached:
+        async with terminals.attach("abc"):
+            pass
+    assert attached.value.status_code == 404
+    assert len(workers.touched) == 3

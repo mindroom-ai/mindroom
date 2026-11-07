@@ -21,6 +21,7 @@ from mindroom.constants import (
 from mindroom.shell.execution import run_command, shell_call_timeout
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.terminal.session import TerminalError, TerminalLaunch
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -39,7 +40,7 @@ from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -175,14 +176,17 @@ def _shell_subprocess_env(
     base_process_env: dict[str, str] | None = None,
     shell_path_prepend: str | None = None,
     workspace_dir: Path | None = None,
+    process_environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses.
 
     ``call_environment`` is the call's own environment, applied over ``runtime_env``; the variables it removes stay
     away from the command even where the base environment would give them, while the workspace variables, ``PATH``
-    entries, and telemetry settings MindRoom adds here still apply.
+    entries, and telemetry settings MindRoom adds here still apply. ``process_environ`` is the environment of the
+    process the command runs from, by default this one's.
     """
-    env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
+    environ = os.environ if process_environ is None else process_environ
+    env = {key: value for key, value in environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
     env.update(call_environment.applied(runtime_env, base_process_env or {}))
@@ -207,6 +211,19 @@ def _shell_subprocess_env(
         env["PATH"] = path_value
     env.update(vendor_telemetry_env_values())
     return env
+
+
+def _terminal_cwd(base_dir: Path | None, cwd: str | None) -> str | None:
+    """Return the folder a terminal starts in: ``cwd`` inside the workspace, else the workspace itself."""
+    if base_dir is None:
+        if cwd:
+            raise TerminalError(400, "This shell has no workspace to start a terminal in.")
+        return None
+    root = base_dir.expanduser().resolve()
+    resolved = (root / (cwd or "")).resolve()
+    if not resolved.is_relative_to(root) or not resolved.is_dir():
+        raise TerminalError(400, "A terminal starts only in a folder inside the workspace.")
+    return str(resolved)
 
 
 def _login_bash_command_index(args: list[str]) -> int | None:
@@ -345,7 +362,7 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shell",
     function_names=("run_shell_command",),
 )
-def shell_tools() -> type[Toolkit]:
+def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its functions and its terminal
     """Return shell tools for command execution."""
 
     class MindRoomShellTools(Toolkit):
@@ -391,6 +408,33 @@ def shell_tools() -> type[Toolkit]:
                 function,
                 description="\n\n".join((function.description or "", *notes)).strip(),
                 parameters=closed_parameters(self.run_shell_command, function.parameters),
+            )
+
+        def terminal_launch(
+            self,
+            cwd: str | None,
+            *,
+            process_environ: Mapping[str, str] | None,
+        ) -> TerminalLaunch:
+            """Return an interactive Bash in the environment and workspace this toolkit's commands get.
+
+            Not a function the agent calls: the sandbox runner starts it in a pty beside the commands it runs. It
+            reads no startup files, so it starts with exactly that environment. ``process_environ`` is the
+            environment of the process a command runs from there, None for this one's.
+            """
+            env = _shell_subprocess_env(
+                self._runtime_env,
+                call_environment=current_tool_environment(),
+                base_process_env=self._base_process_env,
+                shell_path_prepend=self._shell_path_prepend,
+                workspace_dir=self.base_dir,
+                process_environ=process_environ,
+            )
+            env["TERM"] = "xterm-256color"
+            return TerminalLaunch(
+                argv=("bash", "--noprofile", "--norc", "-i"),
+                env=env,
+                cwd=_terminal_cwd(self.base_dir, cwd),
             )
 
         async def run_shell_command(

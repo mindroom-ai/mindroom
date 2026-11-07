@@ -243,6 +243,9 @@ Matrix sync callback
 | `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
+| `terminal/session.py` | Persistent shells in a pty in the sandbox runner: scrollback, attached viewers, input, resize, and the idle end |
+| `api/worker_terminal.py` | Runner routes that open, list, and close an owner's terminals, and the websocket a viewer attaches with |
+| `terminal/client.py` | The primary's client for an agent's terminals, reached with the request its worker-routed shell toolkit would send |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |

@@ -66,6 +66,7 @@ from mindroom.runtime_env_policy import (
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.catalog import (
@@ -1094,6 +1095,63 @@ async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
         call.tools,
         credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
     )
+
+
+def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | None) -> TerminalLaunch:
+    """Return the interactive shell of a terminal opened with ``payload``, a shell call's request, in ``cwd``.
+
+    The request is prepared as ``/execute`` prepares it and the shell toolkit the call would run is built from it,
+    so the shell gets the environment, workspace and ``PATH`` the call's command would. Blocking.
+    """
+    if payload.tool_name != "shell":
+        raise TerminalError(400, "A terminal opens only with a shell call's request.")
+    route = _prepare_route(app, payload)
+    if isinstance(route, WorkerFailure):
+        raise TerminalError(400, route.error)
+    tools = refresh_plugins(route.config, route.runtime_paths).tools
+    try:
+        request = _validated_execute_request(payload, tool_metadata=tools.entries)
+        prepared = _prepare_execute_request(_ExecuteCall(request=request, route=route, tools=tools))
+    except HTTPException as exc:
+        raise TerminalError(400, str(exc.detail)) from None
+    except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+        raise TerminalError(400, str(exc)) from None
+    # Where /execute runs a shell call in a subprocess, the command sees that subprocess's environment.
+    in_subprocess = sandbox_exec.runner_uses_subprocess(route.runtime_paths) or route.worker_key is not None
+    process_environ = _prepare_subprocess_context(prepared).subprocess_env if in_subprocess else None
+    shell = prepared.request
+    identity = (
+        parse_tool_execution_identity_payload(shell.execution_identity)
+        if shell.execution_identity is not None
+        else None
+    )
+    with bind_detached_execution_identity(identity):
+        try:
+            toolkit, _ = _resolve_entrypoint(
+                runtime_paths=prepared.runtime_paths,
+                config=route.config,
+                tools=tools,
+                tool_name=shell.tool_name,
+                function_name=shell.function_name,
+                execution_identity=identity,
+                credential_overrides=shell.credential_overrides or None,
+                tool_config_overrides=shell.tool_config_overrides or None,
+                tool_init_overrides=shell.tool_init_overrides or None,
+                runtime_overrides=shell.runtime_overrides or None,
+                worker_scope=shell.worker_scope,
+                routing_agent_name=shell.routing_agent_name,
+                private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
+                tool_output_workspace_root=(
+                    Path(shell.tool_output_workspace_root) if shell.tool_output_workspace_root is not None else None
+                ),
+            )
+        except HTTPException as exc:
+            raise TerminalError(400, str(exc.detail)) from None
+        if not isinstance(toolkit, SupportsTerminalLaunch):
+            raise TerminalError(400, "This shell cannot start a terminal.")
+        call_environment = ToolEnvironment(values=shell.call_environment, path_prepend=tuple(shell.call_path_prepend))
+        with collected_tool_environment(call_environment):
+            return toolkit.terminal_launch(cwd, process_environ=process_environ)
 
 
 def _cancelled_response() -> ExecuteResponse:

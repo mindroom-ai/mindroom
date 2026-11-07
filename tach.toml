@@ -2261,6 +2261,7 @@ depends_on = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.registry",
+    "mindroom.terminal.session",
 ]
 
 [[modules]]
@@ -2275,6 +2276,7 @@ depends_on = [
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_runner_scripts",
     "mindroom.api.validation_errors",
+    "mindroom.api.worker_terminal",
 ]
 
 [[modules]]
@@ -7408,6 +7410,7 @@ expose = [
     "primary_owns_tool_settings",
     "view_file_from_worker",
     "to_json_compatible",
+    "worker_call",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
 
@@ -8135,6 +8138,25 @@ depends_on = [
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.rfb",
     "mindroom.worker_computer.runtime",
+]
+
+[[modules]]
+path = "mindroom.api.worker_terminal"
+depends_on = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.terminal.session",
+]
+
+[[modules]]
+path = "mindroom.terminal.session"
+depends_on = []
+
+[[modules]]
+path = "mindroom.terminal.client"
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.terminal.session",
+    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]
