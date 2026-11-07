@@ -543,6 +543,7 @@ async def _build_file_content(
     size_limit: int,
     *,
     room_encrypted: bool,
+    durable: bool,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload full original content JSON and build preview ``m.file`` event."""
     mxc_uri, file_info = await upload_json_sidecar(
@@ -550,6 +551,7 @@ async def _build_file_content(
         room_id,
         full_content,
         room_encrypted=room_encrypted,
+        durable=durable,
     )
 
     available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
@@ -671,11 +673,13 @@ async def upload_json_sidecar(
     payload: dict[str, Any],
     *,
     room_encrypted: bool,
+    durable: bool = False,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``.
 
     ``room_encrypted`` is the authoritative room encryption state and decides whether the upload is encrypted.
-    Returns ``(None, None)`` on failure.
+    Returns ``(None, None)`` on failure. A ``durable`` caller freezes the result, so a homeserver that stays
+    down or rate limiting past nio's retry bound is waited out instead of failing the upload.
     """
     text_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     try:
@@ -697,6 +701,7 @@ async def upload_json_sidecar(
             prepared.data,
             content_type=prepared.content_type,
             filename=prepared.filename,
+            durable=durable,
         )
 
         # Check if upload was successful
@@ -830,7 +835,8 @@ async def prepare_large_message(
         room_id: The room to send to
         content: The message content dictionary
         room_encrypted: Authoritative room encryption state from the delivery boundary
-        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery
+        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery,
+            waiting out a homeserver outage for the sidecar rather than freezing a truncated text
 
     Returns:
         The original content object when no preparation is needed, otherwise
@@ -923,6 +929,7 @@ async def prepare_large_message(
         preview_text,
         size_limit,
         room_encrypted=encrypted_delivery_safe,
+        durable=prepare_for_encrypted_delivery,
     )
 
     sidecar_usable = sidecar_upload_is_usable(
