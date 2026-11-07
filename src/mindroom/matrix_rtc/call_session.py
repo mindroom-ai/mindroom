@@ -247,13 +247,14 @@ class CallSession:
         finally:
             if preparing is not None:
                 # The real agent build finishes before it takes a cancellation, and none may outlive the start.
-                await asyncio.gather(wait_for_future_until_complete(preparing), return_exceptions=True)
-        if isinstance(error, (asyncio.CancelledError, CallStartRevokedError)) or preparing is None:
+                # Awaited directly, so a cancellation arriving now still finds the wait running.
+                await wait_for_future_until_complete(asyncio.gather(preparing, return_exceptions=True))
+        if not isinstance(error, Exception) or isinstance(error, CallStartRevokedError) or preparing is None:
             return
         failure = None if preparing.cancelled() else preparing.exception()
         if failure is not None and failure is not error:
             # An agent that cannot start is skipped, whatever media step failed after its preparation did.
-            raise failure from error
+            raise failure
 
     def _require_start_allowed(self) -> None:
         """Abort before the next call-start side effect when ownership was revoked or the agent's preparation failed."""

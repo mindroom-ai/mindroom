@@ -69,7 +69,7 @@ from mindroom.matrix_rtc.call_origin import (
     CallOriginContext,
     _CallBriefMessage,
 )
-from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
+from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, CallStartRevokedError
 from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
@@ -3852,6 +3852,42 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
             clock_ms=lambda: clock[0],
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_start_cancelled_as_it_turns_to_its_preparation_still_waits_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation landing right after the media left still waits for the draining agent build."""
+    session = _session(_client(), FakeBridge(), FakeKeyTransport(), [0])
+    release = asyncio.Event()
+
+    async def draining_build() -> CallVoiceAgentOptions:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+        raise AssertionError
+
+    async def left_at_once() -> None:
+        return None
+
+    monkeypatch.setattr(session, "stop", left_at_once)
+    preparing = asyncio.create_task(draining_build())
+    await asyncio.sleep(0)
+    ending = asyncio.create_task(session._end_failed_start(CallJoinError("SFU connect failed"), preparing))
+    await asyncio.sleep(0)
+    ending.cancel()
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not ending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(ending, timeout=1)
+    assert preparing.cancelled()
 
 
 @pytest.mark.asyncio
