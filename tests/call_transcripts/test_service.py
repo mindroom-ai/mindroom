@@ -74,6 +74,7 @@ class FakeRoom:
     ready: bool = True
     router_in_room: bool = True
     failed_transcript_posts: int = 0
+    failing_edits: bool = False
     crashing_rooms: set[str] = field(default_factory=set)
     on_read: Callable[[], None] | None = None
     read_gate: asyncio.Event | None = None
@@ -149,7 +150,7 @@ class FakeRoom:
         await asyncio.sleep(0)
         if self.edit_gate is not None:
             await self.edit_gate.wait()
-        if not self.ready:
+        if not self.ready or self.failing_edits:
             return None
         self.row_edits.append(row)
         return f"$edit-{len(self.row_edits)}"
@@ -644,6 +645,34 @@ async def test_a_failed_row_edit_is_retried_by_the_loop_a_minute_later(world: Wo
     [ended] = world.room.row_edits
     assert ended.call_id == call.id
     assert ended.transcript_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_row_edit_owed_for_hours_is_still_made_and_given_up_only_a_day_after_the_end(world: World) -> None:
+    """A finished call is kept while its row cannot be edited, so the row never stays live; a day after its end it goes."""
+    world.room.failing_edits = True
+    first = await world.end_by_leaving(ANN)
+    world.clock.advance(20)
+    await world.tick()
+    world.clock.advance(2 * 3600)
+    await world.tick()
+
+    world.room.failing_edits = False
+    world.clock.advance(60)
+    await world.tick()
+    [ended] = world.room.row_edits
+    assert (ended.call_id, ended.transcript_event_id) == (first, "$transcript-1")
+
+    world.room.failing_edits = True
+    second = await world.end_by_leaving(BOB)
+    world.clock.advance(20)
+    await world.tick()
+    world.clock.advance(86_370)
+    await world.tick()
+    assert world.store.call(second) is not None
+    world.clock.advance(60)
+    await world.tick()
+    assert world.store.call(second) is None
 
 
 @pytest.mark.asyncio

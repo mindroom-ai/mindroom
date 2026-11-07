@@ -261,12 +261,32 @@ def test_finished_calls_are_forgotten_after_a_while(tmp_path: Path) -> None:
     store.end_call(pending.id, at=240.0, transcript_due_at=260.0)
     live, _ = store.ensure_live_call(OTHER_ROOM, at=250.0)
 
-    assert store.forget_finished_calls(before=225.0) == 0
-    assert store.forget_finished_calls(before=300.0) == 1
+    assert store.forget_finished_calls(before=225.0, ended_before=0.0) == 0
+    assert store.forget_finished_calls(before=300.0, ended_before=0.0) == 1
 
     assert store.call(finished.id) is None
     assert store.call(pending.id) is not None
     assert store.call(live.id) is not None
+
+
+def test_a_finished_call_whose_row_still_owes_an_edit_is_kept_until_it_is_made_or_given_up(tmp_path: Path) -> None:
+    """A row that does not yet say where the transcript is keeps its call, until the edit or the give-up after the end."""
+    store = CallTranscriptStore(tmp_path)
+    owing = []
+    for room_id in (ROOM, OTHER_ROOM):
+        call, _ = store.ensure_live_call(room_id, at=100.0)
+        store.set_row_event_id(call.id, "$row")
+        store.end_call(call.id, at=200.0, transcript_due_at=220.0)
+        store.finish_transcript(call.id, at=225.0, event_id="$transcript")
+        store.record_row_edit(call.id, "ended")
+        owing.append(call.id)
+
+    assert store.forget_finished_calls(before=300.0, ended_before=200.0) == 0
+    store.record_row_edit(owing[0], "transcript")
+    assert store.forget_finished_calls(before=300.0, ended_before=200.0) == 1
+    assert store.call(owing[0]) is None
+    assert store.forget_finished_calls(before=300.0, ended_before=201.0) == 1
+    assert store.call(owing[1]) is None
 
 
 def test_app_presence_is_kept_for_each_call_across_reopening_until_it_is_forgotten(tmp_path: Path) -> None:
@@ -289,7 +309,7 @@ def test_app_presence_is_kept_for_each_call_across_reopening_until_it_is_forgott
     assert reopened.presence("unknown") == {}
     store.end_call(call.id, at=130.0, transcript_due_at=150.0)
     store.finish_transcript(call.id, at=151.0)
-    store.forget_finished_calls(before=200.0)
+    store.forget_finished_calls(before=200.0, ended_before=0.0)
     assert store.presence(call.id) == {}
     assert store.presence(other.id) == {ANN: _AppPresence(present_at=90.0, left=False)}
 

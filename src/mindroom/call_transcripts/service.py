@@ -42,7 +42,8 @@ _TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 _NOTES_TIMEOUT_SECONDS = 90.0
 _MIN_TICK_SECONDS = 1.0
 _FORGET_AFTER_SECONDS = 3600.0
-# A transcript message still not posted this long after its call ended is given up, and the call's lines deleted.
+# A transcript message still not posted this long after its call ended is given up, and the call's lines deleted; a
+# finished call whose row still owes an edit is forgotten then too.
 _GIVE_UP_AFTER_SECONDS = 86_400.0
 
 _NO_SUCH_CALL = "This call does not exist."
@@ -366,7 +367,11 @@ class CallTranscriptService:
         owing_ids = {call.id for call in owing}
         self._row_edits_retry_at = {key: at for key, at in self._row_edits_retry_at.items() if key in owing_ids}
         now = self._clock()
-        await asyncio.to_thread(self._store.forget_finished_calls, before=now - _FORGET_AFTER_SECONDS)
+        await asyncio.to_thread(
+            self._store.forget_finished_calls,
+            before=now - _FORGET_AFTER_SECONDS,
+            ended_before=now - _GIVE_UP_AFTER_SECONDS,
+        )
         self._forget_quiet_speakers(now)
         due_at = await asyncio.to_thread(self._store.next_transcript_due_at, besides=frozenset(self._posts))
         if due_at is None:

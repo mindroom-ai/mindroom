@@ -246,10 +246,17 @@ class CallTranscriptStore:
             (edit, call_id, edit),
         )
 
-    def forget_finished_calls(self, *, before: float) -> int:
-        """Forget the calls whose transcript message was done before ``before``; return how many."""
+    def forget_finished_calls(self, *, before: float, ended_before: float) -> int:
+        """Forget the calls whose transcript message was done before ``before``; return how many.
+
+        A call whose row still owes an edit is kept until the edit is made, unless it ended before ``ended_before``.
+        """
         with closing(self._connect()) as connection:
-            return connection.execute("DELETE FROM calls WHERE transcript_done_at < ?", (before,)).rowcount
+            return connection.execute(
+                "DELETE FROM calls WHERE transcript_done_at < ? AND (ended_at < ? OR row_event_id IS NULL"
+                " OR row_edit = 'transcript' OR (row_edit = 'ended' AND transcript_event_id IS NULL))",
+                (before, ended_before),
+            ).rowcount
 
     def add_speech(
         self,
