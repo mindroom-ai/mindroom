@@ -381,7 +381,12 @@ async def test_a_stop_before_the_catch_up_after_frames_stopped_keeps_what_frames
     async def relays(_homeserver_url: str) -> bool:
         return True
 
-    async def send_frame(_client: object, _room_id: str, frame: dict[str, object], **_kwargs: object) -> LiveSendOutcome:
+    async def send_frame(
+        _client: object,
+        _room_id: str,
+        frame: dict[str, object],
+        **_kwargs: object,
+    ) -> LiveSendOutcome:
         frames.append(json.dumps(frame))
         # The frame carrying the last words is refused, as one too large is: frames stop on their own.
         return LiveSendOutcome.STOP if "plus more" in frames[-1] else LiveSendOutcome.SENT
