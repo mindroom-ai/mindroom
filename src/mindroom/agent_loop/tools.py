@@ -356,7 +356,7 @@ async def _run_call(
 ) -> None:
     """Run one call, hand over its progress while it runs, record its outcome, and hand it over with its result."""
     execution = call.execution
-    context = replace(run.call_context(execution.tool_call_id), approved=execution.confirmed is True)
+    context = run.call_context(execution.tool_call_id)
     loop = asyncio.get_running_loop()
     lock = threading.Lock()
     latest: str | None = None

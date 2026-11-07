@@ -85,9 +85,8 @@ def save(
 ) -> None:
     """Replace an accepted job's snapshot, and its outcome payload when one is given.
 
-    A snapshot that ends the job's approvals, its end or its cancel request, gives the reason they end with; it denies
-    the calls its approval cards still ask about with that reason and queues those cards' terminal edits, so no card
-    of a stopping or ended job stays answerable.
+    A snapshot that ends the job's approvals, its end or its cancel request, denies the calls its approval cards still
+    ask about with ``approval_end_reason`` and queues the cards' terminal edits, so no card of an ending job stays open.
     """
     require_ownership(transaction, runtime_generation)
     transaction.execute(

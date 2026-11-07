@@ -30,7 +30,6 @@ from mindroom.event_journal import (
     ToolJobStore,
     tool_job_run_id,
 )
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT, HookBindings, HookRegistry, hook
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, SpanSlot, _current_slot
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
@@ -50,7 +49,6 @@ from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import reply_span
-from tests.test_tool_hooks import _plugin
 from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -76,7 +74,6 @@ if TYPE_CHECKING:
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.event_journal import PrincipalStore
-    from mindroom.hooks import ToolBeforeCallContext, ToolEnvironmentContext
     from mindroom.llm.runs import RunRecord
 
 
@@ -737,16 +734,14 @@ async def test_a_decision_that_reaches_the_runtime_before_its_replys_stop_runs_n
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("then", ["approve", "retry"])
 async def test_a_stop_whose_cancel_save_fails_still_runs_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    then: str,
 ) -> None:
-    """A job whose cancel request the Stop could not save never runs its call, and its cancel is saved later.
+    """A job whose cancel request the Stop could not save never runs its call, and approving it saves the cancel.
 
-    Approving the card refuses the job and saves its cancel; without a decision, the revocation pass saves it. Either
-    save denies the card, saying the reply was stopped, and settles the job cancelled.
+    The failed save surfaces from the Stop's effects as any failed effect does; the job stays marked, so approving its
+    card refuses the job, which denies the card, saying the reply was stopped, and settles the job cancelled.
     """
     original_save = ToolJobStore.save
     failures: list[str] = []
@@ -772,7 +767,8 @@ async def test_a_stop_whose_cancel_save_fails_still_runs_nothing(
             await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
             monkeypatch.setattr(ToolJobStore, "save", failing_once)
 
-            await _stop_reply(principal, replies, "$question", by="reaction")
+            with pytest.raises(OSError, match="the journal is unavailable"):
+                await _stop_reply(principal, replies, "$question", by="reaction")
 
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(stopped, JOB_TEST_TIMEOUT)
@@ -780,35 +776,25 @@ async def test_a_stop_whose_cancel_save_fails_still_runs_nothing(
             assert (failures, job.status, await run.cards.decisions()) == ([job.job_id], "awaiting_approval", [None])
             execution = run.runtime._entries[job.job_id].task
             assert execution is not None
-            if then == "approve":
-                run.decide("approved")
-                await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
-                assert run.effects == []
-            else:
-                await run.runtime.cancel_revoked()
+            run.decide("approved")
+            await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
 
             await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
             assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", REPLY_STOPPED_REASON)]
-            if then == "retry":
-                run.decide("approved")
-                await asyncio.wait_for(asyncio.gather(execution, return_exceptions=True), JOB_TEST_TIMEOUT)
         assert run.effects == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["taking-decision", "taking-denial", "starting-wait"])
-@pytest.mark.parametrize("fail_cancel_save", [False, True])
 async def test_stop_during_approval_state_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
-    fail_cancel_save: bool,
 ) -> None:
     """A Stop during either approval-state save prevents card posting and gated tool entry."""
     saving, release = asyncio.Event(), asyncio.Event()
     original_save = ToolJobStore.save
     target_status = "awaiting_approval" if phase == "starting-wait" else "running"
-    failures: list[str] = []
 
     async def held_save(
         store: ToolJobStore,
@@ -819,10 +805,6 @@ async def test_stop_during_approval_state_save(
         approval_end_reason: str | None,
     ) -> None:
         status = json.loads(job_json)["status"]
-        if status == "cancel_requested" and fail_cancel_save and not failures:
-            failures.append(job_id)
-            msg = "the journal is unavailable"
-            raise OSError(msg)
         if status == target_status and not saving.is_set():
             saving.set()
             await release.wait()
@@ -853,55 +835,14 @@ async def test_stop_during_approval_state_save(
                 assert run.effects == [], "call executed after Stop marked it during the decision's save"
                 if phase == "starting-wait":
                     assert run.cards.requested == [], "new approval card posted after Stop marked the job"
-                await run.runtime.cancel_revoked()
                 assert entry.control.cancelled
                 await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
-                assert failures == ([job.job_id] if fail_cancel_save else [])
             finally:
                 release.set()
                 for task in (parent, stop):
                     if task is not None and not task.done():
                         task.cancel()
                 await asyncio.gather(*(task for task in (parent, stop) if task is not None), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("event", [EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT])
-async def test_stop_during_approved_call_hook(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    event: str,
-) -> None:
-    """A Stop during hook preparation refuses the approved tool body, before-call and environment hooks included."""
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    @hook(event, timeout_ms=30_000)
-    async def preparing(_context: ToolBeforeCallContext | ToolEnvironmentContext) -> None:
-        entered.set()
-        await release.wait()
-
-    registry = HookRegistry.from_plugins([_plugin("preparing", [preparing])])
-    async with _GatedRun(tmp_path, monkeypatch, approval_wait_timeout=None) as run, execution_resources():
-        run.context = replace(run.context, hooks=HookBindings(registry=registry))
-        principal, replies = _reply_runtime(run)
-        with tool_runtime_context(run.context):
-            parent = asyncio.create_task(_turn_in_reply(run, principal, replies, "$question"))
-            try:
-                await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
-                run.decide("approved")
-                await asyncio.wait_for(entered.wait(), JOB_TEST_TIMEOUT)
-                entry = run.runtime._entries[_job_of(run, "$question").job_id]
-                assert not run.effects
-                await _stop_reply(principal, replies, "$question", by="reaction")
-                release.set()
-                await asyncio.wait_for(asyncio.gather(parent, entry.task, return_exceptions=True), JOB_TEST_TIMEOUT)
-                assert not run.effects
-                await asyncio.wait_for(wait_for_status(run.runtime, entry.job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
-            finally:
-                release.set()
-                if not parent.done():
-                    parent.cancel()
-                await asyncio.gather(parent, return_exceptions=True)
 
 
 @pytest.mark.asyncio

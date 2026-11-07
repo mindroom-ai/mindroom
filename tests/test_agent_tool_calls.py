@@ -25,7 +25,7 @@ from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentInstance
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_jobs.control import JobControl, StoppedBeforeStart, job_control_context
+from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
@@ -1024,45 +1024,3 @@ async def test_generated_cli_authorization_keeps_exact_owner(
             await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=target)
     else:
         await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=target)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("gate", [ToolGate.CONFIRM, ToolGate.POLICY])
-@pytest.mark.parametrize("stop", [False, True])
-async def test_a_cli_call_resumed_from_its_approval_checks_stop_after_its_middleware(
-    tmp_path: Path,
-    gate: ToolGate,
-    *,
-    stop: bool,
-) -> None:
-    """A CLI call resuming approved carries its approval to its body, so a Stop during its middleware refuses it."""
-    control = JobControl()
-    effects: list[int] = []
-
-    async def stop_meanwhile(call: ToolCall, call_next: ToolNext) -> object:
-        await asyncio.sleep(0)
-        control.reply_stopped = stop
-        return await call_next(call.arguments)
-
-    def action(value: int) -> int:
-        effects.append(value)
-        return value
-
-    catalog = await _catalog(tmp_path, [_function(action, gate=gate)], middleware=(stop_meanwhile,))
-    binding = await catalog.bind(ToolKey("actions", "action"))
-    [waiting] = await _events(catalog, "actions", "action", {"value": 3})
-    assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
-    waiting.requirement.confirm()
-    resumed = agent_tool_calls.execute_agent_tool_call(
-        binding,
-        "inner-id",
-        {"value": 3},
-        requirement=waiting.requirement,
-    )
-    with job_control_context(control):
-        if stop:
-            with pytest.raises(StoppedBeforeStart):
-                _ = [event async for event in resumed]
-        else:
-            _ = [event async for event in resumed]
-    assert effects == ([] if stop else [3])

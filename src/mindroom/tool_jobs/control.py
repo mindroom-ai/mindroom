@@ -20,17 +20,13 @@ class _PendingHumanMessages(Protocol):
         ...
 
 
-class StoppedBeforeStart(asyncio.CancelledError):
-    """A reply's Stop refused an approved action before it started, so nothing ran."""
-
-
 @dataclass
 class JobControl:
     """Prevent future tool entry after explicit cancellation."""
 
     cancelled: bool = False
     shutdown: bool = False
-    # A reply's Stop refuses later approval actions while leaving already running calls alone.
+    # Set by a Stop of the reply that started the job, which then gets no further approval.
     reply_stopped: bool = False
 
     def cancel(self, *, shutdown: bool = False) -> None:
@@ -39,26 +35,13 @@ class JobControl:
             self.cancelled, self.shutdown = True, shutdown
 
     def checkpoint(self, *, approval: bool = False) -> None:
-        """Fail on cancellation, or a stopped reply's approved action, without event-loop waiters."""
-        if self.cancelled:
+        """Fail on cancellation, or on an approval step after the reply's Stop, without event-loop waiters."""
+        if self.cancelled or (approval and self.reply_stopped):
             raise asyncio.CancelledError
-        if approval and self.reply_stopped:
-            raise StoppedBeforeStart
 
 
 _pending_human: ContextVar[_PendingHumanMessages | None] = ContextVar("job_pending_human_messages", default=None)
 _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
-
-
-@dataclass
-class _CallApproval:
-    """Whether the tool call whose entrypoint runs was approved, and whether a Stop refused it before its effects."""
-
-    approved: bool
-    refused: bool = False
-
-
-_call_approval: ContextVar[_CallApproval | None] = ContextVar("job_call_approval", default=None)
 
 
 def current_pending_human_messages() -> _PendingHumanMessages | None:
@@ -86,35 +69,11 @@ def job_control_context(control: JobControl) -> Iterator[None]:
         _control.reset(token)
 
 
-@contextmanager
-def approved_call(approved: bool) -> Iterator[None]:
-    """Carry whether a tool call was approved through its entrypoint, to the checks right before its effects."""
-    call = _CallApproval(approved)
-    token = _call_approval.set(call)
-    try:
-        yield
-    except asyncio.CancelledError:
-        # Task and shield boundaries turn a refusal into plain cancellation; the call still says it never ran.
-        if call.refused:
-            raise StoppedBeforeStart from None
-        raise
-    finally:
-        _call_approval.reset(token)
-
-
-def job_checkpoint(*, approval: bool | None = None) -> None:
-    """Check right before an action's effect: refuse cancelled work, and a stopped reply's approved action.
-
-    The action defaults to the tool call whose entrypoint runs; outside an entrypoint no call is approved.
-    """
+def job_checkpoint(*, approval: bool = False) -> None:
+    """Enforce the active job's cancellation immediately before tool execution, or its reply's Stop at an approval."""
     control = _control.get()
-    call = _call_approval.get() if approval is None else None
-    if control is None:
-        return
-    if call is not None:
-        approval = call.approved
-        call.refused = approval and control.reply_stopped
-    control.checkpoint(approval=bool(approval))
+    if control is not None:
+        control.checkpoint(approval=approval)
 
 
 def job_owns_execution() -> bool:

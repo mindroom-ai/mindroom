@@ -11,7 +11,6 @@ import subprocess
 import time
 from contextvars import ContextVar
 from dataclasses import replace
-from functools import partial
 from typing import TYPE_CHECKING, Never
 from uuid import uuid4
 
@@ -45,12 +44,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
-from mindroom.tool_jobs.control import (
-    JobControl,
-    approved_call,
-    job_control_context,
-    job_owns_execution,
-)
+from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -2005,65 +1999,3 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
             await owner.close()
             await asyncio.gather(task, return_exceptions=True)
     assert effects == (["exact\nvalue"] if approved else [])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("shell", ["native shell", "minimal Bash", "minimal Bash, synchronous"])
-@pytest.mark.parametrize("approved", [False, True])
-async def test_a_stop_while_an_approved_command_waits_for_its_window_runs_nothing(
-    tmp_path: Path,
-    shell: str,
-    *,
-    approved: bool,
-) -> None:
-    """An approved shell command checks Stop once its CLI window admits it; an unapproved one runs."""
-    control = JobControl()
-    effects: list[str] = []
-
-    async def run_shell_command(args: str) -> str:
-        effects.append(args)
-        return "ran"
-
-    def run_synchronously(args: str) -> str:
-        effects.append(args)
-        return "ran"
-
-    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
-    binding = await catalog.bind(ToolKey("shell", "run_shell_command"))
-    if shell == "minimal Bash, synchronous":
-        binding = replace(binding, function=replace(binding.function, entrypoint=run_synchronously))
-
-    async def authorize(_key: ToolKey, _arguments: dict[str, object]) -> None:
-        return None
-
-    owner = live_turn_tools_for_test(
-        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
-    )
-    owner.shell_env = _SHELL_ENV
-
-    async def command() -> object:
-        if shell == "native shell":
-            return await owner.run_native_shell(partial(run_shell_command, "command"))
-        async with owner._window("window"):
-            return await owner._invoke_shell(binding, {"args": "command"}, window="window")
-
-    try:
-        # The approval the call's entrypoint carries, while another command holds window admission.
-        with job_control_context(control), approved_call(approved):
-            await owner._admission.acquire()
-            task = asyncio.create_task(command())
-            await asyncio.sleep(0)
-            control.reply_stopped = True
-            owner._admission.release()
-            if approved:
-                # Outside the call's entrypoint, a refusal crossing the thread's task arrives as plain cancellation.
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            else:
-                assert await task == "ran"
-    finally:
-        await owner.close()
-    assert effects == ([] if approved else ["command"])

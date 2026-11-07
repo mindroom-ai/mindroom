@@ -412,8 +412,6 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.turn"
 depends_on = [
-    "mindroom.tool_jobs.control",
-    "mindroom.tool_system.tool_hooks",
     "mindroom.agent_cli.approval",
     "mindroom.agent_cli.delegation",
     "mindroom.agent_cli.events",
@@ -5637,7 +5635,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.tool_system.invocation"
 depends_on = [
-    "mindroom.tool_jobs.control",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.tool_function",
@@ -7747,7 +7744,6 @@ depends_on = ["mindroom.history.types", "mindroom.tool_system.worker_routing"]
 [[modules]]
 path = "mindroom.delegation.hooks"
 depends_on = [
-    "mindroom.tool_jobs.control",
     "mindroom.delegation.state",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
@@ -8539,9 +8535,6 @@ visibility = [
 path = "mindroom.tool_jobs.control"
 depends_on = []
 visibility = [
-    "mindroom.agent_cli.turn",
-    "mindroom.delegation.hooks",
-    "mindroom.tool_system.invocation",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
     "mindroom.tool_jobs.runtime",

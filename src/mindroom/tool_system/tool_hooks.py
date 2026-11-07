@@ -35,7 +35,7 @@ from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
-from mindroom.tool_jobs.control import StoppedBeforeStart, job_checkpoint
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.plugins import config_plugins
@@ -317,8 +317,6 @@ async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _Tool
     def invoke() -> _ToolHookResult:
         if not claim.claim_start():
             raise asyncio.CancelledError
-        # Checked here, not before queueing, so a Stop while the body waits for a thread still refuses an approved call.
-        job_checkpoint()
         return call()
 
     async def offload() -> _ToolHookResult:
@@ -669,7 +667,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     if declined_result is not None:
         return await decline("blocked_environment_hooks", declined_result)
 
-    # Report cancellation and lost grants as blocked before recording; the checks before the call's effects see Stop.
+    # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
         job_checkpoint()
         check_current_execution_authority(arguments=args)
@@ -684,9 +682,6 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         return await answer(oauth_connection_required_payload(exc), "oauth_connection_required")
-    except StoppedBeforeStart as stopped:
-        await finish("blocked_before_body", timing.result_ready(), error=stopped, blocked=True)
-        raise
     except BaseException as error:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         ready = timing.result_ready()
