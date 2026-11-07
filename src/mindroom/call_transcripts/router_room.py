@@ -172,7 +172,9 @@ class RouterCallRoom:
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
         """Post the call's one message in the row's thread: the notes, the transcript and the call it finishes.
 
-        A transcript too large for one event goes into a sidecar on the way. Mentions in the notes are neutralised.
+        A transcript too large for one event goes into a sidecar on the way, and the message is not posted while
+        the sidecar cannot be uploaded: a cut-short text without the transcript, sent under the call's transaction,
+        could never be replaced. Mentions in the notes are neutralised.
         """
         transcript = message.transcript
         content = build_message_content(
@@ -195,6 +197,7 @@ class RouterCallRoom:
             content,
             transaction_id=f"mindroom-call-{message.call_id}-transcript",
             operation="call_transcript",
+            sidecar_required=True,
         )
 
     async def _state(self, client: nio.AsyncClient, room_id: str) -> _RoomState | None:
@@ -214,7 +217,15 @@ class RouterCallRoom:
         await asyncio.wait([read.result])
         return read.result.result()
 
-    async def _post(self, room_id: str, content: dict[str, Any], *, transaction_id: str, operation: str) -> str | None:
+    async def _post(
+        self,
+        room_id: str,
+        content: dict[str, Any],
+        *,
+        transaction_id: str,
+        operation: str,
+        sidecar_required: bool = False,
+    ) -> str | None:
         """Send one message as a transaction derived from its call, so sending it again never posts a second one."""
         return await self._send(
             room_id,
@@ -224,6 +235,7 @@ class RouterCallRoom:
                 content,
                 operation=operation,
                 transaction_id=transaction_id,
+                sidecar_required=sidecar_required,
             ),
             operation=operation,
         )

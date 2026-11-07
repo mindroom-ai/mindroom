@@ -75,6 +75,7 @@ class FakeRouterClient:
     state: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     unreadable: BaseException | nio.ErrorResponse | None = None
     send_error: BaseException | nio.RoomSendError | None = None
+    upload_error: nio.UploadError | None = None
     user_id: str = ROUTER
     device_id: str = "ROUTER"
     access_token: str = "router-token"  # noqa: S105 - a fake client's token
@@ -150,11 +151,13 @@ class FakeRouterClient:
         content_type: str,
         filename: str,
         filesize: int,
-    ) -> tuple[nio.UploadResponse, None]:
-        """Keep the uploaded bytes."""
+    ) -> tuple[nio.UploadResponse | nio.UploadError, None]:
+        """Keep the uploaded bytes, or refuse them with ``upload_error``."""
         del content_type, filename
         data = data_provider(None, None).read()
         assert len(data) == filesize
+        if self.upload_error is not None:
+            return self.upload_error, None
         self.uploads.append(data)
         return nio.UploadResponse(f"mxc://example.org/upload-{len(self.uploads)}"), None
 
@@ -540,6 +543,24 @@ async def test_a_transcript_too_large_for_one_event_goes_to_the_sidecar() -> Non
     sidecar = json.loads(upload)
     assert len(sidecar[CALL_TRANSCRIPT_CONTENT_KEY]["turns"]) == 60
     assert sidecar["io.mindroom.call_notes"] == {"call_id": "call1"}
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_whose_sidecar_cannot_be_uploaded_is_not_posted() -> None:
+    """Without its sidecar the transcript is not sent at all, never as a cut-short text that would replace it."""
+    client = FakeRouterClient(
+        state={ROOM: [_member(ANN)]},
+        upload_error=nio.UploadError("Service unavailable", "M_UNKNOWN"),
+    )
+    room = _room(client)
+    turns = tuple(_Turn(sender=ANN if index % 2 else BOB, text="word " * 400) for index in range(60))
+
+    assert await room.post_transcript(_message(turns=turns)) is None
+    assert client.sent == []
+
+    client.upload_error = None
+    assert await room.post_transcript(_message(turns=turns)) == "$event-0"
+    assert client.sent[0]["content"]["io.mindroom.long_text"]["is_complete_content"] is True
 
 
 @pytest.mark.asyncio
