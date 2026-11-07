@@ -2,12 +2,15 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.browser.call_limit import HostCallTimeLimitError
 from mindroom.worker_computer.protocol import BrowserSession, ComputerDisplay, ComputerStatus
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 
 class ComputerControlError(RuntimeError):
@@ -108,6 +111,12 @@ class WorkerComputerRuntime:
 
         return await self._run_browser_action(action)
 
+    def agent_page(self) -> "Page | None":
+        """Return the page the agent's browser shows while it runs in this computer, else None."""
+        if self._browser is None or self.status()["state"] != "ready":
+            return None
+        return self._browser.page()
+
     async def take_control(self, session_id: str, *, generation: str | None = None) -> ComputerStatus:
         """Wait for an active action, then grant exclusive control to a live viewer."""
         self._check_generation(generation)
@@ -139,7 +148,7 @@ class WorkerComputerRuntime:
             if self._controller == session_id:
                 self._controller = None
                 self._epoch += 1
-                # RFB disconnect resets keys/buttons held by this controller.
+                # Closing the stream releases keys and buttons this controller held.
                 # The same viewer can reconnect in watch mode immediately.
                 stream = self._streams.pop(session_id, None)
                 if stream is not None:

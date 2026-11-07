@@ -215,6 +215,7 @@ class MatrixApiTools(Toolkit):
     def _validate_content(
         cls,
         content: dict[str, object] | None,
+        plugin_namespaces: tuple[str, ...],
     ) -> tuple[dict[str, object] | None, str | None]:
         if content is None:
             return None, "content must be a JSON object (dict)."
@@ -222,22 +223,28 @@ class MatrixApiTools(Toolkit):
             json.dumps(content, sort_keys=True)
         except (TypeError, ValueError) as exc:
             return None, f"content must be JSON-serializable: {exc}"
-        reserved_keys = cls._reserved_content_keys(content)
+        reserved_keys = cls._reserved_content_keys(content, cls._RESERVED_MINDROOM_PREFIXES)
         if reserved_keys:
             return None, (
                 f"content must not set MindRoom-reserved keys ({', '.join(reserved_keys)}); "
                 "they carry runtime trust metadata such as the relayed requester identity."
             )
+        plugin_keys = cls._reserved_content_keys(content, plugin_namespaces)
+        if plugin_keys:
+            return None, (
+                f"content must not set plugin-reserved keys ({', '.join(plugin_keys)}); "
+                "a plugin reserves their namespace for content only it writes."
+            )
         return content, None
 
-    @classmethod
-    def _reserved_content_keys(cls, value: object) -> list[str]:
-        """Return every MindRoom-reserved key the model placed anywhere in *value*.
+    @staticmethod
+    def _reserved_content_keys(value: object, prefixes: tuple[str, ...]) -> list[str]:
+        """Return every key starting with one of *prefixes* that the model placed anywhere in *value*.
 
-        A managed Matrix account speaks for the runtime, so content the model
-        composes must never carry the namespaces ingress reads as runtime
-        metadata. Nested payloads count: edits and sidecars promote inner
-        objects into the content the receiving agent validates.
+        A managed Matrix account speaks for the runtime and its plugins, so
+        content the model composes must never carry the namespaces they read
+        as their own metadata. Nested payloads count: edits and sidecars
+        promote inner objects into the content receivers read.
 
         The walk keeps its own stack: content the model chose can nest deeply
         enough to exhaust the interpreter's, and a rejection is only useful if
@@ -248,16 +255,11 @@ class MatrixApiTools(Toolkit):
         while pending:
             current = pending.pop()
             if isinstance(current, dict):
-                found.update(key for key in current if isinstance(key, str) and cls._is_reserved_name(key))
+                found.update(key for key in current if isinstance(key, str) and key.startswith(prefixes))
                 pending.extend(current.values())
-            elif isinstance(current, list):
+            elif isinstance(current, (list, tuple)):
                 pending.extend(current)
         return sorted(found)
-
-    @classmethod
-    def _is_reserved_name(cls, name: str) -> bool:
-        """Return whether one content key or event type belongs to MindRoom's runtime namespaces."""
-        return name.startswith(cls._RESERVED_MINDROOM_PREFIXES)
 
     @classmethod
     def _reserved_event_type_error(
@@ -266,27 +268,30 @@ class MatrixApiTools(Toolkit):
         action: str,
         room_id: str,
         event_type: str,
+        plugin_namespaces: tuple[str, ...],
         state_key: str | None = None,
     ) -> str | None:
-        """Reject writes to event types MindRoom's own runtime owns and reads back.
+        """Reject writes to event types MindRoom's own runtime or a plugin owns and reads back.
 
         A runtime-owned event is an instruction, not a message: a scheduled
         task's state event names the requester its fire will later speak for.
         Rejecting reserved content keys is not enough, because such a payload
         can carry the identity inside a field of its own -- so the model must
         not be able to author one of these events from the agent's Matrix
-        account at all.
+        account at all. A plugin's reserved namespaces hold its events alike.
         """
-        if not cls._is_reserved_name(event_type):
+        if event_type.startswith(cls._RESERVED_MINDROOM_PREFIXES):
+            reservation = "is reserved for MindRoom runtime state"
+        elif event_type.startswith(plugin_namespaces):
+            reservation = "is reserved by a plugin"
+        else:
             return None
         state_key_payload = {} if state_key is None else {"state_key": state_key}
         return cls._error_payload(
             action=action,
             room_id=room_id,
             event_type=event_type,
-            message=(
-                f"Event type '{event_type}' is reserved for MindRoom runtime state and cannot be written by a tool."
-            ),
+            message=f"Event type '{event_type}' {reservation} and cannot be written by a tool.",
             **state_key_payload,
         )
 
@@ -560,6 +565,7 @@ class MatrixApiTools(Toolkit):
             action=action,
             room_id=room_id,
             event_type=event_type,
+            plugin_namespaces=context.plugins.reserved_namespaces,
             state_key=state_key,
         )
         if reserved_error is not None:
@@ -642,6 +648,7 @@ class MatrixApiTools(Toolkit):
     @classmethod
     def _send_event_policy_error(
         cls,
+        context: ToolRuntimeContext,
         *,
         room_id: str,
         event_type: str,
@@ -650,6 +657,7 @@ class MatrixApiTools(Toolkit):
             action="send_event",
             room_id=room_id,
             event_type=event_type,
+            plugin_namespaces=context.plugins.reserved_namespaces,
         )
         if reserved_error is not None:
             return reserved_error
@@ -714,7 +722,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message=event_type_error,
             )
-        normalized_content, content_error = self._validate_content(content)
+        normalized_content, content_error = self._validate_content(content, context.plugins.reserved_namespaces)
         if content_error is not None:
             return self._error_payload(
                 action="send_event",
@@ -727,7 +735,7 @@ class MatrixApiTools(Toolkit):
         assert normalized_content is not None
 
         if (
-            policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)
+            policy_error := self._send_event_policy_error(context, room_id=room_id, event_type=normalized_event_type)
         ) is not None:
             return policy_error
 
@@ -901,7 +909,7 @@ class MatrixApiTools(Toolkit):
                 message=event_type_error,
             )
         resolved_state_key = state_key or ""
-        normalized_content, content_error = self._validate_content(content)
+        normalized_content, content_error = self._validate_content(content, context.plugins.reserved_namespaces)
         if content_error is not None:
             return self._error_payload(
                 action="put_state",
