@@ -39,6 +39,8 @@ from mindroom.scheduling.recurring_schedule import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import nio
 
     from mindroom.config.main import Config
@@ -232,6 +234,7 @@ async def _deliver_scheduled_trigger(
     target: MessageTarget,
     content: dict[str, typing.Any],
     occurrence: RecurringOccurrence | None,
+    owner_stopped: Callable[[], bool],
 ) -> ScheduledWorkflowOutcome:
     """Freeze recurring content before sending and classify the typed Matrix result."""
     if occurrence is not None and occurrence.checkpoint.prepared is None:
@@ -241,6 +244,10 @@ async def _deliver_scheduled_trigger(
                 "failed" if prepared.kind is client_delivery.MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE else "retry"
             )
             return ScheduledWorkflowOutcome(status=status, failure_reason=prepared.detail)
+        if owner_stopped():
+            # A stopping owner's client is disposed under a durable upload's wait, which then falls back to truncated
+            # text; the replacement prepares the trigger again instead.
+            return ScheduledWorkflowOutcome(status="retry", failure_reason="owner stopped during preparation")
         occurrence = await prepare_recurring_delivery(occurrence, prepared, client.device_id)
         assert occurrence.checkpoint.prepared is not None
         content = occurrence.checkpoint.prepared.content
@@ -280,6 +287,7 @@ async def execute_scheduled_workflow(
     matrix_admin: HookMatrixAdmin | None = None,
     *,
     occurrence: RecurringOccurrence | None = None,
+    owner_stopped: Callable[[], bool] = lambda: False,
 ) -> ScheduledWorkflowOutcome:
     """Execute a scheduled workflow by posting its message to the thread.
 
@@ -309,7 +317,7 @@ async def execute_scheduled_workflow(
                 )
                 if content is None:
                     return ScheduledWorkflowOutcome(status="suppressed", failure_reason="suppressed by hook")
-            outcome = await _deliver_scheduled_trigger(client, workflow, target, content, occurrence)
+            outcome = await _deliver_scheduled_trigger(client, workflow, target, content, occurrence, owner_stopped)
         except _InvalidScheduledTriggerError as error:
             outcome = ScheduledWorkflowOutcome(status="failed", failure_reason=str(error))
         except RecurringDeliveryHeldError as error:
