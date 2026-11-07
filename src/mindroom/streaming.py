@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Protocol
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -497,12 +497,20 @@ class ProgressPermission(Enum):
     """What a reply's records allow for one direct progress edit."""
 
     SEND = "send"
-    # An earlier durable write of the reply is unresolved; a later edit shows this progress.
+    # An earlier durable write of the reply is unresolved, and a later edit shows this progress; or a Stop is
+    # recorded, and its note is the only write left.
     DEFER = "defer"
     REFUSE = "refuse"
 
 
-type ProgressWriteAhead = Callable[[ProgressState], Awaitable[ProgressPermission]]
+class ProgressWriteAhead(Protocol):
+    """Records one direct progress edit before it is sent, or with ``shown_live``, what live frames already showed."""
+
+    def __call__(self, progress: ProgressState, *, shown_live: bool = False) -> Awaitable[ProgressPermission]:
+        """Return whether to send the edit."""
+        ...
+
+
 # Reports the progress edit that landed on the reply's event.
 type ProgressDelivered = Callable[[ProgressState, str], None]
 type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
@@ -1224,7 +1232,7 @@ class StreamingResponse:
         try:
             prepared = await self._prepare_delivery_async(is_final=False, allow_empty_progress=False)
             if prepared is not None:
-                await self.progress_write_ahead(_progress_state(prepared.committed_state))
+                await self.progress_write_ahead(_progress_state(prepared.committed_state), shown_live=True)
         except Exception:
             logger.warning(
                 "live_presentation_not_recorded",

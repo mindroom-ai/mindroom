@@ -768,6 +768,7 @@ def _write_ahead(
     previous: rl.ProgressConfirmation | None,
     active_generation: str,
     now_ns: int,
+    shown_live: bool,
 ) -> AppliedTransition:
     """Record a span's next direct progress edit against the reply's unresolved durable writes."""
     return decide_on_span(
@@ -784,6 +785,7 @@ def _write_ahead(
             active_generation=active_generation,
             durable_write_debt=has_unresolved_rows(transaction, principal_id, reply_id),
             now_ns=now_ns,
+            shown_live=shown_live,
         ),
     )
 
@@ -923,6 +925,7 @@ class ReplyStore(PrincipalRows):
         previous: rl.ProgressConfirmation | None,
         active_generation: str,
         now_ns: int,
+        shown_live: bool = False,
     ) -> AppliedTransition:
         """Record a span's next direct progress edit, deferring it while earlier durable writes are unresolved."""
         return await self._write(
@@ -933,6 +936,7 @@ class ReplyStore(PrincipalRows):
             previous=previous,
             active_generation=active_generation,
             now_ns=now_ns,
+            shown_live=shown_live,
         )
 
     async def update(self, reply_id: str, decide: Callable[[Reply], Transition]) -> AppliedTransition | None:

@@ -662,7 +662,13 @@ class ReplyRuntime:
             handle,
         )
 
-    async def write_ahead(self, handle: SpanHandle, presentation: Presentation) -> ProgressPermission:
+    async def write_ahead(
+        self,
+        handle: SpanHandle,
+        presentation: Presentation,
+        *,
+        shown_live: bool = False,
+    ) -> ProgressPermission:
         """Record the presentation of the next direct progress edit, and say whether to send it."""
         applied = await self.store.replies.write_ahead(
             reply_id=handle.reply_id,
@@ -671,8 +677,9 @@ class ReplyRuntime:
             previous=handle.unconfirmed_progress,
             active_generation=self.generation,
             now_ns=time.time_ns(),
+            shown_live=shown_live,
         )
-        if applied.transition.outcome is rl.Outcome.DEFERRED:
+        if applied.transition.outcome in {rl.Outcome.DEFERRED, rl.Outcome.STOPPED}:
             return ProgressPermission.DEFER
         if not applied.transition.applied:
             await self.run_effects(applied.post_commit)

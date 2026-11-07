@@ -2114,8 +2114,8 @@ class DeliveryGateway:
                 return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
             return await deliver(terminal(progress), content=content, new_text=display_text)
 
-        async def progress_write_ahead(progress: ProgressState) -> ProgressPermission:
-            return await handle.runtime.write_ahead(handle, shown(progress))
+        async def progress_write_ahead(progress: ProgressState, *, shown_live: bool = False) -> ProgressPermission:
+            return await handle.runtime.write_ahead(handle, shown(progress), shown_live=shown_live)
 
         def progress_delivered(progress: ProgressState, event_id: str) -> None:
             handle.unconfirmed_progress = ReplyProgressConfirmation(

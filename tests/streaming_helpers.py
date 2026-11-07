@@ -113,8 +113,9 @@ class FakeReplyRecords:
         self.writes.append(ReplyWrite("terminal", progress, dict(content), display_text, event_id))
         return await self.edit(client, room_id, event_id, content, display_text)
 
-    async def progress_write_ahead(self, progress: ProgressState) -> ProgressPermission:
+    async def progress_write_ahead(self, progress: ProgressState, *, shown_live: bool = False) -> ProgressPermission:
         """Record one progress edit and answer it from the scripted permissions."""
+        del shown_live
         self.writes.append(ReplyWrite("progress", progress))
         return self.progress_permissions.pop(0) if self.progress_permissions else ProgressPermission.SEND
 
