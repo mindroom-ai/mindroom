@@ -189,7 +189,7 @@ async def test_relay_streams_an_answer_as_the_app_writes_it(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_relay_passes_an_apps_answer_as_the_app_sent_it(tmp_path: Path) -> None:
-    """An app's own 502 stays unmarked, a redirect is not followed, and a compressed answer stays compressed."""
+    """An app's own 502 stays unmarked, a redirect is not followed, a compressed answer stays compressed, and HEAD gets no body."""
     async with _app() as port, _runner(tmp_path) as runner, aiohttp.ClientSession() as client:
         async with client.get(f"{runner.root}/{port}/?status=502", headers=_AUTH) as response:
             assert response.status == 502
@@ -207,6 +207,10 @@ async def test_relay_passes_an_apps_answer_as_the_app_sent_it(tmp_path: Path) ->
         async with client.get(f"{runner.root}/{port}/zipped?gzip=1", headers=_AUTH) as response:
             assert response.headers["Content-Encoding"] == "gzip"
             assert (await response.json())["path"] == "/zipped?gzip=1"
+        async with client.head(f"{runner.root}/{port}/", headers=_AUTH) as response:
+            assert response.status == 200
+            assert int(response.headers["Content-Length"]) > 0
+            assert await response.read() == b""
 
 
 @pytest.mark.asyncio
