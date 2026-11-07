@@ -386,6 +386,7 @@ def _identity(room_id: str, agent_name: str) -> tuple[ResponseDraft, ResponseIde
         response_kind="ai",
         response_envelope=envelope,
         correlation_id="corr",
+        turn_id="turn-1",
         sources=ResponseSources((EVENT_ID,), (EVENT_ID,)),
     )
     return draft, identity

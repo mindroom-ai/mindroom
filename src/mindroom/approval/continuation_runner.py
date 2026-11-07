@@ -1040,8 +1040,9 @@ class ApprovalContinuationRunner:
         *,
         target: MessageTarget,
     ) -> ResponseRequest:
-        """Rebuild the original response identity for resumed hooks and post-effects.
+        """Rebuild the original response's envelope, sources, and correlation for resumed hooks and post-effects.
 
+        The resumed reply runs as a turn of its own, with a new turn ID.
         It carries no contact: a contact turn offers no function that asks for approval, so it never pauses.
         """
         envelope = MessageEnvelope(
@@ -1172,6 +1173,7 @@ class ApprovalContinuationRunner:
             attachment_ids=continuation.attachment_ids,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
+            turn_id=request.turn_id,
         )
         if tool_context.execution_identity != execution_identity:
             msg = "Approval continuation execution identity no longer matches its target"

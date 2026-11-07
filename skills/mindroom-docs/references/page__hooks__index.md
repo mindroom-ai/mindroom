@@ -441,6 +441,8 @@ All contexts include these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
+| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval runs as a new turn with the same `correlation_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
+| `parent_turn_id` | `str \| None` | In a delegated subagent's turn, the `turn_id` of the turn that delegated it; otherwise `None` |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
 
