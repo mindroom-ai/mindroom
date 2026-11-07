@@ -121,6 +121,10 @@ class FakeLiveBridge:
         """Record the roster."""
         self.calls.append(("roster", participant_identities))
 
+    def vacate_roster(self) -> None:
+        """Record that the Matrix roster emptied."""
+        self.calls.append(("vacate_roster", None))
+
     async def connect(self, grant: SfuGrant) -> None:
         """Record the grant, or fail as configured."""
         self.calls.append(("connect", grant))
@@ -240,15 +244,20 @@ async def test_child_connects_and_reports_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_child_forwards_roster_and_frame_keys() -> None:
-    """Roster and frame-key messages reach the bridge with decoded values."""
+    """Roster, vacated-roster, and frame-key messages reach the bridge with decoded values."""
     async with child_channel() as channel:
         bridge = await channel.started()
         key = os.urandom(16)
         channel.send({"type": "SetRoster", "identities": ["@a:x:D1", "@a:x:D2"]})
         channel.send({"type": "SetFrameKey", "identity": "@a:x:D1", "key": encode_key(key), "index": 3})
+        channel.send({"type": "VacateRoster"})
         channel.send({"type": "Connect", "id": 1, "url": "wss://sfu", "jwt": "j"})
         assert await channel.recv() == {"type": "Ok", "id": 1}
-        assert bridge.calls[:2] == [("roster", frozenset({"@a:x:D1", "@a:x:D2"})), ("key", "@a:x:D1", key, 3)]
+        assert bridge.calls[:3] == [
+            ("roster", frozenset({"@a:x:D1", "@a:x:D2"})),
+            ("key", "@a:x:D1", key, 3),
+            ("vacate_roster", None),
+        ]
 
 
 @pytest.mark.asyncio
