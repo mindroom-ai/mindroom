@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 from playwright.async_api import async_playwright
 from starlette.websockets import WebSocketDisconnect
 
@@ -205,6 +207,46 @@ async def test_screencast_follows_the_agent_to_another_page_and_to_none(page: Pa
         assert sent.frames.empty()
 
 
+_ANIMATION = """<body style="margin:0"><div id=box style="width:800px;height:600px;background:rgb(255,0,0)"></div>
+<script>
+window.animate = (ms) => new Promise((done) => {
+  const start = performance.now();
+  const step = (now) => {
+    const box = document.getElementById("box");
+    if (now - start < ms) {
+      box.style.background = `rgb(${now % 200 + 55}, ${now % 150}, 0)`;
+      requestAnimationFrame(step);
+    } else {
+      box.style.background = "rgb(0, 0, 255)";
+      done();
+    }
+  };
+  requestAnimationFrame(step);
+});
+</script>"""
+
+
+@pytest.mark.asyncio
+async def test_a_slow_viewer_still_gets_the_frame_a_page_settles_on(page: Page) -> None:
+    """Frames a slow viewer skips never hold Chromium back, so the look an animation ends on still reaches it."""
+    await page.set_content(_ANIMATION)
+    settled = asyncio.Event()
+
+    async def ignore(_text: str) -> None:
+        return None
+
+    async def over_a_slow_link(jpeg: bytes) -> None:
+        await asyncio.sleep(0.3)
+        red, green, blue = Image.open(io.BytesIO(jpeg)).convert("RGB").getpixel((400, 300))
+        if blue > 200 and red < 60 and green < 60:
+            settled.set()
+
+    viewer = ScreencastViewer(lambda: page, lambda: True, ignore, over_a_slow_link, poll_seconds=0.05)
+    async with _watching(viewer):
+        await page.evaluate("animate(1000)")
+        await asyncio.wait_for(settled.wait(), _TIMEOUT)
+
+
 class _FakeSession:
     """A CDP session whose frames the test delivers by hand."""
 
@@ -238,11 +280,12 @@ class _FakeSession:
     async def detach(self) -> None:
         self.sent.append(("detach", None))
         if self.frame_on_detach is not None:
-            self.frame(0, self.frame_on_detach)
+            await self.frame(0, self.frame_on_detach)
 
-    def frame(self, frame_id: int, data: bytes) -> None:
+    async def frame(self, frame_id: int, data: bytes) -> None:
         metadata = {"deviceWidth": 1280, "deviceHeight": 800}
-        self.on_frame({"data": base64.b64encode(data).decode(), "metadata": metadata, "sessionId": frame_id})
+        # Playwright runs an async event handler as a task; awaiting it here delivers the frame at a known point.
+        await self.on_frame({"data": base64.b64encode(data).decode(), "metadata": metadata, "sessionId": frame_id})
 
 
 class _FakePage:
@@ -258,7 +301,7 @@ class _FakePage:
 
 @pytest.mark.asyncio
 async def test_slow_viewer_gets_the_newest_frame_and_chromium_every_acknowledgement() -> None:
-    """A newer frame replaces one not yet sent, an oversized frame is skipped, and Chromium hears about each."""
+    """A newer frame replaces one not yet sent, an oversized frame is skipped, and Chromium hears about each at once."""
     fake = _FakePage()
     sent = _Viewer()
     viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: True, sent.send_text, sent.send_bytes)
@@ -268,14 +311,14 @@ async def test_slow_viewer_gets_the_newest_frame_and_chromium_every_acknowledgem
 
     async with _watching(viewer):
         await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
-        fake.session.frame(1, b"first")
-        fake.session.frame(2, b"second")
+        await fake.session.frame(1, b"first")
+        await fake.session.frame(2, b"second")
         assert await sent.frame() == b"second"
         assert [await acknowledged(), await acknowledged()] == [1, 2]
         # A frame at the limit is one message too big for the backend hop.
-        fake.session.frame(3, b"x" * MAX_WORKER_STREAM_MESSAGE_BYTES)
+        await fake.session.frame(3, b"x" * MAX_WORKER_STREAM_MESSAGE_BYTES)
         assert await acknowledged() == 3
-        fake.session.frame(4, b"fourth")
+        await fake.session.frame(4, b"fourth")
         assert await sent.frame() == b"fourth"
         assert await acknowledged() == 4
         assert sent.frames.empty()
@@ -300,7 +343,7 @@ async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() 
         shown = new
         await asyncio.wait_for(new.session.screencasting.wait(), _TIMEOUT)
         assert ("detach", None) in old.session.sent
-        new.session.frame(1, b"new")
+        await new.session.frame(1, b"new")
         assert await sent.frame() == b"new"
 
 

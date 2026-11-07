@@ -3,8 +3,8 @@
 The agent's ``browser`` tool runs Chromium in this worker process through Playwright, which speaks CDP to it over a
 pipe, so a viewer reaches the page without any debugging port.
 Each viewer opens its own CDP session on the page the tool shows and moves to another page when the agent does.
-A frame is acknowledged once it is sent, skipped, or replaced by a newer one, so a slow viewer gets the newest frame
-instead of a queue.
+Each frame is acknowledged as it arrives, so Chromium never waits on a slow viewer, which gets the newest frame instead
+of a queue.
 The wire protocol is described in docs/tools/worker-computer.md#page-stream.
 """
 
@@ -128,9 +128,8 @@ class ScreencastViewer:
         self._location: dict[str, str] | None = None
         self._viewport: tuple[int, int] | None = None
         self._invalid = False
-        # The newest frame not yet sent, and frames it replaced, which Chromium still waits to have acknowledged.
-        self._frame: tuple[CDPSession, dict[str, Any]] | None = None
-        self._replaced: list[tuple[CDPSession, int]] = []
+        # The newest frame not yet sent.
+        self._frame: dict[str, Any] | None = None
         self._wake = asyncio.Event()
         self._buttons: set[str] = set()
         self._keys: dict[str, _Key] = {}
@@ -185,23 +184,21 @@ class ScreencastViewer:
             self._location = location
             self._wake.set()
 
-    def _on_frame(self, cdp: CDPSession, params: dict[str, Any]) -> None:
+    async def _on_frame(self, cdp: CDPSession, params: dict[str, Any]) -> None:
         if cdp is not self._cdp:
             # The page this viewer is leaving can still deliver a frame while its session detaches.
             return
-        if self._frame is not None:
-            self._replaced.append((self._frame[0], self._frame[1]["sessionId"]))
-        self._frame = (cdp, params)
+        self._frame = params
         self._wake.set()
+        # Chromium stops after a few frames it waits on, and the look a page settles on would then never be sent.
+        with suppress(PlaywrightError):
+            await cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
 
     async def send(self) -> None:
         """Send what changed and the newest frame until cancelled."""
         while True:
             await self._wake.wait()
             self._wake.clear()
-            replaced, self._replaced = self._replaced, []
-            for cdp, frame_id in replaced:
-                await self._acknowledge(cdp, frame_id)
             if self._invalid:
                 self._invalid = False
                 await self._send_text(json.dumps({"type": "error", "detail": "Invalid screencast message."}))
@@ -212,20 +209,13 @@ class ScreencastViewer:
             frame, self._frame = self._frame, None
             if frame is None:
                 continue
-            cdp, params = frame
-            jpeg = base64.b64decode(params["data"])
-            viewport = (round(params["metadata"]["deviceWidth"]), round(params["metadata"]["deviceHeight"]))
+            jpeg = base64.b64decode(frame["data"])
+            viewport = (round(frame["metadata"]["deviceWidth"]), round(frame["metadata"]["deviceHeight"]))
             if len(jpeg) < MAX_WORKER_STREAM_MESSAGE_BYTES:
                 if viewport != self._viewport:
                     self._viewport = viewport
                     await self._send_text(json.dumps({"type": "viewport", "width": viewport[0], "height": viewport[1]}))
                 await self._send_bytes(jpeg)
-            await self._acknowledge(cdp, params["sessionId"])
-
-    @staticmethod
-    async def _acknowledge(cdp: CDPSession, frame_id: int) -> None:
-        with suppress(PlaywrightError):
-            await cdp.send("Page.screencastFrameAck", {"sessionId": frame_id})
 
     async def receive(self, raw: str) -> None:
         """Apply one viewer message; its input reaches the page only while the viewer holds control."""
