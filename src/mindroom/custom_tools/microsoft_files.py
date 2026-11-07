@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -29,6 +31,7 @@ from mindroom.custom_tools.microsoft_graph import (
 )
 from mindroom.file_access import checked_upload_source
 from mindroom.oauth.microsoft import microsoft_oauth_provider
+from mindroom.redaction import MAX_CANONICAL_JSON_INTEGER
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -61,6 +64,35 @@ _ADDRESS = re.compile(
     r"\$?(?P<first_column>[A-Za-z]{1,3})\$?(?P<first_row>\d{1,7})"
     r"(?::\$?(?P<last_column>[A-Za-z]{1,3})\$?(?P<last_row>\d{1,7}))?",
 )
+_RANGE_SELECT = "address,values,formulas,numberFormat,rowCount,columnCount"
+_TEXT_NUMBER_FORMAT = "@"
+_NUMBER = re.compile(r"[+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]*)?|[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?"
+)
+# Times and durations, such as 9:30, 16:9, 1:23.5, 100:00, 5 pm, or 5 a, with one or more digits per part.
+_TIME = r"[0-9]{1,2}(?::[0-9]+(?::[0-9]+(?:\.[0-9]+)?)?)?\s*[ap](?:\.?m\.?)?|[0-9]+(?::[0-9]+){1,2}(?:\.[0-9]+)?"
+_NUMERIC_DATE = r"[0-9]{1,4}\s*[-/.]\s*[0-9]{1,2}(?:\s*[-/.]\s*[0-9]{1,4})?|[0-9]{1,2}\s*[-/.]\s*[0-9]{4}"
+# Text Excel stores as a date, time, fraction, boolean, or error value, as it does when the text is typed.
+_CONVERTED_TEXT = (
+    re.compile(rf"(?:{_NUMERIC_DATE})(?:\s+(?:{_TIME}))?", re.IGNORECASE),
+    re.compile(rf"[0-9]{{1,2}}[-\s/]{_MONTH}(?:[-\s,/]+[0-9]{{1,4}})?(?:\s+(?:{_TIME}))?", re.IGNORECASE),
+    re.compile(rf"{_MONTH}[-\s,/.]+[0-9]{{1,4}}(?:[-\s,]+[0-9]{{1,4}})?(?:\s+(?:{_TIME}))?", re.IGNORECASE),
+    # A time before its date.
+    re.compile(rf"(?:{_TIME})\s+(?:{_NUMERIC_DATE})", re.IGNORECASE),
+    re.compile(_TIME, re.IGNORECASE),
+    re.compile(r"[0-9]+\s+[0-9]+/[0-9]+"),
+    re.compile(r"true|false", re.IGNORECASE),
+    re.compile(r"#(?:N/A|DIV/0!|VALUE!|REF!|NAME\?|NUM!|NULL!|SPILL!|CALC!|GETTING_DATA)", re.IGNORECASE),
+)
+# Excel stores an ISO date, optionally with a time, as that date, which is how a date is written on purpose.
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?: [0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?")
+# Day zero of Excel's 1900 date system, from which a date's serial number counts days.
+_EXCEL_EPOCH = datetime(1899, 12, 30, tzinfo=UTC)
+# Excel reads text starting with these characters as a formula or a signed number.
+_FORMULA_PREFIXES = ("+", "-", "@")
+_FORMULA_STRING_LITERAL = re.compile(r'("(?:[^"]|"")*")')
 # Characters OneDrive and SharePoint refuse in file names.
 _INVALID_NAME_CHARACTERS = frozenset('"*:<>?/\\|')
 _INVALID_WORKSHEET_CHARACTERS = frozenset("\\/?*[]:")
@@ -177,17 +209,17 @@ def _upload_name(name: str) -> str:
     return name
 
 
-def _address(value: str) -> tuple[str, tuple[int, int]]:
-    """Return a cell or range address and the rows and columns it covers."""
+def _address(value: str) -> tuple[str, tuple[int, int], tuple[int, int]]:
+    """Return a cell or range address, the rows and columns it covers, and its top-left row and column."""
     address = value.strip()
     if not (match := _ADDRESS.fullmatch(address)):
         msg = "address must be a cell or range such as A1 or A1:C10, without a worksheet name."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    first_column, first_row = match["first_column"], match["first_row"]
-    last_column, last_row = match["last_column"] or first_column, match["last_row"] or first_row
-    rows = abs(int(last_row) - int(first_row)) + 1
-    columns = abs(_column_number(last_column) - _column_number(first_column)) + 1
-    return address, (rows, columns)
+    first_row, first_column = int(match["first_row"]), _column_number(match["first_column"])
+    last_row = int(match["last_row"] or first_row)
+    last_column = _column_number(match["last_column"]) if match["last_column"] else first_column
+    shape = (abs(last_row - first_row) + 1, abs(last_column - first_column) + 1)
+    return address, shape, (min(first_row, last_row), min(first_column, last_column))
 
 
 def _column_number(letters: str) -> int:
@@ -195,6 +227,14 @@ def _column_number(letters: str) -> int:
     for letter in letters.upper():
         number = number * 26 + ord(letter) - ord("A") + 1
     return number
+
+
+def _column_letters(number: int) -> str:
+    letters = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
 
 
 def _checked_range_size(rows: int, columns: int) -> None:
@@ -220,19 +260,199 @@ def _cell_count(values: list[Any]) -> int:
     return len(values) * max((len(row) for row in values if isinstance(row, list)), default=0)
 
 
-def _range_write(address: str, values: list[list[Any]]) -> str:
-    """Return the checked address of a range write; the values must be equally long rows of the address's shape."""
-    target, shape = _address(address)
-    if not values or any(len(row) != len(values[0]) for row in values):
-        raise MicrosoftGraphError(
-            code="invalid_argument",
-            message="values must be a non-empty list of equally long rows of text, numbers, booleans, or nulls.",
-        )
-    if (len(values), len(values[0])) != shape:
-        msg = f"values have {len(values)} rows of {len(values[0])} cells, but {target} covers {shape[0]} by {shape[1]}."
+def _checked_grid(field_name: str, grid: list[list[Any]], target: str, shape: tuple[int, int]) -> None:
+    """Refuse a grid that is not equally long rows of the address's shape."""
+    if not grid or any(len(row) != len(grid[0]) for row in grid):
+        msg = f"{field_name} must be a non-empty list of equally long rows."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    _checked_range_size(*shape)
-    return target
+    if (len(grid), len(grid[0])) != shape:
+        msg = (
+            f"{field_name} has {len(grid)} rows of {len(grid[0])} cells, but {target} covers {shape[0]} by {shape[1]}."
+        )
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+
+
+def _at(grid: object, row: int, column: int) -> object:
+    """Return one cell of a Graph grid, or None when Graph left it out."""
+    cells = grid[row] if isinstance(grid, list) and row < len(grid) else None
+    return cells[column] if isinstance(cells, list) and column < len(cells) else None
+
+
+def _case_key(text: str) -> str:
+    """Return a formula or number format uppercased outside its quoted literals, whose case Excel keeps."""
+    return "".join(
+        part if index % 2 else part.upper() for index, part in enumerate(_FORMULA_STRING_LITERAL.split(text))
+    )
+
+
+def _same(left: object, right: object) -> bool:
+    """Return whether two cells read from Graph are equal, keeping booleans apart from the numbers 1 and 0."""
+    return isinstance(left, bool) == isinstance(right, bool) and left == right
+
+
+def _iso_serial(value: object) -> float | None:
+    """Return the serial number Excel stores for a written ISO date, or None for any other value."""
+    if not isinstance(value, str) or not _ISO_DATE.fullmatch(value.strip()):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip()).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    serial = (moment - _EXCEL_EPOCH) / timedelta(days=1)
+    # Excel counts a 1900-02-29 that never was, so its serials before 1900-03-01 are one lower.
+    return serial - 1 if serial < 61 else serial
+
+
+def _shown_as_text(value: object) -> bool:
+    """Return whether an approval card carries this number as text, as Matrix events hold no floats or huge integers."""
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, float) or (isinstance(value, int) and abs(value) > MAX_CANONICAL_JSON_INTEGER)
+
+
+def _shown_alike(left: object, right: object) -> bool:
+    """Return whether an approval card shows two different cells alike: a number it carries as text and that text."""
+    return any(
+        _shown_as_text(number) and isinstance(text, str) and str(number) == text
+        for number, text in ((left, right), (right, left))
+    )
+
+
+def _stored_as_written(held: object, written: object, *, text_cell: bool) -> bool:
+    """Return whether a cell holds what was written, as Excel stores it.
+
+    Excel uppercases a formula's names and references, stores an ISO date as its serial number, and may round a
+    number's last digit; a text-formatted cell stores written text exactly.
+    """
+    if isinstance(written, str) and not text_cell:
+        if written.startswith("=") and isinstance(held, str):
+            return _case_key(held) == _case_key(written)
+        if (serial := _iso_serial(written)) is not None:
+            # A workbook in the 1904 date system stores another serial, which is reported as a difference.
+            if isinstance(held, bool) or not isinstance(held, int | float):
+                return False
+            return math.isclose(held, serial, rel_tol=0.0, abs_tol=1e-6)
+    if isinstance(held, int | float) and isinstance(written, int | float) and not isinstance(held, bool):
+        # Only rounding in a double's last bit is tolerated, so two distinct numbers Excel can store differ.
+        return not isinstance(written, bool) and abs(held - written) <= math.ulp(max(abs(held), abs(written)))
+    return _same(held, written)
+
+
+def _excel_would_convert(value: object) -> bool:
+    """Return whether Excel would store this text as a number, date, time, boolean, error, or formula.
+
+    Graph parses a written cell as if it were typed, so `0042` loses its zeros and `1/2` becomes a date.
+    This approximates Excel's English parser conservatively; text in a text-formatted cell stays text.
+    """
+    if not isinstance(value, str) or value.startswith("=") or _iso_serial(value) is not None:
+        return False
+    text = value.strip()
+    unsigned = text[1:-1].strip() if text.startswith("(") and text.endswith(")") else text
+    number = unsigned.strip("$€£¥").strip().removesuffix("%").strip().strip("$€£¥").strip()
+    return (
+        (_NUMBER.fullmatch(number) is not None and any(character.isdigit() for character in number))
+        or any(pattern.fullmatch(text) for pattern in _CONVERTED_TEXT)
+        or (len(text) > 1 and text.startswith(_FORMULA_PREFIXES))
+    )
+
+
+@dataclass(frozen=True)
+class _RangeEdit:
+    """One checked range write: the cells it writes, what they held when read, and the formats it sets."""
+
+    worksheet: str
+    address: str
+    first_cell: tuple[int, int]
+    values: list[list[Any]]
+    expected_formulas: list[list[Any]]
+    number_formats: list[list[str | None]] | None
+
+    @property
+    def writes(self) -> list[list[Any]]:
+        """Return the values with null for every cell given what it held when read and no new number format.
+
+        Graph parses every written cell again, so an unchanged cell is left out rather than rewritten, where text
+        such as an ISO date would become a date; the approval card shows those cells as unchanged. A cell whose
+        format changes is written again, so text such as a formula typed into a text cell is parsed in the new one.
+        """
+        return [
+            [
+                None if _same(value, read[column]) and _at(self.number_formats, row, column) is None else value
+                for column, value in enumerate(values)
+            ]
+            for row, (values, read) in enumerate(zip(self.values, self.expected_formulas, strict=True))
+        ]
+
+    def cell(self, row: int, column: int) -> str:
+        return f"{_column_letters(self.first_cell[1] + column)}{self.first_cell[0] + row}"
+
+    def _cells(self) -> list[tuple[int, int]]:
+        return [(row, column) for row in range(len(self.values)) for column in range(len(self.values[0]))]
+
+    def check_unchanged(self, current: Mapping[str, Any]) -> None:
+        """Refuse a range that no longer holds what it held when read, such as after someone edited it."""
+        formulas = current.get("formulas")
+        if not all(
+            _same(_at(formulas, row, column), self.expected_formulas[row][column]) for row, column in self._cells()
+        ):
+            msg = (
+                "The range no longer holds expected_formulas, so nothing was written; someone may have edited it. "
+                "Show the requester current_formulas and ask again."
+            )
+            raise MicrosoftGraphError(code="cells_changed", message=msg, current_formulas=formulas)
+
+    def check_conversions(self, current: Mapping[str, Any]) -> None:
+        """Refuse a written cell the approval card shows unchanged, or one Excel would store as something else."""
+        writes = self.writes
+        for row, column in self._cells():
+            value = writes[row][column]
+            requested = _at(self.number_formats, row, column)
+            number_format = _at(current.get("numberFormat"), row, column) if requested is None else requested
+            cell = self.cell(row, column)
+            if value is not None and _shown_alike(value, self.expected_formulas[row][column]):
+                msg = (
+                    f"{cell} would change only between a number and the same text, {value!r}, which the approval "
+                    "card shows as unchanged, so nothing was written. Write the type the cell holds, or null."
+                )
+                raise MicrosoftGraphError(code="ambiguous_change", message=msg, cell=cell)
+            if number_format == _TEXT_NUMBER_FORMAT and isinstance(value, str) and value.startswith("="):
+                msg = (
+                    f"{cell} is formatted as text, so Excel would store the formula {value!r} as text and nothing "
+                    "was written. Give that cell's number_formats entry another format, such as General, or write null to "
+                    "keep its value."
+                )
+                raise MicrosoftGraphError(code="formula_as_text", message=msg, cell=cell)
+            if number_format != _TEXT_NUMBER_FORMAT and _excel_would_convert(value):
+                msg = (
+                    f"Excel would store the text {value!r} in {cell} as a number, date, time, boolean, or formula, "
+                    "so nothing was written. Write numbers as JSON numbers and dates as YYYY-MM-DD or YYYY-MM-DD HH:MM, "
+                    "or keep the text "
+                    f"by setting that cell's number_formats entry to '{_TEXT_NUMBER_FORMAT}'."
+                )
+                raise MicrosoftGraphError(code="converted_text", message=msg, cell=cell)
+
+    def differences(self, stored: Mapping[str, Any]) -> list[dict[str, object]]:
+        """Return the written cells and number formats that the range does not hold as written."""
+        differences: list[dict[str, object]] = []
+        writes = self.writes
+        for row, column in self._cells():
+            value = writes[row][column]
+            held = _at(stored.get("formulas"), row, column)
+            held_format = _at(stored.get("numberFormat"), row, column)
+            text_cell = held_format == _TEXT_NUMBER_FORMAT
+            if value is not None and not _stored_as_written(held, value, text_cell=text_cell):
+                differences.append({"cell": self.cell(row, column), "written": value, "stored": held})
+            number_format = _at(self.number_formats, row, column)
+            # Excel may change a format code's case, such as general to General, but not inside quoted text.
+            if isinstance(number_format, str) and _case_key(str(held_format)) != _case_key(number_format):
+                differences.append(
+                    {
+                        "cell": self.cell(row, column),
+                        "number_format": number_format,
+                        "stored_number_format": held_format,
+                    },
+                )
+        return differences
 
 
 def _range(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -245,6 +465,7 @@ def _range(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "address": payload.get("address"),
         "values": values,
+        "formulas": payload.get("formulas"),
         "row_count": payload.get("rowCount", len(values)),
         "column_count": payload.get("columnCount", max((len(row) for row in values), default=0)),
     }
@@ -538,7 +759,10 @@ class MicrosoftFilesTools(Toolkit):
         return graph_call(_TOOL_NAME, self._session, lambda: _parse_file(file), operation)
 
     def microsoft_files_excel_read_range(self, file: str, worksheet: str, address: str | None = None) -> str:
-        """Read cell values from one worksheet of an Excel workbook, up to 10,000 cells.
+        """Read cell values and formulas from one worksheet of an Excel workbook, up to 10,000 cells.
+
+        values holds each cell's raw value, such as a date's serial number; formulas holds a computed cell's
+        formula and any other cell's raw value, which microsoft_files_excel_update_range takes as expected_formulas.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
@@ -552,7 +776,7 @@ class MicrosoftFilesTools(Toolkit):
             sheet = _worksheet(worksheet)
             if address is None:
                 return f"{sheet}/usedRange(valuesOnly=true)"
-            checked, shape = _address(address)
+            checked, shape, _first_cell = _address(address)
             _checked_range_size(*shape)
             return f"{sheet}/range(address='{checked}')"
 
@@ -561,7 +785,7 @@ class MicrosoftFilesTools(Toolkit):
             payload = session.json(
                 "GET",
                 f"{item.path}/workbook/worksheets/{target}",
-                params={"$select": "address,values,rowCount,columnCount"},
+                params={"$select": "address,values,formulas,rowCount,columnCount"},
             )
             return {"range": _range(payload)}
 
@@ -573,38 +797,72 @@ class MicrosoftFilesTools(Toolkit):
         worksheet: str,
         address: str,
         values: list[list[str | int | float | bool | None]],
+        expected_formulas: list[list[str | int | float | bool]],
         expected_web_url: str,
+        number_formats: list[list[str | None]] | None = None,
     ) -> str:
         """Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.
 
         The write fails with target_mismatch unless expected_web_url is the workbook's web_url.
+        It writes nothing and fails with cells_changed when the range no longer holds expected_formulas, such as
+        after someone edited it in Excel; show the requester current_formulas and ask again.
+        It writes nothing and fails with converted_text for text Excel would store as a number, date, time,
+        boolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD or
+        YYYY-MM-DD HH:MM, or set number_formats to @ for cells that keep text. It fails with ambiguous_change for a
+        cell that would change only between a number and the same text, which approval cards show alike. It fails
+        with formula_as_text for a formula in a text-formatted cell unless number_formats gives that cell another
+        format, such as General, or the value is null. The result reports verified false and lists differences when
+        Excel stored a cell differently from what was written; tell the requester.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
             worksheet: The worksheet name.
             address: The range to write, such as A1:C2, matching the shape of values.
-            values: Rows of cell values; a string starting with = is written as a formula.
+            values: Rows of cell values; a string starting with = is written as a formula, "" empties a cell, and
+                null leaves a cell unchanged.
+            expected_formulas: The range's formulas exactly as microsoft_files_excel_read_range returned them for
+                this address, in the same shape as values; cells whose value equals them are not written. Required.
             expected_web_url: The workbook's web_url as microsoft_files_get_file or microsoft_files_list_folder
                 returns it; search results show a different form of it. Required.
+            number_formats: Optional rows of Excel number formats, such as 0.0% or @ for text, set before the
+                values; null keeps a cell's format.
 
         """
 
-        def build() -> tuple[str, str]:
+        def build() -> _RangeEdit:
             sheet = _worksheet(worksheet)
-            target = _range_write(address, values)
+            target, shape, first_cell = _address(address)
+            _checked_grid("values", values, target, shape)
+            _checked_range_size(*shape)
+            _checked_grid("expected_formulas", expected_formulas, target, shape)
+            if number_formats is not None:
+                _checked_grid("number_formats", number_formats, target, shape)
+                if any(number_format == "" for row in number_formats for number_format in row):
+                    msg = "number_formats entries must be Excel number formats, such as 0.0%, @, or General, or null."
+                    raise MicrosoftGraphError(code="invalid_argument", message=msg)
             _parse_file(file)
             _web_url(expected_web_url)
-            return sheet, target
+            return _RangeEdit(sheet, target, first_cell, values, expected_formulas, number_formats)
 
-        def operation(session: GraphSession, checked: tuple[str, str]) -> Mapping[str, object]:
-            sheet, target = checked
+        def operation(session: GraphSession, edit: _RangeEdit) -> Mapping[str, object]:
             item = _resolve(file, session)
             _checked_target(self._metadata(item, session), expected_web_url)
-            payload = session.json(
-                "PATCH",
-                f"{item.path}/workbook/worksheets/{sheet}/range(address='{target}')",
-                json={"values": values},
-            )
-            return {"range": _range(payload)}
+            path = f"{item.path}/workbook/worksheets/{edit.worksheet}/range(address='{edit.address}')"
+            current = session.json("GET", path, params={"$select": _RANGE_SELECT})
+            edit.check_unchanged(current)
+            edit.check_conversions(current)
+            if any(number_format is not None for row in edit.number_formats or [] for number_format in row):
+                # Formats go first, so a text-formatted cell keeps text such as leading zeros.
+                session.json("PATCH", path, json={"numberFormat": edit.number_formats})
+            writes = edit.writes
+            if any(value is not None for row in writes for value in row):
+                session.json("PATCH", path, json={"values": writes})
+            # The range is read again rather than trusting the PATCH response to carry every property.
+            payload = session.json("GET", path, params={"$select": _RANGE_SELECT})
+            differences = edit.differences(payload)
+            result: dict[str, object] = {"range": _range(payload), "verified": not differences}
+            if differences:
+                result["differences"] = differences
+            return result
 
         return graph_call(_TOOL_NAME, self._session, build, operation)

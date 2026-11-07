@@ -18351,7 +18351,7 @@
       },
       {
         "name": "microsoft_files_excel_read_range",
-        "description": "Read cell values from one worksheet of an Excel workbook, up to 10,000 cells.",
+        "description": "Read cell values and formulas from one worksheet of an Excel workbook, up to 10,000 cells.\nvalues holds each cell's raw value, such as a date's serial number; formulas holds a computed cell's\nformula and any other cell's raw value, which microsoft_files_excel_update_range takes as expected_formulas.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18398,7 +18398,7 @@
       },
       {
         "name": "microsoft_files_excel_update_range",
-        "description": "Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.\nThe write fails with target_mismatch unless expected_web_url is the workbook's web_url.",
+        "description": "Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.\nThe write fails with target_mismatch unless expected_web_url is the workbook's web_url.\nIt writes nothing and fails with cells_changed when the range no longer holds expected_formulas, such as\nafter someone edited it in Excel; show the requester current_formulas and ask again.\nIt writes nothing and fails with converted_text for text Excel would store as a number, date, time,\nboolean, or formula, such as 0042 or 1/2; write numbers as JSON numbers and dates as YYYY-MM-DD or\nYYYY-MM-DD HH:MM, or set number_formats to @ for cells that keep text. It fails with ambiguous_change for a\ncell that would change only between a number and the same text, which approval cards show alike. It fails\nwith formula_as_text for a formula in a text-formatted cell unless number_formats gives that cell another\nformat, such as General, or the value is null. The result reports verified false and lists differences when\nExcel stored a cell differently from what was written; tell the requester.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18438,11 +18438,58 @@
                   ]
                 }
               },
-              "description": "Rows of cell values; a string starting with = is written as a formula."
+              "description": "Rows of cell values; a string starting with = is written as a formula, \"\" empties a cell, and\nnull leaves a cell unchanged."
+            },
+            "expected_formulas": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    }
+                  ]
+                }
+              },
+              "description": "The range's formulas exactly as microsoft_files_excel_read_range returned them for\nthis address, in the same shape as values; cells whose value equals them are not written. Required."
             },
             "expected_web_url": {
               "type": "string",
               "description": "The workbook's web_url as microsoft_files_get_file or microsoft_files_list_folder\nreturns it; search results show a different form of it. Required."
+            },
+            "number_formats": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional rows of Excel number formats, such as 0.0% or @ for text, set before the\nvalues; null keeps a cell's format."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18462,6 +18509,7 @@
             "worksheet",
             "address",
             "values",
+            "expected_formulas",
             "expected_web_url"
           ]
         },

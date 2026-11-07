@@ -14283,8 +14283,8 @@ Microsoft ends a connection that has not been used for 90 days, and the requeste
 | `microsoft_files_replace_file` | yes | Replace a file's contents with a workspace file, up to 250 MB, given the `etag` the edit started from. |
 | `microsoft_files_upload_file` | yes | Upload a workspace file, up to 250 MB, as a new file in a folder or the requester's OneDrive root. |
 | `microsoft_files_excel_list_worksheets` | no | List the worksheets of an Excel workbook. |
-| `microsoft_files_excel_read_range` | no | Read a worksheet range, or its used range, up to 10,000 cells. |
-| `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells. |
+| `microsoft_files_excel_read_range` | no | Read the values and formulas of a worksheet range, or of its used range, up to 10,000 cells. |
+| `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells, while its cells still hold the values and formulas that were read. |
 
 Functions name a file or folder by its Graph item path, `/drives/{drive-id}/items/{item-id}`, which search, listing, and details return, or by a OneDrive or SharePoint link the requester can open.
 Replacing a file, uploading into a folder, and writing a range also take the target's `web_url` from its details, download, or folder listing (search results show another form) as `expected_web_url`, so an approval card shows where the write lands, and fail with `target_mismatch`, naming the target's `web_url`, when it differs.
@@ -14297,7 +14297,23 @@ Uploads never overwrite an existing file; a name that already exists returns `na
 
 Excel functions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
 They take a worksheet name and an address such as `B2` or `A1:C10` without a worksheet prefix, and written values must have the shape of the address.
-A written string that starts with `=` becomes a formula.
+A written string that starts with `=` becomes a formula, `""` empties a cell, and `null` leaves a cell unchanged.
+A read returns `values`, each cell's raw value, such as a date's serial number or a percentage as a fraction, and `formulas`, the formula of a computed cell and the raw value of any other.
+
+Writing a range takes its `formulas` from a read of the same address as `expected_formulas`, so an approval card shows each cell before and after the edit.
+The write reads the range again first and writes nothing, failing with `cells_changed` and the range's `current_formulas`, when a cell's value or formula differs from that read; number formats are not compared.
+Microsoft Graph has no conditional range write, so a change in the moment between that check and the write is not caught.
+Cells whose new value equals what was read are left as they are rather than written again, unless the write also gives them a number format, so a formula typed into a text-formatted cell becomes live when the cell gets another format.
+Approval cards show a decimal or very large number and the same text alike, such as `1.5` and `"1.5"`, so a cell that would change only between them fails with `ambiguous_change`.
+
+Excel parses written text as if someone typed it, so text it would store as something else, such as `0042` losing its zeros or `1/2` becoming a date, fails with `converted_text` unless the cell is formatted as text.
+This check approximates Excel's English parsing; any other conversion shows up in the verification after the write.
+Dates written as `YYYY-MM-DD`, optionally followed by a time such as `09:30`, are stored as dates, except in a text-formatted cell, where they stay text.
+Verification counts dates in Excel's default 1900 date system, so a date correctly written into a workbook using the 1904 date system is reported as a difference.
+A formula written into a text-formatted cell would be stored as text, so it fails with `formula_as_text` unless the write also gives that cell another format.
+`number_formats` sets formats such as `0.0%`, or `@` for text, before the values are written, and `null` keeps a cell's format.
+If writing the values fails after the formats were set, the formats stay, and writing again finishes the edit.
+After writing, the range is read again, and the result reports `verified: true` when Excel stored every written cell and format as written, and otherwise `verified: false` with the cells it stored differently.
 
 Search uses Microsoft Search, which covers work and school accounts.
 Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
@@ -14587,6 +14603,10 @@ To give an agent read access only, set `write: false` on the tool.
 | `speaker_attribution_disabled` | A Teams administrator turned off speaker attribution for transcripts, and `microsoft_meetings` reads transcripts only with their speakers. |
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
+| `cells_changed` | A cell's value or formula differs from what was read; nothing was written, and `current_formulas` shows what the range holds now. |
+| `converted_text` | Excel would store the text in `cell` as a number, date, time, boolean, error value, or formula; write a number or a `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` date, or set that cell's `number_formats` entry to `@`. |
+| `ambiguous_change` | `cell` would change only between a number and the same text, which approval cards show alike; write the type the cell holds, or `null`. |
+| `formula_as_text` | `cell` is formatted as text, so Excel would keep the formula as text; set that cell's `number_formats` entry to another format, such as `General`. |
 | `locked` | The file is checked out or locked; try again later. |
 | `name_conflict` | A file with that name already exists in the folder; replace it or choose another name. |
 | `too_large` | The file, range, attachment, or message exceeds a limit above; send a OneDrive link instead of a large attachment. |
