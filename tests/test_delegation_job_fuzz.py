@@ -313,7 +313,10 @@ async def test_a_stop_refuses_the_reply_s_subagent_every_later_approval(
             await runner.step(Step("approve"))
 
             assert not await runner.approvals.pending()
-            assert [job.status for job in runner.runtime.retained_jobs()] == ["cancelled"]
+            # Refused at any point, the job settles as any cancelled subagent job does.
+            assert [(job.status, job.result) for job in runner.runtime.retained_jobs()] == [
+                ("cancelled", "Delegation cancelled."),
+            ]
             assert not runner.executed
     finally:
         release.set()
