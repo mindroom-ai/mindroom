@@ -137,7 +137,7 @@ def imports_outside_plugin_api(plugin_root: Path) -> list[str]:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     names = [(alias.lineno, alias.name) for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
                     names = [(alias.lineno, f"{node.module}.{alias.name}") for alias in node.names]
                 else:
                     continue
