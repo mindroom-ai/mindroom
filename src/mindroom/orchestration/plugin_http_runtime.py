@@ -76,8 +76,9 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
         if lookup is None:
             lookup = lookups[room_id] = asyncio.create_task(look_up(room_id))
             lookup.add_done_callback(lambda done: forget(room_id, done))
-        # Shielded, so a caller that goes away leaves the lookup running for the others.
-        return await asyncio.shield(lookup)
+        # Waiting never cancels the lookup, so a caller that goes away leaves it running for the others.
+        await asyncio.wait([lookup])
+        return lookup.result()
 
     ensure_app_state(app).room_members = room_members
 
