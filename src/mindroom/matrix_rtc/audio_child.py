@@ -80,6 +80,8 @@ class _AudioChild:
             self._bridge = self._bridge_factory(message["local_identity"], message["e2ee"])
         elif kind == "SetRoster":
             self._bridge.set_participant_identities(frozenset(message["identities"]))
+        elif kind == "VacateRoster":
+            self._bridge.vacate_roster()
         elif kind == "SetFrameKey":
             self._bridge.set_frame_key(message["identity"], decode_key(message["key"]), message["index"])
         elif kind == "Connect":
