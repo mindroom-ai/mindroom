@@ -237,7 +237,7 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](personal-rooms.md) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](configuration/agents.md) setting or that it [joined because one of its rooms lists it](rooms.md#rooms-under-a-room).
+An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](personal-rooms.md) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](configuration/agents.md) setting or that [one of its rooms lists](rooms.md#rooms-under-a-room).
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
 A configured room assignment wins over personal rooms, invites, and listed rooms; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
 
