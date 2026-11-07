@@ -460,6 +460,32 @@ async def test_speech_too_large_is_refused_before_its_body_is_read(api: Api) -> 
 
 
 @pytest.mark.asyncio
+async def test_speech_from_outside_the_call_or_with_a_stretch_in_flight_is_refused_before_its_body_is_read(
+    api: Api,
+) -> None:
+    """Who sends a stretch is checked before its audio is read: 404 outside the call's room, 429 with one in flight."""
+    call_id = (await api.join(ANN)).json()["call"]["id"]
+    api.world.clock.advance(10)
+    path = f"{PREFIX}/calls/{call_id}/speech"
+    form = {"Content-Type": "multipart/form-data; boundary=xyz"}
+    chunks = [b"x" * 65_536] * 4
+
+    outsider = await _drive(path, {**api.headers(OUTSIDER), **form}, chunks)
+    unknown = await _drive(f"{PREFIX}/calls/unknown/speech", {**api.headers(ANN), **form}, chunks)
+    api.world.transcriber.gate = asyncio.Event()
+    first = asyncio.create_task(api.speech(call_id, ANN))
+    await api.world.transcriber.started.wait()
+    in_flight = await _drive(path, {**api.headers(ANN), **form}, chunks)
+    api.world.transcriber.gate.set()
+
+    assert (outsider[0], outsider[1]["code"], outsider[2]) == (404, "not-found", 0)
+    assert (unknown[0], unknown[1]["code"], unknown[2]) == (404, "not-found", 0)
+    assert (in_flight[0], in_flight[1]["code"], in_flight[2]) == (429, "too-many-requests", 0)
+    assert (await first).status_code == 200
+    assert len(api.world.transcriber.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_speech_is_never_written_to_disk(api: Api, monkeypatch: pytest.MonkeyPatch) -> None:
     """The audio goes from the request to speech-to-text in memory: no temporary file, spooled or not, is made."""
     call_id = (await api.join(ANN)).json()["call"]["id"]

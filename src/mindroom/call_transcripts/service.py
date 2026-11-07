@@ -322,6 +322,11 @@ class CallTranscriptService:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
         return line
 
+    async def check_speech_sender(self, call_id: str, user_id: str) -> None:
+        """Refuse a stretch before its audio is read: from outside the call's room, or with one still in flight."""
+        await self._call_for(call_id, user_id)
+        self._refuse_second_stretch(user_id)
+
     async def live(self, room_id: str, user_id: str, *, after: str | None = None) -> LiveCall:
         """Return the room's live call with its lines, those added after the line ``after`` if given, and names.
 
@@ -510,14 +515,17 @@ class CallTranscriptService:
         if user_id not in await asyncio.to_thread(self._store.presence, call.id):
             raise CallRefusedError(code="forbidden", message="You were not in this call.")
 
-    def _count_speech(self, user_id: str, now: float) -> None:
-        """Refuse a second stretch in flight, or more than 240 a minute, from one person; otherwise count this one."""
+    def _refuse_second_stretch(self, user_id: str) -> None:
         if user_id in self._speaking:
             raise CallRefusedError(
                 code="too-many-requests",
                 message="Your previous stretch of speech is still being transcribed.",
                 retry_after=_SPEAKING_RETRY_AFTER_SECONDS,
             )
+
+    def _count_speech(self, user_id: str, now: float) -> None:
+        """Refuse a second stretch in flight, or more than 240 a minute, from one person; otherwise count this one."""
+        self._refuse_second_stretch(user_id)
         recent = self._recent_speech.setdefault(user_id, deque())
         while recent and recent[0] <= now - _SPEECH_WINDOW_SECONDS:
             recent.popleft()
