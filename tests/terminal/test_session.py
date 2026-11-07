@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import signal
 from typing import TYPE_CHECKING
 
 import pytest
@@ -107,21 +108,36 @@ async def test_a_session_ends_when_its_shell_exits_and_keeps_its_scrollback(
     tmp_path: Path,
     manager: TerminalManager,
 ) -> None:
-    """Viewers get the exit code, a later viewer gets the scrollback and the exit, and typing is refused."""
+    """Viewers get the exit code and all output before it, a later viewer gets the scrollback and the exit."""
     session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
     _, viewer = session.attach()
-    session.write(b"echo $((3*3))gone; exit 7\n")
+    session.write(b"head -c 200000 /dev/zero | tr '\\0' z; exit 7\n")
 
     assert await _exit_code(viewer) == 7
     info = session.info()
     assert (info.alive, info.exit_code) == (False, 7)
     scrollback, late = session.attach()
-    assert b"9gone" in scrollback
+    assert b"z" * 200000 in scrollback
     assert await _exit_code(late) == 7
     with pytest.raises(TerminalError) as refused:
         session.write(b"echo again\n")
     assert refused.value.status_code == 409
     assert manager.sessions("owner") == [session]
+
+
+async def test_without_pidfds_a_session_still_ends(
+    tmp_path: Path,
+    manager: TerminalManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where the platform has no pidfds, the shell's exit is still noticed."""
+    monkeypatch.delattr(os, "pidfd_open")
+    monkeypatch.setattr(session_module, "_EXIT_POLL_SECONDS", 0.01)
+    session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
+    _, viewer = session.attach()
+    session.write(b"exit 4\n")
+
+    assert await _exit_code(viewer) == 4
 
 
 async def test_a_shell_with_no_input_and_no_viewer_is_hung_up_and_forgotten(
@@ -131,14 +147,18 @@ async def test_a_shell_with_no_input_and_no_viewer_is_hung_up_and_forgotten(
 ) -> None:
     """Idle time counts only while nobody types and nobody watches; an ended session is forgotten after it too."""
     monkeypatch.setattr(session_module, "_IDLE_SECONDS", 0.5)
+    loop = asyncio.get_running_loop()
     watched = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
     _, viewer = watched.attach()
-    idle = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
+    typed = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
     ended = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
     ended.write(b"exit 3\n")
+    await asyncio.sleep(0.3)
+    typed.write(b"true\n")
+    typed_at = loop.time()
 
-    await _ended(idle)
-    assert idle.exit_code is not None
+    await _ended(typed)
+    assert loop.time() - typed_at >= 0.5
     await _ended(ended)
     async with asyncio.timeout(10):
         while manager.sessions("owner") != [watched]:  # noqa: ASYNC110 - forgetting has no event to await
@@ -146,7 +166,9 @@ async def test_a_shell_with_no_input_and_no_viewer_is_hung_up_and_forgotten(
     assert watched.alive
 
     watched.detach(viewer)
+    detached_at = loop.time()
     await _ended(watched)
+    assert loop.time() - detached_at >= 0.5
     assert manager.sessions("owner") == []
 
 
@@ -181,7 +203,10 @@ async def test_a_session_answers_only_its_owner_and_each_owner_has_a_limit(
     manager: TerminalManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Another owner can't find a session; a full owner first forgets its oldest ended session, then refuses."""
+    """Another owner can't find a session; a full owner first forgets its oldest ended session, then refuses.
+
+    The runner as a whole holds a limited number of sessions too.
+    """
     monkeypatch.setattr(session_module, "_MAX_SESSIONS_PER_OWNER", 2)
     first = manager.open("alice", _launch(tmp_path), cols=80, rows=24)
     second = manager.open("alice", _launch(tmp_path), cols=80, rows=24)
@@ -201,6 +226,50 @@ async def test_a_session_answers_only_its_owner_and_each_owner_has_a_limit(
     with pytest.raises(TerminalError) as invalid:
         manager.open("alice/../x", _launch(tmp_path), cols=80, rows=24)
     assert invalid.value.status_code == 400
+    monkeypatch.setattr(session_module, "_MAX_SESSIONS", 2)
+    with pytest.raises(TerminalError) as crowded:
+        manager.open("bob", _launch(tmp_path), cols=80, rows=24)
+    assert crowded.value.status_code == 429
+
+
+async def test_typing_is_refused_when_too_much_comes_at_once_or_the_shell_stops_reading(
+    tmp_path: Path,
+    manager: TerminalManager,
+) -> None:
+    """One write holds at most the input limit, and typing the shell does not read piles up only so far."""
+    session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
+    _, viewer = session.attach()
+    session.write(b"echo $((2*2))asleep; sleep 600\n")
+    await _read_until(viewer, b"4asleep")
+
+    with pytest.raises(TerminalError) as too_much:
+        session.write(b"x" * (session_module._MAX_INPUT_BYTES + 1))
+    assert too_much.value.status_code == 413
+
+    def type_past_the_unread_limit() -> None:
+        for _ in range(session_module._MAX_PENDING_INPUT_BYTES // session_module._MAX_INPUT_BYTES + 2):
+            session.write(b"x" * session_module._MAX_INPUT_BYTES)
+
+    with pytest.raises(TerminalError) as unread:
+        type_past_the_unread_limit()
+    assert unread.value.status_code == 429
+
+
+async def test_a_shell_that_ignores_the_hangup_is_killed(
+    tmp_path: Path,
+    manager: TerminalManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing kills a shell that is still running after the hangup's grace time."""
+    monkeypatch.setattr(session_module, "_HANGUP_GRACE_SECONDS", 0.2)
+    session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
+    _, viewer = session.attach()
+    session.write(b"trap '' HUP; echo $((3+4))trapped\n")
+    await _read_until(viewer, b"7trapped")
+
+    await manager.close("owner", session.id)
+
+    assert session.exit_code == -signal.SIGKILL
 
 
 async def test_closing_hangs_up_the_shell_and_its_foreground_job(tmp_path: Path, manager: TerminalManager) -> None:

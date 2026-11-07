@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.terminal import client as client_module
+from mindroom.terminal import session as session_module
 from mindroom.terminal.client import TerminalDetachedError, WorkerTerminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system import sandbox_proxy
@@ -27,6 +28,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.workers.runtime import reset_primary_worker_manager
 
@@ -144,6 +146,14 @@ async def _exit_code(stream: TerminalStream) -> int | None:
     return event.code
 
 
+async def _type_and_read_until_detached(stream: TerminalStream, text: str) -> None:
+    """Type ``text``, then take only output until the stream ends; a dropped viewer's stream may end before typing."""
+    await stream.send_input(text)
+    async with asyncio.timeout(20):
+        while True:
+            assert (await stream.receive()).type == "output"
+
+
 def _env(listing: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in listing.splitlines() if "=" in line)
 
@@ -153,26 +163,36 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     tmp_path: Path,
     runner: str,
 ) -> None:
-    """The terminal's shell sees what the agent's shell commands see, whether the runner runs them here or in a child."""
+    """The terminal's shell sees what the agent's shell commands see, whether the runner runs them here or in a child.
+
+    That includes the call's own environment, and no startup file in the shell's home runs.
+    """
     toolkit = _shell(_primary_paths(tmp_path, runner))
     terminals = _terminals(toolkit)
-    cwd_line, _, command_listing = (await _run_shell_command(toolkit, "env | sort")).partition("\n")
+    home = agent_workspace_root_path(tmp_path / "storage", "code")
+    home.mkdir(parents=True, exist_ok=True)
+    for startup_file in (".bashrc", ".bash_profile", ".profile"):
+        (home / startup_file).write_text("export FROM_STARTUP_FILE=1\n")
+    with collected_tool_environment(ToolEnvironment(values={"HOME": str(home), "FROM_THE_CALL": "1"})):
+        cwd_line, _, command_listing = (await _run_shell_command(toolkit, "env | sort")).partition("\n")
+        info = await terminals.open()
     workspace = cwd_line.removeprefix("[cwd: ").removesuffix("]")
 
-    info = await terminals.open()
     async with terminals.attach(info.id) as stream:
         await stream.send_input("env | sort > terminal.env; exit\r")
         assert await _exit_code(stream) == 0
 
-    terminal_env = _env((agent_workspace_root_path(tmp_path / "storage", "code") / "terminal.env").read_text())
+    terminal_env = _env((home / "terminal.env").read_text())
     command_env = _env(command_listing)
+    assert (terminal_env["HOME"], terminal_env["FROM_THE_CALL"]) == (str(home), "1")
+    assert "FROM_STARTUP_FILE" not in terminal_env
     assert terminal_env.pop("TERM") == "xterm-256color"
     for name in ("TERM", "SHLVL", "_"):
         command_env.pop(name, None)
         terminal_env.pop(name, None)
     assert terminal_env == command_env
     assert terminal_env["MINDROOM_AGENT_WORKSPACE"] == workspace
-    assert terminal_env["PWD"] == workspace == str(agent_workspace_root_path(tmp_path / "storage", "code").resolve())
+    assert terminal_env["PWD"] == workspace == str(home.resolve())
 
 
 async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resize(tmp_path: Path, runner: str) -> None:
@@ -201,6 +221,28 @@ async def test_a_terminal_keeps_running_between_viewers_and_takes_input_and_resi
     assert (ended.id, ended.alive, ended.exit_code, ended.cols, ended.rows) == (info.id, False, 3, 100, 30)
     await terminals.close(info.id)
     assert await terminals.sessions() == []
+
+
+async def test_a_viewer_that_falls_too_far_behind_is_told_to_attach_again(
+    tmp_path: Path,
+    runner: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped viewer's stream ends without an exit, while the terminal runs on and a new viewer gets its output."""
+    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    info = await terminals.open()
+    with monkeypatch.context() as limited:
+        # Any output at all puts the viewer too far behind.
+        limited.setattr(session_module, "_MAX_VIEWER_BACKLOG_BYTES", 0)
+        async with terminals.attach(info.id) as dropped:
+            with pytest.raises(TerminalDetachedError):
+                await _type_and_read_until_detached(dropped, "echo $((6*6))done\r")
+
+    [running] = await terminals.sessions()
+    assert running.alive
+    async with terminals.attach(info.id) as again:
+        await again.send_input("echo $((7*7))alive\r")
+        await _read_until(again, b"49alive")
 
 
 async def test_a_terminal_answers_only_the_agent_and_workspace_it_serves(tmp_path: Path, runner: str) -> None:
