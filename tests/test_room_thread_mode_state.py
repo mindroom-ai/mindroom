@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import AdmissionFacts, RoomMembershipPosition
+from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 from mindroom.matrix.users import AgentMatrixUser
@@ -1017,14 +1018,34 @@ async def test_config_reload_drops_an_entity_the_config_no_longer_has(room_state
 
 @pytest.mark.asyncio
 async def test_unchanged_accounts_are_written_once(room_state: RoomState) -> None:
-    """Concurrent and later unchanged triggers write the list once."""
+    """Later triggers with unchanged membership do not rewrite the list."""
     config, paths, ids, _, client = room_state
     setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
-    await asyncio.gather(*(setup.publish_room_state() for _ in range(3)))
-    await setup.publish_room_state()
+    for _ in range(3):
+        await setup.publish_room_state()
     assert [write.kwargs for write in _writes(client, ACCOUNTS_EVENT_TYPE)] == [
         {"state_key": ids[ROUTER_AGENT_NAME].full_id},
     ]
+
+
+@pytest.mark.asyncio
+async def test_slower_earlier_trigger_cannot_restore_a_departed_account(room_state: RoomState) -> None:
+    """Triggers in one room run one at a time, so the list ends with the latest membership."""
+    config, paths, ids, events, client = room_state
+    agent2 = ids["agent2"].full_id
+    read_members = client.joined_members.side_effect
+
+    async def depart_after_first_read(room_id: str) -> nio.JoinedMembersResponse:
+        client.joined_members.side_effect = read_members
+        response = await read_members(room_id)
+        events["m.room.member", agent2] = {"membership": "leave"}
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return response
+
+    client.joined_members.side_effect = depart_after_first_read
+    await asyncio.gather(*(reconcile_room_accounts(client, config, paths, ROOM_ID) for _ in range(2)))
+    assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1"))
 
 
 @pytest.mark.asyncio
