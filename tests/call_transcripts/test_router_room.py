@@ -387,6 +387,16 @@ async def test_posting_follows_the_power_levels_for_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_router_is_held_to_the_power_levels_for_messages_too() -> None:
+    """Whether the router may post its calls' messages follows the same rule; without a ready router it cannot tell."""
+    levels = _power_levels(users={ROUTER: 0}, events_default=50)
+
+    assert await _room(FakeRouterClient(state={ROOM: [_create("11"), levels]})).router_may_post(ROOM) is False
+    assert await _room(FakeRouterClient(state={ROOM: [_create("11")]})).router_may_post(ROOM) is True
+    assert await _room(None).router_may_post(ROOM) is None
+
+
+@pytest.mark.asyncio
 async def test_everyone_may_post_in_a_room_without_power_levels() -> None:
     """Without power levels everyone is at level 0, which may post messages."""
     room = _room(FakeRouterClient(state={ROOM: [_create("11")]}))

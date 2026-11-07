@@ -157,6 +157,10 @@ class _CallRoom(Protocol):
         """Return whether ``user_id`` may post messages in the room by its power levels, None when it cannot tell."""
         ...
 
+    async def router_may_post(self, room_id: str) -> bool | None:
+        """Return whether the router may post messages in the room by its power levels, None when it cannot tell."""
+        ...
+
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> Mapping[str, str | None] | None:
         """Return each person's display name in the room, None for someone without one; None when it cannot tell."""
         ...
@@ -637,6 +641,7 @@ class CallTranscriptService:
         """Post the ended call's one message in its row's thread, with notes while they can be had, or hold it a minute.
 
         A call in which people spoke but none of it could be transcribed posts a message that says so, without turns.
+        A message the router may not post is given up, as when it left the room.
         """
         assert call.ended_at is not None
         # Due and read under the room's lock, so every stretch let in before then has its line written first.
@@ -647,6 +652,9 @@ class CallTranscriptService:
         turns = _turns(lines)
         if not turns and all(line.reason != "not-transcribed" for line in lines):
             await self._finish(call)
+            return
+        if await self._room.router_may_post(call.room_id) is False:
+            await self._finish(call, given_up="router-may-not-post")
             return
         notes = self._written_notes.get(call.id)
         writes_notes = (

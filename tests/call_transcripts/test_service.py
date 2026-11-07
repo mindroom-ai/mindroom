@@ -76,6 +76,7 @@ class FakeRoom:
     readable: bool = True
     ready: bool = True
     router_in_room: bool = True
+    router_posts: bool = True
     failed_transcript_posts: int = 0
     lost_row_answers: int = 0
     failing_edits: bool = False
@@ -120,6 +121,11 @@ class FakeRoom:
         if not (self.readable and self.ready):
             return None
         return {user_id: self.names.get(user_id) for user_id in user_ids}
+
+    async def router_may_post(self, room_id: str) -> bool | None:
+        """Answer from ``router_posts``, or not at all while the room is unreadable or the router is away."""
+        del room_id
+        return self.router_posts if self.readable and self.ready else None
 
     def _gated(self, room_id: str) -> bool:
         return self.gated_rooms is None or room_id in self.gated_rooms
@@ -1364,6 +1370,23 @@ async def test_the_message_of_a_call_in_a_room_the_router_left_is_given_up(world
     assert stored is not None
     assert stored.transcript_done_at is not None
     assert stored.transcript_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_the_message_of_a_call_in_a_room_the_router_may_not_post_in_is_given_up(world: World) -> None:
+    """A message the router may not post is given up as soon as it is due: no notes, no upload, its lines deleted."""
+    call_id = await world.end_by_leaving(ANN, BOB)
+    world.room.router_posts = False
+    world.clock.advance(20)
+
+    await world.tick()
+
+    assert world.room.transcripts == []
+    assert world.notes.transcripts == []
+    assert world.store.lines(call_id) == []
+    stored = world.store.call(call_id)
+    assert stored is not None
+    assert (stored.transcript_done_at, stored.transcript_event_id) == (world.clock.now, None)
 
 
 @pytest.mark.asyncio

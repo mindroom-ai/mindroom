@@ -113,6 +113,11 @@ class RouterCallRoom:
         required = _message_power_level(power_levels)
         return user_id in state.creators() or user_power_level(power_levels, user_id) >= required
 
+    async def router_may_post(self, room_id: str) -> bool | None:
+        """Return whether the room's power levels let the router send ``m.room.message`` events."""
+        client = self.client()
+        return None if client is None else await self.may_post(room_id, client.user_id)
+
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> Mapping[str, str | None] | None:
         """Return each person's display name from their membership in the room, None for someone without one.
 
