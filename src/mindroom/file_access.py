@@ -60,13 +60,12 @@ def agent_file_access(config: Config | None, agent_name: str | None) -> FileAcce
     return resolved_file_access(config, agent_name)
 
 
-def _requested_path(raw_path: str, field_name: str) -> Path:
-    """Return one model-supplied path with ``~`` expanded, so reads and writes name the same file."""
-    try:
-        return Path(raw_path).expanduser()
-    except RuntimeError as exc:
-        msg = f"{field_name} '{raw_path}' names a home directory that cannot be determined."
-        raise ValueError(msg) from exc
+def _requested_path(raw_path: str) -> Path:
+    """Return one model-supplied path with ``~`` expanded, so reads and writes name the same file.
+
+    A name such as ``~draft.md`` that names no user stays as written.
+    """
+    return Path(os.path.expanduser(raw_path))  # noqa: PTH111 - Path.expanduser raises for an unknown user.
 
 
 def resolve_agent_file(
@@ -77,7 +76,7 @@ def resolve_agent_file(
     field_name: str,
 ) -> AuthorizedFile:
     """Return the authorized file for one model-supplied path, or raise ``ValueError``."""
-    requested = _requested_path(raw_path, field_name)
+    requested = _requested_path(raw_path)
     if file_access == "unrestricted":
         base = workspace_root if workspace_root is not None else Path.cwd()
         candidate = requested if requested.is_absolute() else base / requested
@@ -118,7 +117,7 @@ def write_agent_file(
     Paths resolve as for reads; any setting but ``unrestricted`` refuses paths outside the workspace and agents
     without one.
     """
-    requested = _requested_path(raw_path, "Path")
+    requested = _requested_path(raw_path)
     restrict = file_access != "unrestricted"
     if restrict and workspace_root is None:
         msg = f"Path '{raw_path}' requires an agent workspace; file_access is 'workspace'."

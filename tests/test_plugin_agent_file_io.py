@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -20,76 +22,18 @@ from tests.api.sandbox_runner_support import execute_call
 from tests.conftest import publish_test_plugins
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
 
-# The example tool of docs/plugins.md, which imports only the supported plugin surface.
-_NOTES_TOOLS = '''
-from pathlib import Path
-from typing import Literal
-
-from mindroom.plugin_api import (
-    ToolCategory,
-    ToolFileAccess,
-    ToolManagedInitArg,
-    Toolkit,
-    register_tool_with_metadata,
-    resolve_agent_file,
-    tool,
-    write_agent_file,
+# The example tool of docs/plugins.md's "Agent files" section, which imports only the supported plugin surface.
+_AGENT_FILES_EXAMPLE = re.search(
+    r"^### Agent files\n.*?^```python\n(.*?)^```$",
+    (Path(__file__).parent.parent / "docs/plugins.md").read_text(encoding="utf-8"),
+    re.DOTALL | re.MULTILINE,
 )
-
-
-class NotesTools(Toolkit):
-    name = "notes"
-
-    def __init__(
-        self,
-        *,
-        tool_output_workspace_root: Path | None,
-        file_access: Literal["workspace", "unrestricted"],
-    ) -> None:
-        super().__init__()
-        self.workspace_root = tool_output_workspace_root
-        self.file_access = file_access
-
-    @tool
-    def save_note(self, path: str, text: str) -> str:
-        """Save a note.
-
-        Args:
-            path: Where to save the note, relative to the workspace.
-            text: The note.
-        """
-        written = write_agent_file(path, text.encode(), workspace_root=self.workspace_root, file_access=self.file_access)
-        return f"Saved {written}."
-
-    @tool
-    def read_note(self, path: str) -> str:
-        """Read a note.
-
-        Args:
-            path: The note's path, relative to the workspace.
-        """
-        note = resolve_agent_file(path, workspace_root=self.workspace_root, file_access=self.file_access, field_name="path")
-        with note.open() as file:
-            return file.read().decode()
-
-
-@register_tool_with_metadata(
-    name="notes",
-    file_access=ToolFileAccess.AGENT,
-    display_name="Notes",
-    description="Save and read notes in the agent workspace",
-    category=ToolCategory.PRODUCTIVITY,
-    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
-)
-def notes_tools() -> type[NotesTools]:
-    return NotesTools
-'''
+assert _AGENT_FILES_EXAMPLE is not None
+_NOTES_TOOLS = _AGENT_FILES_EXAMPLE[1]
 
 _OUTSIDE_WRITE_CASES = [("workspace", False), ("unrestricted", True)]
 
@@ -179,6 +123,17 @@ async def test_plugin_tool_reads_back_a_home_path_it_wrote(
             await call_entrypoint(read_note, path="~/note.md")
         assert not (home / "note.md").exists()
     assert not (workspace / "~").exists()
+
+
+@pytest.mark.asyncio
+async def test_plugin_tool_saves_a_tilde_name_that_names_no_user_below_the_workspace(tmp_path: Path) -> None:
+    """A name such as `~draft.md` names no home directory, so it saves and reads back below the workspace."""
+    save_note, read_note, workspace = _primary_notes_tools(tmp_path, "workspace")
+
+    await call_entrypoint(save_note, path="~draft.md", text="Draft")
+
+    assert (workspace / "~draft.md").read_text() == "Draft"
+    assert await call_entrypoint(read_note, path="~draft.md") == "Draft"
 
 
 def test_write_agent_file_confines_an_unknown_file_access_to_the_workspace(tmp_path: Path) -> None:
