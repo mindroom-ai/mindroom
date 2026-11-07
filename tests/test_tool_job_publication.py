@@ -85,8 +85,8 @@ def test_a_subagent_job_is_published_under_its_agents_name() -> None:
 def test_hundreds_of_live_jobs_with_the_longest_ids_fit_in_a_state_update_listing_the_newest() -> None:
     """300 live jobs with maximum-length fields still make a state update the homeserver accepts, listing the newest.
 
-    Tuwunel counts the replaced state's content (``unsigned.prev_content``) toward the 65,535-byte event limit, and
-    reserves 10,240 bytes for the rest of an event, so two contents and that reserve must fit together.
+    Tuwunel counts the replaced state's content (``unsigned.prev_content``) toward the 65,535-byte event limit, so two
+    contents must fit together with the rest of the event, allowed 10,240 bytes as in Tuwunel's admin responder.
     """
     owner = replace(
         job_owner(),
