@@ -226,13 +226,15 @@ class World:
         return self.service
 
     async def say(self, call_id: str, user_id: str, *, ago: float = 3.0, seconds: float = 2.0) -> StoredLine:
-        """Upload a stretch of ``seconds`` that began ``ago`` seconds before now."""
-        return await self.service.speech(
+        """Upload a stretch of ``seconds`` that began ``ago`` seconds before now, which speech-to-text hears words in."""
+        line = await self.service.speech(
             call_id,
             user_id,
             audio=_wav(seconds),
             started_at=self.clock.now - ago,
         )
+        assert line is not None
+        return line
 
     async def end_by_leaving(self, *user_ids: str) -> str:
         """Start a call with ``user_ids``, let each say something, and have them all leave; return the call's id."""
@@ -1185,11 +1187,10 @@ async def test_at_most_240_stretches_a_minute_per_person(world: World) -> None:
     assert (await world.say(call.id, ANN, ago=1, seconds=0.25)).kind == "speech"
 
 
-@pytest.mark.parametrize("text", [None, ""], ids=["failed", "no-words"])
 @pytest.mark.asyncio
-async def test_a_stretch_that_fails_to_transcribe_becomes_a_gap(world: World, text: str | None) -> None:
+async def test_a_stretch_that_fails_to_transcribe_becomes_a_gap(world: World) -> None:
     """Speech-to-text failing leaves a "not transcribed" gap where the stretch was, and the call goes on."""
-    world.transcriber.text = text
+    world.transcriber.text = None
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(30)
 
@@ -1203,6 +1204,23 @@ async def test_a_stretch_that_fails_to_transcribe_becomes_a_gap(world: World, te
         None,
         "not-transcribed",
     )
+    world.transcriber.text = "Still here."
+    assert (await world.say(call.id, ANN, ago=1, seconds=0.5)).text == "Still here."
+
+
+@pytest.mark.asyncio
+async def test_a_stretch_in_which_speech_to_text_heard_no_words_adds_nothing(world: World) -> None:
+    """No words is not a failure: no line and no gap is written or announced, and the call goes on."""
+    world.transcriber.text = ""
+    call = await world.service.join(ROOM, ANN)
+    world.clock.advance(30)
+
+    with world.service.listen(ROOM, world.events.append):
+        nothing = await world.service.speech(call.id, ANN, audio=_wav(1.0), started_at=world.clock.now - 2)
+
+    assert nothing is None
+    assert world.store.lines(call.id) == []
+    assert world.events == []
     world.transcriber.text = "Still here."
     assert (await world.say(call.id, ANN, ago=1, seconds=0.5)).text == "Still here."
 

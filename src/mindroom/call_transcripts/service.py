@@ -320,11 +320,12 @@ class CallTranscriptService:
                 await self._release(call, now, user_ids=[user_id])
             return await self._settle(call, now, state)
 
-    async def speech(self, call_id: str, user_id: str, *, audio: bytes, started_at: float) -> StoredLine:
+    async def speech(self, call_id: str, user_id: str, *, audio: bytes, started_at: float) -> StoredLine | None:
         """Transcribe one stretch the person said from ``started_at`` into a line, or a gap if speech-to-text fails.
 
-        The audio is never written to disk. A stretch said before its call ended is accepted until the transcript
-        message is posted; one said while anyone held Pause never is.
+        A stretch speech-to-text heard no words in adds nothing, and returns None. The audio is never written to disk.
+        A stretch said before its call ended is accepted until the transcript message is posted; one said while anyone
+        held Pause never is.
         """
         call = await self._call_for(call_id, user_id)
         seconds = _speech_seconds(audio)
@@ -338,9 +339,12 @@ class CallTranscriptService:
             self._speaking[user_id] = stretch
         try:
             text = await self._transcribe(audio, call_id=call.id, user_id=user_id, seconds=seconds)
+            if text == "":
+                # Speech-to-text heard no words: nothing is missing from the transcript, so there is no gap either.
+                return None
             async with self._room_lock(call.room_id):
                 self._done_speaking(user_id, stretch)
-                if text:
+                if text is not None:
                     line = await asyncio.to_thread(
                         self._store.add_speech,
                         call.id,

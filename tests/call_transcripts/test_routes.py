@@ -309,6 +309,20 @@ async def test_speech_that_fails_to_transcribe_answers_a_gap(api: Api) -> None:
 
 
 @pytest.mark.asyncio
+async def test_speech_in_which_no_words_were_heard_answers_no_line(api: Api) -> None:
+    """A stretch speech-to-text heard no words in answers a null line and leaves nothing in the call."""
+    call_id = (await api.join(ANN)).json()["call"]["id"]
+    api.world.clock.advance(10)
+    api.world.transcriber.text = ""
+
+    response = await api.speech(call_id, ANN)
+
+    assert response.status_code == 200
+    assert response.json() == {"line": None}
+    assert api.world.store.lines(call_id) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("started_at", "audio"),
     [

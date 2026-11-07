@@ -136,7 +136,7 @@ async def upload_speech(call_id: str, request: Request, caller: _SignedIn) -> di
     """
     audio, started_at = await _speech_form(request)
     line = await caller.service.speech(call_id, caller.user_id, audio=audio, started_at=started_at)
-    return {"line": _line_json(line)}
+    return {"line": None if line is None else _line_json(line)}
 
 
 @router.get("/rooms/{room_id}/calls.live")

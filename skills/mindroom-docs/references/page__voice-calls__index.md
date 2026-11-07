@@ -375,7 +375,7 @@ Clients reach the transcripts under `/api/call-transcripts/v1` with a client ses
 | `POST /rooms/{room_id}/calls.join` | `{"call": Call}`: the room's live call, started if there is none; also the heartbeat |
 | `POST /calls/{call_id}/leave` | `{}` |
 | `POST /calls/{call_id}/pause` with `{"holding": true}` or `{"holding": false}` | `{"call": Call}` |
-| `POST /calls/{call_id}/speech`, multipart form data with `audio` (WAV) and `startedAt` (ISO 8601 time with its time zone) | `{"line": Line}`, a line or a gap |
+| `POST /calls/{call_id}/speech`, multipart form data with `audio` (WAV) and `startedAt` (ISO 8601 time with its time zone) | `{"line": Line or null}`: a line, a gap, or null when speech-to-text heard no words |
 | `GET /rooms/{room_id}/calls.live` | `{"call": Call or null, "lines": [Line], "names": {user ID: display name or null}}` |
 | `GET /rooms/{room_id}/calls.events` | Server-sent events, each with JSON `data`: `ready` (what `calls.live` answers), `call` (a Call), `line` (a Line), and `ended` (`{"callId"}`), with a comment every 20 seconds |
 
