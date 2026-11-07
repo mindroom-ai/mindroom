@@ -1,4 +1,4 @@
-"""Public helpers for plugin HTTP routes that serve a Matrix web client."""
+"""Public helpers for plugin HTTP routes."""
 
 from __future__ import annotations
 

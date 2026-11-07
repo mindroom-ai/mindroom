@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
-from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -40,7 +40,11 @@ class _PluginRoutesApp:
         # Without the main app's ``router`` the plugin's own takes its place, and ``app_root_path`` is where
         # ``request.url_for`` and ``request.base_url`` start, so URLs a plugin generates reach its own routes.
         sub_scope = {key: value for key, value in scope.items() if key != "router"}
-        await routes_app({**sub_scope, "root_path": plugin_root, "app_root_path": plugin_root}, receive, send)
+        await routes_app(
+            {**sub_scope, "root_path": plugin_root, "app_root_path": plugin_root, PLUGIN_NAME_SCOPE_KEY: name},
+            receive,
+            send,
+        )
 
     def _routes_app(self, name: str) -> ASGIApp | None:
         snapshot = config_lifecycle.require_api_state(self._app).snapshot
