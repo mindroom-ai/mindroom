@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 import idna
@@ -12,6 +12,9 @@ from httpx._utils import get_environment_proxies
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
 
 type _PublicFetchErrorCode = Literal[
     "url_not_allowed",
@@ -82,11 +85,14 @@ async def _read_final_response(response: httpx.Response, max_bytes: int) -> Publ
     return PublicFetchResult(url=str(response.url), content_type=response.headers.get("content-type"), content=content)
 
 
-async def _fetch(url: str, max_bytes: int, use_env_proxy: bool) -> PublicFetchResult:
+async def _fetch(url: str, max_bytes: int, use_env_proxy: bool, user_agent: str | None) -> PublicFetchResult:
+    headers = {"Accept-Encoding": "identity"}
+    if user_agent is not None:
+        headers["User-Agent"] = user_agent
     async with httpx.AsyncClient(
         transport=ServerFetchAsyncHTTPTransport(),
         mounts=_proxy_mounts() if use_env_proxy else None,
-        headers={"Accept-Encoding": "identity"},
+        headers=headers,
         timeout=httpx.Timeout(None, connect=_CONNECT_TIMEOUT_SECONDS),
     ) as client:
         request = client.build_request("GET", url.strip())
@@ -105,7 +111,13 @@ async def _fetch(url: str, max_bytes: int, use_env_proxy: bool) -> PublicFetchRe
     raise PublicFetchError(msg, code="too_many_redirects")
 
 
-async def fetch_public_url(url: str, *, max_bytes: int, use_env_proxy: bool = False) -> PublicFetchResult:
+async def fetch_public_url(
+    url: str,
+    *,
+    max_bytes: int,
+    use_env_proxy: bool = False,
+    user_agent: str | None = None,
+) -> PublicFetchResult:
     """Fetch a public HTTP(S) URL with GET, following up to ten redirects, within one 30-second deadline.
 
     Every hop must be a public address: loopback, private, link-local, and metadata targets are refused, including
@@ -114,11 +126,12 @@ async def fetch_public_url(url: str, *, max_bytes: int, use_env_proxy: bool = Fa
     most `max_bytes` bytes from a 2xx response.
     With `use_env_proxy`, a hop goes through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, unless
     `NO_PROXY` excludes it; that proxy resolves the hostname again itself, so it must refuse private addresses too.
+    `user_agent` replaces HTTPX's `User-Agent` header on every hop.
     Every failure raises `PublicFetchError`.
     """
     try:
         async with asyncio.timeout(_DEADLINE_SECONDS):
-            return await _fetch(url, max_bytes, use_env_proxy)
+            return await _fetch(url, max_bytes, use_env_proxy, user_agent)
     except TimeoutError:
         msg = f"The fetch did not finish within {_DEADLINE_SECONDS:g} seconds."
         raise PublicFetchError(msg, code="timeout") from None
@@ -137,13 +150,26 @@ async def fetch_public_url(url: str, *, max_bytes: int, use_env_proxy: bool = Fa
         raise PublicFetchError(msg, code="request_failed") from None
 
 
-def fetch_public_url_sync(url: str, *, max_bytes: int, use_env_proxy: bool = False) -> PublicFetchResult:
-    """Run `fetch_public_url` from synchronous code, such as a synchronous tool, never from an event loop's thread."""
+def run_fetch_sync[T](fetch: Coroutine[object, object, T]) -> T:
+    """Run an async fetch from synchronous code, such as a synchronous tool, never from an event loop's thread."""
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(fetch_public_url(url, max_bytes=max_bytes, use_env_proxy=use_env_proxy))
+        return loop.run_until_complete(fetch)
     finally:
         # Unlike `asyncio.run`, closing the loop does not wait for its executor, so a hostname lookup still running
         # past the deadline finishes on its own instead of holding the caller.
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
+
+
+def fetch_public_url_sync(
+    url: str,
+    *,
+    max_bytes: int,
+    use_env_proxy: bool = False,
+    user_agent: str | None = None,
+) -> PublicFetchResult:
+    """Run `fetch_public_url` from synchronous code, such as a synchronous tool, never from an event loop's thread."""
+    return run_fetch_sync(
+        fetch_public_url(url, max_bytes=max_bytes, use_env_proxy=use_env_proxy, user_agent=user_agent),
+    )

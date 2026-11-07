@@ -11298,6 +11298,7 @@ For a visible, persistent browser that the user can watch or control in MindRoom
 
 Tools that fetch pages from MindRoom itself (`website`, `trafilatura`, `newspaper`, `crawl4ai`, `agentql`, and the `browser` host target) reach only public HTTP(S) addresses.
 Private, loopback, link-local, multicast, reserved, and cloud-metadata targets are refused, and so are redirects, crawled links, and page resources that lead to them.
+`website`, `trafilatura`, and `newspaper` also refuse URLs that carry a user name or password, and fail on a page a server sends compressed or otherwise encoded or that does not finish downloading within 30 seconds.
 Unless a worker egress proxy is set, DNS answers that change after a URL is checked cannot redirect the connection to an internal service.
 Only the `browser` tool can opt into private networks, with [`allow_private_networks`](#browser-configuration).
 In Computer mode, the `browser` tool also opens worker-local loopback previews such as `http://localhost:5173` without that option; see [Preview a local web app](https://docs.mindroom.chat/tools/worker-computer/#preview-a-local-web-app).
@@ -11320,8 +11321,7 @@ WebRTC cannot send UDP from these browsers.
 ### [`website`]
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
-Pages larger than 2 MiB fail, as do pages a server sends compressed or otherwise encoded and pages that do not finish downloading within 30 seconds.
-URLs that carry a user name or password are refused.
+Pages larger than 2 MiB fail.
 
 ```yaml
 agents:
@@ -11335,7 +11335,6 @@ agents:
 `trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
 `extract_batch()` returns one JSON payload listing successes and failures.
 `crawl_website()` stops with an error when it reaches a refused target, while `extract_content=True` reports each refused page individually.
-A server that sends a compressed body fails the download.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -15899,7 +15898,7 @@ A body larger than 8 MiB, or one the server compressed despite being asked not t
 | `api_key` | `password` | `null` | Bearer token. |
 | `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
 | `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
-| `timeout` | `number` | `30` | Request timeout in seconds. |
+| `timeout` | `number` | `30` | Seconds the whole request may take, including redirects and the response body. |
 | `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
 | `all` | `boolean` | `false` | Enable `make_request()`. |
 
@@ -18271,6 +18270,7 @@ async def feed_xml(url: str) -> str:
 
 A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
 It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+Pass `user_agent` to send your own `User-Agent` header instead of HTTPX's default.
 It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
 Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
 In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
