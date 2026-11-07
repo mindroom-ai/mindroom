@@ -3055,6 +3055,7 @@ The rules are:
 5. **Mentioning another joined room participant**: if a message tags only joined users who are neither agents, teams, nor configured bot accounts, agents and teams stay silent.
 
 MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is empty from HTML mention pills in `formatted_body`, or otherwise from plain `@name` text in the body, so bridged messages without mention metadata still count.
+A message that marks its `m.mentions` as exact, as a hook or tool send with [`mentions`](https://docs.mindroom.chat/hooks/#sending-messages) does, mentions only the users listed there.
 Mentions of users who are not in the room or only invited do not suppress normal responses.
 Mentioning a configured agent that has not joined the room still counts as an explicit mention for the other agents.
 
@@ -19028,7 +19029,7 @@ ResponseResult(
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `@name` mentions of agents and teams in `text` mention them, unless `mentions` lists the Matrix user IDs of everyone the message mentions.
-  Names in `text` then still show as links, but only the listed users are mentioned, so another agent named in `text` neither answers the message nor counts as [mentioned earlier](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) in its thread; `mentions=[]` mentions nobody.
+  Names in `text` then still show as links, but only the listed users are mentioned, so an agent named only in `text` is not woken by the name and does not count as [mentioned earlier](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) in its thread; `mentions=[]` mentions nobody.
 - `extra_content` can set standard fields of the message content, such as `"msgtype": "m.notice"` for a notice, which agents never answer, or a `formatted_body` of your own in place of the HTML rendered from `text`; an `m.mentions` in it only adds to the mentions found in `text`.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
 - Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
