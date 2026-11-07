@@ -335,9 +335,6 @@ class HookContext:
     config: Config
     runtime_paths: RuntimePaths
     correlation_id: str
-    # The agent turn this hook runs in, and in a delegated child's turn the turn that delegated it; None outside a turn.
-    turn_id: str | None = field(default=None, kw_only=True)
-    parent_turn_id: str | None = field(default=None, kw_only=True)
     # `emit` fills these three with each hook's own before calling it.
     plugin_name: str = field(default="", kw_only=True)
     settings: dict[str, Any] = field(default_factory=dict, kw_only=True)
@@ -351,6 +348,9 @@ class HookContext:
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    # The agent turn this hook runs in, and in a delegated child's turn the turn that delegated it; None outside a turn.
+    turn_id: str | None = field(default=None, kw_only=True)
+    parent_turn_id: str | None = field(default=None, kw_only=True)
 
     def is_active(self) -> bool:
         """Return whether this hook still belongs to the live registry snapshot."""
