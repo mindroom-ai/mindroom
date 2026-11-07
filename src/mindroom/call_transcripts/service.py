@@ -356,13 +356,33 @@ class CallTranscriptService:
             if checked is not None and (falls_due := self._falls_due_at(checked)) is not None:
                 due.append(falls_due)
         now = self._clock()
+        await self._forget_finished_calls(now)
+        self._forget_quiet_speakers(now)
+        return min(_CHECK_SECONDS, max(_MIN_TICK_SECONDS, min(due, default=math.inf) - now))
+
+    async def tick_while_off(self) -> None:
+        """Hold the store to its limits while call transcripts are off, reading and writing nothing in Matrix.
+
+        Stops the Matrix writes in progress, ends every live call, gives up every transcript message not yet posted,
+        deleting its lines, and forgets finished calls. Rows stay as they are until call transcripts come back on
+        within a day of their call's end, when their owed edits are made.
+        """
+        await self.stop()
+        for call in await asyncio.to_thread(self._store.calls):
+            async with self._room_lock(call.room_id):
+                fresh = await asyncio.to_thread(self._store.call, call.id)
+                if fresh is not None and fresh.ended_at is None:
+                    fresh = await self._end(fresh)
+                if fresh is not None and fresh.transcript_done_at is None:
+                    await self._give_up(fresh, reason="call-transcripts-off")
+        await self._forget_finished_calls(self._clock())
+
+    async def _forget_finished_calls(self, now: float) -> None:
         await asyncio.to_thread(
             self._store.forget_finished_calls,
             before=now - _FORGET_AFTER_SECONDS,
             ended_before=now - _GIVE_UP_AFTER_SECONDS,
         )
-        self._forget_quiet_speakers(now)
-        return min(_CHECK_SECONDS, max(_MIN_TICK_SECONDS, min(due, default=math.inf) - now))
 
     async def stop(self) -> None:
         """Cancel the calls' Matrix writes in progress: each is made after the next start, and posted once."""
@@ -418,6 +438,10 @@ class CallTranscriptService:
         """
         if await self._present(call, now):
             return call
+        return await self._end(call)
+
+    async def _end(self, call: StoredCall) -> StoredCall:
+        """End a live call when an app in it last checked in or left, never before it started; return it ended."""
         presence = await asyncio.to_thread(self._store.presence, call.id)
         await asyncio.to_thread(
             self._store.end_call,

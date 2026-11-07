@@ -1056,6 +1056,70 @@ async def test_a_message_still_not_posted_a_day_after_its_call_is_given_up(world
 
 
 @pytest.mark.asyncio
+async def test_a_message_not_posted_within_a_day_of_the_end_is_given_up_before_any_attempt(world: World) -> None:
+    """After MindRoom was down for over a day, no notes are written and nothing is posted; the lines go at once."""
+    ended = await world.end_by_leaving(ANN)
+    live = await world.service.join(OTHER_ROOM, BOB)
+    world.clock.advance(5)
+    await world.say(live.id, BOB)
+    world.clock.advance(86_400)
+
+    world.restart()
+    await world.tick()
+    assert world.store.lines(ended) == []
+    world.clock.advance(61)
+    await world.tick()
+    world.clock.advance(20)
+    await world.tick()
+
+    assert world.room.transcripts == []
+    assert world.notes.transcripts == []
+    for call_id, ended_at in ((ended, START + 10), (live.id, START + 15)):
+        stored = world.store.call(call_id)
+        assert stored is not None
+        assert (stored.ended_at, stored.transcript_event_id) == (ended_at, None)
+        assert stored.transcript_done_at is not None
+        assert world.store.lines(call_id) == []
+
+
+@pytest.mark.asyncio
+async def test_while_off_calls_end_and_messages_not_posted_go_without_matrix_and_rows_catch_up_later(
+    world: World,
+) -> None:
+    """Off, writes in progress stop, live calls end and messages not yet posted go; back on, rows say the calls ended."""
+    pending = await world.end_by_leaving(ANN)
+    live = await world.service.join(OTHER_ROOM, BOB)
+    world.clock.advance(5)
+    await world.say(live.id, BOB)
+    world.room.row_gate = asyncio.Event()
+    world.room.gated_rooms = {THIRD_ROOM}
+    world.room.row_started = asyncio.Event()
+    stuck = await world.service.join(THIRD_ROOM, CAROL)
+    await world.room.row_started.wait()
+    sent = (list(world.room.rows), list(world.room.row_edits), list(world.room.transcripts))
+
+    await world.service.tick_while_off()
+
+    assert (world.room.rows, world.room.row_edits, world.room.transcripts) == sent
+    assert world.service._settling == {}
+    for call_id in (pending, live.id, stuck.id):
+        stored = world.store.call(call_id)
+        assert stored is not None
+        assert stored.ended_at is not None
+        assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 15, None)
+        assert world.store.lines(call_id) == []
+    world.room.row_gate.set()
+    world.clock.advance(15)
+    await world.tick()
+    assert world.room.transcripts == []
+    assert [(edit.call_id, edit.transcript_event_id) for edit in world.room.row_edits] == [
+        (pending, None),
+        (live.id, None),
+        (stuck.id, None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_the_message_of_a_call_in_a_room_the_router_left_is_given_up(world: World) -> None:
     """Once the router is no longer in the room, the message is not written or posted, and its lines are deleted."""
     call_id = await world.end_by_leaving(ANN, BOB)

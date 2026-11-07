@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,7 @@ import nio
 import pytest
 
 from mindroom.call_transcripts.service import CallRefusedError, CallTranscriptService
+from mindroom.call_transcripts.store import CallTranscriptStore
 from mindroom.config.calls import CallsConfig, CallTranscriptsConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -50,19 +52,19 @@ class _Sleeps:
 
     def __init__(self) -> None:
         self.delays: list[float] = []
+        self._waited = asyncio.Event()
 
     async def __call__(self, seconds: float) -> None:
         self.delays.append(seconds)
+        self._waited.set()
         await asyncio.sleep(0)
 
     async def until(self, condition: Callable[[], bool]) -> None:
-        """Let the loop run until ``condition`` holds."""
-        for _ in range(1_000):
-            if condition():
-                return
-            await asyncio.sleep(0)
-        msg = "the loop never got there"
-        raise AssertionError(msg)
+        """Let the loop run, its store work in threads included, until ``condition`` holds; fail after 5 seconds."""
+        async with asyncio.timeout(5):
+            while not condition():
+                self._waited.clear()
+                await self._waited.wait()
 
 
 def _coordinator(
@@ -199,6 +201,38 @@ async def test_the_loop_ticks_while_on_idles_while_off_and_reads_the_config_each
     ticked = len(ticks)
     await sleeps.until(lambda: len(ticks) >= ticked + 2)
     await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_while_off_the_loop_gives_up_what_was_not_posted_and_reads_and_writes_nothing_in_matrix(
+    tmp_path: Path,
+) -> None:
+    """Off from the start, the loop still runs: it ends calls and drops lines kept from before, with no Matrix call."""
+    paths = test_runtime_paths(tmp_path)
+    config = _config(enabled=False)
+    sleeps = _Sleeps()
+    coordinator = _coordinator(paths, lambda: config, sleeps)
+    router = _router()
+    coordinator.bind_if_ready(config, _bots(router))
+    await sleeps.until(lambda: len(sleeps.delays) >= 2)
+    assert not (paths.storage_root / "call_transcripts").exists()
+
+    store = CallTranscriptStore(paths.storage_root)
+    heard_at = time.time() - 30
+    call, _ = store.ensure_live_call(ROOM, at=heard_at)
+    store.record_presence(call.id, ANN, at=heard_at)
+    store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
+    waited = len(sleeps.delays)
+    await sleeps.until(lambda: len(sleeps.delays) >= waited + 2)
+    await coordinator.stop()
+
+    ended = store.call(call.id)
+    assert ended is not None
+    assert (ended.ended_at, ended.transcript_event_id) == (heard_at, None)
+    assert ended.transcript_done_at is not None
+    assert store.lines(call.id) == []
+    assert router.client.mock_calls == []
+    assert sleeps.delays[-2:] == [15.0, 15.0]
 
 
 @pytest.mark.asyncio

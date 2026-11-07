@@ -124,7 +124,7 @@ class CallTranscriptStore:
     """Calls, their lines and their apps' check-ins in ``<storage_root>/call_transcripts/calls.db``."""
 
     def __init__(self, storage_root: Path) -> None:
-        self.path = storage_root / "call_transcripts" / "calls.db"
+        self.path = database_path(storage_root)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path.parent.chmod(0o700)
         with self._transaction() as connection:
@@ -362,6 +362,11 @@ class CallTranscriptStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+
+def database_path(storage_root: Path) -> Path:
+    """Return where the call database is under the storage root, made by the first store opened there."""
+    return storage_root / "call_transcripts" / "calls.db"
 
 
 def _end_pause(connection: sqlite3.Connection, call_id: str, *, at: float) -> None:

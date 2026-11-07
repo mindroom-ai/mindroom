@@ -11,7 +11,7 @@ from mindroom.background_tasks import SupervisedLoop
 from mindroom.call_transcripts.notes import ModelNotesWriter
 from mindroom.call_transcripts.router_room import RouterCallRoom
 from mindroom.call_transcripts.service import CallTranscriptService
-from mindroom.call_transcripts.store import CallTranscriptStore
+from mindroom.call_transcripts.store import CallTranscriptStore, database_path
 from mindroom.call_transcripts.transcriber import SpeechTranscriber
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
@@ -45,17 +45,17 @@ class CallTranscriptsRuntimeCoordinator:
     _loop: SupervisedLoop = field(init=False)
 
     def __post_init__(self) -> None:
-        """Create the loop, which starts once the router is first bound."""
+        """Create the loop, which starts once the runtime first binds its routers, whether call transcripts are on or off."""
         self._loop = SupervisedLoop("call_transcripts", self._run)
 
     def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:
-        """Read and post through the router while it runs and call transcripts are on, and start the loop."""
+        """Start the loop, and read and post through the router while it runs and call transcripts are on."""
+        self._loop.start()
         router = bots.get(ROUTER_AGENT_NAME)
         if not config.calls.transcripts.enabled or router is None or router.client is None or not router.running:
             self.unbind()
             return
         self._router = router
-        self._loop.start()
 
     def unbind(self) -> None:
         """Stop reading and posting through the router, before it stops or is replaced; calls wait for the next one."""
@@ -75,6 +75,9 @@ class CallTranscriptsRuntimeCoordinator:
         """Return the service while call transcripts are on, the same one each time; None while they are off."""
         if not self.config_provider().calls.transcripts.enabled:
             return None
+        return self._made_service()
+
+    def _made_service(self) -> CallTranscriptService:
         if self._service is None:
             self._service = CallTranscriptService(
                 CallTranscriptStore(self.runtime_paths.storage_root),
@@ -97,12 +100,16 @@ class CallTranscriptsRuntimeCoordinator:
             await self.sleep(await self._pass())
 
     async def _pass(self) -> float:
-        """Check every call while call transcripts are on, and return how long to wait before the next pass."""
-        service = self.service()
-        if service is None:
-            return _IDLE_SECONDS
+        """Check every call, and return how long to wait before the next pass.
+
+        While call transcripts are off, a pass only ends calls and gives up what was not posted, touching no Matrix,
+        and makes no call database where there is none.
+        """
         try:
-            return await service.tick()
+            if self.config_provider().calls.transcripts.enabled:
+                return await self._made_service().tick()
+            if self._service is not None or database_path(self.runtime_paths.storage_root).exists():
+                await self._made_service().tick_while_off()
         except Exception:
             logger.exception("call_transcripts_pass_failed")
-            return _IDLE_SECONDS
+        return _IDLE_SECONDS
