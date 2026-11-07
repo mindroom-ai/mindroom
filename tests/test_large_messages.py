@@ -8,6 +8,7 @@ import nio
 import pytest
 from nio.crypto import OutboundGroupSession
 from nio.crypto.attachments import decrypt_attachment
+from structlog.testing import capture_logs
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -27,6 +28,7 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.matrix.client_session import _MatrixTransportShutdownError
 from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _NORMAL_MESSAGE_LIMIT,
@@ -461,22 +463,39 @@ async def test_prepare_large_message_upload_failure_falls_back_to_text() -> None
     _assert_text_sidecar_fallback(result, "upload failure ")
 
 
+def _bare_upload_error(status: int) -> nio.UploadError:
+    """Return an upload failure as nio parses a proxy's answer that carries no Matrix errcode."""
+    error = nio.UploadResponse.from_dict({})
+    assert isinstance(error, nio.UploadError)
+    error.transport_response = MagicMock(spec=aiohttp.ClientResponse, status=status)
+    return error
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "outage",
+    ("outage", "error_type", "waited_out"),
     [
-        aiohttp.ClientConnectionError("Connection refused"),
-        TimeoutError(),
-        nio.UploadError("Too many requests", "M_LIMIT_EXCEEDED"),
+        (aiohttp.ClientConnectionError("Connection refused"), "ClientConnectionError", True),
+        (TimeoutError(), "TimeoutError", True),
+        (nio.UploadError("Too many requests", "M_LIMIT_EXCEEDED"), "M_LIMIT_EXCEEDED", True),
+        (_bare_upload_error(429), "HTTP 429", True),
+        (_bare_upload_error(502), "HTTP 502", True),
+        (_bare_upload_error(500), None, False),
+        (_MatrixTransportShutdownError(), None, False),
     ],
 )
 @pytest.mark.parametrize("durable", [True, False])
 async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_truncated_text(
     monkeypatch: pytest.MonkeyPatch,
     outage: object,
+    error_type: str | None,
+    waited_out: bool,
     durable: bool,
 ) -> None:
-    """A payload frozen for later delivery keeps its sidecar when uploads fail past nio's retry bound, then recover."""
+    """A payload frozen for later delivery keeps its sidecar when uploads fail past nio's retry bound, then recover.
+
+    A server error and the shutdown fence end the wait at once.
+    """
     monkeypatch.setattr("mindroom.matrix.media._DURABLE_UPLOAD_RETRY_SECONDS", 0)
     client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
     recovered_upload = client.upload
@@ -494,22 +513,57 @@ async def test_durable_preparation_waits_out_an_outage_instead_of_freezing_a_tru
     client.upload = upload  # type: ignore[method-assign]
     content = _large_text_content("durable ")
 
-    result = await prepare_large_message(
-        client,
-        "!room:server",
-        content,
-        room_encrypted=False,
-        prepare_for_encrypted_delivery=durable,
-    )
+    with capture_logs() as logs:
+        result = await prepare_large_message(
+            client,
+            "!room:server",
+            content,
+            room_encrypted=False,
+            prepare_for_encrypted_delivery=durable,
+        )
 
-    if durable:
+    waits = [log for log in logs if log["event"] == "matrix_upload_waiting_for_homeserver"]
+    if durable and waited_out:
         assert attempts == 4
         assert result["msgtype"] == "m.file"
         assert result["file"]["url"] == "mxc://server/sidecar"
         assert _SIDECAR_UPLOAD_FALLBACK_TEXT not in result["body"]
+        assert [(wait["room_id"], wait["error_type"]) for wait in waits] == [("!room:server", error_type)] * 3
     else:
         assert attempts == 1
         _assert_text_sidecar_fallback(result, "durable ")
+        assert waits == []
+
+
+@pytest.mark.asyncio
+async def test_frozen_nonterminal_edit_waits_out_an_outage_for_its_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pause row is frozen like a final answer, so its sidecar upload outlasts nio's retry bound too."""
+    monkeypatch.setattr("mindroom.matrix.media._DURABLE_UPLOAD_RETRY_SECONDS", 0)
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    recovered_upload = client.upload
+    outage = aiohttp.ClientConnectionError("Connection refused")
+    attempts = 0
+
+    async def upload(**kwargs: object) -> tuple[object, None]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise outage
+        return await recovered_upload(**kwargs)
+
+    client.upload = upload  # type: ignore[method-assign]
+
+    result = await prepare_large_message(
+        client,
+        "!room:server",
+        _oversized_edit_content("$reply", "paused " + ("x" * 100000)),
+        room_encrypted=False,
+        prepare_for_encrypted_delivery=True,
+    )
+
+    assert attempts == 2
+    assert result["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
+    assert "io.mindroom.long_text" in result["m.new_content"]
 
 
 @pytest.mark.asyncio
@@ -659,8 +713,10 @@ async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_s
         _full_content: dict[str, object],
         *,
         room_encrypted: bool,
+        durable: bool,
     ) -> tuple[str, dict[str, object]]:
         assert room_encrypted is True
+        assert durable is False
         return "mxc://server/incomplete-streaming-sidecar", {
             "size": 123,
             "mimetype": "application/json",

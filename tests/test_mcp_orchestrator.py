@@ -694,12 +694,24 @@ async def test_reconcile_post_update_rooms_does_not_bind_trigger_runtime(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rooms_error", [None, aiohttp.ClientConnectionError("homeserver down")])
+@pytest.mark.parametrize(
+    ("rooms_error", "finalize_error"),
+    [
+        (None, None),
+        (aiohttp.ClientConnectionError("homeserver down"), None),
+        (aiohttp.ClientConnectionError("homeserver down"), RuntimeError("bind failed")),
+        (asyncio.CancelledError(), None),
+    ],
+)
 async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_services(
     tmp_path: Path,
-    rooms_error: Exception | None,
+    rooms_error: BaseException | None,
+    finalize_error: Exception | None,
 ) -> None:
-    """Config reloads finish with trigger runtime bound to the final API snapshot, even when room setup fails."""
+    """Config reloads finish with trigger runtime bound to the final API snapshot, even when room setup fails.
+
+    The room error stays the one raised when the bindings fail too, and a cancelled reload binds nothing.
+    """
     current_config = _config_with_code_agent(tmp_path)
     new_config = _config_with_code_agent(tmp_path, role="Write better code")
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=current_config)
@@ -742,6 +754,8 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
     def bind_runtime(_config: Config, _bots: object) -> None:
         assert _config is new_config
         call_order.append("bind")
+        if finalize_error is not None:
+            raise finalize_error
 
     with (
         patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
@@ -761,9 +775,14 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         if rooms_error is None:
             assert await orchestrator._apply_config_update_plan(current_config, plan) is True
         else:
-            with pytest.raises(type(rooms_error)):
+            with pytest.raises(type(rooms_error)) as raised:
                 await orchestrator._apply_config_update_plan(current_config, plan)
+            assert raised.value is rooms_error
+            assert raised.value.__cause__ is finalize_error
 
+    if isinstance(rooms_error, asyncio.CancelledError):
+        assert call_order == ["rooms"]
+        return
     assert call_order.count("bind") == 1
     assert call_order.index("rooms") < call_order.index("support") < call_order.index("bind")
 
