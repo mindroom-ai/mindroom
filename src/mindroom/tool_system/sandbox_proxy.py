@@ -54,11 +54,11 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.models import (
-    SANDBOX_RUNNER_API_ROOT,
     ProgressSink,
     WorkerHandle,
     WorkerReadyProgress,
     WorkerSpec,
+    normalize_sandbox_runner_api_root,
     worker_api_root,
 )
 from mindroom.workers.placements import placement_for_session
@@ -311,8 +311,8 @@ def _worker_route(
 
     ``base_dir`` is the calling agent's tool workspace in this primary's paths; a request that names a worker
     carries it relative to the shared storage root, which the worker mounts at its own path.
-    Without ``start``, the worker is never started, only looked up and marked used: its handle, None while its
-    backend knows none.
+    Without ``start``, a dedicated worker is never started, only looked up and marked used: its handle, None while
+    its backend knows none. The shared runner starts nothing, so its worker is ensured either way.
     """
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
@@ -364,7 +364,7 @@ def _worker_route(
     worker_key = spec.worker_key if spec is not None else None
     if spec is None:
         worker_handle = None
-    elif start:
+    elif start or not worker_backend_kind(runtime_paths).dedicated:
         worker_handle = worker_manager.ensure_worker(spec, progress_sink=progress_sink)
     else:
         worker_handle = worker_manager.touch_worker(spec.worker_key)
@@ -1035,16 +1035,13 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
         )
     if worker_backend_kind(runtime_paths).dedicated and (worker_handle is None or worker_handle.status != "ready"):
         return None
-    if worker_handle is None and proxy_config.proxy_url is None:
-        msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
-        raise RuntimeError(msg)
     return WorkerCall(
         request=request,
-        # Without a worker of its own, the call goes to the shared runner at the proxy URL.
+        # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
         api_root=(
             worker_api_root(worker_handle)
             if worker_handle is not None
-            else f"{proxy_config.proxy_url}{SANDBOX_RUNNER_API_ROOT}"
+            else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
         ),
         headers=worker_request_headers(
             worker_handle,

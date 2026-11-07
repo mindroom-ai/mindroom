@@ -22,8 +22,10 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_root
+from mindroom.workers.runtime import reset_primary_worker_manager
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -65,6 +67,14 @@ async def _run_shell_command(toolkit: AnyToolkit, command: str) -> object:
     function = toolkit_function(toolkit, "run_shell_command")
     assert function is not None
     return await function.entrypoint(command)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_primary_worker_manager() -> Iterator[None]:
+    """Start each test with a worker manager that knows no worker, and drop the one it leaves."""
+    reset_primary_worker_manager()
+    yield
+    reset_primary_worker_manager()
 
 
 @pytest.fixture
@@ -132,17 +142,27 @@ def _unsent(sent: httpx.Request) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("current_static_runner")
-@pytest.mark.parametrize("worker_scope", [None, "user"])
+@pytest.mark.parametrize(
+    ("worker_scope", "proxy_url"),
+    [
+        (None, "http://runner:8765"),
+        ("user", "http://runner:8765"),
+        # The runner's URL may name its API root; a scoped call reaches the same runner either way.
+        ("user", "http://runner:8765/api/sandbox-runner"),
+    ],
+    ids=["unscoped", "user", "user-api-root-url"],
+)
 async def test_a_call_built_unsent_is_the_one_its_toolkit_sends_to_the_shared_runner(
     tmp_path: Path,
     executed: list[httpx.Request],
     worker_scope: WorkerScope | None,
+    proxy_url: str,
 ) -> None:
     """A toolkit's unsent call is built exactly as its sent calls are, and the shared runner needs no start."""
     paths = _paths(
         tmp_path,
         {
-            "MINDROOM_SANDBOX_PROXY_URL": "http://runner:8765",
+            "MINDROOM_SANDBOX_PROXY_URL": proxy_url,
             "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
             "MINDROOM_SANDBOX_PROXY_TOOLS": "shell",
         },
@@ -210,6 +230,26 @@ def test_a_toolkit_whose_calls_run_here_has_no_worker_stand_ins(tmp_path: Path) 
     """Only a toolkit built to run in a worker has stand-ins to build its calls with."""
     paths = _paths(tmp_path, {"MINDROOM_SANDBOX_EXECUTION_MODE": "off"})
     assert toolkit_worker_stand_ins(_shell(paths)) is None
+
+
+@pytest.mark.usefixtures("current_static_runner")
+def test_an_unscoped_call_reaches_the_shared_runner_at_its_api_root(tmp_path: Path) -> None:
+    """A call without a worker of its own goes to the shared runner's API root, however its URL names the runner."""
+    paths = _paths(
+        tmp_path,
+        {
+            "MINDROOM_SANDBOX_PROXY_URL": "http://runner:8765/api/sandbox-runner",
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+        },
+    )
+    stand_ins = toolkit_worker_stand_ins(_shell(paths))
+    assert stand_ins is not None
+
+    call = worker_call(stand_ins, "run_shell_command", start=False)
+
+    assert call is not None
+    assert call.request.worker_key is None
+    assert call.api_root == "http://runner:8765/api/sandbox-runner"
 
 
 @pytest.mark.parametrize("start", [True, False])
