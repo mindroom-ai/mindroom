@@ -2021,4 +2021,3 @@ async def test_a_subagent_works_until_its_own_request_carries_the_pause_notice(
     result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
     assert isinstance(result, str)
     assert "Report written" in result
-
