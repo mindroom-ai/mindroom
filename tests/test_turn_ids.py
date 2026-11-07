@@ -10,7 +10,8 @@ import pytest
 
 from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
-from mindroom.delegation.lifecycle import child_tool_runtime_context
+from mindroom.config.models import ModelConfig
+from mindroom.delegation.state import DelegationState
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.hooks import (
     EVENT_CONTACT_BEFORE_SEND,
@@ -34,6 +35,7 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.runtime_context import emit_custom_event, get_tool_runtime_context, tool_runtime_context
 from tests.bot_helpers import _noop_typing_indicator
 from tests.conftest import (
@@ -45,18 +47,29 @@ from tests.conftest import (
 )
 from tests.contacts.test_policy import _check, _tool_context
 from tests.contacts.test_policy import _config as _contact_config
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, native_delegation_config
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    _saved_approval_calls,
+    approval_executor,
+    native_delegation_config,
+    registered_report_tool,
+    respond,
+    resume,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _target
 from tests.scripted_agent_helpers import PROBE_TOOL, registered_probe_tools
 from tests.test_cancelled_response_hook import _envelope, _response_hook_service, _team_bot
 from tests.test_delegation_direct_audit import _identity
+from tests.test_delegation_execution import _config as _delegation_config
+from tests.test_delegation_execution import _leader_identity, _parent_record
 from tests.test_queued_message_notify import _bot
 from tests.test_response_payload_preparation import _preparation, _request
 from tests.test_response_runner_session_lifecycle import _session_runner, _thread_request
 from tests.test_tool_hooks import _plugin, _tool_runtime_context
-from tests.tool_job_helpers import job_child
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -202,19 +215,50 @@ async def test_a_delegated_child_s_tool_calls_carry_its_own_turn_id_and_its_call
     ]
 
 
-def test_a_child_s_child_names_the_child_s_turn_as_its_parent(tmp_path: Path) -> None:
-    """Each delegation level gets a turn of its own whose parent is the turn one level up."""
-    config = native_delegation_config(agents={"leader": AgentConfig(display_name="Leader")})
-    caller = replace(
-        _delegate_runtime_context(config, _runtime_paths(tmp_path), execution_identity=_identity()),
-        turn_id="turn-caller",
+@pytest.mark.asyncio
+async def test_a_child_resumed_after_approval_keeps_its_turn_id_when_a_model_switch_continues_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed run and the continuation a model switch starts are one child turn, so their calls share its ID."""
+    seen: list[tuple[str, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL, agents=["code"])
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.turn_id))
+
+    paths = _runtime_paths(tmp_path)
+    config = _delegation_config(paths, child_tools=("report", "thread_model"))
+    config.models["alternate"] = ModelConfig(provider="openai", id="alternate-model")
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
     )
+    switch = tool_call("switch_thread_model", "call-switch", model_name="alternate", when="after-toolcall")
+    later = tool_call("switch_thread_model", "call-later", model_name="default", when="next-turn")
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), calls(switch), calls(later), answer("Done")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    registry = HookRegistry.from_plugins([_plugin("turn-ids", [before])])
+    identity = _leader_identity()
+    options = {"config": config, "runtime_paths": paths, "identity": identity, "hook_registry": registry}
 
-    child = child_tool_runtime_context(caller, job_child())
-    grandchild = child_tool_runtime_context(child, job_child("c" * 32))
+    with registered_report_tool():
+        paused = await respond("leader", "delegate", **options, run_id="parent-run")
+        assert isinstance(paused, PausedAttempt)
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        [pending] = state.pending_tools
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            **options,
+            decisions={str(pending["tool_call_id"]): True},
+        )
 
-    assert (child.parent_turn_id, grandchild.parent_turn_id) == ("turn-caller", child.turn_id)
-    assert len({caller.turn_id, child.turn_id, grandchild.turn_id} - {None}) == 3
+    assert isinstance(result, CompletedApprovalRun)
+    assert [name for name, _turn in seen] == ["write_report", "switch_thread_model", "switch_thread_model"]
+    [turn] = {turn for _name, turn in seen}
+    assert turn is not None
 
 
 @pytest.mark.asyncio
