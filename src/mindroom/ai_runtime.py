@@ -24,6 +24,7 @@ __all__ = [
     "queued_message_signal_context",
     "queued_notice_after_tool_batch",
     "queued_notice_on_resume_entry",
+    "told_to_pause",
 ]
 
 logger = get_logger(__name__)
@@ -129,6 +130,17 @@ def _append_queued_notice_if_needed(
     if not notice_context.notice_fired:
         notice_context.notice_fired = True
         logger.info("queued_message_notice_injected", response_turn_id=response_turn_id)
+
+
+def told_to_pause() -> bool:
+    """Return whether this reply's model was told to pause for a newer message that still waits."""
+    context = _queued_message_notice_context.get()
+    return (
+        context is not None
+        and context.notice_fired
+        and context.state is not None
+        and context.state.has_pending_human_messages()
+    )
 
 
 def _ends_with_completed_tool_batch(
