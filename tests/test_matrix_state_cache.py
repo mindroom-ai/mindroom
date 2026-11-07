@@ -215,6 +215,21 @@ def test_matrix_state_cache_observes_first_write_after_missing_read(tmp_path: Pa
     assert written.get_room("dev") is not None
 
 
+def test_matrix_state_cache_keeps_a_local_write_across_the_stat_ttl(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """State this process wrote stays one cached object after the stat TTL, so identity memos keyed on it hold."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    now = 0.0
+    monkeypatch.setattr(matrix_state, "monotonic", lambda: now)
+    monkeypatch.setattr(matrix_state, "_MATRIX_STATE_STAT_TTL_SECONDS", 1.0)
+    # The missing file's stat is cached before the write, as a first read at startup caches it.
+    assert matrix_state_for_runtime(runtime_paths).rooms == {}
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+    written = matrix_state_for_runtime(runtime_paths)
+    now = 1.0
+
+    assert matrix_state_for_runtime(runtime_paths) is written
+
+
 def test_matrix_state_cache_observes_external_write_after_stat_ttl(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     """A write from another process must become visible after the stat TTL."""
     runtime_paths = test_runtime_paths(tmp_path)
