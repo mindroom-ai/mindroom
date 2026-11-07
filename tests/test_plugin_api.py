@@ -1,9 +1,9 @@
 """The plugin API exports exactly the supported plugin entry points, pinned together with `PLUGIN_API_VERSION`.
 
 Plugins import these names (docs/plugins.md, docs/hooks.md, docs/tools/atlassian.md), so removing a name, an enum
-member, or a documented method or property, renaming, reordering, or changing the kind of a parameter, or changing a
-constant's value breaks them; update this pin together with the plugin docs and the fleet, and bump
-`PLUGIN_API_VERSION` as docs/plugins.md says.
+member, a documented method or property, or a manifest field, renaming, reordering, or changing the kind of a
+parameter, or changing a constant's value breaks them; update this pin together with the plugin docs and the fleet,
+and bump `PLUGIN_API_VERSION` as docs/plugins.md says.
 """
 
 from __future__ import annotations
@@ -13,10 +13,16 @@ import hashlib
 import inspect
 import json
 import pkgutil
+from typing import TYPE_CHECKING
 
+import pytest
 import typing_extensions
 
 from mindroom import plugin_api, plugin_http
+from mindroom.tool_system import plugin_imports
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _EXPORTS = [
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
@@ -470,6 +476,18 @@ _CONSTANTS = {
 }
 
 
+# Every manifest field docs/plugins.md documents, set as a plugin sets it.
+_MANIFEST = {
+    "name": "demo",
+    "mindroom_plugin_api": "1.0",
+    "tools_module": "tools.py",
+    "oauth_module": "oauth.py",
+    "hooks_module": "hooks.py",
+    "routes_module": "routes.py",
+    "skills": ["skills"],
+    "reserved_namespaces": ["com.example.demo."],
+}
+
 # What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = ["ClientUser", "require_client_user", "require_room_member"]
@@ -485,7 +503,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 1), "ac8580901c401c8d84afb88e449bb732232f7922951bf9410c2491d5ddbfe968")
+_PINNED_VERSION = ((1, 1), "c5353269fb8945342c6da38b8ab85c334112074f62b5d319f078c4ac2c3dccfe")
 
 
 def _is_enum(obj: object) -> bool:
@@ -552,6 +570,26 @@ def test_each_exported_constant_keeps_its_value() -> None:
     assert {name: value for name, value in exported.items() if isinstance(value, str)} == _CONSTANTS
 
 
+def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
+    """MindRoom ignores unknown manifest fields, so renaming a documented one would silently drop it from every plugin."""
+    root = tmp_path.resolve()
+    for module in ("tools.py", "oauth.py", "hooks.py", "routes.py"):
+        (root / module).touch()
+    (root / "skills").mkdir()
+    (root / "mindroom.plugin.json").write_text(json.dumps(_MANIFEST))
+    (root / "later").mkdir()
+    (root / "later" / "mindroom.plugin.json").write_text(json.dumps({**_MANIFEST, "mindroom_plugin_api": "1.999"}))
+
+    plugin = plugin_imports._load_plugin_base(root)
+
+    modules = (plugin.tools_module_path, plugin.oauth_module_path, plugin.hooks_module_path, plugin.routes_module_path)
+    assert plugin.name == "demo"
+    assert modules == (root / "tools.py", root / "oauth.py", root / "hooks.py", root / "routes.py")
+    assert (plugin.skill_dirs, plugin.reserved_namespaces) == ([root / "skills"], ("com.example.demo.",))
+    with pytest.raises(plugin_imports.PluginValidationError, match=r"needs plugin API 1\.999"):
+        plugin_imports._load_plugin_base(root / "later")
+
+
 def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter_names_and_kinds() -> None:
     """`mindroom.plugin_http` exports exactly the route helpers, and each named entry point keeps its parameters."""
     shapes = {path: _parameter_shape(pkgutil.resolve_name(path)) for path in _ELSEWHERE_SIGNATURES}
@@ -562,7 +600,7 @@ def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter
 
 def test_the_pins_record_the_plugin_api_version_they_describe() -> None:
     """A change to the pinned surface fails here until the version is bumped and pinned with the surface's digest."""
-    pins = [_EXPORTS, _SIGNATURES, _ENUM_MEMBERS, _MEMBERS, _CONSTANTS, _HTTP_EXPORTS, _ELSEWHERE_SIGNATURES]
+    pins = [_EXPORTS, _SIGNATURES, _ENUM_MEMBERS, _MEMBERS, _CONSTANTS, _MANIFEST, _HTTP_EXPORTS, _ELSEWHERE_SIGNATURES]
     digest = hashlib.sha256(json.dumps(pins, sort_keys=True).encode()).hexdigest()
 
     assert (plugin_api.PLUGIN_API_VERSION, digest) == _PINNED_VERSION, (
