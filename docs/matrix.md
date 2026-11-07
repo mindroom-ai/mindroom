@@ -115,7 +115,8 @@ Use it when an agent seems to ignore messages in an encrypted room.
 
 When an agent cannot decrypt a message from an authorized sender, it logs a `matrix_event_decryption_failed` warning and posts one notice for that message's encryption session asking the user to resend.
 The notice replies to that message where an agent reply would go: in the message's thread, in the thread of the message an edit or reply targets, or in a new thread under the message.
-When none of these is known, for example when the edited message cannot be found, the notice is a plain reply.
+When none of these is known, for example when the edited message cannot be found or the homeserver does not answer within 10 seconds, the notice is a plain reply.
+In `thread_mode: room` rooms, agent replies stay in the room timeline, but this notice still starts or joins a thread, because MindRoom Chat opens room-mode rooms in its Threads view, where room-level notices are hidden.
 Only one agent posts the notice, even in multi-agent rooms.
 Resending normally fixes it, because the sender's client then shares a new key with the agent.
 Decryption-failure counters also appear on `/api/health` under `e2ee`.

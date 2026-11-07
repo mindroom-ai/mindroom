@@ -153,7 +153,12 @@ async def _send_decrypt_failure_notice(
         try:
             thread_id = await resolve_related_thread(room_id, related_event_id)
         except Exception as exc:  # A plain reply beats dropping the notice.
-            logger.warning("e2ee_decrypt_notice_thread_unresolved", room_id=room_id, error=str(exc))
+            logger.warning(
+                "e2ee_decrypt_notice_thread_unresolved",
+                room_id=room_id,
+                related_event_id=related_event_id,
+                error=repr(exc),
+            )
     if thread_id is None and event_info.can_be_thread_root:
         thread_id = event.event_id
     delivered = await send_message_result(
