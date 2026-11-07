@@ -425,6 +425,13 @@ def test_plugins_check_cli_prints_compatibility_as_json(tmp_path: Path) -> None:
         "hooks": ["compat-demo-hook"],
         "automations": [],
         "skills": ["skills"],
+        "internal_imports": [
+            {"path": "hooks.py", "line": 1, "name": "mindroom.hooks.hook"},
+            {"path": "oauth.py", "line": 1, "name": "mindroom.oauth.OAuthProvider"},
+            {"path": "tools.py", "line": 2, "name": "mindroom.tool_system.declarations.ToolCategory"},
+            {"path": "tools.py", "line": 2, "name": "mindroom.tool_system.declarations.ToolFileAccess"},
+            {"path": "tools.py", "line": 3, "name": "mindroom.tool_system.registration.register_tool_with_metadata"},
+        ],
     }
 
 
@@ -440,7 +447,7 @@ def test_plugins_check_cli_prints_failure_as_json(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
-    assert set(payload) == {"status", "detail"}
+    assert set(payload) == {"status", "detail", "internal_imports"}
     assert payload["status"] == "failed"
     assert payload["detail"].endswith("plugin exploded: list[str]")
 
@@ -468,6 +475,7 @@ def test_plugins_check_cli_json_stdout_holds_only_the_document(tmp_path: Path) -
         "hooks": [],
         "automations": [],
         "skills": [],
+        "internal_imports": [],
     }
     assert "chatty plugin imported" in completed.stderr
 
