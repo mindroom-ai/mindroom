@@ -17988,6 +17988,7 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 `context.execution_identity` names who the call runs for: the agent, inside a team the member that called the tool, the account that answers, the requester, and the conversation.
 `mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
 `context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
+`context.turn_id` names the agent turn the call belongs to, which that turn's hooks carry as `ctx.turn_id`, or is `None` for a call outside a turn, such as a background script's; in a delegated subagent's turn, `context.parent_turn_id` names the turn that delegated it.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -18931,6 +18932,8 @@ All contexts include these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
+| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval runs as a new turn with the same `correlation_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
+| `parent_turn_id` | `str \| None` | In a delegated subagent's turn, the `turn_id` of the turn that delegated it; otherwise `None` |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
 

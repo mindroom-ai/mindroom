@@ -103,12 +103,14 @@ class ResponsePayloadPreparer:
             payload,
             target_entity_name=self.agent_name,
             target_member_names=preparation.target_member_names,
+            turn_id=request.turn_id,
         )
         system_enrichment_items = await self.ingress_hook_runner.apply_system_enrichment(
             dispatch,
             prepared_payload.envelope,
             target_entity_name=self.agent_name,
             target_member_names=preparation.target_member_names,
+            turn_id=request.turn_id,
         )
         payload_ready_monotonic = time.monotonic()
         if pipeline_timing is not None:

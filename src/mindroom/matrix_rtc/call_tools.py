@@ -433,7 +433,7 @@ class _CallAgentCache:
         """Build the call's agent."""
         # Build the same tools and system prompt as text chat, less its Markdown output format, which a call speaks,
         # and the background-job guidance, which its calls cannot use: they all finish inside the call's turn.
-        # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
+        # The shell's mindroom-agent CLI stays off: call turns answer no inbound message to own it.
         build = create_agent(
             self.agent_name,
             self.config,
@@ -740,6 +740,8 @@ async def _run_authorized_call_agent(
             TurnBudget(monitor=context.budget_monitor, requester_id=requester_id),
         ).model_name
         context = replace(context, active_model_name=active_model_name)
+    # Each transcript is a turn of its own.
+    context = replace(context, turn_id=uuid4().hex)
     # Seeded here too: a cancellation before the turn driver starts still stores the transcript it answered.
     recorder = TurnRecorder(user_message=transcript)
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
@@ -821,10 +823,10 @@ async def _run_authorized_call_agent(
     response = result.text
     # Live commentary can be paraphrased or omitted; only cascaded TTS owns a
     # one-to-one mapping between this answer and the eventual spoken turn.
-    turn_id = response_tracker.register(state) if response and reconcile_spoken_response else None
+    token = response_tracker.register(state) if response and reconcile_spoken_response else None
     if (not response or not reconcile_spoken_response) and state.outcome == "interrupted":
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
-    return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
+    return CallAgentResponse(text=response, tool_names=tool_names, turn_id=token)
 
 
 def _call_agent_run_state(

@@ -1823,6 +1823,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
                     response_kind="agent",
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id or "failed-edit",
+                    turn_id="turn-1",
                     sources=request.sources,
                 ),
                 tool_trace=None,
