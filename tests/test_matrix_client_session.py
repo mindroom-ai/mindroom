@@ -203,7 +203,9 @@ async def test_matrix_requests_give_up_on_a_homeserver_that_stays_down(
             with pytest.raises(aiohttp.ClientConnectionError):
                 await client.room_get_event(_ROOM_ID, "$event")
             assert 60 < sum(waits) < 120
+            waits.clear()
             assert await send_room_event_result(client, _ROOM_ID, "m.room.message", _MESSAGE) is None
+            assert 60 < sum(waits) < 120
     finally:
         await client.close()
 
