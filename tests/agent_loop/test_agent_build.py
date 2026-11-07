@@ -33,13 +33,12 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.llm.provider import ModelRequest
 from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
-from mindroom.tool_system.declarations import ApprovalAlias
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
-from tests.conftest import bind_runtime_paths, publish_test_plugins, register_test_tool, test_runtime_paths
+from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
+from tests.tool_approval_helpers import judge_test_tool_function_as_shell
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -225,9 +224,7 @@ def test_a_rule_on_the_function_an_alias_names_gates_the_aliased_function(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The calculator says its ``add`` calls are shell commands, so a shell rule gates ``add`` and nothing else."""
-    calculator = builtin_tool_registry().entries["calculator"]
-    alias = ApprovalAlias(judged_as="run_shell_command", judge=lambda _arguments: None)
-    register_test_tool(monkeypatch, replace(calculator, approval_aliases={"add": alias}))
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
     config, runtime_paths = _config(tmp_path)
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],

@@ -73,7 +73,7 @@ async def _asks(
     config: Config,
     runtime_paths: RuntimePaths,
     arguments: dict[str, object],
-    alias: ApprovalAlias | None = _LINES,
+    alias: ApprovalAlias = _LINES,
 ) -> tuple[bool, float]:
     return await evaluate_tool_approval(config, runtime_paths, "run_line", arguments, "code", alias)
 
@@ -132,22 +132,21 @@ async def test_a_call_that_amounts_to_no_judged_call_follows_its_own_rules(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("own_rule", "command", "asks"),
+    ("own_rule", "command"),
     [
-        pytest.param({"match": "run_line", "action": "require_approval"}, "ls -la", True, id="own-rule-asks"),
-        pytest.param({"match": "run_line", "action": "auto_approve"}, "rm -rf build", True, id="own-rule-cannot-lift"),
+        pytest.param({"match": "run_line", "action": "require_approval"}, "ls -la", id="own-rule-asks"),
+        pytest.param({"match": "run_line", "action": "auto_approve"}, "rm -rf build", id="own-rule-cannot-lift"),
     ],
 )
 async def test_a_tools_own_rules_add_to_the_judged_rules(
     tmp_path: Path,
     own_rule: dict[str, object],
     command: str,
-    asks: bool,
 ) -> None:
     """The function's own rule still asks, and auto-approving it does not let it run what the shell rule asks about."""
     config, runtime_paths = _config(tmp_path, own_rule, _shell_review())
 
-    assert (await _asks(config, runtime_paths, {"command": command}))[0] is asks
+    assert (await _asks(config, runtime_paths, {"command": command}))[0] is True
 
 
 @pytest.mark.parametrize(
@@ -302,4 +301,5 @@ def test_the_tools_catalog_lists_a_tool_that_declares_an_alias() -> None:
     (tool,) = export_tools_metadata({"lines": _lines_tool()})
 
     assert tool["name"] == "lines"
-    assert "approval_aliases" not in json.loads(json.dumps(tool))
+    json.dumps(tool)
+    assert "approval_aliases" not in tool
