@@ -1214,9 +1214,10 @@ class StreamingResponse:
         """Record what live frames showed past the last progress edit, once a stream that ends early stopped them.
 
         Frames record nothing as they go, so a Stop, failure, or interruption, whose note the reply's span exit writes
-        below what the reply's records say it shows, would drop what readers saw since the last edit. Called once
-        every progress task has exited, so no edit's write-ahead races this one. Best effort: records that defer,
-        refuse, or fail it leave the note below the last edit.
+        below what the reply's records say it shows, would drop what readers saw since the last edit. Nothing is sent:
+        no write but that note may follow a committed Stop. Called once every progress task has exited, so no edit's
+        write-ahead races this one. Best effort: records that defer, refuse, or fail it leave the note below the last
+        edit.
         """
         if self.live is None or self.live.seq < 0 or not self.has_uncommitted_presentation():
             return

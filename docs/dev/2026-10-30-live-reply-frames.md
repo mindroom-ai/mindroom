@@ -13,6 +13,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 
 - Frames are custom ephemeral room events (MSC2477 send route, unstable prefix) relayed by our Tuwunel fork from an in-memory buffer, because the runtime already reaches the homeserver from behind NAT, clients already hold a `/sync` connection with resume, and the homeserver already decides room membership.
 - Durable edits stay as checkpoints every `update_interval` plus semantic boundaries and the terminal edit, so every client converges on the same final message and recovery keeps reading only durable writes.
+- A Stop, a stream error, or an interruption ends the reply below what frames showed, not below the last checkpoint: once frames stop, the stream records their text in the reply's records, and the note, the only write a committed Stop allows, carries it.
+  A checkpoint edit after a committed Stop would break the reply lifecycle, and shorter intervals would bring back the edits frames remove.
 - Frames carry the Markdown the next durable edit renders, not HTML: rendering 40 KB of Markdown with markdown-it-py and Pygments took 38 ms on the development host and produced 62 KB of HTML, which at ten frames a second would cost most of a core per long reply and hit the frame size limit early.
   Chat renders it with markdown-it configured like the server; code highlighting differs slightly until the terminal edit (Prism versus Pygments), which was accepted.
 - Delivery is opt-in by sync filter: a custom ephemeral type reaches, and wakes, only a sync whose filter lists it in `room.ephemeral.types`.
@@ -64,7 +66,6 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Clients without frame support (Element, bridges, older Chat builds) see the reply in steps of `update_interval` instead of the former fast start.
 - Federated users and sliding-sync clients get no frames.
 - A crash loses what frames showed beyond the last checkpoint; Chat falls back to the checkpoint after 12 s without frames.
-- A Stop or a stream error ends the reply below its last checkpoint, so up to one `update_interval` of text Chat showed live disappears above the note; writing a checkpoint after a committed Stop would break the reply lifecycle, and shorter intervals bring back the edits frames remove.
 - A reply split into several messages (`large_message_strategy: split`) keeps no reasoning, which would otherwise repeat on every segment, and a final edit carries reasoning only in `m.new_content`, cut to the space the answer leaves, so reasoning never turns an ordinary reply into a sidecar or segments for Element and bridges.
 - Teams stream body and tool calls but no reasoning, and a reply that paused for an approval shows reasoning only until the pause and keeps none on its final message: the continuation that finishes it streams through the caller-owned progress path, which carries no reasoning.
 - Every opted-in device wakes once per frame while a reply streams in any of its rooms.
