@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 import aiohttp
 import nio
 
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
@@ -187,12 +188,15 @@ class CallSession:
             if not task.cancelled():
                 task.exception()
 
-        preparing = self._preparing_agent = asyncio.create_task(
-            self.deps.prepare_agent(),
-            name=f"matrix_rtc_prepare_agent_{self.room_id}",
-        )
-        preparing.add_done_callback(prepared)
+        preparing: asyncio.Task[CallVoiceAgentOptions] | None = None
         try:
+            # A caller whose access went while the service was discovered gets no agent built.
+            self._require_start_allowed()
+            preparing = self._preparing_agent = asyncio.create_task(
+                self.deps.prepare_agent(),
+                name=f"matrix_rtc_prepare_agent_{self.room_id}",
+            )
+            preparing.add_done_callback(prepared)
             grant = await self.deps.fetch_grant()
             stages["sfu_granted"] = time.monotonic()
             self._require_start_allowed()
@@ -213,7 +217,8 @@ class CallSession:
                 stages["keys_sent"] = time.monotonic()
                 self._require_start_allowed()
             self._spawn(self._membership_refresh_loop())
-            options = await preparing
+            # Shielded: a cancelled start leaves the media at once instead of after an agent build drains.
+            options = await asyncio.shield(preparing)
             self._require_start_allowed()
             try:
                 await self.deps.bridge.start_agent(options)
@@ -224,12 +229,31 @@ class CallSession:
                 raise CallJoinError(msg) from error
             stages["agent_started"] = time.monotonic()
             self._require_start_allowed()
-        except BaseException:
-            # The preparation publishes nothing, so the session stops without waiting for it to unwind.
-            preparing.cancel()
-            await self.stop()
+        except BaseException as error:
+            await self._end_failed_start(error, preparing)
             raise
         logger.info("call_joined", room_id=self.room_id, identity=self._local_identity)
+
+    async def _end_failed_start(
+        self,
+        error: BaseException,
+        preparing: asyncio.Task[CallVoiceAgentOptions] | None,
+    ) -> None:
+        """Leave the media first, then wait out the agent preparation, whose failure decides the outcome."""
+        if preparing is not None:
+            preparing.cancel()
+        try:
+            await self.stop()
+        finally:
+            if preparing is not None:
+                # The real agent build finishes before it takes a cancellation, and none may outlive the start.
+                await asyncio.gather(wait_for_future_until_complete(preparing), return_exceptions=True)
+        if isinstance(error, (asyncio.CancelledError, CallStartRevokedError)) or preparing is None:
+            return
+        failure = None if preparing.cancelled() else preparing.exception()
+        if failure is not None and failure is not error:
+            # An agent that cannot start is skipped, whatever media step failed after its preparation did.
+            raise failure from error
 
     def _require_start_allowed(self) -> None:
         """Abort before the next call-start side effect when ownership was revoked or the agent's preparation failed."""
