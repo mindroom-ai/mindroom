@@ -117,6 +117,13 @@ async def _loopback_host(port: int) -> str | None:
     return None
 
 
+async def _loopback_only(request: aiohttp.ClientRequest, handler: aiohttp.ClientHandlerType) -> aiohttp.ClientResponse:
+    """Send ``request`` only to loopback: aiohttp follows a WebSocket handshake's redirects, wherever they point."""
+    if request.url.host not in {"127.0.0.1", "::1"}:
+        raise aiohttp.InvalidURL(request.url, "The relay reaches only loopback.")
+    return await handler(request)
+
+
 async def _upstream_url(connection: HTTPConnection, port: int) -> URL:
     """Return the URL of the app on ``port`` that ``connection`` asks for."""
     _require_dedicated_worker(connection)
@@ -204,7 +211,7 @@ async def relay_socket(websocket: WebSocket, port: int) -> None:
     headers = [(name, value) for name, value in websocket.headers.items() if name in _WEBSOCKET_HEADERS]
     try:
         async with (
-            aiohttp.ClientSession(timeout=_TIMEOUT) as session,
+            aiohttp.ClientSession(timeout=_TIMEOUT, middlewares=(_loopback_only,)) as session,
             session.ws_connect(url, protocols=protocols, headers=headers, max_msg_size=_MAX_MESSAGE_BYTES) as upstream,
         ):
             await websocket.accept(subprotocol=upstream.protocol)

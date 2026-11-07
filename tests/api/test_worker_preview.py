@@ -229,6 +229,25 @@ async def test_relay_passes_a_request_and_its_answer_without_the_runner_token(tm
 
 
 @pytest.mark.asyncio
+async def test_relay_passes_a_chunked_upload(tmp_path: Path) -> None:
+    """A body sent without a length, in chunks, reaches the app whole."""
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for part in (b"first;", b"second"):
+            yield part
+
+    async with (
+        _app() as port,
+        _runner(tmp_path) as runner,
+        aiohttp.ClientSession() as client,
+        client.put(f"{runner.root}/{port}/upload", data=chunks(), headers=_AUTH) as response,
+    ):
+        seen = await response.json()
+    assert dict(seen["headers"])["transfer-encoding"] == "chunked"
+    assert seen["body"] == "first;second"
+
+
+@pytest.mark.asyncio
 async def test_relay_streams_an_answer_as_the_app_writes_it(tmp_path: Path) -> None:
     """The first part of an answer arrives before the app has written the rest."""
     released = asyncio.Event()
@@ -273,7 +292,10 @@ async def test_relay_passes_an_apps_answer_as_the_app_sent_it(tmp_path: Path) ->
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host", ["::1", "::", "::ffff:127.0.0.1"])
 async def test_relay_reaches_an_app_on_an_ipv6_socket_that_takes_loopback(tmp_path: Path, host: str) -> None:
-    """An app on ``[::1]``, every IPv6 address, or ``::ffff:127.0.0.1`` (as Java binds localhost) is listed and reached."""
+    """An app on ``[::1]``, every IPv6 address, or ``::ffff:127.0.0.1`` (as Java binds localhost) is listed and reached.
+
+    Requests and WebSockets both reach it.
+    """
     async with AsyncExitStack() as stack:
         try:
             port = await stack.enter_async_context(_app(host))
@@ -286,6 +308,8 @@ async def test_relay_reaches_an_app_on_an_ipv6_socket_that_takes_loopback(tmp_pa
         async with client.get(f"{runner.root}/{port}/hello", headers=_AUTH) as response:
             assert response.status == 200
             assert (await response.json())["path"] == "/hello"
+        async with client.ws_connect(f"{runner.root}/{port}/socket", headers=_AUTH) as websocket:
+            assert (await websocket.receive_json())["path"] == "/socket"
 
 
 @pytest.mark.asyncio
@@ -470,6 +494,27 @@ async def test_relay_ends_the_apps_websocket_in_an_error_when_the_caller_drops_m
             websocket._response.connection.transport.abort()
         async with asyncio.timeout(5):
             assert await close_codes.get() == 1011
+
+
+@pytest.mark.asyncio
+async def test_relay_follows_a_websocket_redirect_only_on_loopback(tmp_path: Path) -> None:
+    """A WebSocket handshake the app redirects within loopback connects; one it redirects elsewhere is refused."""
+    async with (
+        _app() as port,
+        _app("127.0.0.2") as elsewhere,
+        _runner(tmp_path) as runner,
+        aiohttp.ClientSession() as client,
+    ):
+        here = f"http://127.0.0.1:{port}/socket"
+        async with client.ws_connect(
+            f"{runner.root}/{port}/hop?status=302&location={here}",
+            headers=_AUTH,
+        ) as websocket:
+            assert (await websocket.receive_json())["path"] == "/socket"
+        there = f"http://127.0.0.2:{elsewhere}/socket"
+        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect(f"{runner.root}/{port}/hop?status=302&location={there}", headers=_AUTH)
+        assert refused.value.status == 403
 
 
 @pytest.mark.asyncio
