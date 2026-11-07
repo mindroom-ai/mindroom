@@ -272,7 +272,7 @@ class _MindRoomWebsiteReader:
 
     def crawl(self, url: str) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
-        starting_url = url.strip()
+        starting_url = url
         crawl_host = _normalized_hostname(starting_url)
         num_links = 0
         crawler_result: dict[str, str] = {}
