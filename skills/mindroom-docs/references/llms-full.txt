@@ -18384,7 +18384,7 @@ See [Skills](https://docs.mindroom.chat/skills/) for the `SKILL.md` format, prec
 
 A plugin whose Matrix events clients trust, such as cards it sends, lists their prefixes in the manifest `reserved_namespaces` so agents cannot forge them.
 While the plugin is loaded, the `matrix_api` tool refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
-No other built-in tool lets an agent choose event types or content keys, and the plugin's own sends are not affected.
+Every other built-in tool fixes the event type and top-level content keys it sends, and the plugin's own sends are not affected.
 An agent whose code execution tools run in the primary process instead of a worker is fully trusted and can still send anything; see [Security posture](https://docs.mindroom.chat/architecture/security-posture/).
 
 ## Hooks
