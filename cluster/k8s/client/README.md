@@ -19,6 +19,8 @@ helm upgrade --install mindroom-client ./cluster/k8s/client \
 The default values render a Deployment, Service, a client `config.json` ConfigMap, and an nginx ConfigMap.
 The Deployment carries checksum annotations for both chart-managed ConfigMaps, so config changes roll pods on upgrade.
 The default `image.tag` is a [MindRoom Chat release](https://github.com/mindroom-ai/mindroom-chat/releases) (`vYYYY.M.N`); set `image.tag` or `image.digest` to run another one.
+The pinned tag moves only when someone bumps it in `values.yaml`; new client releases do not update it.
+With a tag that moves, such as `latest`, also set `image.pullPolicy: Always`, because the default `IfNotPresent` keeps the image a node already has.
 
 ## Homeserver Configuration
 
@@ -155,8 +157,7 @@ basePath: /mindroom
 MindRoom Chat releases do not work under a sub-path yet: their asset URLs and `config.json` request start at `/`, so keep `basePath` at `/` with them.
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
 It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
-The bundled Element Call under `public/element-call/` resolves to its own `assets/` directory.
-Files under `assets/` and `public/` are cached as immutable, except Element Call's stable files such as its `index.html`, which revalidate on every use.
+Files under `assets/` and `public/` are cached as immutable.
 Missing files there get no immutable caching header.
 The client always loads `/runtime-config.js` from the origin root, so route the full origin host to this Service even when `basePath` is not `/`.
 The chart serves `/runtime-config.js` directly from nginx because the image entrypoint would otherwise write it into the app directory, which the unprivileged read-only container forbids.

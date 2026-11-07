@@ -245,6 +245,27 @@ def test_client_chart_mounts_operator_notices_so_edits_reach_running_pods(tmp_pa
     assert "notices" not in {volume["name"] for volume in default_pod["volumes"]}
 
 
+def test_client_chart_mounts_its_files_where_its_nginx_config_reads_them(tmp_path: Path) -> None:
+    """An image whose nginx root is a real directory would otherwise keep its own config.json."""
+    pod = _client_pod(tmp_path, "basePath: /chat\nrootServiceWorkerCleanup:\n  enabled: true\n")
+    mounts = {mount["mountPath"]: mount["name"] for mount in pod["containers"][0]["volumeMounts"]}
+
+    assert mounts["/usr/share/nginx/html/config.json"] == "config"
+    assert mounts["/usr/share/nginx/html/root-cleanup-sw.js"] == "nginx-config"
+
+
+def test_client_chart_requires_an_image_tag(tmp_path: Path) -> None:
+    """The chart's appVersion is a MindRoom release, so it must not pick the client image tag."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/client"),
+        release_name="mindroom-client",
+        values_files=_values_files(tmp_path, 'image:\n  tag: ""\n'),
+    )
+
+    assert completed.returncode != 0
+    assert "image.tag must name a MindRoom Chat release" in completed.stderr
+
+
 def _client_main_nginx_conf(tmp_path: Path, values: str) -> str | None:
     docs = _render_chart(
         Path("cluster/k8s/client"),

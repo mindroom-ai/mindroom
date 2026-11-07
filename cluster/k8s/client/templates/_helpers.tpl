@@ -40,7 +40,7 @@ app.kubernetes.io/component: client
 {{- end -}}
 
 {{- define "mindroom-client.image" -}}
-{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
+{{- $tag := required "image.tag must name a MindRoom Chat release (vYYYY.M.N)" .Values.image.tag -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
 {{- else -}}
@@ -367,10 +367,6 @@ server {
   location = {{ $prefix }}/manifest.json {
     alias /usr/share/nginx/html/manifest.json;
     add_header Cache-Control "no-store, max-age=0" always;
-  }
-
-  location = {{ $prefix }}/pdf.worker.min.js {
-    alias /usr/share/nginx/html/pdf.worker.min.js;
   }
 {{- end }}
 
