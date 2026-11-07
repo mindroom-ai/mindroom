@@ -395,6 +395,26 @@ async def test_an_app_that_leaves_is_out_at_once(world: World) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_join_after_every_app_dropped_out_starts_a_new_call(world: World) -> None:
+    """A call ends when its last app drops out, though no check noticed it yet: a join after that starts another call."""
+    old = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    await world.settled()
+    world.clock.advance(61)
+
+    new = await world.service.join(ROOM, CAROL)
+    await world.settled()
+
+    assert new.id != old.id
+    assert new.members == (CAROL,)
+    ended = world.store.call(old.id)
+    assert ended is not None
+    assert ended.ended_at == START
+    assert world.room.rows == [(ROOM, old.id), (ROOM, new.id)]
+    assert [edit.call_id for edit in world.room.row_edits] == [old.id]
+
+
+@pytest.mark.asyncio
 async def test_a_restart_does_not_end_a_call_whose_apps_check_in_again(world: World) -> None:
     """Presence is kept on disk, and apps get a full 60 seconds after a restart to check in again."""
     call = await world.service.join(ROOM, ANN)
@@ -510,6 +530,7 @@ async def test_a_call_ends_when_its_last_app_was_last_heard_from_not_when_that_i
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(60)
+    await world.service.join(ROOM, BOB)
     await world.say(call.id, ANN)
     await world.service.leave(call.id, ANN)
     world.clock.advance(60)

@@ -224,7 +224,7 @@ class CallTranscriptService:
         self._written_notes: dict[str, str] = {}
 
     async def join(self, room_id: str, user_id: str) -> Call:
-        """Join the room's live call, starting it if there is none; from someone already in it, this is the heartbeat.
+        """Join the room's live call, starting one if there is none or nobody is in it; from someone in it, a heartbeat.
 
         Coming into the call needs permission to post in the room; a heartbeat does not check it again.
         """
@@ -236,7 +236,11 @@ class CallTranscriptService:
         async with self._room_lock(room_id):
             now = self._clock()
             live = await asyncio.to_thread(self._store.live_call, room_id)
-            if live is None or user_id not in await self._present(live, now):
+            present = frozenset() if live is None else await self._present(live, now)
+            if live is not None and not present:
+                # Its last app dropped out, so it ended then, though no check has noticed yet: this join starts another.
+                self._settle(await self._end(live), now)
+            if user_id not in present:
                 _require_poster(may_post)
             call, started = await asyncio.to_thread(self._store.ensure_live_call, room_id, at=now)
             await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now)
