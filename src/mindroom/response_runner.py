@@ -1521,6 +1521,10 @@ class ResponseRunner:
             )
             if not isinstance(prepared, ResponseRequest):
                 return prepared
+            prepared = await self.deps.request_preparer.with_system_enrichment(
+                prepared,
+                target_member_names=member_names or None,
+            )
             if team is None:
                 return await self._prepare_agent_turn(
                     prepared,

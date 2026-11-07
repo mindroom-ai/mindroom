@@ -3279,6 +3279,7 @@ visibility = [
     "mindroom.approval.continuation_runner",
     "mindroom.edit_regenerator",
     "mindroom.reply_turn.locked_turn",
+    "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.turns.dispatch",
     "mindroom.turns.interactive_selection",
@@ -5913,6 +5914,7 @@ path = "mindroom.response_payload_preparation"
 depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
+    "mindroom.reply_turn.request",
 ]
 visibility = [
     "mindroom.bot",
@@ -8133,12 +8135,17 @@ path = "mindroom.worker_computer.runtime"
 depends_on = ["mindroom.worker_computer.protocol"]
 
 [[modules]]
+path = "mindroom.worker_computer.screencast"
+depends_on = ["mindroom.worker_computer.protocol"]
+
+[[modules]]
 path = "mindroom.api.worker_computer"
 depends_on = [
     "mindroom.api.sandbox_runner",
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.rfb",
     "mindroom.worker_computer.runtime",
+    "mindroom.worker_computer.screencast",
 ]
 
 [[modules]]
@@ -8188,6 +8195,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
+    "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend_kinds",
     "mindroom.origins",
