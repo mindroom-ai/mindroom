@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Never
 from uuid import uuid4
 
@@ -1617,11 +1617,12 @@ async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path) -
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> None:
+    """A delegated child's compaction hooks report the compaction and name its turn and the turn that delegated it."""
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     hook_context, observed = _observed_compaction_hooks(config, paths)
 
-    with tool_runtime_context(hook_context):
+    with tool_runtime_context(replace(hook_context, turn_id="turn-child", parent_turn_id="turn-parent")):
         await _run(
             _scoped_agent(ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
             "Do the task",
@@ -1630,6 +1631,7 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
     assert observed[1].token_count_after is not None
     assert observed[1].token_count_after < observed[1].token_count_before
+    assert {(ctx.turn_id, ctx.parent_turn_id) for ctx in observed} == {("turn-child", "turn-parent")}
 
 
 @pytest.mark.asyncio

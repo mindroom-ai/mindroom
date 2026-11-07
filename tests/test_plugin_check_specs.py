@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mindroom.cli.main import app
+from tests.test_plugin_check import _write_plugin
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -18,19 +19,14 @@ runner = CliRunner()
 pytestmark = pytest.mark.usefixtures("wide_cli_consoles")
 
 
-def _write_manifest(root: Path, name: str) -> None:
-    root.mkdir(parents=True)
-    (root / "mindroom.plugin.json").write_text(json.dumps({"name": name}), encoding="utf-8")
-
-
 @pytest.fixture
 def working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """An empty working directory, beside an importable package that is a plugin and ships two more."""
     package_root = tmp_path / "site-packages" / "check_demo_pkg"
-    _write_manifest(package_root, "packaged-root")
+    _write_plugin(package_root, manifest={"name": "packaged-root"})
     (package_root / "__init__.py").write_text("", encoding="utf-8")
-    _write_manifest(package_root / "bundled", "packaged-bundled")
-    _write_manifest(package_root / "plugins" / "demo", "packaged-demo")
+    _write_plugin(package_root / "bundled", manifest={"name": "packaged-bundled"})
+    _write_plugin(package_root / "plugins" / "demo", manifest={"name": "packaged-demo"})
     monkeypatch.syspath_prepend(str(tmp_path / "site-packages"))
     working_directory = tmp_path / "work"
     working_directory.mkdir()
@@ -57,7 +53,7 @@ def test_plugins_check_cli_checks_a_plugin_in_an_installed_package(spec: str, pl
 
 def test_plugins_check_cli_prefers_a_working_directory_plugin_over_a_package(working_directory: Path) -> None:
     """A bare name resolves against the working directory first, as a config entry does against its directory."""
-    _write_manifest(working_directory / "check_demo_pkg", "local-demo")
+    _write_plugin(working_directory / "check_demo_pkg", manifest={"name": "local-demo"})
 
     result = runner.invoke(app, ["plugins", "check", "check_demo_pkg"])
 
@@ -74,21 +70,32 @@ def test_plugins_check_cli_reports_a_package_spec_that_does_not_resolve() -> Non
     assert "Traceback (most recent call last)" not in result.output
 
 
+@pytest.mark.parametrize(
+    ("spec", "internal_imports"),
+    [
+        pytest.param(
+            "pkg:check_demo_pkg:plugins/demo",
+            [{"path": "helpers.py", "line": 1, "name": "mindroom.hooks.hook"}],
+            id="resolved-plugin",
+        ),
+        pytest.param("python:check_demo_pkg", [], id="package-root-leaves-out-nested-plugins"),
+    ],
+)
 def test_plugins_check_cli_lists_imports_outside_the_plugin_api_in_the_resolved_package_plugin(
     working_directory: Path,
+    spec: str,
+    internal_imports: list[dict[str, object]],
 ) -> None:
-    """The import report reads the plugin directory a package spec resolves to, not the spec as a path."""
+    """The import report reads the plugin directory a package spec resolves to, without the plugins nested in it."""
     (working_directory.parent / "site-packages" / "check_demo_pkg" / "plugins" / "demo" / "helpers.py").write_text(
         "from mindroom.hooks import hook\n",
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["plugins", "check", "--json", "pkg:check_demo_pkg:plugins/demo"])
+    result = runner.invoke(app, ["plugins", "check", "--json", spec])
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["internal_imports"] == [
-        {"path": "helpers.py", "line": 1, "name": "mindroom.hooks.hook"},
-    ]
+    assert json.loads(result.stdout)["internal_imports"] == internal_imports
 
 
 def test_plugins_check_cli_json_reports_a_package_spec_that_does_not_resolve() -> None:

@@ -2401,6 +2401,7 @@ depends_on = [
     "mindroom.managed_room_notice",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_accounts",
     "mindroom.matrix.room_power",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
@@ -3168,6 +3169,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestration.rooms"
 depends_on = [
+    "mindroom.matrix.room_accounts",
     "mindroom.matrix.room_thread_mode",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -4058,6 +4060,7 @@ visibility = [
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.custom_tools.matrix_api",
     "mindroom.contacts.flow",
+    "mindroom.matrix.room_accounts",
 ]
 
 [[modules]]
@@ -5419,6 +5422,7 @@ depends_on = [
 path = "mindroom.plugin_api"
 depends_on = [
     "mindroom.agent_loop.helper",
+    "mindroom.config.main",
     "mindroom.constants",
     "mindroom.file_access",
     "mindroom.hooks",
@@ -5428,6 +5432,7 @@ depends_on = [
     "mindroom.tool_system.atlassian_connections",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.events",
     "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugin_imports",
@@ -6907,6 +6912,7 @@ expose = [
     "ToolMetadataValidationError",
     "ToolRegistry",
     "builtin_tool_registry",
+    "plugin_load_active",
 ]
 from = ["mindroom.tool_system.registry"]
 
@@ -6918,7 +6924,9 @@ expose = [
     "ToolRegistry",
     "builtin_tool_registry",
     "compose_tool_registry",
+    "plugin_load_active",
     "plugin_module_registrations",
+    "record_plugin_root",
     "register_tool",
 ]
 from = ["mindroom.tool_system.registry"]
@@ -6941,7 +6949,7 @@ expose = [
     "_collect_plugin_bases",
     "_install_plugin_package_chain",
     "_load_plugin_base",
-    "_log_skipped_plugin_entry",
+    "_log_failed_plugin_entry",
     "_module_name",
     "_plugin_package_name",
     "_prepare_module",
@@ -9794,6 +9802,13 @@ depends_on = [
     "mindroom.contacts.store",
     "mindroom.hooks",
     "mindroom.tool_system.plugins",
+]
+
+[[modules]]
+path = "mindroom.matrix.room_accounts"
+depends_on = [
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_room_admin",
 ]
 
 [[modules]]

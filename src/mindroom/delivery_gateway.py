@@ -382,6 +382,8 @@ class ResponseIdentity:
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str
+    # The ID the turn's hooks carry as ``ctx.turn_id``; delivery keys the response by its envelope's source event.
+    turn_id: str
     sources: ResponseSources
     participating_agent_names: tuple[str, ...] = ()
     # Set for a contact turn, whose answer is never shown.

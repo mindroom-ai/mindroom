@@ -5733,7 +5733,7 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting or that it [joined because one of its rooms lists it](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
+An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting or that [one of its rooms lists](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
 A configured room assignment wins over personal rooms, invites, and listed rooms; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
 
@@ -5749,6 +5749,7 @@ It also leaves and logs `call_roster_absent_from_sfu` after a minute in which no
 After that it joins the call again only when the caller rejoins it or MindRoom restarts; after a restart it leaves again a minute later if the caller is still not connected.
 A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
+The agent prepares its voice session while it connects to the call's media, and logs `call_join_timing` once it is in the call, with the milliseconds from the start of the join to each step.
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
 
@@ -5836,6 +5837,7 @@ LiveKit media still needs a static public IP and open TCP and UDP media ports, w
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables it with `matrix_rtc_enabled: true`.
 
 The agent joins only calls started on your own MatrixRTC backend, meaning the one in `calls.livekit_service_url` or the agent homeserver's `.well-known`; calls started through a different backend are ignored.
+The agent reuses the `.well-known` service for 10 minutes, and reads it again sooner when a call advertises a different one.
 [Managed rooms](https://docs.mindroom.chat/rooms/#room-management) already let every member join calls.
 In other rooms, such as ad-hoc rooms, the power levels must let members send `org.matrix.msc3401.call.member` state events, which Element Call-capable clients set up when they create rooms.
 Calls work in both encrypted and unencrypted rooms.
@@ -7398,7 +7400,7 @@ The router creates and maintains managed rooms:
 - Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
-Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms they joined because [one of their rooms lists them](#rooms-under-a-room).
+Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms [one of their rooms lists](#rooms-under-a-room).
 
 On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
 Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.
@@ -7567,6 +7569,7 @@ For a room with shared history and one existing guest, a record looks like this:
 If the room's history setting stops matching the record, or anyone other than a MindRoom agent it does not list joins, is invited, or knocks, onboarding for that human fails with one of the log messages above until someone fixes the room.
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.
+Like every personal room, an adopted room has the power level of MindRoom's own state events, such as the router's room accounts list, set to 0 at each reconciliation, so the router and agents can publish them.
 
 # Personal Agents
 
@@ -17323,6 +17326,8 @@ Do not report or "fix" these; they are deliberate.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - `!auto_approve` lets a person approve every gated tool call they request in one thread, or in the whole room when it has no threads, for up to 24 hours, including tools that ask for their own confirmation but not tool calls scheduled to run later; only that person can send it, never an agent acting for them.
 - The router publishes each room's open `!auto_approve` windows as unencrypted room state keyed by its own user ID: thread, requester ID, and end time, so the homeserver and every room member can read them even in an encrypted room.
+- The router also publishes which joined members of each room are its installation's router, agent, and team accounts, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read them even in an encrypted room.
+  Other members can send the same event type only under other state keys, so a client trusts only the list a MindRoom router on the viewer's homeserver sent under its own user ID; see [Room Accounts List](https://docs.mindroom.chat/architecture/matrix/#room-accounts-list).
 - Scheduled tasks, including their prompts, and thread tags, including the topic tags agents add automatically, are stored as unencrypted room state, so the homeserver and every room member can read them even in an encrypted room.
 - A `!config set` change awaiting confirmation is stored as unencrypted room state with its config path, requester, and new value, so the homeserver and every room member can read them even in an encrypted room; a new value that display redaction would mask, or that room state cannot hold, such as a decimal number, stays only in the running process.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
@@ -17731,6 +17736,8 @@ The argument takes every form a `plugins:` entry takes, as listed in [Path resol
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
+It leaves out the plugin's top-level `tests/` directory and any directory inside the plugin with its own manifest, which is a separate plugin.
+It also accepts `mindroom.script_sdk`, the client that [background scripts](https://docs.mindroom.chat/tools/background-scripts/#calling-agent-tools-from-a-script), such as a skill's scripts, call tools with.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
 The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
@@ -17741,7 +17748,7 @@ It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does
 `PLUGIN_API_VERSION` in `mindroom.plugin_api` is the version, as `(major, minor)`, of what this page and [Hooks](https://docs.mindroom.chat/hooks/) let plugins use: the manifest format, and the names they say to import from `mindroom.plugin_api` and the other modules they name.
 A change that only adds to the API bumps the minor version, so a plugin written for an earlier minor of the same major keeps working.
 A breaking change, one that removes or changes anything a plugin uses, bumps the major version.
-Anything a major bump removes or changes is first deprecated for at least 30 days.
+Anything a major bump removes or changes is first deprecated for at least 30 days, announced in this section with the date from which it may go.
 
 A plugin states the version it needs as `mindroom_plugin_api` in its manifest, such as `"1.2"` for major 1 at minor 2 or later.
 MindRoom checks it before running any of the plugin's code and skips a plugin that needs another major or a later minor, logging `Failed to load plugin, skipping` with a reason such as `Plugin 'my-plugin' needs plugin API 1.3, but this MindRoom provides 1.2: upgrade MindRoom`.
@@ -17764,6 +17771,7 @@ my-plugin/
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, and skills.
 Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
+`mindroom.plugin_api` also exports the types to annotate with: `Config` and `RuntimePaths` for the `config` and `runtime_paths` that hooks, tools, and automations receive, `HookContext` for any hook's context, `HookMessageSender` and `HookMatrixAdmin` for `message_sender` and `matrix_admin`, and `ToolTraceEntry` for the entries of a response draft's `tool_trace`.
 Other `mindroom` modules can change in any release.
 
 ## Manifest format
@@ -17960,6 +17968,8 @@ def lines_tools() -> type[LineTools]:
 A call then needs approval when its own rules ask for it or when the `judged_as` rules would ask about any call `judge` returns, so a rule that auto-approves `run_line` does not lift a `run_shell_command` rule.
 `judge` reads only the call's arguments, since an approval covers exactly those: return an empty list for a call that amounts to no call of `judged_as`, and `None` when the arguments cannot tell, which asks whenever the `judged_as` rules may ask.
 The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
+Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias.
+When an option can turn an aliased function off, pass every function the toolkit can offer as `function_names` to `register_tool_with_metadata`, so the toolkit still builds without it.
 In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](https://docs.mindroom.chat/tools/agent-orchestration/#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
 
 ### Dependencies
@@ -18068,6 +18078,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
+| `SHARED_DIRECTORY_ROOTS` | `shared_directory_roots` | A function that returns the [shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) the tool can reach where it runs, each with its `path` and whether it is `writable`: in the primary process the constructing agent's, or none when tools run in dedicated workers or through the sandbox proxy, and in a worker every directory it mounts (see [Access by deployment](https://docs.mindroom.chat/tools/execution-and-coding/#access-by-deployment)); call it on each use, since the agent can join or leave one while it replies |
 
 ```python
 from mindroom.plugin_api import (
@@ -18186,6 +18197,7 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 `mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
 `context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
 `await context.hooks.message_sender(room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch=False, mentions=None, wake_mentioned=True)` sends a message from the turn's bot, with `source_hook` such as `"my-plugin:my-tool"` naming what sent it; `extra_content`, `trigger_dispatch`, `mentions`, and `wake_mentioned` work as in a hook's [`ctx.send_message`](https://docs.mindroom.chat/hooks/#sending-messages), but the message does not carry the turn's requester.
+`context.turn_id` names the agent turn the call belongs to, which that turn's hooks carry as `ctx.turn_id`, or is `None` for a call outside a turn, such as a background script's; in a delegated subagent's turn, `context.parent_turn_id` names the turn that delegated it.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -19161,6 +19173,8 @@ All contexts include these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
+| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval runs as a new turn with the same `correlation_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
+| `parent_turn_id` | `str \| None` | In a delegated subagent's turn, the `turn_id` of the turn that delegated it; otherwise `None` |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
 

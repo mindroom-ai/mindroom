@@ -10,3 +10,6 @@ BACKGROUND_JOBS_EVENT_TYPE = "io.mindroom.background_jobs"
 MINDROOM_SERVER_EVENT_TYPE = "io.mindroom.server"
 # The router publishes the room's open `!auto_approve` windows as state keyed by its own user ID, for a client indicator.
 AUTO_APPROVE_WINDOWS_EVENT_TYPE = "io.mindroom.auto_approve"
+# The router publishes the room's joined MindRoom accounts as state keyed by its own user ID, so a client recognizes
+# agents whatever their user names.
+MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
