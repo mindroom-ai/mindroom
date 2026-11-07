@@ -168,11 +168,12 @@ def _raise_for_worker_status(response: _WorkerProxyResponse) -> None:
         raise _WorkerHttpError(exc.response) from exc
 
 
-def _request_headers_for_handle(
+def worker_request_headers(
     worker_handle: WorkerHandle | None,
     *,
     config: WorkerProxyClientConfig,
 ) -> dict[str, str]:
+    """Return the headers that authenticate a request to its worker, or to the shared runner without one."""
     token = worker_handle.auth_token if worker_handle is not None else config.proxy_token
     if token is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
@@ -287,7 +288,7 @@ def post_worker_proxy_request[Answer: SaveAttachmentResponse | ViewFileResponse]
         raise RuntimeError(msg)
 
     try:
-        headers = _request_headers_for_handle(worker_handle, config=config)
+        headers = worker_request_headers(worker_handle, config=config)
         request_url = (
             worker_api_endpoint(worker_handle, worker_operation)
             if worker_handle is not None
@@ -427,7 +428,7 @@ def execute_worker_proxy_request(
         raise RuntimeError(msg)
 
     try:
-        headers = _request_headers_for_handle(worker_handle, config=config)
+        headers = worker_request_headers(worker_handle, config=config)
         execute_url = (
             worker_api_endpoint(worker_handle, "execute")
             if worker_handle is not None

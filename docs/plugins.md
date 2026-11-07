@@ -195,7 +195,10 @@ mindroom plugins check ./my-plugin
 
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
+It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
+Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
+The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 
 ## Plugin structure
@@ -225,7 +228,8 @@ Other `mindroom` modules can change in any release.
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
   "routes_module": "routes.py",
-  "skills": ["skills"]
+  "skills": ["skills"],
+  "reserved_namespaces": ["com.example.my_plugin."]
 }
 ```
 
@@ -237,6 +241,7 @@ Other `mindroom` modules can change in any release.
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
+| `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -914,7 +919,9 @@ A plugin route that serves a Matrix web client authenticates its caller with `re
 The client signs in by posting a Matrix OpenID token to `POST /api/client-sessions`, which returns `session_token`, `user_id`, and `expires_at` in Unix seconds, and then sends `Authorization: Bearer <session_token>`.
 Sign-in needs a homeserver that binds OpenID tokens to this deployment, MindRoom's Tuwunel fork with `mindroom_openid_audience` on (see [Token Binding](connections-portal.md#token-binding)); on any other homeserver `POST /api/client-sessions` answers 403, with no setting to allow it, because another backend the user opens could replay their token here.
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
-Browser origins that may call these routes and `POST /api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](tools/worker-computer.md); there is no separate setting for plugin routes.
+To end its session at once, as at sign-out, the client sends `DELETE /api/client-sessions` with the same header, which answers 204; from then on that token answers 401 like an expired one.
+A response a route is already streaming continues after its session expires or is revoked.
+Browser origins that may call these routes and `/api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](tools/worker-computer.md); there is no separate setting for plugin routes.
 Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, besides the two headers above, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
 A route that acts on one room depends on `require_room_member` instead, as in the example above: `user: ClientUser = Depends(require_room_member)`.
 It authenticates the caller as `require_client_user` does and takes the room from the route's `{room_id}` path parameter, and it returns the same `ClientUser` once that user is joined to the room.
@@ -928,6 +935,13 @@ It answers 503 when membership is unavailable: `No running MindRoom bot is in th
 
 Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
 See [Skills](skills.md) for the `SKILL.md` format, precedence, and the per-agent `skills:` allowlist that plugin skills also require.
+
+## Reserved namespaces
+
+A plugin whose Matrix events clients trust, such as cards it sends, lists their prefixes in the manifest `reserved_namespaces` so agents cannot forge them.
+While the plugin is loaded, the `matrix_api` tool refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
+Every other built-in tool fixes the event type and top-level content keys it sends, and the plugin's own sends are not affected.
+An agent whose code execution tools run in the primary process instead of a worker is fully trusted and can still send anything; see [Security posture](architecture/security-posture.md).
 
 ## Hooks
 
