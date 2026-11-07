@@ -6940,7 +6940,7 @@ expose = [
     "_collect_plugin_bases",
     "_install_plugin_package_chain",
     "_load_plugin_base",
-    "_log_skipped_plugin_entry",
+    "_log_failed_plugin_entry",
     "_module_name",
     "_plugin_package_name",
     "_prepare_module",
