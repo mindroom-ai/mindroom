@@ -191,7 +191,10 @@ mindroom plugins check ./my-plugin
 
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
+It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
+Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
+The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 
 ## Plugin structure
@@ -221,7 +224,8 @@ Other `mindroom` modules can change in any release.
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
   "routes_module": "routes.py",
-  "skills": ["skills"]
+  "skills": ["skills"],
+  "reserved_namespaces": ["com.example.my_plugin."]
 }
 ```
 
@@ -233,6 +237,7 @@ Other `mindroom` modules can change in any release.
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
+| `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -565,6 +570,28 @@ Pass a model name from `config.yaml` to `build_model_provider` instead to call a
 The provider uses the model entry's credentials, base URL, and request settings.
 With `schema`, `result.content` is an instance of that model, or the raw text when the answer does not parse; without it, `result.content` is the answer text.
 Each call is one request with no tools and no conversation history.
+
+### Fetching public URLs
+
+To download a page or file from a URL a model or user supplied, use `fetch_public_url` from `mindroom.plugin_api` in async code, or `fetch_public_url_sync` in synchronous code that runs off the event loop, such as a synchronous tool:
+
+```python
+from mindroom.plugin_api import PublicFetchError, fetch_public_url
+
+
+async def feed_xml(url: str) -> str:
+    try:
+        feed = await fetch_public_url(url, max_bytes=1_000_000)
+    except PublicFetchError as error:
+        return f"Could not read the feed: {error}"
+    return feed.content.decode("utf-8", errors="replace")
+```
+
+A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
+It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
+Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
+In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
 
 ### Dispatch-time worker targets
 
@@ -904,6 +931,13 @@ It answers 503 when membership is unavailable: `No running MindRoom bot is in th
 
 Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
 See [Skills](https://docs.mindroom.chat/skills/) for the `SKILL.md` format, precedence, and the per-agent `skills:` allowlist that plugin skills also require.
+
+## Reserved namespaces
+
+A plugin whose Matrix events clients trust, such as cards it sends, lists their prefixes in the manifest `reserved_namespaces` so agents cannot forge them.
+While the plugin is loaded, the `matrix_api` tool refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
+Every other built-in tool fixes the event type and top-level content keys it sends, and the plugin's own sends are not affected.
+An agent whose code execution tools run in the primary process instead of a worker is fully trusted and can still send anything; see [Security posture](https://docs.mindroom.chat/architecture/security-posture/).
 
 ## Hooks
 

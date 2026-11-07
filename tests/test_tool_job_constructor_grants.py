@@ -13,7 +13,7 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -105,8 +105,10 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
             finished.set()
 
     try:
-        await coordinator.sync()
+        # No background worker: its revocation pass would race the nested gate this test pins and may cancel the job.
+        await coordinator.initialize()
         runtime = coordinator.runtime
+        register_background_runtime(paths, runtime)
         async with execution_resources():
             with tool_runtime_context(context):
                 job, claim = await runtime.start(

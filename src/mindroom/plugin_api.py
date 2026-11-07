@@ -78,6 +78,7 @@ from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
 from mindroom.providers.registry import build_model_provider
+from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
@@ -167,6 +168,8 @@ __all__ = [
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
+    "PublicFetchError",
+    "PublicFetchResult",
     "ReactionReceivedContext",
     "ResolvedWorkerTarget",
     "ResponseDraft",
@@ -203,6 +206,8 @@ __all__ = [
     "current_call",
     "current_execution_identity",
     "emit_custom_event",
+    "fetch_public_url",
+    "fetch_public_url_sync",
     "get_logger",
     "get_tool_by_name",
     "get_tool_runtime_context",
