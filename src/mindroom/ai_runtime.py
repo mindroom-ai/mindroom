@@ -133,7 +133,7 @@ def _append_queued_notice_if_needed(
 
 
 def told_to_pause(messages: Sequence[Message]) -> bool:
-    """Return whether the request ``messages[-1]`` answers carried this reply's notice and its newer message still waits.
+    """Return whether the request ``messages[-1]`` answers carried this reply's notice, and its newer message waits.
 
     Only a notice after that request's last assistant message counts, so a run that never read the notice, such as a
     subagent of a paused batch or a run whose queue emptied, is not told to pause by another run's notice or by history.

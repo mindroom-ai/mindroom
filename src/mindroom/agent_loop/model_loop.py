@@ -119,8 +119,9 @@ class LoopHooks:
       ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
       (participation, the skill review's budget).
     - ``answer_tool_calls``: sees the live messages, which end with an assistant message that requests tools,
-      together with the turn's stop reason; when it returns result messages, one per call in call order, they answer the batch in place of running it, and
-      each call is recorded and announced as a failed call (the output-limit policy).
+      together with the turn's stop reason; when it returns result messages, one per call in call order, they answer
+      the batch in place of running it, and each call is recorded and announced as a failed call (the output-limit
+      policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
