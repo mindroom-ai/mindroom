@@ -19,15 +19,15 @@ from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_
 
 # The plugin API, as docs/plugins.md documents it: the modules a plugin may import whole, and the names it may import
 # from other modules. Every other `mindroom` module can change in any release.
-_PLUGIN_API = frozenset(
-    {
-        "mindroom.custom_tools.google_service.GoogleCloudToolkit",
-        "mindroom.memory.refresh_agent_memory_search",
-        "mindroom.memory.write_scope_markdown_file",
-        "mindroom.plugin_api",
-        "mindroom.plugin_http",
-    },
+_PLUGIN_API = (
+    "mindroom.custom_tools.google_service.GoogleCloudToolkit",
+    "mindroom.memory.refresh_agent_memory_search",
+    "mindroom.memory.write_scope_markdown_file",
+    "mindroom.plugin_api",
+    "mindroom.plugin_http",
 )
+# Each entry with a trailing dot, so an import matches it only on whole name parts: `mindroom.plugin_apix` is outside.
+_PLUGIN_API_PREFIXES = tuple(f"{public}." for public in _PLUGIN_API)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,15 +136,13 @@ def imports_outside_plugin_api(plugin_root: Path) -> list[str]:
                 continue
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    names = [(alias.lineno, alias.name) for alias in node.names]
+                    module_prefix = ""
                 elif isinstance(node, ast.ImportFrom) and node.level == 0:
-                    names = [(alias.lineno, f"{node.module}.{alias.name}") for alias in node.names]
+                    module_prefix = f"{node.module}."
                 else:
                     continue
-                found.extend(
-                    (path.relative_to(plugin_root), line, name)
-                    for line, name in names
-                    if f"{name}.".startswith("mindroom.")
-                    and not any(f"{name}.".startswith(f"{public}.") for public in _PLUGIN_API)
-                )
+                for alias in node.names:
+                    imported = f"{module_prefix}{alias.name}"
+                    if f"{imported}.".startswith("mindroom.") and not f"{imported}.".startswith(_PLUGIN_API_PREFIXES):
+                        found.append((path.relative_to(plugin_root), alias.lineno, imported))
     return [f"{path}:{line}: {name}" for path, line, name in sorted(found)]
