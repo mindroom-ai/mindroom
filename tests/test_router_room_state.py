@@ -270,40 +270,22 @@ async def test_only_router_publishes(room_state: RoomState) -> None:
 
 @pytest.mark.asyncio
 async def test_router_membership_callback_publishes_agent_join_and_leave(room_state: RoomState) -> None:
-    """Router membership duties update state even without human membership hooks."""
+    """An account's leave and join update the thread mode and the accounts list, even without membership hooks."""
     config, paths, ids, events, client = room_state
     for agent in config.agents.values():
         agent.rooms = []
-    deps = RouterDutiesDeps(
-        runtime=MagicMock(config=config, runtime_paths=paths, client=client),
-        logger=MagicMock(),
-        matrix_id=ids[ROUTER_AGENT_NAME],
-        hook_context=MagicMock(),
-        journal=MagicMock(),
-        room_lifecycle=MagicMock(),
-        personal_rooms=MagicMock(),
-    )
-    deps.hook_context.registry.has_hooks.return_value = False
-    deps.personal_rooms.observes_onboarding_joins = False
     await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
-    duties = RouterDuties(deps)
-    for membership, expected in (("leave", "room"), ("join", "mixed")):
-        events["m.room.member", ids["agent2"].full_id] = {"membership": membership}
-        event = nio.RoomMemberEvent.from_dict(
-            {
-                "type": "m.room.member",
-                "event_id": f"${membership}",
-                "sender": ids["agent2"].full_id,
-                "state_key": ids["agent2"].full_id,
-                "origin_server_ts": 1,
-                "content": {"membership": membership},
-                "unsigned": {"prev_content": {"membership": "join" if membership == "leave" else "leave"}},
-            },
-        )
-        assert isinstance(event, nio.RoomMemberEvent)
+    duties = _router_duties(room_state)
+    router, agent1, agent2 = (ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
+    for membership, previous, mode, accounts in (
+        ("leave", "join", "room", [router, agent1]),
+        ("join", "leave", "mixed", [router, agent1, agent2]),
+    ):
+        events["m.room.member", agent2] = {"membership": membership}
         _sync_live_room(room_state)
-        await duties.member_event(client.rooms[ROOM_ID], event)
-        assert events[EVENT_TYPE, ""] == {"mode": expected}
+        await duties.member_event(client.rooms[ROOM_ID], _membership_event(agent2, membership, previous))
+        assert events[EVENT_TYPE, ""] == {"mode": mode}
+        assert _accounts(room_state) == sorted(accounts)
 
 
 @pytest.mark.asyncio
@@ -336,12 +318,6 @@ async def test_setup_publishes_after_agents_join(room_state: RoomState, monkeypa
 async def test_command_set_and_reset_publish_immediately(room_state: RoomState) -> None:
     """Authorized commands publish changed effective modes before returning."""
     config, paths, _, events, client = room_state
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        {"users": {"@admin:localhost": 100}},
-        "m.room.power_levels",
-        "",
-        ROOM_ID,
-    )
     for command, expected in (("room", "room"), ("thread", "thread"), ("reset", "mixed")):
         await handle_thread_mode_command(
             command,
@@ -444,7 +420,7 @@ async def test_reloads_read_only_the_thread_mode_event(room_state: RoomState) ->
     config.agents["agent1"].role = "Updated role"
     await setup.publish_room_state()
     client.room_get_state.assert_not_awaited()
-    mode_reads = [call for call in client.room_get_state_event.await_args_list if call.args[1] == EVENT_TYPE]
+    mode_reads = [read for read in client.room_get_state_event.await_args_list if read.args[1] == EVENT_TYPE]
     assert len(mode_reads) == 1
     assert mode_reads[0].args == (ROOM_ID, EVENT_TYPE)
     assert mode_reads[0].kwargs == {"state_key": ""}
@@ -481,25 +457,9 @@ async def test_setup_defers_reconciliation_until_admission_reopens(
 
 
 @pytest.mark.asyncio
-async def test_router_profile_change_does_not_read_or_write_state(
-    room_state: RoomState,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Join-to-join profile updates do not change the responder roster."""
-    config, paths, ids, _, client = room_state
-    publish = AsyncMock()
-    monkeypatch.setattr("mindroom.router.duties.reconcile_room_thread_mode", publish)
-    deps = RouterDutiesDeps(
-        runtime=MagicMock(config=config, runtime_paths=paths, client=client),
-        logger=MagicMock(),
-        matrix_id=ids[ROUTER_AGENT_NAME],
-        hook_context=MagicMock(),
-        journal=MagicMock(),
-        room_lifecycle=MagicMock(),
-        personal_rooms=MagicMock(),
-    )
-    deps.hook_context.registry.has_hooks.return_value = False
-    deps.personal_rooms.observes_onboarding_joins = False
+async def test_router_profile_change_does_not_read_or_write_state(room_state: RoomState) -> None:
+    """Join-to-join profile updates change neither the responder roster nor the accounts list."""
+    _, _, ids, _, client = room_state
     event = nio.RoomMemberEvent.from_dict(
         {
             "type": "m.room.member",
@@ -512,9 +472,10 @@ async def test_router_profile_change_does_not_read_or_write_state(
         },
     )
     assert isinstance(event, nio.RoomMemberEvent)
-    await RouterDuties(deps).member_event(nio.MatrixRoom(ROOM_ID, client.user_id), event)
-    publish.assert_not_awaited()
+    await _router_duties(room_state).member_event(nio.MatrixRoom(ROOM_ID, client.user_id), event)
     client.room_get_state.assert_not_awaited()
+    client.room_get_state_event.assert_not_awaited()
+    client.joined_members.assert_not_awaited()
     client.room_put_state.assert_not_awaited()
 
 
@@ -596,12 +557,6 @@ async def test_repeated_command_repairs_another_writers_mode(
 ) -> None:
     """An explicit mode command reasserts its result even after another writer changed it."""
     config, paths, _, events, client = room_state
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        {"users": {"@admin:localhost": 100}},
-        "m.room.power_levels",
-        "",
-        ROOM_ID,
-    )
     for _ in range(2):
         await handle_thread_mode_command(
             command,
@@ -620,7 +575,7 @@ async def test_repeated_command_repairs_another_writers_mode(
 @pytest.mark.asyncio
 async def test_membership_recovers_after_initial_state_read_failure(room_state: RoomState) -> None:
     """A failed setup read cannot prevent later membership-triggered publication."""
-    config, paths, ids, events, client = room_state
+    config, _, ids, events, client = room_state
     for agent in config.agents.values():
         agent.rooms = []
     read = client.room_get_state.side_effect
@@ -628,34 +583,12 @@ async def test_membership_recovers_after_initial_state_read_failure(room_state: 
     assert await read_room_state(client, ROOM_ID) is None
     client.room_get_state.side_effect = read
     client.room_get_state.reset_mock()
-    deps = RouterDutiesDeps(
-        runtime=MagicMock(config=config, runtime_paths=paths, client=client),
-        logger=MagicMock(),
-        matrix_id=ids[ROUTER_AGENT_NAME],
-        hook_context=MagicMock(),
-        journal=MagicMock(),
-        room_lifecycle=MagicMock(),
-        personal_rooms=MagicMock(),
-    )
-    deps.hook_context.registry.has_hooks.return_value = False
-    deps.personal_rooms.observes_onboarding_joins = False
-    room = nio.MatrixRoom(ROOM_ID, client.user_id)
-    room.add_member(ids["agent1"].full_id, None, None)
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "type": "m.room.member",
-            "event_id": "$leave",
-            "origin_server_ts": 1,
-            "sender": ids["agent2"].full_id,
-            "state_key": ids["agent2"].full_id,
-            "content": {"membership": "leave"},
-            "unsigned": {"prev_content": {"membership": "join"}},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
     events["m.room.member", ids["agent2"].full_id] = {"membership": "leave"}
     _sync_live_room(room_state)
-    await RouterDuties(deps).member_event(client.rooms[ROOM_ID], event)
+    await _router_duties(room_state).member_event(
+        client.rooms[ROOM_ID],
+        _membership_event(ids["agent2"].full_id, "leave", "join"),
+    )
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
     client.room_get_state.assert_not_awaited()
 
@@ -985,22 +918,6 @@ async def test_router_lists_joined_mindroom_accounts_by_any_user_name(room_state
     assert _accounts(room_state) == sorted(
         ["@alice.mind:localhost", *(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "team1"))],
     )
-
-
-@pytest.mark.asyncio
-async def test_router_membership_callback_updates_accounts(room_state: RoomState) -> None:
-    """An account's leave drops it from the router's list and its join adds it back."""
-    _, _, ids, events, client = room_state
-    duties = _router_duties(room_state)
-    router, agent1, agent2 = (ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1", "agent2"))
-    for membership, previous, expected in (
-        ("leave", "join", [router, agent1]),
-        ("join", "leave", [router, agent1, agent2]),
-    ):
-        events["m.room.member", agent2] = {"membership": membership}
-        _sync_live_room(room_state)
-        await duties.member_event(client.rooms[ROOM_ID], _membership_event(agent2, membership, previous))
-        assert _accounts(room_state) == sorted(expected)
 
 
 @pytest.mark.asyncio
