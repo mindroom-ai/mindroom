@@ -1962,6 +1962,7 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
         "read_file",
         {"path": "notes.txt"},
         "code",
+        None,
     )
 
     assert requires_approval is True
@@ -1989,7 +1990,10 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
     hostnames: object,
     expected: bool,
 ) -> None:
-    """request_network_access calls where every hostname is statically allowlisted need no approval."""
+    """request_network_access calls where every hostname is statically allowlisted need no approval.
+
+    Either way the call's card would stay open for the default window, since the rule sets none.
+    """
     (tmp_path / ".env").write_text("MINDROOM_APPROVED_EGRESS_ALLOWLIST=.example.com\n")
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -2001,15 +2005,17 @@ async def test_evaluate_tool_approval_honors_tool_approval_exemption(
         runtime_paths,
     )
 
-    requires_approval, _ = await evaluate_tool_approval(
+    requires_approval, timeout_seconds = await evaluate_tool_approval(
         config,
         runtime_paths,
         "request_network_access",
         {"hostnames": hostnames, "ttl_minutes": 5, "reason": "Need docs."},
         "code",
+        None,
     )
 
     assert requires_approval is expected
+    assert timeout_seconds == config.tool_approval.timeout_days * 24 * 60 * 60
 
 
 @pytest.mark.parametrize(
@@ -2039,6 +2045,7 @@ async def test_starter_config_asks_before_config_manager_changes_configuration(
         tool_name,
         arguments,
         "mind",
+        None,
     )
 
     assert requires_approval is expected
@@ -2068,6 +2075,7 @@ async def test_tool_approval_rule_matching_uses_first_matching_action_for_listin
         "read_file",
         {"path": "notes.txt"},
         "code",
+        None,
     )
 
     assert requires_approval is False
@@ -2102,6 +2110,7 @@ async def test_tool_approval_script_rule_listing_requires_approval_but_evaluatio
         "write_file",
         {"requires_approval": False},
         "code",
+        None,
     )
 
     assert requires_approval is False
@@ -2141,6 +2150,7 @@ async def test_tool_approval_rule_matching_falls_back_to_default_for_listing(
         "read_file",
         {"path": "notes.txt"},
         "code",
+        None,
     )
 
     assert requires_approval is expected
@@ -2166,7 +2176,7 @@ async def test_evaluate_tool_approval_script_error_is_sanitized(tmp_path: Path) 
     )
 
     with pytest.raises(ToolApprovalScriptError, match="failed with ValueError"):
-        await evaluate_tool_approval(config, runtime_paths, "read_file", {"path": "notes.txt"}, "code")
+        await evaluate_tool_approval(config, runtime_paths, "read_file", {"path": "notes.txt"}, "code", None)
 
 
 def test_get_approval_store_returns_initialized_store(tmp_path: Path) -> None:

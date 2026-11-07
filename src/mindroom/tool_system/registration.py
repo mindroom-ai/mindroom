@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
+    ApprovalAlias,
     ConfigField,
     SetupType,
     ToolAuthoredOverrideValidator,
@@ -18,7 +19,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registry import register_tool
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 
 def register_tool_with_metadata(
@@ -47,6 +48,7 @@ def register_tool_with_metadata(
     docs_url: str | None = None,
     helper_text: str | None = None,
     function_names: tuple[str, ...] = (),
+    approval_aliases: Mapping[str, ApprovalAlias] | None = None,
     worker_inert_agent_functions: tuple[str, ...] = (),
     managed_init_args: tuple[ToolManagedInitArg, ...] = (),
     supports_toolkit_filters: bool = True,
@@ -88,6 +90,7 @@ def register_tool_with_metadata(
             docs_url=docs_url,
             helper_text=helper_text,
             function_names=function_names,
+            approval_aliases=dict(approval_aliases or {}),
             worker_inert_agent_functions=worker_inert_agent_functions,
             managed_init_args=managed_init_args,
             supports_toolkit_filters=supports_toolkit_filters,

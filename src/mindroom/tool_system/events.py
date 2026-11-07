@@ -760,6 +760,11 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     return args_preview, truncated or args_truncated
 
 
+def tool_args_chat_preview(tool_args: dict[str, object]) -> str:
+    """Return a call's arguments as a reply's tool trace shows them: redacted, values cut at 250 and the whole at 1200."""
+    return redact_sensitive_text(_format_tool_args(tool_args)[0])
+
+
 def _format_tool_started(
     tool_name: str,
     tool_args: dict[str, object],

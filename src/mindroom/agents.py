@@ -16,7 +16,7 @@ from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec, join_sections
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
-from mindroom.approval.tool_approval import tool_may_require_approval
+from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
@@ -978,14 +978,18 @@ def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool
     return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
 
 
-def _approval_may_gate(config: Config, function_name: str, registered_tool_name: str) -> bool:
-    """Return whether a config approval rule may gate one function of the toolkit registered as this name."""
+def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, registered_tool_name: str) -> bool:
+    """Return whether a config approval rule may gate one function of the tool registered as this name in ``tools``."""
     # A scheduled call runs only with the approval its requester gave when it was scheduled.
     is_scheduled_call_runner = registered_tool_name == "scheduler" and function_name == "run_scheduled_call"
     return (
         not is_matrix_room_runtime_function(registered_tool_name, function_name)
         and not is_scheduled_call_runner
-        and tool_may_require_approval(config, function_name)
+        and tool_may_require_approval(
+            config,
+            function_name,
+            toolkit_approval_alias(config, tools, registered_tool_name, function_name),
+        )
     )
 
 
@@ -994,6 +998,7 @@ def apply_tool_approval_capability(
     toolkit: AnyToolkit,
     config: Config,
     *,
+    tools: ToolRegistry,
     registered_tool_name: str,
     resumable: bool,
     approvals_as_jobs: bool,
@@ -1004,11 +1009,12 @@ def apply_tool_approval_capability(
     approval. Otherwise each function an approval rule gates pauses the run for its approval, or, with
     ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one. Without
     ``approvals_as_jobs`` the delegation functions pause for their native driver, which owns the policy gate and the
-    exact child wait; with it they are ordinary calls whose subagents run as jobs.
+    exact child wait; with it they are ordinary calls whose subagents run as jobs. ``tools`` is the registry the toolkit
+    was built from, whose approval aliases let another function's rules gate its functions too.
     """
 
     def offered(function: ToolFunction) -> ToolFunction | None:
-        may_gate = _approval_may_gate(config, function.name, registered_tool_name)
+        may_gate = _approval_may_gate(config, tools, function.name, registered_tool_name)
         if not resumable:
             return None if function.gate is ToolGate.CONFIRM or may_gate else function
         delegation = is_delegation_function(function)
@@ -1219,6 +1225,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             adapted,
             toolkit,
             config,
+            tools=agent_tools.tools,
             registered_tool_name=tool_name,
             resumable=supports_native_tool_approval,
             approvals_as_jobs=toolkit_calls_as_jobs,
