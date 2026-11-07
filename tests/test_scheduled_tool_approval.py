@@ -2133,6 +2133,36 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
         await manager.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_a_stored_call_reads_as_hidden_while_the_runner_that_runs_it_reads_as_shown(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A reply that shows tool calls shows the runner's call; the stored call's arguments stay out of Matrix."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    seen: list[tuple[str, bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def mirror(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.shown, ctx.chat_preview()))
+
+    registry = HookRegistry.from_plugins([_plugin("mirror", [mirror])])
+    agent = _live_agent([], middleware=(detached_policy(registry),))
+    try:
+        await _armed(manager)
+
+        context = replace(_turn_context(_code_config()), hooks=HookBindings(registry=registry), tool_calls_shown=True)
+        await _run(manager, agent, context=context)
+
+        assert seen == [
+            ("run_scheduled_call", True, f"task_id={_TASK}, arguments_json=null"),
+            ("post_slack_message", False, None),
+        ]
+    finally:
+        await manager.shutdown()
+
+
 class _ConfiguredSlackTools(Toolkit):
     """The Slack toolkit as the tool registry builds it for an agent, recording each real run."""
 

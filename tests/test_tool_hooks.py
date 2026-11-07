@@ -811,7 +811,7 @@ async def test_a_call_tells_its_hooks_whether_its_reply_shows_it(
 
     context = _tool_runtime_context(tmp_path, hook_registry=registry)
     scope = {
-        "shows_calls": lambda: tool_runtime_context(replace(context, show_tool_calls=True)),
+        "shows_calls": lambda: tool_runtime_context(replace(context, tool_calls_shown=True)),
         "default": lambda: tool_runtime_context(context),
         "detached": lambda: detached_tool_scope(_execution_identity()),
     }[reply]
@@ -839,7 +839,7 @@ async def test_a_shown_call_s_chat_preview_hides_secrets_and_cuts_long_values_as
         del kwargs
         return "ok"
 
-    context = replace(_tool_runtime_context(tmp_path, hook_registry=registry), show_tool_calls=True)
+    context = replace(_tool_runtime_context(tmp_path, hook_registry=registry), tool_calls_shown=True)
     with tool_runtime_context(context):
         await bridge("post", next_func, {"api_key": "sk-live-123", "body": "first line\nsecond " + "x" * 300})
 

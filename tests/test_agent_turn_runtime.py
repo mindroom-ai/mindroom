@@ -77,7 +77,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import FailedReply
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import member_tool_scope, tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.agent_tool_helpers import UnansweredCallTools, tool_policy
@@ -2078,7 +2078,7 @@ async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_sho
     source_kind: str,
     shown: bool,
 ) -> None:
-    """A call in a team's reply, a member's as much as the leader's, tells its hooks whether that reply shows it."""
+    """A member's call in a team's reply tells its hooks whether that reply shows it, as the turn's own calls do."""
     seen: list[tuple[str, bool, str | None]] = []
     reply = _reply(tmp_path, monkeypatch, [], tools=())
     reply.config.defaults.show_tool_calls = show_tool_calls
@@ -2090,8 +2090,9 @@ async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_sho
         return f"touched {kwargs['label']}"
 
     async def touch_then_answer(*_args: object, **_kwargs: object) -> str:
-        # The team's own stream runs its calls under the turn's context, as its leader and members do.
-        await policy("touch", touch, {"label": "a"})
+        # The member's call runs under the turn's context rebound to the member, as a team runs its members' calls.
+        with member_tool_scope("assistant", "default"):
+            await policy("touch", touch, {"label": "a"})
         return "Touched."
 
     with patch_response_runner_module(

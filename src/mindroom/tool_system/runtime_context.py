@@ -152,7 +152,7 @@ class ToolRuntimeContext:
     # Whether the reply this turn's calls run in shows them, which tool hooks read as ``shown``. Only a visible reply that
     # shows tool calls sets it, so a call nobody sees, as in a voice call, a listening, script, quiet, or delegated
     # child's turn, never reads as shown.
-    show_tool_calls: bool = False
+    tool_calls_shown: bool = False
 
     @property
     def current_config(self) -> Config:

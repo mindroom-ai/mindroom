@@ -119,7 +119,7 @@ def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChi
         active_model_name=child.model_name,
         target=replace(context.target, session_id=child.session_id),
         persona=child.persona,
-        show_tool_calls=False,
+        tool_calls_shown=False,
     )
 
 

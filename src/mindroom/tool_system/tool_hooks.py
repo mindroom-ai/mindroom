@@ -292,7 +292,7 @@ def _resolve_tool_context(
             correlation_id=_correlation_id_for_runtime_context(context, origin),
             origin=origin,
             message_received_depth=context.message_received_depth,
-            shown=context.show_tool_calls,
+            shown=context.tool_calls_shown,
         )
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
     return _ResolvedToolContext(

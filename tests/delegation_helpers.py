@@ -305,7 +305,7 @@ async def respond(
         supports_native_tool_approval=True,
     )
     # The turn's tool context says whether its reply shows tool calls, as the response runner builds it.
-    with tool_runtime_context(replace(runtime, show_tool_calls=ctx.show_tool_calls)):
+    with tool_runtime_context(replace(runtime, tool_calls_shown=ctx.show_tool_calls)):
         try:
             return (await ai_response(ctx, runtime_paths, config)).text
         except ResponsePausedForApproval as suspended:
