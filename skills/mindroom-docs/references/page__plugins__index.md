@@ -1079,7 +1079,7 @@ A route gets it from `plugin_context` in `mindroom.plugin_http`, as a FastAPI de
 # routes.py
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, WebSocket
+from fastapi import APIRouter, Depends
 
 from mindroom.plugin_api import PluginContext
 from mindroom.plugin_http import plugin_context, require_client_user
@@ -1090,18 +1090,11 @@ router = APIRouter()
 @router.get("/greeting", dependencies=[Depends(require_client_user)])
 async def greeting(ctx: Annotated[PluginContext, Depends(plugin_context)]) -> dict[str, str]:
     return {"greeting": ctx.settings.get("greeting", "hello")}
-
-
-@router.websocket("/greetings")
-async def greetings(websocket: WebSocket) -> None:
-    await websocket.accept()
-    while True:
-        await websocket.receive_text()
-        ctx = plugin_context(websocket)  # Called again, it sees the settings of a config reload since.
-        await websocket.send_json({"greeting": ctx.settings.get("greeting", "hello")})
 ```
 
-A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call in a Matrix conversation or an OpenAI-compatible API request made for a user.
+Each call returns the context of the config MindRoom serves at that moment, so a long-lived websocket calls `plugin_context(websocket)` again to see a later reload's settings.
+
+A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call in a Matrix conversation or in an OpenAI-compatible API request whose API key is [mapped to a user](https://docs.mindroom.chat/openai-api/#requester-identities-and-delegation).
 Anywhere else, such as in the MCP gateway or a worker, it raises `RuntimeError`, so a tool that uses it sets [`requires_primary_runtime=True`](#decorator-fields).
 A plugin that uses its context states `"mindroom_plugin_api": "1.3"` in its manifest, so an older MindRoom skips it with a clear reason.
 
@@ -1114,7 +1107,7 @@ A plugin that uses its context states `"mindroom_plugin_api": "1.3"` in its mani
 | `state_root` | The plugin's [state directory](https://docs.mindroom.chat/hooks/#plugin-state), the one its hooks get as `ctx.state_root`; reading it here sets its mode to 0700 |
 | `is_active()` | Whether the config MindRoom runs now still loads the plugin |
 
-A context keeps the settings of the config it was made under, so a long-lived websocket or task gets a new context to see a later reload's settings.
+A context keeps the settings of the config it was made under, and a tool's context has its turn's or request's config.
 Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error.
 A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket closes with code 1013 and that reason.
 
