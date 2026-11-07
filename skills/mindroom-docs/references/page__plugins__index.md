@@ -194,6 +194,7 @@ It prints the discovered tools, hooks, automations, and skill directories, and e
 Whether or not the plugin loads, it also warns about each import of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
+The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
 
 ## Plugin structure

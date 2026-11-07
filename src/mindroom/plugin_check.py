@@ -30,6 +30,15 @@ _PLUGIN_API = (
 _PLUGIN_API_PREFIXES = tuple(f"{public}." for public in _PLUGIN_API)
 
 
+@dataclass(frozen=True, order=True, slots=True)
+class OutsideImport:
+    """One import of a ``mindroom`` module or name outside the plugin API, in a file relative to the plugin root."""
+
+    path: Path
+    line: int
+    name: str
+
+
 @dataclass(frozen=True, slots=True)
 class _PluginCheckResult:
     """Successful plugin compatibility-check summary."""
@@ -122,9 +131,9 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 dispose_plugins(generation)
 
 
-def imports_outside_plugin_api(plugin_root: Path) -> list[str]:
-    """Statically list each import from ``mindroom`` outside the plugin API in the plugin's Python files, as ``path:line: name``."""
-    found: list[tuple[Path, int, str]] = []
+def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
+    """Statically list each import from ``mindroom`` outside the plugin API in the plugin's Python files, by file and line."""
+    found: list[OutsideImport] = []
     for directory, subdirectories, file_names in plugin_root.walk():
         # Installed packages, such as a virtual environment's copy of MindRoom, and hidden directories are not plugin code.
         subdirectories[:] = [name for name in subdirectories if name != "site-packages" and not name.startswith(".")]
@@ -144,5 +153,5 @@ def imports_outside_plugin_api(plugin_root: Path) -> list[str]:
                 for alias in node.names:
                     imported = f"{module_prefix}{alias.name}"
                     if f"{imported}.".startswith("mindroom.") and not f"{imported}.".startswith(_PLUGIN_API_PREFIXES):
-                        found.append((path.relative_to(plugin_root), alias.lineno, imported))
-    return [f"{path}:{line}: {name}" for path, line, name in sorted(found)]
+                        found.append(OutsideImport(path.relative_to(plugin_root), alias.lineno, imported))
+    return sorted(found)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,6 +16,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 runner = CliRunner()
+
+
+def _outside_imports(plugin_root: Path) -> list[str]:
+    return [f"{found.path}:{found.line}: {found.name}" for found in imports_outside_plugin_api(plugin_root)]
 
 
 def _hooks_plugin(root: Path, hooks_module: str) -> Path:
@@ -71,7 +76,7 @@ def test_imports_outside_plugin_api_names_each_mindroom_import_outside_it(
     """Only `mindroom.plugin_api`, `mindroom.plugin_http`, and the documented names count as the plugin API."""
     (tmp_path / "module.py").write_text(source, encoding="utf-8")
 
-    assert imports_outside_plugin_api(tmp_path) == expected
+    assert _outside_imports(tmp_path) == expected
 
 
 def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(tmp_path: Path) -> None:
@@ -95,7 +100,7 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
     # An editor's lock file while hooks.py has unsaved changes.
     (tmp_path / ".#hooks.py").symlink_to("user@host.1234:1700000000")
 
-    assert imports_outside_plugin_api(tmp_path) == [
+    assert _outside_imports(tmp_path) == [
         "helpers/__init__.py:1: mindroom.logging_config.get_logger",
         "hooks.py:2: mindroom.constants.ROUTER_AGENT_NAME",
         "hooks.py:9: mindroom.hooks",
@@ -153,6 +158,45 @@ def test_plugins_check_cli_lists_imports_outside_the_plugin_api_of_a_plugin_that
         "  hooks.py:1: mindroom.constants.ROUTER_AGENT_NAME\n"
         "  hooks.py:2: mindroom.retired_module.helper\n"
     ) in result.stdout
+
+
+@pytest.mark.parametrize(("options", "exit_code", "status"), [([], 0, "compatible"), (["--strict"], 1, "failed")])
+def test_plugins_check_cli_json_lists_imports_outside_the_plugin_api(
+    tmp_path: Path,
+    options: list[str],
+    exit_code: int,
+    status: str,
+) -> None:
+    """`--json` lists each import outside the plugin API, and `--strict` fails the document and the command."""
+    plugin_root = _hooks_plugin(
+        tmp_path / "plugin",
+        "from mindroom.plugin_api import hook\nfrom mindroom.hooks import hook\n",
+    )
+
+    result = runner.invoke(app, ["plugins", "check", "--json", *options, str(plugin_root)])
+
+    assert result.exit_code == exit_code
+    payload = json.loads(result.stdout)
+    assert payload["status"] == status
+    assert payload["name"] == "imports-demo"
+    assert payload["internal_imports"] == [{"path": "hooks.py", "line": 2, "name": "mindroom.hooks.hook"}]
+    if status == "failed":
+        assert payload["detail"] == "imports from outside the plugin API can break in any MindRoom release"
+
+
+def test_plugins_check_cli_json_lists_imports_outside_the_plugin_api_of_a_plugin_that_fails_to_load(
+    tmp_path: Path,
+) -> None:
+    """A `--json` failure carries the import list too."""
+    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.retired_module import helper\n")
+
+    result = runner.invoke(app, ["plugins", "check", "--json", str(plugin_root)])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "failed"
+    assert "No module named 'mindroom.retired_module'" in payload["detail"]
+    assert payload["internal_imports"] == [{"path": "hooks.py", "line": 1, "name": "mindroom.retired_module.helper"}]
 
 
 def test_plugins_check_cli_strict_accepts_a_plugin_that_imports_only_the_plugin_api(tmp_path: Path) -> None:
