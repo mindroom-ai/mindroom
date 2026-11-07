@@ -3276,6 +3276,7 @@ visibility = [
     "mindroom.approval.continuation_runner",
     "mindroom.edit_regenerator",
     "mindroom.reply_turn.locked_turn",
+    "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.turns.dispatch",
     "mindroom.turns.interactive_selection",
@@ -5910,6 +5911,7 @@ path = "mindroom.response_payload_preparation"
 depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
+    "mindroom.reply_turn.request",
 ]
 visibility = [
     "mindroom.bot",
