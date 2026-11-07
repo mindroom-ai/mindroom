@@ -348,6 +348,7 @@ What people see in MindRoom Chat:
 - Anyone in the call can pause transcription for everyone, and anyone in it can resume it; while paused, nothing anyone says is transcribed, and the transcript shows one gap for each pause.
 - When the call ends, the router edits the row to `Call ended · N min`.
 - About 20 seconds after the end, the router posts one message in the row's thread: the notes (what the call was about, decisions, action items with who will do them, and open questions) above the full transcript, or `Call · N min` above it without a notes model; the row then links to it.
+- The finished transcript holds only what was said and transcribed: it leaves out the gaps for pauses and the stretches that could not be transcribed.
 - The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
 
 The rules:
@@ -360,7 +361,7 @@ The rules:
 - A call ends when nobody is in it, checked when someone leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
 - A call's length runs to the last check-in or leave of anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down still shows how long it really lasted.
 - A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
-- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB; each person has one stretch at a time at speech-to-text, and at most 240 a minute.
+- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed, and at most 240 a minute.
 - A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
 - A stretch said before the call ended that arrives late is still added if it arrives within 20 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
 - Notes that fail are tried once more a minute later; after that, the message is posted without notes.
@@ -371,6 +372,7 @@ Privacy:
 
 - Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
 - MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
+- Redacting the message removes it from the room, but a transcript too large for one event leaves its sidecar file in the homeserver's media store until the homeserver's operator purges it, and clients may keep copies they already loaded.
 - A message that cannot be posted, because the router has left the room or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
 - Speech-to-text and notes count as internal AI work under `call_transcript` in [usage](https://docs.mindroom.chat/usage/#token-usage).
 
