@@ -131,6 +131,33 @@ async def test_matrix_api_refuses_event_types_a_loaded_plugin_reserves(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_refuses_to_redact_room_state_a_loaded_plugin_reserves(tmp_path: Path) -> None:
+    """Redacting a state event rewrites that state, so a plugin's reserved room state is not the model's to redact."""
+    context = _context(tmp_path)
+    context.client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {"mode": "strict"},
+                "event_id": "$state:localhost",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 123,
+                "room_id": "!room:localhost",
+                "type": "io.example.settings",
+                "state_key": "",
+            },
+        ),
+    )
+
+    payload = await _call(context, action="redact", event_id="$state:localhost")
+
+    assert payload["status"] == "error"
+    assert payload["message"] == (
+        "Event type 'io.example.settings' is reserved by a plugin and cannot be written by a tool."
+    )
+    context.client.room_redact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_sends_names_outside_the_reserved_namespaces(tmp_path: Path) -> None:
     """A reservation covers names under its prefix and nothing that merely starts alike."""
     context = _context(tmp_path)
