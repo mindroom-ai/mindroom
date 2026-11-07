@@ -2,6 +2,32 @@ name: Plugin fleet
 
 on:
   pull_request:
+    # Modules that define what fleet plugins import, directly or through mindroom.plugin_api, and files this workflow runs.
+    # Extend the list when a fleet plugin imports another module; pushes to main and the nightly run test every change.
+    paths:
+      - ".github/plugin-fleet.json"
+      - ".github/workflows/plugin-ci.yml"
+      - ".github/workflows/plugin-fleet.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/mindroom/agent_loop/helper.py"
+      - "src/mindroom/attachments/**"
+      - "src/mindroom/cli/plugins.py"
+      - "src/mindroom/config/**"
+      - "src/mindroom/constants.py"
+      - "src/mindroom/history/**"
+      - "src/mindroom/hooks/**"
+      - "src/mindroom/judgment/**"
+      - "src/mindroom/llm/provider.py"
+      - "src/mindroom/logging_config.py"
+      - "src/mindroom/message_target.py"
+      - "src/mindroom/plugin_api.py"
+      - "src/mindroom/plugin_check.py"
+      - "src/mindroom/providers/registry.py"
+      - "src/mindroom/thread_tags.py"
+      - "src/mindroom/tool_system/**"
+      - "src/mindroom/turn_model.py"
+      - "src/mindroom/turn_origin.py"
   push:
     branches: [main]
   schedule:
