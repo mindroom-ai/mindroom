@@ -480,7 +480,7 @@ get_workflow_run("brief-report", "run_...")
 Workflow participants cannot pause for human approval, so every toolkit a participant names must be pre-approved.
 `validate_workflow()`, `create_workflow()`, and `update_workflow()` refuse a participant tool that is not pre-approved, and a run fails before any participant starts if a pre-approval was removed after the workflow was saved.
 Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
-Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
+Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit, except a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function the participant does not also have pre-approved.
 
 ```yaml
 agents:
