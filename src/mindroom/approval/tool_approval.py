@@ -156,12 +156,16 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     return rule
 
 
-def _rules_may_ask(config: Config, tool_name: str) -> tuple[bool, float]:
-    """Return whether the rules matching ``tool_name`` may ask about a call of it, and how long its card stays open."""
-    rule = _matching_tool_approval_rule(config, tool_name)
+def _rule_outcome(config: Config, rule: ApprovalRuleConfig | None) -> tuple[bool, float]:
+    """Return whether ``rule``, or the default when no rule matches, may ask about a call, and how long its card stays open."""
     may_ask = config.tool_approval.default == "require_approval" if rule is None else rule.action != "auto_approve"
     timeout_days = config.tool_approval.timeout_days if rule is None or rule.timeout_days is None else rule.timeout_days
     return may_ask, timeout_days * 24 * 60 * 60
+
+
+def _rules_may_ask(config: Config, tool_name: str) -> tuple[bool, float]:
+    """Return whether the rules matching ``tool_name`` may ask about a call of it, and how long its card stays open."""
+    return _rule_outcome(config, _matching_tool_approval_rule(config, tool_name))
 
 
 def tool_may_require_approval(config: Config, tool_name: str, alias: ApprovalAlias | None = None) -> bool:
@@ -185,15 +189,11 @@ def toolkit_approval_alias(
     """
     if toolkit is None:
         return None
-    return next(
-        (
-            alias
-            for name in config.expand_tool_names([toolkit])
-            if (metadata := tools.get(name)) is not None
-            and (alias := metadata.approval_aliases.get(function_name)) is not None
-        ),
-        None,
-    )
+    for name in config.expand_tool_names([toolkit]):
+        metadata = tools.get(name)
+        if metadata is not None and function_name in metadata.approval_aliases:
+            return metadata.approval_aliases[function_name]
+    return None
 
 
 def resolve_tool_approval_approver(
@@ -271,22 +271,14 @@ async def _evaluate_rules(
     agent_name: str,
 ) -> tuple[bool, float]:
     """Return the decision of the rules that match ``tool_name`` itself for one call of it."""
-    approval_config = config.tool_approval
-    require_approval = approval_config.default == "require_approval"
-    timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
-
     if tool_call_is_approval_exempt(tool_name, arguments, runtime_paths):
-        return False, timeout_seconds
+        return False, config.tool_approval.timeout_days * 24 * 60 * 60
 
     rule = _matching_tool_approval_rule(config, tool_name)
-    if rule is None:
-        return require_approval, timeout_seconds
-    if rule.timeout_days is not None:
-        timeout_seconds = rule.timeout_days * 24 * 60 * 60
-    if rule.action is not None:
-        return rule.action == "require_approval", timeout_seconds
+    may_ask, timeout_seconds = _rule_outcome(config, rule)
+    if rule is None or rule.script is None:
+        return may_ask, timeout_seconds
 
-    assert rule.script is not None
     module, resolved_path = _load_script_module(rule.script, runtime_paths)
     check = getattr(module, "check", None)
     if not callable(check):
