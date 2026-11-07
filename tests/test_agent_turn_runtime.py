@@ -1804,8 +1804,8 @@ def _runner(reply: _Reply) -> ResponseRunner:
     return bot._response_runner
 
 
-def _request(prompt: str = "Hello") -> ResponseRequest:
-    """Return one admitted reply request for the thread the ``ai`` seam tests use."""
+def _request(prompt: str = "Hello", *, source_kind: str = "message") -> ResponseRequest:
+    """Return one admitted reply request for the thread the ``ai`` seam tests use, from a ``source_kind`` source."""
     target = MessageTarget.resolve(room_id=ROOM_ID, thread_id=THREAD_ID, reply_to_event_id=EVENT_ID)
     return ResponseRequest(
         thread_history=[],
@@ -1818,7 +1818,7 @@ def _request(prompt: str = "Hello") -> ResponseRequest:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="assistant",
-            origin=message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind="message"),
+            origin=message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind=source_kind),
         ),
         sources=ResponseSources(pending_event_ids=(EVENT_ID,), logical_source_event_ids=(EVENT_ID,)),
     )
@@ -2003,12 +2003,6 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     assert not record.requirements
 
 
-def _silent(request: ResponseRequest) -> ResponseRequest:
-    """Return ``request`` as a silent scheduled task's turn, which shows no progress in its room."""
-    origin = message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
-    return replace(request, response_envelope=replace(request.response_envelope, origin=origin))
-
-
 def _call_mirror(seen: list[tuple[str, bool, str | None]]) -> list[object]:
     """Return before-call and after-call hooks that record whether each call's reply shows it, and its preview."""
 
@@ -2045,8 +2039,8 @@ async def test_the_runner_tells_a_call_s_hooks_what_its_reply_shows_of_the_call(
     content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
     trace = content.get("m.new_content", content).get("io.mindroom.tool_trace")
     shown_previews = [] if trace is None else [event["args_preview"] for event in trace["events"]]
-    assert shown_previews == (["label=a"] if show_tool_calls else [])
     preview = "label=a" if show_tool_calls else None
+    assert shown_previews == ([preview] if show_tool_calls else [])
     assert seen == [("before", show_tool_calls, preview), ("after", show_tool_calls, preview)]
 
 
@@ -2061,7 +2055,7 @@ async def test_the_runner_tells_a_silent_scheduled_task_s_calls_hooks_that_they_
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call-1", label="a")), answer("Touched.")])
     publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
 
-    await _respond_through_runner(_runner(reply), _silent(_request()), streaming=False)
+    await _respond_through_runner(_runner(reply), _request(source_kind=SILENT_SCHEDULE_SOURCE_KIND), streaming=False)
 
     assert seen == [("before", False, None), ("after", False, None)]
 
@@ -2101,7 +2095,7 @@ async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_sho
         apply_post_response_effects=AsyncMock(),
     ):
         await runner.generate_team_response_helper(
-            _silent(_request()) if source_kind == SILENT_SCHEDULE_SOURCE_KIND else _request(),
+            _request(source_kind=source_kind),
             member_names=["assistant"],
             team_mode="coordinate",
         )

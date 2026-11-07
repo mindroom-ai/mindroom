@@ -2148,7 +2148,7 @@ async def test_a_stored_call_reads_as_hidden_while_the_runner_that_runs_it_reads
         seen.append((ctx.tool_name, ctx.shown, ctx.chat_preview()))
 
     registry = HookRegistry.from_plugins([_plugin("mirror", [mirror])])
-    agent = _live_agent([], middleware=(detached_policy(registry),))
+    agent = _live_agent(middleware=(detached_policy(registry),))
     try:
         await _armed(manager)
 

@@ -845,14 +845,11 @@ async def test_a_resumed_run_s_calls_tell_their_hooks_whether_the_reply_it_conti
             await policy("read_document", read_document, {"name": "notes"})
         return CompletedApprovalRun("Read.", {})
 
-    def pausing_on_its_call(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        async def chunks() -> AsyncIterator[object]:
-            yield "Reading document"
-            # The reply shows the call it asks approval for, where it shows tool calls.
-            yield ToolStarted(ReportedCall(tool_call_id="call-run-1", tool_name="read_document", tool_args={}))
-            raise ResponsePausedForApproval(_paused())
-
-        return chunks()
+    async def pausing_on_its_call(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield "Reading document"
+        # The reply shows the call it asks approval for, where it shows tool calls.
+        yield ToolStarted(ReportedCall(tool_call_id="call-run-1", tool_name="read_document", tool_args={}))
+        raise ResponsePausedForApproval(_paused())
 
     async with _approval_bot(tmp_path, requires_human=False) as bot:
         bot.config.defaults.show_tool_calls = show_tool_calls
@@ -867,11 +864,7 @@ async def test_a_resumed_run_s_calls_tell_their_hooks_whether_the_reply_it_conti
             patch.object(type(runner.approvals._approval_execution), "continue_run", AsyncMock(side_effect=resume)),
         ):
             request = _plain_request(_target())
-            origin = message_origin(
-                sender_id="@user:localhost",
-                requester_id="@user:localhost",
-                source_kind=source_kind,
-            )
+            origin = message_origin(source_kind=source_kind)
             await runner.generate_response(
                 replace(request, response_envelope=replace(request.response_envelope, origin=origin)),
             )

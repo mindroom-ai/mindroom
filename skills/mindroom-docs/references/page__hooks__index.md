@@ -469,9 +469,9 @@ All contexts include these fields:
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
 `shown` is true when the call runs in a reply that shows its tool calls, as [`show_tool_calls`](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) sets.
-Calls report false in [voice calls](https://docs.mindroom.chat/voice-calls/), listening and script turns, [contact](https://docs.mindroom.chat/agent-contacts/) turns, [silent](https://docs.mindroom.chat/scheduling/#silent-delivery) scheduled tasks, a delegated agent's turn, and outside a Matrix conversation, such as through the OpenAI-compatible API or the MCP gateway.
+Calls report false in [voice calls](https://docs.mindroom.chat/voice-calls/), [listening](https://docs.mindroom.chat/configuration/agents/#listening) turns, [background scripts](https://docs.mindroom.chat/tools/background-scripts/), [contact](https://docs.mindroom.chat/agent-contacts/) turns, [silent](https://docs.mindroom.chat/scheduling/#silent-delivery) scheduled tasks, a delegated agent's turn, and outside a Matrix conversation, such as through the OpenAI-compatible API or the MCP gateway.
 The call a [pre-approved scheduled call](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) stores also reports false, since its reply shows only `run_scheduled_call`.
-`chat_preview()` returns the call's arguments as that reply's tool trace previews them, with secrets redacted and each value cut to 250 characters, or `None` when `shown` is false, so a plugin that mirrors tool activity elsewhere shows no more than the chat does.
+`chat_preview()` returns the call's arguments as that reply's tool trace previews them, with secrets redacted, each value cut to 250 characters, and the whole preview cut to 1200, or `None` when `shown` is false, so a plugin that mirrors tool activity elsewhere shows no more than the chat does.
 
 ### Message objects
 

@@ -149,9 +149,8 @@ class ToolRuntimeContext:
     # Whether a call may name a workspace file for its result (``mindroom_output_path``); a silent listening turn's may
     # not, as the room text driving it would pick the file.
     tool_output_paths: bool = True
-    # Whether the reply this turn's calls run in shows them, which tool hooks read as ``shown``. Only a visible reply that
-    # shows tool calls sets it, so a call nobody sees, as in a voice call, a listening, script, quiet, or delegated
-    # child's turn, never reads as shown.
+    # Whether people see this turn's calls in its reply, which tool hooks read as ``shown``; only a reply that shows tool
+    # calls in a turn that is not quiet sets it.
     tool_calls_shown: bool = False
 
     @property
