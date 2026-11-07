@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from nio.durable import DurableSyncConfig, RecordKind
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
@@ -23,6 +25,8 @@ from tests.conftest import (
     make_matrix_client_mock,
     test_runtime_paths,
 )
+from tests.test_bot_ready_hook import _agent_bot
+from tests.test_durable_ingestion_runtime import _consume_frame, _consume_repaired_frame, _owned_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -31,6 +35,7 @@ if TYPE_CHECKING:
 PARENT = "!parent:localhost"
 ROOM = "!room:localhost"
 OTHER_ROOM = "!other:localhost"
+OLD_ROOM = "!old:localhost"
 HELPER = "@mindroom_helper:localhost"
 ALICE = "@alice:localhost"
 MALLORY = "@mallory:localhost"
@@ -471,6 +476,54 @@ async def test_a_room_taken_out_of_the_config_that_is_not_followed_is_left(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replayed", ["before", "during", "after"])
+async def test_listings_replayed_from_room_state_at_startup_join_and_leave_nothing_twice(
+    tmp_path: Path,
+    replayed: str,
+) -> None:
+    """A full-state sync replays every listing in the bot's rooms; around the startup sweep each room is joined once."""
+    bot = _Bot(
+        tmp_path,
+        {
+            PARENT: [_create(), _child(ROOM), _child(OTHER_ROOM), _child(OLD_ROOM, listed=False)],
+            ROOM: [_create(), _parent(PARENT)],
+            OTHER_ROOM: [_create(), _parent(PARENT)],
+            OLD_ROOM: [_create(), _parent(PARENT)],
+        },
+        joined=(PARENT, ROOM),
+    )
+    await bot.lifecycle._remember_invited_room(ROOM)
+    change_membership = bot.lifecycle.deps.change_membership
+    replays = [replayed]
+
+    async def replay(moment: str) -> None:
+        if replays != [moment]:
+            return
+        replays.clear()
+        for room_id in tuple(bot.client.rooms):
+            for event in bot.state[room_id]:
+                if event["type"] == "m.space.child":
+                    listing = _space_child_event(event["state_key"], listed=bool(event["content"]))
+                    await bot.lifecycle.on_space_child(bot.client.rooms[room_id], listing)
+
+    async def replay_during_the_sweep(room_id: str, target_membership: str, **kwargs: object) -> bool:
+        await replay("during")
+        return await change_membership(room_id, target_membership, **kwargs)
+
+    bot.lifecycle.deps = replace(bot.lifecycle.deps, change_membership=replay_during_the_sweep)
+
+    await replay("before")
+    await bot.lifecycle.join_configured_rooms()
+    await bot.lifecycle.leave_unconfigured_rooms()
+    await replay("after")
+    await bot.settle()
+
+    assert not replays
+    assert sorted(bot.memberships) == [(OTHER_ROOM, "join"), (PARENT, "join"), (ROOM, "join")]
+    assert bot.lifecycle.invited_room_ids() == {ROOM, OTHER_ROOM}
+
+
+@pytest.mark.asyncio
 async def test_room_cleanup_during_a_follow_keeps_the_room(tmp_path: Path) -> None:
     """A cleanup pass that runs while the bot joins a listed room never leaves the room it is joining."""
     bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]})
@@ -488,3 +541,36 @@ async def test_room_cleanup_during_a_follow_keeps_the_room(tmp_path: Path) -> No
 
     assert rooms_to_leave == [[]]
     assert bot.lifecycle.invited_room_ids() == {ROOM}
+
+
+@pytest.mark.asyncio
+async def test_a_listing_change_seen_only_as_room_state_reaches_the_listing_callback(tmp_path: Path) -> None:
+    """After a gap longer than the sync recovers, a room taken off a list arrives only as state, and is still handled."""
+    bot = _agent_bot(tmp_path)
+    seen: list[str] = []
+
+    async def on_space_child(_room: nio.MatrixRoom, event: nio.RoomSpaceChildEvent) -> None:
+        seen.append(event.event_id)
+
+    def message(event_id: str) -> dict:
+        content = {"msgtype": "m.text", "body": "hello"}
+        return {
+            "type": "m.room.message",
+            "event_id": event_id,
+            "sender": ALICE,
+            "origin_server_ts": 1,
+            "content": content,
+        }
+
+    def joined(state: list[dict], timeline: dict) -> dict:
+        return {"next_batch": "next", "rooms": {"join": {PARENT: {"state": {"events": state}, "timeline": timeline}}}}
+
+    unlisted = {"event_id": "$unlisted", "origin_server_ts": 1, **_child(ROOM, listed=False)}
+    gap = {"limited": True, "prev_batch": "gap", "events": [message("$latest")]}
+    async with _owned_session(bot, DurableSyncConfig(recovery_page_size=1, max_recovery_pages=1)) as session:
+        session.client.add_event_callback(on_space_child, nio.RoomSpaceChildEvent)
+        await _consume_frame(bot, session, json.dumps(joined([], {"limited": False, "events": []})).encode())
+        records = await _consume_repaired_frame(bot, session, joined([unlisted], gap), [message("$older")])
+
+    assert any(record.kind is RecordKind.LOSS for record in records)
+    assert seen == ["$unlisted"]

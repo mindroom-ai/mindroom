@@ -171,6 +171,9 @@ async def _dispatch_auxiliary_record(
         self_sender=account_id,
     ):
         return
+    if record.kind is RecordKind.STATE and record.source.get("type") == "m.space.child":
+        # Nio routes no room state to callbacks, and a listing change after a gap the sync cannot fill arrives only there.
+        record = replace(record, route="event")
     await session.dispatch(record)
 
 
