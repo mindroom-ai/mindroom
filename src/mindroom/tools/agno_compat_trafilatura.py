@@ -3,72 +3,39 @@
 from __future__ import annotations
 
 import agno.tools.trafilatura as agno_trafilatura
-import httpx
 from agno.utils.log import log_warning
 from trafilatura import spider as trafilatura_spider
 from trafilatura.downloads import USER_AGENT, Response
 from trafilatura.settings import DEFAULT_CONFIG
 
-from mindroom.server_fetch_url import (
-    ServerFetchHTTPTransport,
-    validate_server_fetch_redirect_url,
-    validate_server_fetch_url,
-)
+from mindroom.public_fetch import PublicFetchError, fetch_public_url_sync
 
-_DOWNLOAD_TIMEOUT_SECONDS = DEFAULT_CONFIG.getint("DEFAULT", "DOWNLOAD_TIMEOUT")
-_MAX_REDIRECTS = DEFAULT_CONFIG.getint("DEFAULT", "MAX_REDIRECTS")
 _MAX_FILE_SIZE = DEFAULT_CONFIG.getint("DEFAULT", "MAX_FILE_SIZE")
 
 
-def _read_response(response: httpx.Response, url: str, *, decode: bool) -> Response | None:
-    """Buffer one uncompressed response body within Trafilatura's download size limit."""
-    if response.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
-        log_warning("Trafilatura download used an unrequested content encoding")
+def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
+    """Download one page through the shared public fetch, within Trafilatura's download size limit.
+
+    A refused URL raises ``PublicFetchError``.
+    Other download failures, including a non-2xx response, return ``None`` like Trafilatura's own downloader.
+    """
+    try:
+        page = fetch_public_url_sync(url, max_bytes=_MAX_FILE_SIZE, user_agent=USER_AGENT)
+    except PublicFetchError as error:
+        if error.code == "url_not_allowed":
+            raise
+        log_warning(f"Trafilatura download failed: {error}")
         return None
-    data = bytearray()
-    for chunk in response.iter_raw():
-        if len(data) + len(chunk) > _MAX_FILE_SIZE:
-            log_warning("Trafilatura download exceeded the maximum file size")
-            return None
-        data.extend(chunk)
-    fetched = Response(bytes(data), response.status_code, url)
+    # The shared fetch returns only a 2xx body.
+    fetched = Response(page.content, 200, page.url)
     fetched.decode_data(decode)
     return fetched
-
-
-def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
-    """Download one page after validating the URL, every redirect hop, and each dialed address.
-
-    Unsafe targets raise ``ServerFetchUrlError``.
-    Ordinary download failures return ``None`` like Trafilatura's own downloader.
-    Bodies are requested uncompressed so the size limit bounds memory before any decoding.
-    """
-    request_url = validate_server_fetch_url(url)
-    try:
-        with httpx.Client(
-            transport=ServerFetchHTTPTransport(),
-            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
-            timeout=_DOWNLOAD_TIMEOUT_SECONDS,
-        ) as client:
-            for _redirect_count in range(_MAX_REDIRECTS + 1):
-                with client.stream("GET", request_url) as response:
-                    if not response.is_redirect:
-                        return _read_response(response, request_url, decode=decode)
-                    location = response.headers.get("location")
-                request_url = validate_server_fetch_redirect_url(request_url, location)
-    except (httpx.HTTPError, httpx.InvalidURL) as error:
-        log_warning(f"Trafilatura download failed: {error.__class__.__name__}")
-        return None
-    log_warning("Trafilatura download stopped after too many redirects")
-    return None
 
 
 def _fetch_url(url: str) -> str | None:
     """Return decoded HTML from a successful guarded download."""
     response = _fetch_response(url, decode=True)
-    if response is None or response.status != 200:
-        return None
-    return response.html
+    return None if response is None else response.html
 
 
 def install_server_fetch_guard() -> None:
@@ -84,7 +51,7 @@ def install_server_fetch_guard() -> None:
     # path; retain validation of each URL, redirect hop, and dialed address.
     # Coverage: tests/test_trafilatura_tool.py::test_trafilatura_rejects_unsafe_targets_without_connecting,
     # ::test_trafilatura_revalidates_redirects_before_following,
-    # ::test_trafilatura_rejects_dns_rebind_at_connect_time,
+    # ::test_trafilatura_refuses_a_hostname_that_resolves_to_loopback,
     # ::test_trafilatura_extracts_public_page,
     # ::test_trafilatura_rejects_oversized_download,
     # ::test_trafilatura_rejects_compressed_download,

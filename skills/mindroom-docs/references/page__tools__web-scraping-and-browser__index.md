@@ -69,7 +69,7 @@ agents:
 `trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
 `extract_batch()` returns one JSON payload listing successes and failures.
 `crawl_website()` stops with an error when it reaches a refused target, while `extract_content=True` reports each refused page individually.
-A server that sends a compressed body fails the download.
+A server that sends a compressed body fails the download, as does a page that does not finish downloading within 30 seconds.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -108,6 +108,7 @@ agents:
 
 `newspaper` exposes `read_article(url)` and returns JSON with whichever of title, authors, text, and publish date were extracted.
 It is tuned for article pages, not arbitrary sites, and returns no image fields.
+A page that does not finish downloading within 30 seconds fails.
 Use `newspaper` in `tools:`, not `newspaper4k`.
 
 | Option | Type | Default | Notes |

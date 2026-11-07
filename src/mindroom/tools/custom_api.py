@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
 
-from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes_sync
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.public_fetch import run_fetch_sync
 from mindroom.redaction import redact_sensitive_data
-from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_fetch_url
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.string_mapping import parse_string_mapping
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from agno.tools.api import CustomApiTools
 
@@ -39,11 +41,11 @@ def _keeps_credentials(base: httpx.URL, url: httpx.URL) -> bool:
     return (base.scheme, base.port, url.scheme, url.port) == ("http", None, "https", None)
 
 
-def _credential_header_guard(base_url: str, header_names: frozenset[str]) -> Callable[[httpx.Request], None]:
+def _credential_header_guard(base_url: str, header_names: frozenset[str]) -> Callable[[httpx.Request], Awaitable[None]]:
     """Return a request hook that strips credential headers from every hop outside the base_url origin."""
     base = httpx.URL(base_url)
 
-    def strip_credentials_off_origin(request: httpx.Request) -> None:
+    async def strip_credentials_off_origin(request: httpx.Request) -> None:
         if not _keeps_credentials(base, request.url):
             for name in header_names:
                 request.headers.pop(name, None)
@@ -51,14 +53,14 @@ def _credential_header_guard(base_url: str, header_names: frozenset[str]) -> Cal
     return strip_credentials_off_origin
 
 
-def _read_final_response(client: httpx.Client, response: httpx.Response) -> str:
+async def _read_final_response(client: httpx.AsyncClient, response: httpx.Response) -> str:
     """Follow redirects without reading their bodies, then report the final response within the byte cap."""
     for _ in range(_MAX_REDIRECTS):
         next_request = response.next_request
         if next_request is None:
             break
-        response.close()
-        response = client.send(next_request, stream=True)
+        await response.aclose()
+        response = await client.send(next_request, stream=True)
     try:
         if response.next_request is not None:
             return json.dumps({"error": f"Request failed: more than {_MAX_REDIRECTS} redirects"}, indent=2)
@@ -71,12 +73,12 @@ def _read_final_response(client: httpx.Client, response: httpx.Response) -> str:
             result["error"] = f"Response used Content-Encoding {', '.join(compressed)} although identity was requested"
             return json.dumps(result, indent=2)
         try:
-            body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_RESPONSE_BYTES)
+            body = await collect_bounded_bytes(response.aiter_raw(), max_bytes=_MAX_RESPONSE_BYTES)
         except ByteLimitExceededError:
             result["error"] = f"Response body exceeds {_MAX_RESPONSE_BYTES} bytes"
             return json.dumps(result, indent=2)
     finally:
-        response.close()
+        await response.aclose()
     try:
         result["data"] = json.loads(body)
     except ValueError:
@@ -226,11 +228,15 @@ def custom_api_tools() -> type[CustomApiTools]:
                 # The URL alone chooses the virtual host that receives the credentials.
                 request_headers.pop("Host", None)
             request_headers["Accept-Encoding"] = "identity"
-            try:
-                with httpx.Client(
-                    transport=ServerFetchHTTPTransport(verify=self.verify_ssl),
-                    event_hooks=event_hooks,
-                ) as client:
+
+            async def send() -> str:
+                async with (
+                    asyncio.timeout(self.timeout),
+                    httpx.AsyncClient(
+                        transport=ServerFetchAsyncHTTPTransport(verify=self.verify_ssl),
+                        event_hooks=event_hooks,
+                    ) as client,
+                ):
                     request = client.build_request(
                         method=method,
                         url=url,
@@ -240,7 +246,15 @@ def custom_api_tools() -> type[CustomApiTools]:
                         headers=request_headers,
                         timeout=self.timeout,
                     )
-                    return _read_final_response(client, client.send(request, auth=auth, stream=True))
+                    return await _read_final_response(client, await client.send(request, auth=auth, stream=True))
+
+            try:
+                return run_fetch_sync(send())
+            except TimeoutError:
+                return json.dumps(
+                    {"error": f"Request failed: the request did not finish within {self.timeout} seconds"},
+                    indent=2,
+                )
             except httpx.RequestError as e:
                 return json.dumps({"error": f"Request failed: {e}"}, indent=2)
 

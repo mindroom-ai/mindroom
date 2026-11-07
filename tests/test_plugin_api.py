@@ -265,8 +265,8 @@ _SIGNATURES = {
     "current_call": "()",
     "current_execution_identity": "()",
     "emit_custom_event": "(plugin_name, event_name, payload)",
-    "fetch_public_url": "(url, *, max_bytes, use_env_proxy)",
-    "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy)",
+    "fetch_public_url": "(url, *, max_bytes, use_env_proxy, user_agent)",
+    "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy, user_agent)",
     "get_logger": "(name)",
     "get_tool_by_name": (
         "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "

@@ -87,6 +87,23 @@ async def test_a_fetch_follows_public_redirects_and_returns_the_final_page(monke
 
 
 @pytest.mark.asyncio
+async def test_a_fetch_sends_the_given_user_agent_on_every_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller can name itself to the server, while the body is still requested unencoded."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "/final"})
+        return _page(200, b"page")
+
+    requests = _serve(monkeypatch, handler)
+
+    await fetch_public_url("https://example.com/start", max_bytes=1024, user_agent="feed-reader/1.0")
+
+    assert [request.headers["user-agent"] for request in requests] == ["feed-reader/1.0"] * 2
+    assert [request.headers["accept-encoding"] for request in requests] == ["identity"] * 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "url",
     [

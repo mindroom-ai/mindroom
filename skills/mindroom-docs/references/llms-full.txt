@@ -11331,7 +11331,7 @@ agents:
 `trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
 `extract_batch()` returns one JSON payload listing successes and failures.
 `crawl_website()` stops with an error when it reaches a refused target, while `extract_content=True` reports each refused page individually.
-A server that sends a compressed body fails the download.
+A server that sends a compressed body fails the download, as does a page that does not finish downloading within 30 seconds.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -11370,6 +11370,7 @@ agents:
 
 `newspaper` exposes `read_article(url)` and returns JSON with whichever of title, authors, text, and publish date were extracted.
 It is tuned for article pages, not arbitrary sites, and returns no image fields.
+A page that does not finish downloading within 30 seconds fails.
 Use `newspaper` in `tools:`, not `newspaper4k`.
 
 | Option | Type | Default | Notes |
@@ -15894,7 +15895,7 @@ A body larger than 8 MiB, or one the server compressed despite being asked not t
 | `api_key` | `password` | `null` | Bearer token. |
 | `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
 | `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
-| `timeout` | `number` | `30` | Request timeout in seconds. |
+| `timeout` | `number` | `30` | Seconds the whole request may take, including redirects and the response body. |
 | `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
 | `all` | `boolean` | `false` | Enable `make_request()`. |
 
@@ -18118,6 +18119,7 @@ async def feed_xml(url: str) -> str:
 
 A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
 It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+Pass `user_agent` to send your own `User-Agent` header instead of HTTPX's default.
 It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
 Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
 In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
