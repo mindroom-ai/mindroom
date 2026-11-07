@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 ROOM = "!room:example.org"
+OTHER_ROOM = "!other:example.org"
 ANN = "@ann:example.org"
 
 
@@ -247,10 +248,10 @@ async def test_the_loop_ticks_while_on_idles_while_off_and_reads_the_config_each
 
 
 @pytest.mark.asyncio
-async def test_while_off_the_loop_gives_up_what_was_not_posted_and_reads_and_writes_nothing_in_matrix(
+async def test_while_off_the_loop_holds_the_store_to_a_day_and_reads_and_writes_nothing_in_matrix(
     tmp_path: Path,
 ) -> None:
-    """Off from the start, the loop still runs: it ends calls and drops lines kept from before, with no Matrix call."""
+    """Off from the start, the loop still runs: a call not heard from for a day ends and its lines go, others stay."""
     paths = test_runtime_paths(tmp_path)
     config = _config(enabled=False)
     sleeps = _Sleeps()
@@ -261,28 +262,34 @@ async def test_while_off_the_loop_gives_up_what_was_not_posted_and_reads_and_wri
     assert not (paths.storage_root / "call_transcripts").exists()
 
     store = CallTranscriptStore(paths.storage_root)
-    heard_at = time.time() - 30
-    call, _ = store.ensure_live_call(ROOM, at=heard_at)
-    store.record_presence(call.id, ANN, at=heard_at)
-    store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
+    calls: dict[str, tuple[str, float]] = {}
+    for room_id, heard_at in ((ROOM, time.time() - 86_430), (OTHER_ROOM, time.time() - 30)):
+        call, _ = store.ensure_live_call(room_id, at=heard_at)
+        store.record_presence(call.id, ANN, at=heard_at)
+        store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
+        calls[room_id] = (call.id, heard_at)
     waited = len(sleeps.delays)
     await sleeps.until(lambda: len(sleeps.delays) >= waited + 2)
     await coordinator.stop()
 
-    ended = store.call(call.id)
-    assert ended is not None
-    assert (ended.ended_at, ended.transcript_event_id) == (heard_at, None)
-    assert ended.transcript_done_at is not None
-    assert store.lines(call.id) == []
+    lapsed_id, lapsed_at = calls[ROOM]
+    lapsed = store.call(lapsed_id)
+    assert lapsed is not None
+    assert (lapsed.ended_at, lapsed.transcript_event_id) == (lapsed_at, None)
+    assert lapsed.transcript_done_at is not None
+    assert store.lines(lapsed_id) == []
+    recent_id, _ = calls[OTHER_ROOM]
+    recent = store.call(recent_id)
+    assert recent is not None
+    assert recent.ended_at is None
+    assert len(store.lines(recent_id)) == 1
     assert router.client.mock_calls == []
     assert sleeps.delays[-2:] == [15.0, 15.0]
 
 
 @pytest.mark.asyncio
-async def test_off_and_back_on_between_two_passes_still_ends_calls_and_gives_up_what_was_not_posted(
-    tmp_path: Path,
-) -> None:
-    """Turned off and on again within one wait, the next pass still holds the store to having been off."""
+async def test_off_and_back_on_between_two_passes_ends_nothing(tmp_path: Path) -> None:
+    """Turned off and on again within one wait, the next pass goes on as if it had stayed on: every call keeps its lines."""
     paths = test_runtime_paths(tmp_path)
     config = _config(enabled=True)
     slept = asyncio.Event()
@@ -295,30 +302,35 @@ async def test_off_and_back_on_between_two_passes_still_ends_calls_and_gives_up_
 
     coordinator = CallTranscriptsRuntimeCoordinator(runtime_paths=paths, config_provider=lambda: config, sleep=sleep)
     store = CallTranscriptStore(paths.storage_root)
-    heard_at = time.time() - 5
-    call, _ = store.ensure_live_call(ROOM, at=heard_at)
-    store.record_presence(call.id, ANN, at=heard_at)
-    store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
+
+    def start_call(room_id: str) -> str:
+        heard_at = time.time() - 5
+        call, _ = store.ensure_live_call(room_id, at=heard_at)
+        store.record_presence(call.id, ANN, at=heard_at)
+        store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
+        return call.id
+
+    before = start_call(ROOM)
     coordinator.bind_if_ready(config, {})
     async with asyncio.timeout(5):
         await slept.wait()
-    assert store.lines(call.id) != []
 
     config = _config(enabled=False)
     coordinator.bind_if_ready(config, {})
     config = _config(enabled=True)
     coordinator.bind_if_ready(config, {})
+    after = start_call(OTHER_ROOM)
     slept.clear()
     woken.set()
     async with asyncio.timeout(5):
         await slept.wait()
     await coordinator.stop()
 
-    ended = store.call(call.id)
-    assert ended is not None
-    assert (ended.ended_at, ended.transcript_event_id) == (heard_at, None)
-    assert ended.transcript_done_at is not None
-    assert store.lines(call.id) == []
+    for call_id in (before, after):
+        stored = store.call(call_id)
+        assert stored is not None
+        assert stored.ended_at is None
+        assert len(store.lines(call_id)) == 1
 
 
 @pytest.mark.asyncio
@@ -447,59 +459,3 @@ def test_the_api_reaches_the_running_service_through_what_the_runtime_lends_it(t
     service = lent.call_transcripts()
     assert isinstance(service, CallTranscriptService)
     assert lent.call_transcripts() is service
-
-
-@pytest.mark.asyncio
-async def test_an_off_pass_that_fails_is_tried_again_at_the_next_pass(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Turned off and on again, an off pass that raises still holds the store to having been off at the next pass."""
-    paths = test_runtime_paths(tmp_path)
-    config = _config(enabled=True)
-    passes = 0
-    slept = asyncio.Event()
-    woken = asyncio.Event()
-
-    async def sleep(_seconds: float) -> None:
-        slept.set()
-        await woken.wait()
-        woken.clear()
-
-    real_tick_while_off = CallTranscriptService.tick_while_off
-
-    async def tick_while_off_failing_once(service: CallTranscriptService) -> None:
-        nonlocal passes
-        passes += 1
-        if passes == 1:
-            msg = "the store could not be read"
-            raise OSError(msg)
-        await real_tick_while_off(service)
-
-    monkeypatch.setattr(CallTranscriptService, "tick_while_off", tick_while_off_failing_once)
-    coordinator = CallTranscriptsRuntimeCoordinator(runtime_paths=paths, config_provider=lambda: config, sleep=sleep)
-    store = CallTranscriptStore(paths.storage_root)
-    heard_at = time.time() - 5
-    call, _ = store.ensure_live_call(ROOM, at=heard_at)
-    store.record_presence(call.id, ANN, at=heard_at)
-    store.add_speech(call.id, user_id=ANN, said_at=heard_at, seconds=2.0, text="Hello there")
-    coordinator.bind_if_ready(config, {})
-    async with asyncio.timeout(5):
-        await slept.wait()
-
-    config = _config(enabled=False)
-    coordinator.bind_if_ready(config, {})
-    config = _config(enabled=True)
-    coordinator.bind_if_ready(config, {})
-    for _ in range(2):
-        slept.clear()
-        woken.set()
-        async with asyncio.timeout(5):
-            await slept.wait()
-    await coordinator.stop()
-
-    assert passes == 2
-    ended = store.call(call.id)
-    assert ended is not None
-    assert ended.transcript_done_at is not None
-    assert store.lines(call.id) == []

@@ -1223,40 +1223,89 @@ async def test_notes_written_after_the_day_is_up_are_not_posted(world: World) ->
 
 
 @pytest.mark.asyncio
-async def test_while_off_calls_end_and_messages_not_posted_go_without_matrix_and_rows_catch_up_later(
+async def test_while_off_only_a_day_without_word_ends_a_call_or_gives_up_its_message_and_nothing_goes_to_matrix(
     world: World,
 ) -> None:
-    """Off, writes in progress stop, live calls end and messages not yet posted go; back on, rows say the calls ended."""
+    """Off, a call not heard from for a day ends then, and a message not posted a day after its call's end goes."""
     pending = await world.end_by_leaving(ANN)
     live = await world.service.join(OTHER_ROOM, BOB)
     world.clock.advance(5)
     await world.say(live.id, BOB)
-    world.room.row_gate = asyncio.Event()
-    world.room.gated_rooms = {THIRD_ROOM}
-    world.room.row_started = asyncio.Event()
-    stuck = await world.service.join(THIRD_ROOM, CAROL)
-    await world.room.row_started.wait()
+    await world.settled()
     sent = (list(world.room.rows), list(world.room.row_edits), list(world.room.transcripts))
+    world.clock.advance(86_395)
 
     await world.service.tick_while_off()
 
+    given_up = world.store.call(pending)
+    assert given_up is not None
+    assert (given_up.transcript_done_at, given_up.transcript_event_id) == (world.clock.now, None)
+    assert world.store.lines(pending) == []
+    still_live = world.store.call(live.id)
+    assert still_live is not None
+    assert still_live.ended_at is None
+    assert len(world.store.lines(live.id)) == 1
+    world.clock.advance(5)
+    await world.service.tick_while_off()
+    ended = world.store.call(live.id)
+    assert ended is not None
+    assert (ended.ended_at, ended.transcript_done_at) == (START + 15, world.clock.now)
+    assert world.store.lines(live.id) == []
     assert (world.room.rows, world.room.row_edits, world.room.transcripts) == sent
-    assert world.service._settling == {}
-    for call_id in (pending, live.id, stuck.id):
-        stored = world.store.call(call_id)
-        assert stored is not None
-        assert stored.ended_at is not None
-        assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 15, None)
-        assert world.store.lines(call_id) == []
-    world.room.row_gate.set()
-    world.clock.advance(15)
-    await world.tick()
+
+
+@pytest.mark.asyncio
+async def test_off_for_less_than_a_day_changes_nothing_and_back_on_calls_carry_on(world: World) -> None:
+    """Off, every call stays as it was; back on, a call nobody checks in to ends at its last check-in, and each message posts."""
+    pending = await world.end_by_leaving(ANN)
+    live = await world.service.join(OTHER_ROOM, BOB)
+    world.clock.advance(5)
+    await world.say(live.id, BOB)
+    await world.settled()
+    kept = (world.store.calls(), world.store.lines(pending), world.store.lines(live.id))
+    world.clock.advance(3_600)
+
+    await world.service.tick_while_off()
+
+    assert (world.store.calls(), world.store.lines(pending), world.store.lines(live.id)) == kept
     assert world.room.transcripts == []
-    assert [(edit.call_id, edit.transcript_event_id) for edit in world.room.row_edits] == [
-        (pending, None),
-        (live.id, None),
-        (stuck.id, None),
-    ]
+    await world.tick()
+    ended = world.store.call(live.id)
+    assert ended is not None
+    assert ended.ended_at == START + 15
+    assert sorted(message.call_id for message in world.room.transcripts) == sorted([pending, live.id])
+
+
+@pytest.mark.asyncio
+async def test_while_off_a_call_that_cannot_be_checked_holds_up_no_other(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call whose check fails is logged, and the calls after it are still held to the day."""
+    first = await world.end_by_leaving(ANN)
+    second = await world.service.join(OTHER_ROOM, BOB)
+    await world.say(second.id, BOB)
+    await world.service.leave(second.id, BOB)
+    await world.settled()
+    world.clock.advance(86_400)
+    real_finish = CallTranscriptStore.finish_transcript
+
+    def finish(store: CallTranscriptStore, call_id: str, *, at: float, event_id: str | None = None) -> float | None:
+        if call_id == first:
+            msg = "disk I/O error"
+            raise OSError(msg)
+        return real_finish(store, call_id, at=at, event_id=event_id)
+
+    monkeypatch.setattr(CallTranscriptStore, "finish_transcript", finish)
+    with capture_logs() as logs:
+        await world.service.tick_while_off()
+
+    assert [log["call_id"] for log in logs if log["event"] == "call_transcript_check_failed"] == [first]
+    stored = world.store.call(second.id)
+    assert stored is not None
+    assert stored.transcript_done_at == world.clock.now
+    assert world.store.lines(second.id) == []
+    assert world.store.lines(first) != []
 
 
 @pytest.mark.asyncio

@@ -42,8 +42,6 @@ class CallTranscriptsRuntimeCoordinator:
     """Wall-clock time, which calls are kept by."""
     _router: AgentBot | None = field(default=None, init=False)
     _service: CallTranscriptService | None = field(default=None, init=False)
-    _switched_off: bool = field(default=False, init=False)
-    """Whether call transcripts were off at a bind since the last pass, which then holds the store to that."""
     _loop: SupervisedLoop = field(init=False)
 
     def __post_init__(self) -> None:
@@ -53,12 +51,9 @@ class CallTranscriptsRuntimeCoordinator:
     def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:
         """Start the loop, and read and post through the router while it runs and call transcripts are on."""
         self._loop.start()
-        if not config.calls.transcripts.enabled:
-            # Writes under way stop now; the loop's next pass ends the calls and gives up their messages, though call
-            # transcripts are back on by then.
-            self._switched_off = True
-            if self._service is not None:
-                self._service.cancel_writes()
+        if not config.calls.transcripts.enabled and self._service is not None:
+            # Writes under way stop now, and none is sent while call transcripts are off.
+            self._service.cancel_writes()
         router = bots.get(ROUTER_AGENT_NAME)
         if not config.calls.transcripts.enabled or router is None or router.client is None or not router.running:
             self.unbind()
@@ -110,18 +105,14 @@ class CallTranscriptsRuntimeCoordinator:
     async def _pass(self) -> float:
         """Check every call, and return how long to wait before the next pass.
 
-        While call transcripts are off, or after they were off since the last pass, a pass first ends calls and gives
-        up what was not posted, touching no Matrix, and makes no call database where there is none.
+        While call transcripts are off, a pass holds the store to the one-day limit, touching no Matrix, and makes no
+        call database where there is none.
         """
         try:
-            enabled = self.config_provider().calls.transcripts.enabled
-            if self._switched_off or not enabled:
-                if self._service is not None or database_path(self.runtime_paths.storage_root).exists():
-                    await self._made_service().tick_while_off()
-                # Only once the off pass went through: one that fails is tried again at the next pass.
-                self._switched_off = False
-            if enabled:
+            if self.config_provider().calls.transcripts.enabled:
                 return await self._made_service().tick()
+            if self._service is not None or database_path(self.runtime_paths.storage_root).exists():
+                await self._made_service().tick_while_off()
         except Exception:
             logger.exception("call_transcripts_pass_failed")
         return _IDLE_SECONDS
