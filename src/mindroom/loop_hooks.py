@@ -34,6 +34,8 @@ from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_
 from mindroom.tool_jobs.notices import job_notice_hook
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook
     from mindroom.config.main import Config
@@ -177,7 +179,7 @@ def _loop_hooks(
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),
-        answer_tool_calls=_answer_tool_calls(queued_notices=queued_notices),
+        answer_tool_calls=_answer_tool_calls(),
         rewrite_tool_calls=resolve_call_tool_calls if deferred_tools.portable else None,
         tool_middleware=tool_middleware,
         after_tool_batch=(
@@ -196,19 +198,17 @@ def _loop_hooks(
 _PAUSED_TOOL_CALL_RESULT = "Not run: a newer message arrived while you worked, so this turn ended before this call ran."
 
 
-def _answer_tool_calls(*, queued_notices: bool) -> AnswerToolCalls:
-    """Answer a cut-off response's calls, and end a run told to pause at its next calls, running none of them.
+def _answer_tool_calls() -> AnswerToolCalls:
+    """Answer a cut-off response's calls, and end a run at calls it made after reading the pause notice, unrun.
 
     The pause notice asks for no new tool calls, and the newer message releases every wait at once, so a model that
     kept calling made each gated call a job waiting on a card of its own, without end.
     """
     output_limit = output_limit_policy()
-    if not queued_notices:
-        return output_limit
 
-    def answer(message: Message, stop_reason: StopReason | None) -> list[Message] | None:
-        if not ai_runtime.told_to_pause():
-            return output_limit(message, stop_reason)
+    def answer(messages: Sequence[Message], stop_reason: StopReason | None) -> list[Message] | None:
+        if not ai_runtime.told_to_pause(messages):
+            return output_limit(messages, stop_reason)
         return [
             failed_answer(
                 call.get("id"),
@@ -216,7 +216,7 @@ def _answer_tool_calls(*, queued_notices: bool) -> AnswerToolCalls:
                 _PAUSED_TOOL_CALL_RESULT,
                 stop_after_tool_call=True,
             )
-            for call in message.tool_calls or []
+            for call in messages[-1].tool_calls or []
         ]
 
     return answer

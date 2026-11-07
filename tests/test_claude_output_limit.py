@@ -312,7 +312,7 @@ def test_each_run_gets_its_own_cut_off_retries() -> None:
     """
     first, second = output_limit_policy(), output_limit_policy()
     for _ in range(2):
-        [result] = first(_cut_off_call(), "output_limit") or []
+        [result] = first([_cut_off_call()], "output_limit") or []
         assert (result.role, result.tool_call_id, result.tool_name, result.content, result.tool_call_error) == (
             "tool",
             "toolu_cut",
@@ -320,10 +320,10 @@ def test_each_run_gets_its_own_cut_off_retries() -> None:
             CUT_OFF_TOOL_CALL_RESULT,
             True,
         )
-        assert second(_cut_off_call(), "output_limit")
-    assert first(_cut_off_call(), "tool_use") is None
+        assert second([_cut_off_call()], "output_limit")
+    assert first([_cut_off_call()], "tool_use") is None
     with pytest.raises(ModelOutputLimitError, match="smaller steps"):
-        first(_cut_off_call(), "output_limit")
+        first([_cut_off_call()], "output_limit")
 
 
 @pytest.mark.asyncio

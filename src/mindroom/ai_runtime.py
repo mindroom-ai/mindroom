@@ -132,15 +132,21 @@ def _append_queued_notice_if_needed(
         logger.info("queued_message_notice_injected", response_turn_id=response_turn_id)
 
 
-def told_to_pause() -> bool:
-    """Return whether this reply's model was told to pause for a newer message that still waits."""
+def told_to_pause(messages: Sequence[Message]) -> bool:
+    """Return whether the request ``messages[-1]`` answers carried this reply's notice and its newer message still waits.
+
+    Only a notice after that request's last assistant message counts, so a run that never read the notice, such as a
+    subagent of a paused batch or a run whose queue emptied, is not told to pause by another run's notice or by history.
+    """
     context = _queued_message_notice_context.get()
-    return (
-        context is not None
-        and context.notice_fired
-        and context.state is not None
-        and context.state.has_pending_human_messages()
-    )
+    if context is None or context.state is None or not context.state.has_pending_human_messages():
+        return False
+    for message in reversed(messages[:-1]):
+        if message.role == "assistant":
+            return False
+        if _is_response_notice(message, context.response_turn_id):
+            return True
+    return False
 
 
 def _ends_with_completed_tool_batch(
