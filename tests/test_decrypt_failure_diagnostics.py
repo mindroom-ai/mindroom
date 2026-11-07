@@ -11,12 +11,15 @@ import nio
 import pytest
 from nio.durable import SyncBatch
 
+from mindroom import conversation_resolver
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.matrix import client_delivery, decrypt_failure
+from mindroom.matrix.decrypt_failure import handle_decrypt_failure
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from tests.access_schema_support import with_responder_access
 from tests.journal_membership_helpers import admit_room_membership
+from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room, _runtime_paths
 from tests.test_durable_ingestion_admission import Session
 from tests.test_durable_ingestion_decryption import ROOM, SENDER, _ciphertext, _decrypted
 from tests.test_room_member_hooks import _router_bot
@@ -206,13 +209,13 @@ async def test_runtime_shutdown_drains_its_diagnostic(tmp_path: Path, monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("original", ["known", "unknown", "unavailable"])
+@pytest.mark.parametrize("original", ["known", "reply", "unknown", "unavailable", "server-error", "stalled"])
 async def test_edit_notice_joins_the_edited_message_thread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     original: str,
 ) -> None:
-    """An undecryptable edit's notice joins the edited message's thread, else falls back to a plain reply."""
+    """An undecryptable edit's or reply's notice joins its target's thread, else falls back to a plain reply."""
     bot = await _bot(tmp_path)
     sent: list[dict[str, object]] = []
     original_source = {
@@ -232,13 +235,18 @@ async def test_edit_notice_joins_the_edited_message_thread(
         return object()
 
     async def get_event(_room_id: str, event_id: str) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
-        if original == "known" and event_id == "$original":
+        if original == "stalled":
+            await asyncio.Event().wait()
+        if original == "server-error":
+            return nio.RoomGetEventError("boom", "M_UNKNOWN")
+        if original in {"known", "reply"} and event_id == "$original":
             return nio.RoomGetEventResponse.from_dict(original_source)
         return nio.RoomGetEventError("not found", "M_NOT_FOUND")
 
     monkeypatch.setattr(bot.client, "request_room_key", request)
     monkeypatch.setattr(bot.client, "room_get_event", get_event)
     monkeypatch.setattr(client_delivery, "send_message_result", send)
+    monkeypatch.setattr(conversation_resolver, "_RELATED_THREAD_LOOKUP_TIMEOUT_SECONDS", 0.05)
     if original != "unknown":
         # "unavailable": the journal names the thread, but the homeserver cannot confirm it, so the resolver raises.
         await bot.journal_principal().admit(
@@ -254,9 +262,14 @@ async def test_edit_notice_joins_the_edited_message_thread(
             ),
         )
     record = _ciphertext(nio.TimelineEventProvenance.LIVE)
-    edit_content = {**record.source["content"], "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"}}
+    relation = (
+        {"m.in_reply_to": {"event_id": "$original"}}
+        if original == "reply"
+        else {"rel_type": "m.replace", "event_id": "$original"}
+    )
+    content = {**record.source["content"], "m.relates_to": relation}
     try:
-        bot._decryption_diagnostics.schedule(replace(record, source={**record.source, "content": edit_content}))
+        bot._decryption_diagnostics.schedule(replace(record, source={**record.source, "content": content}))
         assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
         expected = (
             {
@@ -265,10 +278,53 @@ async def test_edit_notice_joins_the_edited_message_thread(
                 "is_falling_back": False,
                 "m.in_reply_to": {"event_id": "$cipher"},
             }
-            if original == "known"
+            if original in {"known", "reply"}
             else {"io.mindroom.in_reply_to": {"event_id": "$cipher"}}
         )
         assert [message["m.relates_to"] for message in sent] == [expected]
     finally:
         await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
         await bot._journal_store.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bots_with_slow_resolver_post_one_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ledger claim lands before the thread lookup, so a second bot never waits on it or posts again."""
+    release = asyncio.Event()
+    lookups: list[str] = []
+    sent: list[dict[str, object]] = []
+
+    async def resolve(_room_id: str, related_event_id: str) -> str | None:
+        lookups.append(related_event_id)
+        await release.wait()
+        return "$thread"
+
+    async def send(_client: nio.AsyncClient, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+        sent.append(content)
+        return object()
+
+    event = _megolm_event(event_id="$failed:localhost", relates_to={"rel_type": "m.replace", "event_id": "$original"})
+    runtime_paths = _runtime_paths(tmp_path)
+    monkeypatch.setattr(client_delivery, "send_message_result", send)
+    tasks = [
+        asyncio.create_task(
+            handle_decrypt_failure(
+                _mock_client(user_id=f"@mindroom_{name}:localhost"),
+                _mock_room(),
+                event,
+                agent_name=name,
+                runtime_paths=runtime_paths,
+                resolve_related_thread=resolve,
+            ),
+        )
+        for name in ("first", "second")
+    ]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(*tasks)
+    assert lookups == ["$original"]
+    assert [message["m.relates_to"]["event_id"] for message in sent] == ["$thread"]

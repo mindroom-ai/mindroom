@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -57,6 +58,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.turns.facts import IngressFacts
+
+# nio retries a stalled or rate-limited homeserver read without limit.
+_RELATED_THREAD_LOOKUP_TIMEOUT_SECONDS = 10.0
 
 
 def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
@@ -418,17 +422,18 @@ class ConversationResolver:
         room_id: str,
         related_event_id: str,
     ) -> str | None:
-        """Return thread membership from local state without waiting on the homeserver."""
-        resolution = await resolve_related_event_thread_membership(
-            room_id,
-            related_event_id,
-            access=self._thread_membership_access(
-                mode=ThreadReadMode.NONBLOCKING,
-                # Reaction hook context wants the target's thread, not its
-                # conversation, so an incomplete page answers it just as well.
-                requires_complete_history=False,
-            ),
-        )
+        """Return thread membership from local state, raising ``TimeoutError`` if a homeserver read stalls."""
+        async with asyncio.timeout(_RELATED_THREAD_LOOKUP_TIMEOUT_SECONDS):
+            resolution = await resolve_related_event_thread_membership(
+                room_id,
+                related_event_id,
+                access=self._thread_membership_access(
+                    mode=ThreadReadMode.NONBLOCKING,
+                    # Reaction hook context wants the target's thread, not its
+                    # conversation, so an incomplete page answers it just as well.
+                    requires_complete_history=False,
+                ),
+            )
         return resolution.thread_id
 
     def _thread_membership_access(
