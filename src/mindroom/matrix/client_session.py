@@ -188,6 +188,11 @@ def matrix_client_config(
         # accept a peer device's re-registered olm identity (trust reset)
         # instead of keeping stale keys that silently break E2EE and calls.
         replace_rotated_device_keys=True,
+        # nio retries a failed request forever by default. Ten retries of a connection failure or timeout
+        # span about 100 s of nio's doubling backoff, outlasting a homeserver restart of about a minute; a 429
+        # is retried twenty times, each after the wait the server asks for. Sync uses its own bounded transport.
+        max_timeouts=10,
+        max_limit_exceeded=20,
     )
 
 
