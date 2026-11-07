@@ -227,11 +227,10 @@ def test_matrix_state_cache_keeps_a_local_write_across_the_stat_ttl(tmp_path: Pa
     assert matrix_state_for_runtime(runtime_paths) is written
 
 
-def test_matrix_state_cache_observes_a_local_write_that_keeps_size_and_mtime(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+def test_matrix_state_cache_observes_a_local_write_that_keeps_size_and_mtime(tmp_path: Path) -> None:
     """A local write is seen at once even when the rewritten file keeps its size and modification time."""
     runtime_paths = test_runtime_paths(tmp_path)
     state_file = _seed_state(runtime_paths, "dev", "!aaa:localhost")
-    monkeypatch.setattr(matrix_state, "monotonic", lambda: 0.0)
     assert matrix_state.get_room_id("dev", runtime_paths) == "!aaa:localhost"
     before = state_file.stat()
 
