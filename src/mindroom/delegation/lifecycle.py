@@ -109,13 +109,17 @@ def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, st
 
 
 def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:
-    """Rebind a caller's tool context to one child turn, carrying its persona as the cap on copies it authors."""
+    """Rebind a caller's tool context to one child turn, carrying its persona as the cap on copies it authors.
+
+    The child's turn hides its tool calls whatever its caller's reply shows, so they never read as shown.
+    """
     return replace(
         context,
         agent_name=child.child_agent_name,
         active_model_name=child.model_name,
         target=replace(context.target, session_id=child.session_id),
         persona=child.persona,
+        tool_calls_shown=False,
     )
 
 

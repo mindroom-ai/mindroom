@@ -11,6 +11,7 @@ from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
+from mindroom.tool_system.events import tool_args_chat_preview
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.tool_environment import ToolEnvironment
 
@@ -696,8 +697,14 @@ class ToolBeforeCallContext(HookContext):
     requester_id: str | None
     session_id: str | None
     message_received_depth: int = 0
+    # Whether the reply the call runs in shows it, which a turn no reply shows, such as a listening turn's, never does.
+    shown: bool = False
     declined: bool = False
     decline_reason: str = ""
+
+    def chat_preview(self) -> str | None:
+        """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
+        return tool_args_chat_preview(self.arguments) if self.shown else None
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
@@ -722,6 +729,12 @@ class ToolAfterCallContext(HookContext):
     blocked: bool
     duration_ms: float
     message_received_depth: int = 0
+    # Whether the reply the call ran in shows it, which a turn no reply shows, such as a listening turn's, never does.
+    shown: bool = False
+
+    def chat_preview(self) -> str | None:
+        """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
+        return tool_args_chat_preview(self.arguments) if self.shown else None
 
 
 @dataclass(slots=True, kw_only=True)

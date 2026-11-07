@@ -17,14 +17,14 @@ from mindroom.custom_tools.coding import (
     _truncate_head,
     _truncate_line,
 )
-from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tools.file import file_tools
-from mindroom.tools.path_safety import (
+from mindroom.path_safety import (
     _blocked_base_dir_message,
     format_path_for_output,
     resolve_base_dir_path,
     split_search_pattern,
 )
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tools.file import file_tools
 
 if TYPE_CHECKING:
     from pathlib import Path

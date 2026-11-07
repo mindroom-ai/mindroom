@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -9,9 +10,14 @@ from unittest.mock import patch
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.declarations import ApprovalAlias
+from mindroom.tool_system.registry import builtin_tool_registry
+from tests.conftest import register_test_tool
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
+
+    import pytest
 
     from mindroom.config.main import Config
     from mindroom.tool_system.agno_toolkits import AnyToolkit
@@ -33,17 +39,28 @@ def gated_functions(
     under its registered name. A toolkit named like a tool the gate special-cases (``scheduler``, ``delegate``, a
     Matrix room-runtime tool) therefore gets that tool's rules unless it is registered under another name. A caller
     that cannot resume a paused run (``resumable`` False) is offered none of the functions that ask for approval.
+    The built-in tool registered under that name declares the toolkit's approval aliases.
     """
     registered = registered_tool_name or toolkit.name
     adapted = apply_tool_approval_capability(
         adapt_toolkit(toolkit, key=authored_as or registered),
         toolkit,
         config,
+        tools=builtin_tool_registry(),
         registered_tool_name=registered,
         resumable=resumable,
         approvals_as_jobs=approvals_as_jobs,
     )
     return {function.name: function for function in adapted.functions}
+
+
+def judge_test_tool_function_as_shell(monkeypatch: pytest.MonkeyPatch, tool_name: str, function_name: str) -> None:
+    """Make the built-in tool ``tool_name`` say its ``function_name`` calls are shell commands their arguments hide."""
+    alias = ApprovalAlias(judged_as="run_shell_command", judge=lambda _arguments: None)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries[tool_name], approval_aliases={function_name: alias}),
+    )
 
 
 def scheduled_call_approvals(**methods: object) -> AbstractContextManager[object]:

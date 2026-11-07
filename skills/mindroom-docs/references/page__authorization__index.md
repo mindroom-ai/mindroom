@@ -108,7 +108,7 @@ In an ad-hoc room an agent joined first, have the agent use its `invite_router` 
 
 ### Invitations
 
-`accept_invites` decides only whether an entity joins a room it is invited to.
+`accept_invites` decides only whether an entity joins a room it is invited to, or a [room listed under one of its rooms](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 Accepting an invitation never grants permission to interact; every later message still goes through `access`.
 
 ### Agents mentioning other agents

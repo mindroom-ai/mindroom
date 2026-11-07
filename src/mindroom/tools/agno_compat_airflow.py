@@ -8,9 +8,8 @@ from typing import TYPE_CHECKING, Any, override
 from agno.tools.airflow import AirflowTools
 from agno.utils.log import log_error
 
-from mindroom.file_access import resolve_agent_file
+from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.tools.path_safety import write_agent_file
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
