@@ -503,12 +503,10 @@ class BotRoomLifecycle:
             state = matrix_state_for_runtime(self.deps.runtime_paths)
             configured_rooms.update(room_id for room_id in (state.space_room_id, state.server_emoji_room_id) if room_id)
 
-        leaving = current_rooms - configured_rooms
-        # A room kept this way can list others in turn, so the pass repeats until it keeps no more.
-        while kept := {
-            room_id for room_id in leaving if await self._keep_listed_room(room_id, current_rooms - leaving)
-        }:
-            leaving -= kept
+        leaving, parent_ids = current_rooms - configured_rooms, current_rooms & configured_rooms
+        # A room kept this way can list others in turn, so the rooms it lists are checked against it next.
+        while kept := {room_id for room_id in leaving if await self._keep_listed_room(room_id, parent_ids)}:
+            leaving, parent_ids = leaving - kept, kept
         return list(leaving)
 
     async def send_welcome_message_if_empty(
