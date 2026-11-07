@@ -225,11 +225,11 @@ _SIGNATURES = {
     "SystemEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "ToolAfterCallContext": (
         f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, result, "
-        "error, blocked, duration_ms, message_received_depth)"
+        "error, blocked, duration_ms, message_received_depth, shown)"
     ),
     "ToolBeforeCallContext": (
         f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, "
-        "message_received_depth, declined, decline_reason)"
+        "message_received_depth, shown, declined, decline_reason)"
     ),
     "ToolEnvironmentContext": (
         f"({_TOOL_HOOK}, function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, "
@@ -240,7 +240,7 @@ _SIGNATURES = {
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
         "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
-        "cli_approval_handler, hook_source, tool_output_paths)"
+        "cli_approval_handler, hook_source, tool_output_paths, tool_calls_shown)"
     ),
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
