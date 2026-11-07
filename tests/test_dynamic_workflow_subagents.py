@@ -19,12 +19,16 @@ from mindroom.delegation.personas import inline_persona
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError, SubagentParticipant, parse_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.llm.errors import ProviderError
+from mindroom.tool_system.declarations import ApprovalAlias
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.conftest import register_test_tool
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import judge_test_tool_function_as_shell
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -269,6 +273,126 @@ async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monk
             "Leave mode unset for a participant that needs no shell."
         )
     assert approved["status"] == "ok", approved
+
+
+_ALIAS_REFUSAL = (
+    "calls run_shell_command through add, which requires approval, and workflow participants cannot pause for "
+    "approval; check the operator tool_approval rules and the dynamic_workflow allowed_tools setting."
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "allowed", "rules", "refused"),
+    [
+        pytest.param(["calculator.add"], ["calculator"], None, True, id="function"),
+        pytest.param(["calculator.subtract"], ["calculator"], None, False, id="other-function"),
+        pytest.param(["calculator.add", "shell"], ["calculator", "shell"], None, False, id="shell-pre-approved"),
+        pytest.param(
+            ["calculator.add"],
+            ["calculator"],
+            {"run_shell_command": "auto_approve"},
+            False,
+            id="shell-auto-approved",
+        ),
+    ],
+)
+async def test_a_named_function_judged_as_a_gated_function_is_refused_before_saving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    allowed: list[str],
+    rules: dict[str, str] | None,
+    refused: bool,
+) -> None:
+    """The calculator says ``add`` runs shell commands, so a participant may name it only where the shell needs no approval.
+
+    The shell runs without approval when the participant's own pre-approved tools include it or an operator rule
+    auto-approves it; otherwise validation refuses the participant that names ``add``, as it refuses one naming a
+    function an operator rule gates.
+    """
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    toolkits = sorted({entry.partition(".")[0] for entry in tools})
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": allowed}}, *toolkits], rules=rules)
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    with workflow.context():
+        spec = _spec([{"id": "adder", "system_prompt": "Add.", "tools": tools}])
+        validated = json.loads(await workflow.tools.validate_workflow(spec))
+
+    if refused:
+        assert validated["status"] == "error", validated
+        assert validated["message"] == f"Dynamic Workflow participant 'adder' tool '{tools[0]}' {_ALIAS_REFUSAL}"
+    else:
+        assert validated["status"] == "ok", validated
+
+
+@pytest.mark.asyncio
+async def test_a_whole_toolkit_leaves_a_function_judged_as_a_gated_function_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant naming the whole calculator gets its functions but ``add``, as when an operator rule gates ``add``."""
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["calculator"]}}, "calculator"])
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}]))
+
+    assert run["status"] == "completed", run
+    assert "subtract" in workflow.model.offered[0]
+    assert "add" not in workflow.model.offered[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "error"),
+    [
+        pytest.param(["calculator.add", "file"], None, id="pre-approved"),
+        pytest.param(
+            ["calculator.add", "file.save_file"],
+            "Dynamic Workflow participant 'adder' tool 'calculator.add' calls read_file through add, which requires "
+            "approval, and workflow participants cannot pause for approval; check the operator tool_approval rules "
+            "and the dynamic_workflow allowed_tools setting.",
+            id="not-selected",
+        ),
+    ],
+)
+async def test_a_judged_function_a_toolkit_shows_only_once_built_is_judged_by_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    error: str | None,
+) -> None:
+    """Only a built ``file`` toolkit shows it has ``read_file``, which the calculator says ``add`` reads.
+
+    Validation cannot tell whether the participant pre-approves ``read_file``, so it accepts the workflow; the run,
+    which builds the toolkit, offers ``add`` when the participant's pre-approved ``file`` has ``read_file`` and
+    otherwise fails before the participant starts.
+    """
+    alias = ApprovalAlias(judged_as="read_file", judge=lambda _arguments: None)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries["calculator"], approval_aliases={"add": alias}),
+    )
+    declared = workflow_module.declared_function_names
+    monkeypatch.setattr(
+        workflow_module,
+        "declared_function_names",
+        lambda toolkit, registry: None if toolkit == "file" else declared(toolkit, registry),
+    )
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["calculator", "file"]}}, "calculator", "file"])
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": tools}]))
+
+    if error is None:
+        assert run["status"] == "completed", run
+        assert "add" in workflow.model.offered[0]
+    else:
+        assert run["status"] == "failed", run
+        assert run["error"] == error
+        assert workflow.model.authored_prompts == []
 
 
 @pytest.mark.asyncio

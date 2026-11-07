@@ -38,6 +38,7 @@ from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
+from tests.tool_approval_helpers import judge_test_tool_function_as_shell
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -216,6 +217,23 @@ def test_approval_rules_gate_configured_functions_and_hide_generated_ones(tmp_pa
     assert (build.prompt.knowledge_block, build.prompt.skills_block) == (None, None)
     assert build.surface.knowledge_sources == ()
     assert config.get_prompt("SKILLS_TOOL_USAGE_PROMPT") not in build.prompt.instructions
+
+
+def test_a_rule_on_the_function_an_alias_names_gates_the_aliased_function(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The calculator says its ``add`` calls are shell commands, so a shell rule gates ``add`` and nothing else."""
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    config, runtime_paths = _config(tmp_path)
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+    )
+
+    build = _build(config, runtime_paths, supports_native_tool_approval=True)
+
+    gated = {name: function.gate for name, function in _offered(build).items() if function.gate is not None}
+    assert gated == {"add": ToolGate.POLICY}
 
 
 def test_a_rule_hiding_one_skill_function_names_it_in_the_prompt(tmp_path: Path) -> None:

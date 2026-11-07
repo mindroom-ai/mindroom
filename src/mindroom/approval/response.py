@@ -12,6 +12,7 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
     human_gate,
     resolve_tool_approval_approver,
+    toolkit_approval_alias,
 )
 from mindroom.delegation.state import member_slot_id, pending_call_slot
 from mindroom.event_journal import (
@@ -23,6 +24,7 @@ from mindroom.event_journal import (
 from mindroom.message_target import MessageTarget
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import tool_markers_match_trace
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.turn_origin import TurnIntent
 
@@ -138,6 +140,7 @@ async def plan_approval_calls(
 ) -> ApprovalPausePlan:
     """Evaluate policy once and normalize exact calls with integer deadlines; ``human_gate`` decides what policy gates."""
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
+    tools = config_plugins(config, runtime_paths).tools
     decisions: dict[str, tuple[ApprovalDecision | None, float, bool, str | None]] = {}
     for tool, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
@@ -146,6 +149,7 @@ async def plan_approval_calls(
             tool.tool_name,
             dict(tool.tool_args or {}),
             invoking_agent,
+            toolkit_approval_alias(config, tools, toolkit_owners.get((invoking_agent, tool.tool_name)), tool.tool_name),
         )
         tool_authored_confirmation = (
             tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE

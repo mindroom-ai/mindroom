@@ -43,6 +43,7 @@ _EXPORTS = [
     "VOICE_PREFIX",
     "AfterResponseContext",
     "AgentLifecycleContext",
+    "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
     "AutomationContext",
@@ -143,6 +144,7 @@ _SIGNATURES = {
     "AgentLifecycleContext": (
         f"({_HOOK}, entity_name, entity_type, rooms, matrix_user_id, joined_room_ids, stop_reason, *, {_HOOK_HELPERS})"
     ),
+    "ApprovalAlias": "(judged_as, judge)",
     "Ask": "(text, new_thread, then, summary)",
     "AutomationContext": (
         "(agent_name, config, runtime_paths, entry, options, settings, requester_id, execution_identity, workspace, "
@@ -280,7 +282,7 @@ _SIGNATURES = {
         "(*, name, display_name, description, category, status, setup_type, default_execution_target, "
         "requires_primary_runtime, consumes_workspace_paths, file_access, executes_code, requires_room_context, "
         "requires_conversation, icon, icon_color, config_fields, agent_override_fields, authored_override_validator, "
-        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, "
+        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, approval_aliases, "
         "worker_inert_agent_functions, managed_init_args, supports_toolkit_filters)"
     ),
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
