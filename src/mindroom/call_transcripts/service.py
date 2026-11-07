@@ -574,11 +574,11 @@ class CallTranscriptService:
         return call.row_event_id is None or self._transcript_due(call, now) or _owed_row_edit(call) is not None
 
     async def _settle_now(self, call_id: str) -> None:
-        """Make the call's Matrix writes one at a time, in order: its row, the row's edit for the end, its message once
-        due, then the row's edit for the message.
+        """Make the call's Matrix writes one at a time, in order.
 
-        Each is sent under a transaction of its own, so making it again never posts twice. A write that cannot be
-        made holds them all a minute, when a tick starts them again.
+        Its row, the row's edit for the end, its message once due, then the row's edit for the message. Each is sent
+        under a transaction of its own, so making it again never posts twice. A write that cannot be made holds them
+        all a minute, when a tick starts them again.
         """
         call: StoredCall | None = None
         try:
