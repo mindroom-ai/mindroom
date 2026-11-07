@@ -19,8 +19,11 @@ from mindroom.delegation.personas import inline_persona
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError, SubagentParticipant, parse_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.llm.errors import ProviderError
+from mindroom.tool_system.declarations import ApprovalAlias
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.conftest import register_test_tool
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -322,6 +325,57 @@ async def test_a_function_judged_as_a_gated_function_is_refused_before_saving(
         assert validated["message"] == f"Dynamic Workflow participant 'adder' tool '{tools[0]}' {_ALIAS_REFUSAL}"
     else:
         assert validated["status"] == "ok", validated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "error"),
+    [
+        pytest.param(["calculator", "file"], None, id="pre-approved"),
+        pytest.param(
+            ["calculator", "file.save_file"],
+            "Dynamic Workflow participant 'adder' tool 'calculator' calls read_file through add, which requires "
+            "approval, and workflow participants cannot pause for approval; check the operator tool_approval rules "
+            "and the dynamic_workflow allowed_tools setting.",
+            id="not-selected",
+        ),
+    ],
+)
+async def test_a_judged_function_a_toolkit_shows_only_once_built_is_judged_by_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    error: str | None,
+) -> None:
+    """Only a built ``file`` toolkit shows it has ``read_file``, which the calculator says ``add`` reads.
+
+    Validation cannot tell whether the participant pre-approves ``read_file``, so it accepts the workflow; the run,
+    which builds the toolkit, offers ``add`` when the participant's pre-approved ``file`` has ``read_file`` and
+    otherwise fails before the participant starts.
+    """
+    alias = ApprovalAlias(judged_as="read_file", judge=lambda _arguments: None)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries["calculator"], approval_aliases={"add": alias}),
+    )
+    declared = workflow_module.declared_function_names
+    monkeypatch.setattr(
+        workflow_module,
+        "declared_function_names",
+        lambda toolkit, registry: None if toolkit == "file" else declared(toolkit, registry),
+    )
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["calculator", "file"]}}, "calculator", "file"])
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": tools}]))
+
+    if error is None:
+        assert run["status"] == "completed", run
+        assert "add" in workflow.model.offered[0]
+    else:
+        assert run["status"] == "failed", run
+        assert run["error"] == error
+        assert workflow.model.authored_prompts == []
 
 
 @pytest.mark.asyncio

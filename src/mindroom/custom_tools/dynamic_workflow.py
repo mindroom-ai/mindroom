@@ -510,13 +510,14 @@ async def _execute_subagent_participant(
         raise DynamicWorkflowExecutionError(msg)
     # Recheck approvals against the current config each step; only the function ownership is cached.
     allowed = _workflow_allowed_tools(context)
-    if error := _unapproved_participant_tool_error(context, participant_id, request, allowed=allowed):
-        raise DynamicWorkflowExecutionError(error)
     if participant_id not in state.function_owners:
         state.function_owners[participant_id] = await _participant_function_owners(context, persona)
+    owners = state.function_owners[participant_id]
+    if error := _unapproved_participant_tool_error(context, participant_id, request, allowed=allowed, owners=owners):
+        raise DynamicWorkflowExecutionError(error)
     approval_config = _participant_run_config(
         context,
-        state.function_owners[participant_id],
+        owners,
         allowed=allowed,
         reads_skills=bool(persona.skills),
     )
@@ -589,6 +590,16 @@ def _declared_functions(tools: ToolRegistry, names: Iterable[str]) -> dict[str, 
     return {name: declared for name in names if (declared := declared_function_names(name, tools)) is not None}
 
 
+def _declared_function_owners(
+    context: ToolRuntimeContext,
+    entries: tuple[str, ...],
+) -> dict[str, frozenset[str]] | None:
+    """Return the toolkits exposing each function a participant selected, or None if one shows them only once built."""
+    names = {entry.partition(".")[0] for entry in entries}
+    functions = _declared_functions(config_plugins(context.config, context.runtime_paths).tools, names)
+    return _selected_function_owners(entries, functions) if functions.keys() == names else None
+
+
 def _selected_function_owners(
     entries: tuple[str, ...],
     functions: Mapping[str, tuple[str, ...]],
@@ -608,21 +619,20 @@ def _unapproved_participant_tool_error(
     request: PersonaRequest,
     *,
     allowed: frozenset[str],
+    owners: Mapping[str, frozenset[str]] | None,
 ) -> str | None:
-    """A participant cannot pause, so the shell a minimal participant runs through, and every tool it names, must run without approval."""
+    """A participant cannot pause, so the shell a minimal participant runs through, and every tool it names, must run without approval.
+
+    ``owners`` maps each function the participant selected to the toolkits exposing it, or is None while some of
+    those toolkits show their functions only once built.
+    """
     shell = f"shell.{SHELL_FUNCTION}"
-    entries = cast("SubagentPersona", request.persona).tools or ()
-    tools = config_plugins(context.config, context.runtime_paths).tools
-    owners = _selected_function_owners(
-        entries,
-        _declared_functions(tools, {entry.partition(".")[0] for entry in entries}),
-    )
     if request.agent_mode == "minimal" and (problem := _tool_approval_problem(context, shell, allowed, owners)):
         return (
             f"Dynamic Workflow participant '{participant_id}' runs in minimal mode through {shell}, which {problem} "
             "Leave mode unset for a participant that needs no shell."
         )
-    for entry in entries:
+    for entry in cast("SubagentPersona", request.persona).tools or ():
         if problem := _tool_approval_problem(context, entry, allowed, owners):
             return f"Dynamic Workflow participant '{participant_id}' tool '{entry}' {problem}"
     return None
@@ -638,14 +648,15 @@ def _tool_approval_problem(
     context: ToolRuntimeContext,
     entry: str,
     allowed: frozenset[str],
-    owners: Mapping[str, frozenset[str]],
+    owners: Mapping[str, frozenset[str]] | None,
 ) -> str | None:
     """Say why one participant tool would need approval.
 
     A whole toolkit needs a pre-approval through ``allowed_tools``; a single function may instead be
     auto-approved by an operator rule, which also matches before any pre-approval. A function whose approval alias
     has another function's rules judge its calls also needs that function to run without approval: pre-approved
-    through one of the participant's toolkits ``owners`` lists for it, or auto-approved by an operator rule.
+    through one of the participant's toolkits ``owners`` lists for it, or auto-approved by an operator rule. Without
+    ``owners``, which a run knows once it builds the participant's toolkits, aliases are left to the run's check.
     """
     toolkit, separator, function = entry.partition(".")
     if not separator:
@@ -656,31 +667,23 @@ def _tool_approval_problem(
                 "is not pre-approved; add it to the dynamic_workflow allowed_tools setting "
                 "or name its auto-approved functions."
             )
-    elif tool_may_require_approval(_participant_overlay(context, allowed, {function: frozenset({toolkit})}), function):
+    elif tool_may_require_approval(
+        _participant_run_config(context, {function: frozenset({toolkit})}, allowed=allowed, reads_skills=False),
+        function,
+    ):
         return _NEEDS_APPROVAL
+    if owners is None:
+        return None
     metadata = config_plugins(context.config, context.runtime_paths).tools.get(toolkit)
     aliases = {} if metadata is None else metadata.approval_aliases
     for name, alias in aliases.items():
         if separator and name != function:
             continue
         judged_owners = {alias.judged_as: owners[alias.judged_as]} if alias.judged_as in owners else {}
-        if tool_may_require_approval(_participant_overlay(context, allowed, judged_owners), alias.judged_as):
+        judged_config = _participant_run_config(context, judged_owners, allowed=allowed, reads_skills=False)
+        if tool_may_require_approval(judged_config, alias.judged_as):
             return f"calls {alias.judged_as} through {name}, which {_NEEDS_APPROVAL}"
     return None
-
-
-def _participant_overlay(
-    context: ToolRuntimeContext,
-    allowed: frozenset[str],
-    function_owners: Mapping[str, frozenset[str]],
-) -> Config:
-    """Return the approval policy a participant whose toolkits ``function_owners`` names runs under."""
-    return build_automation_approval_config(
-        context.config,
-        function_owners=function_owners,
-        preapproved_toolkits=allowed,
-        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
-    )
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
@@ -923,7 +926,13 @@ def _validate_workflow_policy_for_context(
             request = _participant_request(context, participant, workflow_id=spec.id)
             persona_tools = cast("SubagentPersona", request.persona).tools or ()
             if error := granted_tool_error(participant.id, persona_tools, granted_tools) or (
-                _unapproved_participant_tool_error(context, participant.id, request, allowed=allowed)
+                _unapproved_participant_tool_error(
+                    context,
+                    participant.id,
+                    request,
+                    allowed=allowed,
+                    owners=_declared_function_owners(context, persona_tools),
+                )
             ):
                 raise DynamicWorkflowError(error)
             requests[participant.id] = request
