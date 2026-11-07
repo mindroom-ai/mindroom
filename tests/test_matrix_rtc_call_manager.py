@@ -4559,9 +4559,21 @@ async def test_roster_gap_ends_the_call_after_its_grace(
     await manager.shutdown()
 
 
+async def _never_answers(_room_id: str) -> nio.RoomGetStateResponse:
+    """Hang like a state read whose connection nio keeps retrying."""
+    await asyncio.Event().wait()
+    raise AssertionError
+
+
 @pytest.mark.asyncio
-async def test_roster_gap_deadline_ends_the_call_when_room_state_cannot_be_read(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure", ["error", "hang"])
+async def test_roster_gap_deadline_ends_the_call_when_room_state_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
     """An unreachable homeserver cannot keep a call whose roster already emptied past its grace."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._STATE_FETCH_TIMEOUT_S", 0.01)
     now_ms = [int(time.time() * 1000)]
     joined_ts = now_ms[0]
     client = _client()
@@ -4573,7 +4585,10 @@ async def test_roster_gap_deadline_ends_the_call_when_room_state_cannot_be_read(
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.roster_vacated
 
-    client.room_get_state.return_value = nio.RoomGetStateError("503 upstream unavailable")
+    if failure == "error":
+        client.room_get_state.return_value = nio.RoomGetStateError("503 upstream unavailable")
+    else:
+        client.room_get_state.side_effect = _never_answers
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert not bridge.closed
 

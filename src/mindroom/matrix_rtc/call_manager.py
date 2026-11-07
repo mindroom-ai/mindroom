@@ -135,6 +135,9 @@ _STABLE_CALL_SESSION_MS = 60_000
 # does, loses its membership and publishes a new one when it runs again; leaving would drop its frame keys.
 _ROSTER_GAP_GRACE_MS = 60_000
 _RECONCILE_MIN_INTERVAL_S = 1.0
+# A room-state read holds the room's call lock, and nio retries a lost connection without limit; giving up
+# lets the reconcile retry, and lets a call held through an empty roster reach its deadline.
+_STATE_FETCH_TIMEOUT_S = 10.0
 # Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
 _ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
 _CALL_WRITEBACK_TIMEOUT_S = 30.0
@@ -1028,9 +1031,10 @@ class CallManager:
         distinguish "the call is empty" from a transient homeserver error.
         """
         try:
-            response = await self._client.room_get_state(room_id)
-        except _MATRIX_NETWORK_ERRORS as error:
-            logger.warning("call_state_fetch_failed", room_id=room_id, error=str(error))
+            async with asyncio.timeout(_STATE_FETCH_TIMEOUT_S):
+                response = await self._client.room_get_state(room_id)
+        except _MATRIX_NETWORK_ERRORS as error:  # Includes the timeout's TimeoutError.
+            logger.warning("call_state_fetch_failed", room_id=room_id, error=str(error) or type(error).__name__)
             return None
         if isinstance(response, nio.RoomGetStateError):
             logger.warning("call_state_fetch_failed", room_id=room_id, error=response.message)
