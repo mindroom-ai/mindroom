@@ -222,6 +222,8 @@ class CallTranscriptService:
         """When this MindRoom began serving calls: every app gets a full minute from then to check in."""
         self._room_locks: dict[str, asyncio.Lock] = {}
         self._speaking: dict[str, _Stretch] = {}
+        self._uploading: set[str] = set()
+        """Who is sending a stretch now, from before its audio is read until it is answered."""
         self._recent_speech: dict[str, deque[float]] = {}
         self._settling: dict[str, asyncio.Task[None]] = {}
         """Each call's one task making its Matrix writes, by call, so no call's writes wait for another's."""
@@ -323,10 +325,24 @@ class CallTranscriptService:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
         return line
 
-    async def check_speech_sender(self, call_id: str, user_id: str) -> None:
-        """Refuse a stretch before its audio is read: from outside the call's room, or with one still in flight."""
-        await self._call_for(call_id, user_id)
-        self._refuse_second_stretch(user_id)
+    async def reserve_upload(self, call_id: str, user_id: str) -> None:
+        """Take the person's one upload slot before a stretch's audio is read, until ``release_upload``.
+
+        Refused from someone not in the call, or ended and past its 20 seconds, or with another upload under way.
+        """
+        call = await self._call_for(call_id, user_id)
+        await self._require_in_call(call, user_id, self._clock())
+        if user_id in self._uploading:
+            raise CallRefusedError(
+                code="too-many-requests",
+                message="Your previous stretch of speech is still being sent.",
+                retry_after=_SPEAKING_RETRY_AFTER_SECONDS,
+            )
+        self._uploading.add(user_id)
+
+    def release_upload(self, user_id: str) -> None:
+        """Give back the person's upload slot."""
+        self._uploading.discard(user_id)
 
     async def live(self, room_id: str, user_id: str, *, after: str | None = None) -> LiveCall:
         """Return the room's live call with its lines, those added after the line ``after`` if given, and names.
@@ -482,10 +498,11 @@ class CallTranscriptService:
 
         Runs under the room's lock.
         """
-        if call.ended_at is None:
-            await self._admit_to_live_call(call, user_id, now)
-        else:
-            await self._admit_to_ended_call(call, user_id, said_at=said_at, ended_at=call.ended_at, now=now)
+        await self._require_in_call(call, user_id, now)
+        if call.ended_at is None and call.paused_since is not None:
+            raise CallRefusedError(code="paused", message="Transcription is paused.")
+        if call.ended_at is not None and said_at >= call.ended_at:
+            raise CallRefusedError(code="forbidden", message="That was said after the call ended.")
         # From when the device says it began to when it arrived: a device clock running behind cannot move a stretch
         # said during a pause to before it.
         if await asyncio.to_thread(
@@ -497,44 +514,27 @@ class CallTranscriptService:
             raise CallRefusedError(code="paused", message="That was said while transcription was paused.")
         self._count_speech(user_id, now)
 
-    async def _admit_to_live_call(self, call: StoredCall, user_id: str, now: float) -> None:
-        """Take speech only from someone whose app is in the call, and never while it is paused."""
-        if user_id not in await self._present(call, now):
-            raise CallRefusedError(code="forbidden", message=_NOT_IN_CALL)
-        if call.paused_since is not None:
-            raise CallRefusedError(code="paused", message="Transcription is paused.")
-
-    async def _admit_to_ended_call(
-        self,
-        call: StoredCall,
-        user_id: str,
-        *,
-        said_at: float,
-        ended_at: float,
-        now: float,
-    ) -> None:
-        """Take late speech said before the end from someone whose app was in the call, for 20 seconds after the end.
+    async def _require_in_call(self, call: StoredCall, user_id: str, now: float) -> None:
+        """Take speech from someone whose app is in the live call, or was in the ended call, for 20 seconds after its end.
 
         The transcript message is begun no sooner, so a retry of its post sends just what the first attempt did.
         """
-        if call.transcript_done_at is not None or now >= ended_at + _TRANSCRIPT_DELAY_SECONDS:
+        if call.ended_at is None:
+            if user_id not in await self._present(call, now):
+                raise CallRefusedError(code="forbidden", message=_NOT_IN_CALL)
+        elif call.transcript_done_at is not None or now >= call.ended_at + _TRANSCRIPT_DELAY_SECONDS:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
-        if said_at >= ended_at:
-            raise CallRefusedError(code="forbidden", message="That was said after the call ended.")
-        if user_id not in await asyncio.to_thread(self._store.presence, call.id):
+        elif user_id not in await asyncio.to_thread(self._store.presence, call.id):
             raise CallRefusedError(code="forbidden", message="You were not in this call.")
 
-    def _refuse_second_stretch(self, user_id: str) -> None:
+    def _count_speech(self, user_id: str, now: float) -> None:
+        """Refuse a second stretch in flight, or more than 240 a minute, from one person; otherwise count this one."""
         if user_id in self._speaking:
             raise CallRefusedError(
                 code="too-many-requests",
                 message="Your previous stretch of speech is still being transcribed.",
                 retry_after=_SPEAKING_RETRY_AFTER_SECONDS,
             )
-
-    def _count_speech(self, user_id: str, now: float) -> None:
-        """Refuse a second stretch in flight, or more than 240 a minute, from one person; otherwise count this one."""
-        self._refuse_second_stretch(user_id)
         recent = self._recent_speech.setdefault(user_id, deque())
         while recent and recent[0] <= now - _SPEECH_WINDOW_SECONDS:
             recent.popleft()

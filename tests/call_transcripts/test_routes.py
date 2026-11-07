@@ -406,17 +406,28 @@ async def _drive(
     path: str,
     headers: dict[str, str],
     chunks: list[bytes],
-) -> tuple[int, dict[str, Any], int]:
-    """Send one POST through the API app body chunk by chunk; return its status, JSON answer and chunks it read."""
+    *,
+    reading: asyncio.Event | None = None,
+) -> tuple[int, dict[str, Any], int, dict[str, str]]:
+    """Send one POST through the API app body chunk by chunk; return its status, JSON answer, chunks read, headers.
+
+    With ``reading``, set it once the body is first read, and never end the body: an upload still being sent.
+    """
     read = 0
     sent: list[Message] = []
 
     async def receive() -> Message:
         nonlocal read
+        if reading is not None:
+            reading.set()
         if read == len(chunks):
             await asyncio.Event().wait()
         read += 1
-        return {"type": "http.request", "body": chunks[read - 1], "more_body": read < len(chunks)}
+        return {
+            "type": "http.request",
+            "body": chunks[read - 1],
+            "more_body": reading is not None or read < len(chunks),
+        }
 
     async def send(message: Message) -> None:
         sent.append(message)
@@ -438,7 +449,8 @@ async def _drive(
     async with asyncio.timeout(10):
         await main.app(scope, receive, send)
     [start, *body] = sent
-    return start["status"], json.loads(b"".join(message.get("body", b"") for message in body)), read
+    answer = json.loads(b"".join(message.get("body", b"") for message in body))
+    return start["status"], answer, read, {name.decode(): value.decode() for name, value in start["headers"]}
 
 
 @pytest.mark.asyncio
@@ -482,6 +494,31 @@ async def test_speech_from_outside_the_call_or_with_a_stretch_in_flight_is_refus
     assert (unknown[0], unknown[1]["code"], unknown[2]) == (404, "not-found", 0)
     assert (in_flight[0], in_flight[1]["code"], in_flight[2]) == (429, "too-many-requests", 0)
     assert (await first).status_code == 200
+    assert len(api.world.transcriber.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_second_upload_at_once_or_one_from_a_member_not_in_the_call_is_refused_before_its_body_is_read(
+    api: Api,
+) -> None:
+    """One upload at a time per person, from someone in the call: a second is 429 and a member not in the call 403."""
+    call_id = (await api.join(ANN)).json()["call"]["id"]
+    api.world.clock.advance(10)
+    path = f"{PREFIX}/calls/{call_id}/speech"
+    form = {"Content-Type": "multipart/form-data; boundary=xyz"}
+    chunks = [b"x" * 65_536] * 4
+    reading = asyncio.Event()
+    first = asyncio.create_task(_drive(path, {**api.headers(ANN), **form}, chunks[:1], reading=reading))
+    await reading.wait()
+
+    second = await _drive(path, {**api.headers(ANN), **form}, chunks)
+    member = await _drive(path, {**api.headers(CAROL), **form}, chunks)
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+
+    assert (second[0], second[1]["code"], second[2], second[3]["retry-after"]) == (429, "too-many-requests", 0, "3")
+    assert (member[0], member[1]["code"], member[2]) == (403, "forbidden", 0)
+    assert (await api.speech(call_id, ANN)).status_code == 200
     assert len(api.world.transcriber.requests) == 1
 
 

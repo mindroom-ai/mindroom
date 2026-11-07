@@ -114,12 +114,16 @@ async def pause_call(call_id: str, request: Request, caller: _SignedIn) -> dict[
 async def upload_speech(call_id: str, request: Request, caller: _SignedIn) -> dict[str, object]:
     """Transcribe one stretch of the person's speech: a form with the WAV as ``audio`` and when it began as ``startedAt``.
 
-    Who sends it is checked before the form is read. The form is read into memory only, refused as too large from its
-    declared length before it is read, and as soon as it passes the limit while it is read.
+    Who sends it is checked, and their one upload slot taken, before the form is read. The form is read into memory
+    only, refused as too large from its declared length before it is read, and as soon as it passes the limit while it
+    is read.
     """
-    await caller.service.check_speech_sender(call_id, caller.user_id)
-    audio, started_at = await _speech_form(request)
-    line = await caller.service.speech(call_id, caller.user_id, audio=audio, started_at=started_at)
+    await caller.service.reserve_upload(call_id, caller.user_id)
+    try:
+        audio, started_at = await _speech_form(request)
+        line = await caller.service.speech(call_id, caller.user_id, audio=audio, started_at=started_at)
+    finally:
+        caller.service.release_upload(caller.user_id)
     return {"line": None if line is None else _line_json(line)}
 
 
