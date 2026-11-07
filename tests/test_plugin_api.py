@@ -69,6 +69,7 @@ _EXPORTS = [
     "HelperResult",
     "HookBindings",
     "HookContext",
+    "HookMatrixAdmin",
     "HookMessageSender",
     "MessageEnrichContext",
     "MessageEnvelope",
@@ -196,6 +197,7 @@ _SIGNATURES = {
         "(registry, registry_state, message_sender, matrix_admin, room_state_querier, room_state_putter, "
         "agent_message_snapshot_reader, runtime_started_at)"
     ),
+    "HookContext": f"({_HOOK}, *, {_HOOK_HELPERS})",
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
         "(source_event_id, target, body, attachment_ids, mentioned_agents, agent_name, hook_source, "
@@ -314,8 +316,8 @@ _SIGNATURES = {
 }
 
 # Classes plugins receive from MindRoom and only annotate with, never construct, so each is pinned by its name alone:
-# pinning a constructor's parameters would make every new config field or context field a plugin API change.
-_ANNOTATION_TYPES = ["Config", "HookContext", "RuntimePaths", "ToolTraceEntry"]
+# pinning a constructor's parameters would make every new config, path, or trace field a plugin API change.
+_ANNOTATION_TYPES = ["Config", "RuntimePaths", "ToolTraceEntry"]
 
 # Plugins use the enums through their members, so each member name is pinned in definition order.
 _ENUM_MEMBERS = {
@@ -364,19 +366,18 @@ _ENUM_MEMBERS = {
     "TurnTrust": ["EXTERNAL", "TRUSTED_INTERNAL", "TRUSTED_USER_RELAY"],
 }
 
-# The methods and properties docs/plugins.md and docs/hooks.md have plugins use on the objects MindRoom hands them, by
-# owning class, each method's parameters written as `_SIGNATURES` writes them; `ctx.matrix_admin`'s type is not exported.
+# The methods and properties docs/plugins.md and docs/hooks.md have plugins use, by owning class, each method's
+# parameters written as `_SIGNATURES` writes them. `ScheduleFiredContext` overrides `send_message` with the same ones.
+_SEND_MESSAGE = "(self, room_id, text, *, thread_id, extra_content, trigger_dispatch, mentions, wake_mentioned)"
 _MEMBERS = {
     "mindroom.plugin_api.HookContext": {
         "state_root": "property",
-        "send_message": "(self, room_id, text, *, thread_id, extra_content, trigger_dispatch, mentions, wake_mentioned)",
+        "send_message": _SEND_MESSAGE,
         "query_room_state": "(self, room_id, event_type, state_key)",
         "get_latest_agent_message_snapshot": "(self, room_id, sender, *, thread_id)",
         "put_room_state": "(self, room_id, event_type, state_key, content)",
     },
-    "mindroom.plugin_api.ScheduleFiredContext": {
-        "send_message": "(self, room_id, text, *, thread_id, extra_content, trigger_dispatch, mentions, wake_mentioned)",
-    },
+    "mindroom.plugin_api.ScheduleFiredContext": {"send_message": _SEND_MESSAGE},
     "mindroom.plugin_api.MessageEnrichContext": {"add_metadata": "(self, key, text, *, cache_policy, persist)"},
     "mindroom.plugin_api.SystemEnrichContext": {"add_instruction": "(self, key, text, *, cache_policy)"},
     "mindroom.plugin_api.ToolBeforeCallContext": {"chat_preview": "(self)", "decline": "(self, reason)"},
@@ -416,7 +417,7 @@ _MEMBERS = {
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
         ),
     },
-    "mindroom.hooks.types.HookMatrixAdmin": {
+    "mindroom.plugin_api.HookMatrixAdmin": {
         "get_joined_rooms": "(self)",
         "retain_room": "(self, room_id)",
         "resolve_alias": "(self, alias)",
@@ -429,6 +430,12 @@ _MEMBERS = {
         "get_room_state_event": "(self, room_id, event_type, state_key)",
         "add_room_to_space": "(self, space_room_id, room_id)",
         "put_room_state": "(self, room_id, event_type, state_key, content)",
+    },
+    "mindroom.history.types.HistoryScope": {"key": "property"},
+    "mindroom.custom_tools.google_service.GoogleCloudToolkit": {
+        "_google_cloud_credentials": "(self)",
+        "_google_cloud_client": "(self, name, factory)",
+        "_google_cloud_error_result": "(self, service_name, operation, exc)",
     },
 }
 
@@ -478,7 +485,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 1), "696edce014777e5e3d9204106e29696392c6ac214359f00e97e47f800188612d")
+_PINNED_VERSION = ((1, 1), "ac8580901c401c8d84afb88e449bb732232f7922951bf9410c2491d5ddbfe968")
 
 
 def _is_enum(obj: object) -> bool:
@@ -541,8 +548,8 @@ def test_each_documented_method_and_property_keeps_its_name_and_parameters() -> 
 
 def test_each_exported_constant_keeps_its_value() -> None:
     """A plugin that compares with a constant's value, or writes it as a literal, breaks when the value changes."""
-    constants = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
-    assert {name: value for name, value in constants.items() if isinstance(value, str)} == _CONSTANTS
+    exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
+    assert {name: value for name, value in exported.items() if isinstance(value, str)} == _CONSTANTS
 
 
 def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter_names_and_kinds() -> None:

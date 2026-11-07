@@ -4,9 +4,8 @@ Plugins import MindRoom's entry points and the types they annotate with from her
 change between releases.
 `GoogleCloudToolkit` and the `mindroom.memory` helpers stay in their documented modules, because those modules load
 Agno at import and this one stays free of Agno and provider SDKs.
-`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, each enum's member names, the
-methods and properties the plugin docs use, and each constant's value, and fails on a change to them until the change
-is pinned there with `PLUGIN_API_VERSION`, this surface's version.
+`tests/test_plugin_api.py` pins this surface and fails on a change to it until the change is pinned there with
+`PLUGIN_API_VERSION`, this surface's version.
 """
 
 from __future__ import annotations
@@ -54,6 +53,7 @@ from mindroom.hooks import (
     FinalResponseTransformContext,
     HookBindings,
     HookContext,
+    HookMatrixAdmin,
     HookMessageSender,
     MessageEnrichContext,
     MessageEnvelope,
@@ -172,6 +172,7 @@ __all__ = [
     "HelperResult",
     "HookBindings",
     "HookContext",
+    "HookMatrixAdmin",
     "HookMessageSender",
     "MessageEnrichContext",
     "MessageEnvelope",
