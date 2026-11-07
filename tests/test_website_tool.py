@@ -21,6 +21,7 @@ from mindroom.custom_tools.website import (
     WebsiteTools,
     _MindRoomWebsiteReader,
     _safe_url_for_log,
+    _url_matches_crawl_host,
 )
 from mindroom.public_fetch import PublicFetchError
 from mindroom.tool_system.metadata import (
@@ -263,6 +264,57 @@ def test_website_reader_refuses_a_hostname_that_resolves_to_loopback(monkeypatch
     assert served == []
 
 
+def test_website_reader_crawls_from_a_start_url_with_surrounding_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whitespace around the start URL neither ends the crawl at its first page nor fetches that page twice."""
+    root_url = "https://example.test/"
+    docs_url = "https://example.test/docs"
+    pages = {
+        root_url: '<main><p>Home page with enough reference text.</p><a href="/docs">Docs</a><a href="/">Home</a></main>',
+        docs_url: "<main><p>Docs page with enough reference text to keep it as a document.</p></main>",
+    }
+
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
+
+    requested_urls = _serve(monkeypatch, lambda url: _page(pages[url]))
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    documents = _MindRoomWebsiteReader().read(f"  {root_url}\n")
+
+    assert requested_urls == [root_url, docs_url]
+    assert [document.meta_data["url"] for document in documents] == [root_url, docs_url]
+
+
+def test_website_reader_crawls_an_internationalized_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host written in Unicode and its punycode form are one crawl host, and the start page is fetched once."""
+    start_url = "https://xn--bcher-kva.example/"
+    relative_url = "https://xn--bcher-kva.example/relative"
+    absolute_url = "https://xn--bcher-kva.example/absolute"
+    pages = {
+        start_url: """
+        <main>
+          <p>Start page with enough reference text to keep it as a document.</p>
+          <a href="/relative">Relative</a>
+          <a href="https://b\u00fccher.example/absolute">Absolute</a>
+          <a href="/">Home</a>
+        </main>
+        """,
+        relative_url: "<main><p>Relative page with enough reference text to keep it as a document.</p></main>",
+        absolute_url: "<main><p>Absolute page with enough reference text to keep it as a document.</p></main>",
+    }
+
+    def no_delay(_reader: _MindRoomWebsiteReader) -> None:
+        pass
+
+    requested_urls = _serve(monkeypatch, lambda url: _page(pages[url]))
+    monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
+
+    documents = _MindRoomWebsiteReader().read("https://b\u00fccher.example/")
+
+    assert requested_urls == [start_url, relative_url, absolute_url]
+    assert [document.meta_data["url"] for document in documents] == [start_url, relative_url, absolute_url]
+
+
 def test_website_reader_does_not_record_cross_host_redirect_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -405,15 +457,7 @@ def test_website_reader_crawls_starting_url_with_port(monkeypatch: pytest.Monkey
 
 def test_website_reader_rejects_domain_suffix_lookalikes() -> None:
     """Same-host checks should not treat badexample.com as example.com."""
-    reader = _MindRoomWebsiteReader()
-
-    assert reader._should_skip_crawl_url(
-        current_url="https://badexample.com/private",
-        starting_url="https://example.com/",
-        current_depth=1,
-        num_links=0,
-        crawl_host="example.com",
-    )
+    assert not _url_matches_crawl_host("https://badexample.com/private", "example.com")
 
 
 def test_website_reader_rejects_public_suffix_sibling_hosts(monkeypatch: pytest.MonkeyPatch) -> None:

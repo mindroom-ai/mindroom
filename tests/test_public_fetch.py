@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import threading
 import time
@@ -275,15 +276,54 @@ async def test_a_server_that_trickles_bytes_fails_at_the_deadline(
     assert time.monotonic() - started < 2
 
 
+@pytest.mark.asyncio
+async def test_a_host_whose_first_address_never_answers_is_reached_at_its_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each address gets its own connect timeout, so a dead first address leaves the deadline for the next one."""
+    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(public_fetch, "_CONNECT_TIMEOUT_SECONDS", 0.1)
+    dead, live = "93.184.216.34", "93.184.216.35"
+
+    def resolve(_host: str, port: int, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port)) for address in (dead, live)
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    attempts: list[str] = []
+
+    async def connect(
+        _backend: httpcore.AnyIOBackend,
+        host: str,
+        _port: int,
+        timeout: float | None = None,  # noqa: ASYNC109
+        **_kwargs: object,
+    ) -> _RecordingStream:
+        attempts.append(host)
+        if host == dead:
+            # The real backend gives up on a silent address only when the connect timeout it was handed runs out.
+            if timeout is None:
+                await asyncio.Event().wait()
+            await asyncio.sleep(timeout)
+            msg = "connect timed out"
+            raise httpcore.ConnectTimeout(msg)
+        return _RecordingStream([b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npage"])
+
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
+
+    result = await fetch_public_url("http://two-addresses.example/", max_bytes=1024)
+
+    assert result.content == b"page"
+    assert attempts == [dead, live]
+
+
 def test_a_synchronous_fetch_returns_at_the_deadline_while_a_lookup_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
     """A hostname lookup that outlives the deadline does not hold a synchronous caller."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 0.3)
     released = threading.Event()
-    real_getaddrinfo = socket.getaddrinfo
 
-    def hang(*args: object, **kwargs: object) -> object:
+    def hang(*_args: object, **_kwargs: object) -> object:
         released.wait(10)
-        return real_getaddrinfo(*args, **kwargs)
+        raise socket.gaierror(socket.EAI_NONAME, "lookup released")
 
     monkeypatch.setattr(socket, "getaddrinfo", hang)
     started = time.monotonic()
@@ -323,9 +363,11 @@ async def test_the_environment_proxy_carries_a_fetch_only_when_asked(
     request_line: bytes,
 ) -> None:
     """Without the flag a fetch dials the address it validated, even when a proxy is configured."""
+    for name in tuple(os.environ):
+        if name.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}:
+            monkeypatch.delenv(name)
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
     monkeypatch.setenv("HTTP_PROXY", f"http://{_PROXY_HOST}:3128")
-    monkeypatch.delenv("NO_PROXY", raising=False)
-    monkeypatch.delenv("no_proxy", raising=False)
     _public_dns(monkeypatch)
     streams: list[tuple[tuple[str, int], _RecordingStream]] = []
 

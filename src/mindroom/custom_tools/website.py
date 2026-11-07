@@ -134,10 +134,10 @@ def _safe_malformed_url_for_log(url: str) -> str:
 
 
 def _normalized_hostname(url: str) -> str:
-    """Return the normalized hostname component for crawl domain checks."""
+    """Return a URL's hostname for crawl host checks, IDNA-encoded and lowercase as the fetch reports page URLs."""
     try:
-        return (urlparse(url).hostname or "").rstrip(".").lower()
-    except ValueError:
+        return httpx.URL(url).raw_host.decode("ascii").rstrip(".")
+    except httpx.InvalidURL:
         return ""
 
 
@@ -197,14 +197,9 @@ class _MindRoomWebsiteReader:
         starting_url: str,
         current_depth: int,
         num_links: int,
-        crawl_host: str,
     ) -> bool:
-        """Return whether a queued crawl URL is outside the current crawl budget; the starting URL is always fetched."""
-        return (
-            (current_url != starting_url and not _url_matches_crawl_host(current_url, crawl_host))
-            or (current_depth > _MAX_DEPTH and current_url != starting_url)
-            or num_links >= _MAX_LINKS
-        )
+        """Return whether a queued crawl URL is outside the current crawl budget."""
+        return (current_depth > _MAX_DEPTH and current_url != starting_url) or num_links >= _MAX_LINKS
 
     def _record_current_url(
         self,
@@ -220,6 +215,8 @@ class _MindRoomWebsiteReader:
         try:
             log_debug(f"Crawling: {safe_current_url}")
             page = fetch_public_url_sync(current_url, max_bytes=_MAX_PAGE_BYTES)
+            # Links resolve against the page's own URL, which can name the requested one differently.
+            self._visited.add(page.url)
             if current_url != starting_url and not _url_matches_crawl_host(page.url, crawl_host):
                 log_debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(page.url)}")
                 return 0
@@ -272,7 +269,7 @@ class _MindRoomWebsiteReader:
 
     def crawl(self, url: str) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
-        starting_url = url
+        starting_url = url.strip()
         crawl_host = _normalized_hostname(starting_url)
         num_links = 0
         crawler_result: dict[str, str] = {}
@@ -285,7 +282,6 @@ class _MindRoomWebsiteReader:
                 starting_url=starting_url,
                 current_depth=current_depth,
                 num_links=num_links,
-                crawl_host=crawl_host,
             ):
                 continue
             if self._visited:

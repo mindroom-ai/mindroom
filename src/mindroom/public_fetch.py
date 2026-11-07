@@ -24,6 +24,8 @@ type _PublicFetchErrorCode = Literal[
 
 # One deadline covers the whole fetch: every redirect hop, its connection, and the body.
 _DEADLINE_SECONDS = 30.0
+# Each address a hostname resolves to gets this long to connect, so a silent one leaves time to try the next.
+_CONNECT_TIMEOUT_SECONDS = 10.0
 _MAX_REDIRECTS = 10
 
 
@@ -84,7 +86,7 @@ async def _fetch(url: str, max_bytes: int, use_env_proxy: bool) -> PublicFetchRe
         transport=ServerFetchAsyncHTTPTransport(),
         mounts=_proxy_mounts() if use_env_proxy else None,
         headers={"Accept-Encoding": "identity"},
-        timeout=None,  # noqa: S113 - the deadline around the client bounds every operation.
+        timeout=httpx.Timeout(None, connect=_CONNECT_TIMEOUT_SECONDS),
     ) as client:
         request = client.build_request("GET", url.strip())
         for _hop in range(_MAX_REDIRECTS + 1):
