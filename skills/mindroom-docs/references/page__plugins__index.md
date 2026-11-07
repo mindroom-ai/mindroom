@@ -409,7 +409,8 @@ def lines_tools() -> type[LineTools]:
 A call then needs approval when its own rules ask for it or when the `judged_as` rules would ask about any call `judge` returns, so a rule that auto-approves `run_line` does not lift a `run_shell_command` rule.
 `judge` reads only the call's arguments, since an approval covers exactly those: return an empty list for a call that amounts to no call of `judged_as`, and `None` when the arguments cannot tell, which asks whenever the `judged_as` rules may ask.
 The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
-Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias; list a function one of the toolkit's options can turn off in `function_names` so the toolkit still builds without it.
+Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias.
+When an option can turn an aliased function off, pass every function the toolkit can offer as `function_names` to `register_tool_with_metadata`, so the toolkit still builds without it.
 In a [background script](https://docs.mindroom.chat/tools/background-scripts/#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](https://docs.mindroom.chat/tools/agent-orchestration/#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
 
 ### Dependencies
