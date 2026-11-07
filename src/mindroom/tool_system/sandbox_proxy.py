@@ -311,7 +311,8 @@ def _worker_route(
 
     ``base_dir`` is the calling agent's tool workspace in this primary's paths; a request that names a worker
     carries it relative to the shared storage root, which the worker mounts at its own path.
-    Without ``start``, the worker is only looked up, never started: its handle, None while its backend knows none.
+    Without ``start``, the worker is never started, only looked up and marked used: its handle, None while its
+    backend knows none.
     """
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
@@ -732,28 +733,25 @@ def _worker_call_arguments(
 
 
 def _build_execute_request(
+    stand_ins: WorkerStandIns,
     *,
     worker_manager: WorkerBackend,
-    runtime_paths: RuntimePaths,
-    tool_name: str,
     function_name: str,
     wire_args: list[object],
     wire_kwargs: dict[str, object],
-    tool_config_overrides: dict[str, object] | None,
-    tool_init_overrides: dict[str, object] | None,
-    execution_env: dict[str, str] | None,
-    extra_env_passthrough: str | None,
-    worker_target: ResolvedWorkerTarget | None,
-    runtime_config: Config | None,
     progress_sink: ProgressSink | None = None,
     start: bool = True,
 ) -> tuple[ExecuteRequest, WorkerHandle | None]:
-    """Build one call's request, unsent, and return it with the handle of the worker that serves it.
+    """Build one call that ``stand_ins`` sends, unsent, and return it with the handle of the worker that serves it.
 
     That worker starts unless ``start`` is False, as ``_worker_route`` describes.
     """
+    runtime_paths = stand_ins.runtime_paths
+    tool_name = stand_ins.tool_name
+    worker_target = stand_ins.worker_target
+    runtime_config = stand_ins.runtime_config
     # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
-    init_overrides = dict(tool_init_overrides or {})
+    init_overrides = dict(stand_ins.tool_init_overrides or {})
     base_dir = init_overrides.pop("base_dir", None)
     route, worker_handle = _worker_route(
         runtime_paths=runtime_paths,
@@ -769,8 +767,10 @@ def _build_execute_request(
     # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
     # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
     call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
-    execution_env = call_environment.applied(execution_env or {}, runtime_paths.process_env)
-    extra_env_passthrough = ",".join(filter(None, (extra_env_passthrough, *call_environment.pass_through))) or None
+    execution_env = call_environment.applied(stand_ins.execution_env or {}, runtime_paths.process_env)
+    extra_env_passthrough = (
+        ",".join(filter(None, (stand_ins.extra_env_passthrough, *call_environment.pass_through))) or None
+    )
     agent_name = worker_target.routing_agent_name if worker_target is not None else None
     # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
     if (
@@ -798,7 +798,7 @@ def _build_execute_request(
         function_name=function_name,
         args=wire_args,
         kwargs=wire_kwargs,
-        tool_config_overrides=cast("dict[str, Any]", to_json_compatible(tool_config_overrides or {})),
+        tool_config_overrides=cast("dict[str, Any]", to_json_compatible(stand_ins.tool_config_overrides or {})),
         tool_init_overrides=cast("dict[str, Any]", to_json_compatible(init_overrides)),
         execution_env=execution_env,
         # The call's set and removed names apply over the worker's own environment and workspace script too,
@@ -815,23 +815,16 @@ def _build_execute_request(
 
 def _call_proxy_sync(
     *,
-    runtime_paths: RuntimePaths,
-    tool_name: str,
+    stand_ins: WorkerStandIns,
     function_name: str,
     args: tuple[object, ...],
     kwargs: dict[str, object],
-    credentials_manager: CredentialsManager | None,
     function_entrypoint: Callable[..., object],
-    tool_config_overrides: dict[str, object] | None,
-    tool_init_overrides: dict[str, object] | None,
-    execution_env: dict[str, str] | None,
-    extra_env_passthrough: str | None,
-    worker_target: ResolvedWorkerTarget | None,
-    runtime_config: Config | None,
-    tools: ToolRegistry,
     cancellation: WorkerCallCancellation | None = None,
 ) -> object:
-    metadata = tools.get(tool_name)
+    runtime_paths = stand_ins.runtime_paths
+    tool_name = stand_ins.tool_name
+    metadata = stand_ins.tools.get(tool_name)
     wire_args, wire_kwargs = _worker_call_arguments(
         args,
         kwargs,
@@ -854,18 +847,11 @@ def _call_proxy_sync(
     )
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         request, worker_handle = _build_execute_request(
+            stand_ins,
             worker_manager=worker_manager,
-            runtime_paths=runtime_paths,
-            tool_name=tool_name,
             function_name=function_name,
             wire_args=wire_args,
             wire_kwargs=wire_kwargs,
-            tool_config_overrides=tool_config_overrides,
-            tool_init_overrides=tool_init_overrides,
-            execution_env=execution_env,
-            extra_env_passthrough=extra_env_passthrough,
-            worker_target=worker_target,
-            runtime_config=runtime_config,
             progress_sink=progress_sink,
         )
         result = execute_worker_proxy_request(
@@ -878,19 +864,21 @@ def _call_proxy_sync(
                 ),
             ),
             request=request,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
+            credentials_manager=stand_ins.credentials_manager,
+            worker_target=stand_ins.worker_target,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
             primary_built_service=functools.partial(
                 primary_owns_tool_settings,
-                tools=tools,
+                tools=stand_ins.tools,
                 runtime_paths=runtime_paths,
             ),
             worker_grantable_credentials=(
-                runtime_config.get_worker_grantable_credentials() if runtime_config is not None else None
+                stand_ins.runtime_config.get_worker_grantable_credentials()
+                if stand_ins.runtime_config is not None
+                else None
             ),
             cancellation=cancellation,
         )
@@ -966,20 +954,11 @@ class WorkerStandIns:
             cancellation = WorkerCallCancellation()
             call = functools.partial(
                 _call_proxy_sync,
-                function_entrypoint=local,
-                runtime_paths=self.runtime_paths,
-                tool_name=self.tool_name,
+                stand_ins=self,
                 function_name=function_name,
                 args=args,
                 kwargs=dict(kwargs),
-                credentials_manager=self.credentials_manager,
-                tool_config_overrides=self.tool_config_overrides,
-                tool_init_overrides=self.tool_init_overrides,
-                execution_env=self.execution_env,
-                extra_env_passthrough=self.extra_env_passthrough,
-                worker_target=self.worker_target,
-                runtime_config=self.runtime_config,
-                tools=self.tools,
+                function_entrypoint=local,
                 cancellation=cancellation,
             )
             try:
@@ -1038,26 +1017,20 @@ class WorkerCall:
 def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = True) -> WorkerCall | None:
     """Build the call of ``function_name`` that ``stand_ins`` would send, without sending it.
 
-    The call carries no arguments; otherwise it is the request a sent call carries, for the worker that would serve it.
-    That worker starts unless ``start`` is False; then a dedicated worker that is not running stays stopped, and the
-    answer is None.
+    The request carries no arguments, nor what sending adds: the job flag, the cancellation id, and a credential lease.
+    Otherwise it is the request a sent call carries, for the worker that would serve it. That worker starts unless
+    ``start`` is False; then a dedicated worker that is not running stays stopped and the answer is None, while a
+    running one is marked used.
     """
     runtime_paths = stand_ins.runtime_paths
     proxy_config = sandbox_proxy_config(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         request, worker_handle = _build_execute_request(
+            stand_ins,
             worker_manager=worker_manager,
-            runtime_paths=runtime_paths,
-            tool_name=stand_ins.tool_name,
             function_name=function_name,
             wire_args=[],
             wire_kwargs={},
-            tool_config_overrides=stand_ins.tool_config_overrides,
-            tool_init_overrides=stand_ins.tool_init_overrides,
-            execution_env=stand_ins.execution_env,
-            extra_env_passthrough=stand_ins.extra_env_passthrough,
-            worker_target=stand_ins.worker_target,
-            runtime_config=stand_ins.runtime_config,
             start=start,
         )
     if worker_backend_kind(runtime_paths).dedicated and (worker_handle is None or worker_handle.status != "ready"):
@@ -1092,6 +1065,7 @@ __all__ = [
     "runner_config_snapshot",
     "sandbox_proxy_config",
     "save_attachment_to_worker",
+    "to_json_compatible",
     "tool_placement",
     "view_file_from_worker",
     "worker_call",

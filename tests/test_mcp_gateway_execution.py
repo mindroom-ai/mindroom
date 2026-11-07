@@ -268,16 +268,7 @@ async def test_cancelled_worker_proxy_call_keeps_capacity_until_proxy_thread_exi
     work.__name__ = "work"
 
     def build(*_args: object, **_kwargs: object) -> Toolkit:
-        # As get_tool_by_name routes a worker-routed toolkit, every function sends its calls through the async proxy.
-        return configure_toolkit_functions(
-            Toolkit(name="calculator", tools=[work]),
-            to_worker=sandbox_proxy.WorkerStandIns(
-                tool_name="calculator",
-                runtime_paths=context.runtime_paths,
-                credentials_manager=None,
-                tools=context.plugins.tools,
-            ),
-        )
+        return _routed(Toolkit(name="calculator", tools=[work]), context)
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
     monkeypatch.setattr(agents, "build_agent_toolkit", build)

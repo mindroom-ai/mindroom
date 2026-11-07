@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -120,15 +121,7 @@ class _DedicatedWorkers:
 def dedicated(monkeypatch: pytest.MonkeyPatch) -> _DedicatedWorkers:
     """Route every worker call to these dedicated workers."""
     workers = _DedicatedWorkers()
-
-    class _Lease:
-        def __enter__(self) -> _DedicatedWorkers:
-            return workers
-
-        def __exit__(self, *_exc: object) -> None:
-            return None
-
-    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_args, **_kwargs: _Lease())
+    monkeypatch.setattr(sandbox_proxy, "lease_primary_worker_manager", lambda *_args, **_kwargs: nullcontext(workers))
     return workers
 
 

@@ -147,7 +147,7 @@ def requires_connect(toolkit: AnyToolkit) -> TypeGuard[Toolkit]:
     """
     if not isinstance(toolkit, Toolkit) or not toolkit.requires_connect:
         return False
-    return _FINISHING.get(toolkit, _Finishing()).to_worker is None or isinstance(toolkit, SupportsPrimaryCallPlacement)
+    return toolkit_worker_stand_ins(toolkit) is None or isinstance(toolkit, SupportsPrimaryCallPlacement)
 
 
 @dataclass(frozen=True, slots=True)
