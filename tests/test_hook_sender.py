@@ -812,8 +812,8 @@ async def test_runtime_matrix_target_key_is_rejected_from_all_hook_enrichment_la
         target_member_names=None,
     )
     system_items = await bot._ingress_hook_runner.apply_system_enrichment(
-        dispatch,
         prepared.envelope,
+        correlation_id=dispatch.correlation_id,
         target_entity_name="code",
         target_member_names=None,
     )
@@ -855,8 +855,8 @@ async def test_payload_enrichment_timing_reports_hook_counts(tmp_path: Path) -> 
             target_member_names=("code",),
         )
         system_items = await bot._ingress_hook_runner.apply_system_enrichment(
-            dispatch,
             prepared.envelope,
+            correlation_id=dispatch.correlation_id,
             target_entity_name="code",
             target_member_names=("code",),
         )
