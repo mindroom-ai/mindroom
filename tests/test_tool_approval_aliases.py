@@ -12,6 +12,7 @@ from mindroom.approval.tool_approval import evaluate_tool_approval, tool_may_req
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.llm.runs import ToolExecution
+from mindroom.tool_system.catalog import export_tools_metadata
 from mindroom.tool_system.declarations import ApprovalAlias, ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.plugins import candidate_tool_registry
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
@@ -292,3 +293,11 @@ async def test_validating_a_plugin_edit_leaves_the_live_alias_judging(tmp_path: 
     assert edited is not None
     assert dict(edited.approval_aliases) == {}
     assert await _planned_asks(config, runtime_paths, "lines", _paused_line("rm -rf build")) == [True]
+
+
+def test_the_tools_catalog_lists_a_tool_that_declares_an_alias() -> None:
+    """The dashboard's tool catalog lists a toolkit with an alias as JSON, since the alias's judge is code."""
+    (tool,) = export_tools_metadata({"lines": _lines_tool()})
+
+    assert tool["name"] == "lines"
+    assert "approval_aliases" not in json.loads(json.dumps(tool))
