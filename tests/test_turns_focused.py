@@ -398,8 +398,8 @@ class _SpyTurnPolicy:
     async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
         return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
 
-    def reply_mode_leaves_unanswered(self, *args: Any) -> bool:  # noqa: ANN401
-        return self.inner.reply_mode_leaves_unanswered(*args)
+    def not_for_this_agent(self, *args: Any) -> bool:  # noqa: ANN401
+        return self.inner.not_for_this_agent(*args)
 
     def effective_response_action(self, action: ResponseAction) -> ResponseAction:
         return self.inner.effective_response_action(action)

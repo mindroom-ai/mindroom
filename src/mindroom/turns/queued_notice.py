@@ -5,19 +5,14 @@ Text, media, and voice ingress share these, so they live apart from every ingres
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.background_tasks import create_background_task
-from mindroom.thread_utils import mentions_another_participant
 
 if TYPE_CHECKING:
-    import nio
-
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
@@ -27,8 +22,6 @@ class _ApprovalWaitSupport(Protocol):
     """Collaborators the approval-wait reaction needs."""
 
     runtime: BotRuntimeView
-    runtime_paths: RuntimePaths
-    matrix_id: MatrixID
     response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
 
@@ -52,22 +45,14 @@ def queued_notice_reservation_if_busy(
 
 def mark_waiting_for_approval(
     support: _ApprovalWaitSupport,
-    room: nio.MatrixRoom,
-    source: dict[str, Any],
     target: MessageTarget,
     envelope: MessageEnvelope,
 ) -> None:
-    """React ⏳ to a human message that waits because a pending approval holds its conversation."""
+    """React ⏳ to a human message that waits because a pending approval holds its conversation.
+
+    Ingress calls it only for a message this agent may answer (`TurnPolicy.not_for_this_agent`).
+    """
     if not envelope.origin.may_answer_interactive_prompt or not support.response_runner.is_held_for_approval(target):
-        return
-    if mentions_another_participant(
-        source,
-        support.matrix_id,
-        support.runtime.config,
-        support.runtime_paths,
-        room=room,
-    ):
-        # A message for another agent or person does not wait for this one.
         return
     create_background_task(
         support.delivery_gateway.send_judgment_reaction(
