@@ -58,47 +58,28 @@ if TYPE_CHECKING:
 
 def test_should_skip_mentions_with_metadata() -> None:
     """Test that should_skip_mentions detects the metadata."""
-    # Event with skip_mentions metadata
-    event_source = {
-        "content": {
-            "body": "✅ Scheduled task. @email_agent will be mentioned",
-            SKIP_MENTIONS_KEY: True,
-        },
-    }
-    assert should_skip_mentions(event_source["content"]) is True
+    content = {"body": "✅ Scheduled task. @email_agent will be mentioned", SKIP_MENTIONS_KEY: True}
+    assert should_skip_mentions(content) is True
 
 
 def test_should_skip_mentions_without_metadata() -> None:
     """Test that should_skip_mentions returns False when no metadata."""
-    # Normal event without metadata
-    event_source = {
-        "content": {
-            "body": "Regular message @email_agent",
-        },
-    }
-    assert should_skip_mentions(event_source["content"]) is False
+    assert should_skip_mentions({"body": "Regular message @email_agent"}) is False
 
 
 def test_should_skip_mentions_explicit_false() -> None:
     """Test that should_skip_mentions returns False when metadata is False."""
-    event_source = {
-        "content": {
-            "body": "Message with explicit false @email_agent",
-            SKIP_MENTIONS_KEY: False,
-        },
-    }
-    assert should_skip_mentions(event_source["content"]) is False
+    content = {"body": "Message with explicit false @email_agent", SKIP_MENTIONS_KEY: False}
+    assert should_skip_mentions(content) is False
 
 
 def test_should_skip_mentions_of_an_edit_marked_in_its_new_content() -> None:
     """An edit whose replacement content carries the metadata skips mentions."""
-    event_source = {
-        "content": {
-            "body": "* ✅ Scheduled task. @email_agent will be mentioned",
-            "m.new_content": {"body": "✅ Scheduled task. @email_agent will be mentioned", SKIP_MENTIONS_KEY: True},
-        },
+    content = {
+        "body": "* ✅ Scheduled task. @email_agent will be mentioned",
+        "m.new_content": {"body": "✅ Scheduled task. @email_agent will be mentioned", SKIP_MENTIONS_KEY: True},
     }
-    assert should_skip_mentions(event_source["content"]) is True
+    assert should_skip_mentions(content) is True
 
 
 def test_skip_marked_message_does_not_count_its_agents_as_mentioned_earlier(tmp_path: Path) -> None:

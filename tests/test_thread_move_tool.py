@@ -35,7 +35,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
-from mindroom.thread_utils import get_all_mentioned_agents_in_thread
+from mindroom.thread_utils import get_all_mentioned_agents_in_thread, history_mentioned_user_ids
 from mindroom.tool_system.events import ToolTraceEntry, body_without_tool_markers, build_tool_trace_content
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -76,12 +76,14 @@ def _message(sender: str, content: dict[str, Any], event_id: str = "$event:examp
 def _plan(
     *messages: ResolvedVisibleMessage,
     display_names: dict[str, str] | None = None,
+    mentioned_user_ids: list[str] | None = None,
 ) -> list[_PlannedCopy]:
     return _plan_thread_copy(
         messages,
         entity_name_for_sender=ENTITY_IDS.get,
         target_posters=frozenset({"code", ROUTER_AGENT_NAME}),
         display_names=display_names if display_names is not None else {HUMAN_ID: "Dominic"},
+        mentioned_user_ids=lambda _content: list(mentioned_user_ids or []),
     )
 
 
@@ -183,11 +185,12 @@ def test_plan_copies_only_allowlisted_keys() -> None:
         "com.mindroom.attachment_ids": ["att_1"],
         "io.mindroom.interactive": {"options": []},
     }
-    own, relayed = _plan(_message(CODE_ID, content), _message(HUMAN_ID, content))
+    own, relayed = _plan(_message(CODE_ID, content), _message(HUMAN_ID, content), mentioned_user_ids=[CODE_ID])
 
     for copy in (own, relayed):
         assert copy.content[SKIP_MENTIONS_KEY] is True
         assert copy.content["m.mentions"] == {}
+        assert copy.content[COPIED_MENTIONS_KEY] == [CODE_ID]
     assert set(own.content) == {*TEXT_KEYS, SKIP_MENTIONS_KEY, "m.mentions", COPIED_MENTIONS_KEY}
     assert set(relayed.content) == {
         *TEXT_KEYS,
@@ -637,24 +640,38 @@ async def test_move_thread_copies_messages_in_order(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "markers",
+    ("case", "expected"),
     [
-        {"m.mentions": {"user_ids": []}, EXACT_MENTIONS_KEY: True},
-        {WAKE_MENTIONED_KEY: False},
-        {SKIP_MENTIONS_KEY: True},
+        ("tagged", ["code", "research"]),
+        ("exact_nobody", []),
+        ("exact_code", ["code"]),
+        ("wake_mentioned_false", []),
+        ("skip_mentions", []),
     ],
-    ids=["exact_mentions", "wake_mentioned_false", "skip_mentions"],
 )
-async def test_moved_card_does_not_mention_the_agents_it_quotes(tmp_path: Path, markers: dict[str, Any]) -> None:
-    """Agents a card or notice only quotes count as mentioned earlier neither in its thread nor where it moves."""
+async def test_moved_message_mentions_whom_its_original_did(tmp_path: Path, case: str, expected: list[str]) -> None:
+    """A message moved once or twice counts as mentioning earlier exactly the agents its original did."""
     move = _move(tmp_path)
     config, runtime_paths = move.context.config, move.context.runtime_paths
+    markers = {
+        "tagged": {},
+        "exact_nobody": {"m.mentions": {"user_ids": []}, EXACT_MENTIONS_KEY: True},
+        "exact_code": {"m.mentions": {"user_ids": [move.ids["code"]]}, EXACT_MENTIONS_KEY: True},
+        "wake_mentioned_false": {WAKE_MENTIONED_KEY: False},
+        "skip_mentions": {SKIP_MENTIONS_KEY: True},
+    }[case]
     card = format_message_with_mentions(config, runtime_paths, "Review card: @code and @research signed off")
     thread = [
         _message(REQUESTER_ID, {"msgtype": "m.text", "body": "status?"}, ROOT_ID),
         _message(move.ids[ROUTER_AGENT_NAME], {**card, **markers}, "$card:localhost"),
     ]
-    assert get_all_mentioned_agents_in_thread(thread, config, runtime_paths) == []
+
+    def mentioned(messages: list[ResolvedVisibleMessage]) -> list[str]:
+        agents = get_all_mentioned_agents_in_thread(messages, config, runtime_paths)
+        return [entity_ids_by_user_id[agent.full_id] for agent in agents]
+
+    entity_ids_by_user_id = {user_id: name for name, user_id in move.ids.items()}
+    assert mentioned(thread) == expected
 
     with _matrix(move, thread) as mocks:
         payload = await _run()
@@ -662,7 +679,15 @@ async def test_moved_card_does_not_mention_the_agents_it_quotes(tmp_path: Path, 
     assert payload["copied"] == 2
     moved = [_message(move.ids[ROUTER_AGENT_NAME], call.args[2]) for call in mocks.send.await_args_list[:2]]
     assert move.ids["code"] in moved[1].content["body"]
-    assert get_all_mentioned_agents_in_thread(moved, config, runtime_paths) == []
+    assert mentioned(moved) == expected
+    moved_again = _plan_thread_copy(
+        moved,
+        entity_name_for_sender=entity_ids_by_user_id.get,
+        target_posters=frozenset({ROUTER_AGENT_NAME}),
+        display_names={},
+        mentioned_user_ids=lambda content: history_mentioned_user_ids(content, config, runtime_paths),
+    )
+    assert mentioned([_message(move.ids[ROUTER_AGENT_NAME], copy.content) for copy in moved_again]) == expected
 
 
 @pytest.mark.asyncio

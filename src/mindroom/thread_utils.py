@@ -84,6 +84,21 @@ def _extract_mentioned_user_ids(
     return [user_id for user_id in user_ids if not registry.is_managed_user_id(user_id)]
 
 
+def history_mentioned_user_ids(
+    content: dict[str, Any],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Return the user IDs a thread message counts as mentioning when a later message reads the thread's history."""
+    if not should_skip_mentions(content):
+        return _extract_mentioned_user_ids(content, config, runtime_paths)
+    # A skip-marked message mentions nobody, but a thread-move copy keeps whom its original mentioned.
+    copied = content.get(COPIED_MENTIONS_KEY)
+    if not isinstance(copied, list):
+        return []
+    return [user_id for user_id in copied[:_MAX_MENTIONED_USER_IDS] if isinstance(user_id, str)]
+
+
 def _listed_or_found_user_ids(
     content: dict[str, object],
     config: Config,
@@ -306,7 +321,7 @@ def get_all_mentioned_agents_in_thread(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
-    """Get all unique agent MatrixIDs that have been mentioned anywhere in the thread.
+    """Get all unique agent MatrixIDs the thread's messages count as mentioning; see ``history_mentioned_user_ids``.
 
     Preserves the order of first mention while preventing duplicates.
     """
@@ -315,10 +330,7 @@ def get_all_mentioned_agents_in_thread(
     registry = entity_identity_registry(config, runtime_paths)
 
     for msg in thread_history:
-        content = msg.content
-        if should_skip_mentions(content) and content.get(COPIED_MENTIONS_KEY) is not True:
-            continue
-        user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
+        user_ids = history_mentioned_user_ids(msg.content, config, runtime_paths)
         agents = _agents_from_user_ids(user_ids, registry)
 
         for agent in agents:

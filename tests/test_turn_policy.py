@@ -20,7 +20,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.custom_tools.thread_move import _plan_thread_copy
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
@@ -28,9 +28,9 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.scheduling.executor import _build_scheduled_failure_content
 from mindroom.teams.formation import TeamIntent, TeamOutcome
 from mindroom.teams.spec import TeamMode
+from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_responder_access
@@ -39,7 +39,6 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
-    make_conversation_reader_mock,
     make_matrix_client_mock,
     make_visible_message,
     request_envelope,
@@ -392,13 +391,11 @@ async def test_untagged_follow_up_after_a_skip_marked_notice_stays_with_the_thre
     """Agents only a skip-marked notice names, here a failed scheduled task's, form no team on an untagged follow-up."""
     general_id = _entity_id(config, "general").full_id
     room = _room_with_members(_SENDER, general_id, _entity_id(config, "research").full_id)
-    reader = make_conversation_reader_mock()
-    reader.latest_thread_event_id = AsyncMock(return_value="$reply:localhost")
-    notice = await _build_scheduled_failure_content(
-        MessageTarget.resolve(_ROOM_ID, "$thread:localhost", _EVENT_ID),
-        "❌ Scheduled task failed: @general and @research compare notes\nError: timed out",
-        reader,
-    )
+    notice = {
+        "msgtype": "m.text",
+        "body": "❌ Scheduled task failed: @general and @research compare notes\nError: timed out",
+        SKIP_MENTIONS_KEY: True,
+    }
     history = [
         make_visible_message(sender=_SENDER, body="please help", event_id="$thread:localhost"),
         make_visible_message(sender=general_id, body="sure thing", event_id="$reply:localhost"),
@@ -427,6 +424,7 @@ async def test_untagged_follow_up_in_a_moved_team_thread_still_gets_the_team(con
         entity_name_for_sender={general_id: "general"}.get,
         target_posters=frozenset(posters),
         display_names={},
+        mentioned_user_ids=lambda content: history_mentioned_user_ids(content, config, runtime_paths_for(config)),
     )
     history = [make_visible_message(sender=posters[copy.poster], content=copy.content) for copy in copies]
     context = _context(thread_id="$moved:localhost", thread_history=history)
