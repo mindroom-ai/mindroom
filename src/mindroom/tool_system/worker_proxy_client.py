@@ -24,7 +24,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.workers.in_flight import worker_call_in_flight
-from mindroom.workers.models import SANDBOX_RUNNER_API_ROOT, WorkerHandle, worker_api_endpoint
+from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_root, worker_api_endpoint
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     CancelRequest,
@@ -45,8 +45,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
 
-_SANDBOX_PROXY_EXECUTE_PATH = f"{SANDBOX_RUNNER_API_ROOT}/execute"
-_SANDBOX_PROXY_LEASE_PATH = f"{SANDBOX_RUNNER_API_ROOT}/leases"
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
@@ -292,7 +290,7 @@ def post_worker_proxy_request[Answer: SaveAttachmentResponse | ViewFileResponse]
         request_url = (
             worker_api_endpoint(worker_handle, worker_operation)
             if worker_handle is not None
-            else f"{config.proxy_url}{SANDBOX_RUNNER_API_ROOT}/{worker_operation}"
+            else f"{normalize_sandbox_runner_api_root(config.proxy_url or '')}/{worker_operation}"
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
             response = client.post(request_url, json=request.model_dump(mode="json"), headers=headers)
@@ -429,15 +427,12 @@ def execute_worker_proxy_request(
 
     try:
         headers = worker_request_headers(worker_handle, config=config)
+        runner_api_root = normalize_sandbox_runner_api_root(config.proxy_url or "")
         execute_url = (
-            worker_api_endpoint(worker_handle, "execute")
-            if worker_handle is not None
-            else f"{config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}"
+            worker_api_endpoint(worker_handle, "execute") if worker_handle is not None else f"{runner_api_root}/execute"
         )
         lease_url = (
-            worker_api_endpoint(worker_handle, "leases")
-            if worker_handle is not None
-            else f"{config.proxy_url}{_SANDBOX_PROXY_LEASE_PATH}"
+            worker_api_endpoint(worker_handle, "leases") if worker_handle is not None else f"{runner_api_root}/leases"
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
             run_as_job = job_owns_execution()
@@ -447,7 +442,7 @@ def execute_worker_proxy_request(
                 cancel_url = (
                     worker_api_endpoint(worker_handle, "execute-cancel")
                     if worker_handle is not None
-                    else f"{config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}/cancel"
+                    else f"{runner_api_root}/execute/cancel"
                 )
                 # Arm before leasing credentials, so an abandoned call leases none.
                 cancellation._arm(
