@@ -129,8 +129,12 @@ class HookMessageSender(Protocol):
         extra_content: dict[str, Any] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
     ) -> Awaitable[str | None]:
-        """Send one hook-originated Matrix message."""
+        """Send one hook-originated Matrix message.
+
+        ``mentions`` lists every Matrix user ID the message mentions, so names in its text mention nobody else.
+        """
 
 
 class HookMatrixAdmin(Protocol):

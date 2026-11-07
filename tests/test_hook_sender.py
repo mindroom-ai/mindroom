@@ -249,7 +249,9 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
     ) -> str | None:
+        del mentions
         sent_messages.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return f"$event{len(sent_messages)}"
 
@@ -322,8 +324,9 @@ async def test_downstream_hook_dispatch_sends_one_hop_past_the_envelopes_message
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions
         sent_messages.append(extra_content)
         return "$event"
 
@@ -394,8 +397,9 @@ async def test_hook_send_message_failure_does_not_crash_later_hooks(tmp_path: Pa
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
+        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch, mentions
         msg = "boom"
         raise RuntimeError(msg)
 

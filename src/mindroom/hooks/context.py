@@ -139,6 +139,7 @@ class HookContextSupport:
         extra_content: dict[str, Any] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
     ) -> str | None:
         """Send a hook-originated Matrix message as this bot, with the client and config it has when sending."""
         client = self.runtime.client
@@ -155,6 +156,7 @@ class HookContextSupport:
             source_hook,
             extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
             conversation_reader=self.conversation_reader,
         )
         if event_id:
@@ -372,6 +374,7 @@ class HookContext:
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
     ) -> str | None:
         """Send a Matrix message from a hook and return the event ID when available.
 
@@ -385,6 +388,8 @@ class HookContext:
         plugin on the first synthetic hop, then suppresses deeper
         ``message:received`` re-entry for the rest of that synthetic
         chain to avoid cross-plugin feedback loops.
+        *mentions* lists every Matrix user ID the message mentions, so
+        names quoted in *text* mention nobody else.
         """
         if self.message_sender is None:
             self.logger.warning("send_message called but no sender registered")
@@ -401,6 +406,7 @@ class HookContext:
             format_hook_source(self.plugin_name, self.event_name),
             resolved_extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
         )
 
     async def query_room_state(
@@ -595,6 +601,7 @@ class ScheduleFiredContext(HookContext):
         thread_id: str | None | _UnsetType = _UNSET,
         extra_content: dict[str, Any] | None = None,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
     ) -> str | None:
         """Send a Matrix message from a schedule hook and return the event ID when available."""
         # Named base call: zero-argument super() breaks in slots dataclasses.
@@ -605,6 +612,7 @@ class ScheduleFiredContext(HookContext):
             thread_id=self.thread_id if isinstance(thread_id, _UnsetType) else thread_id,
             extra_content=extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
         )
 
 
