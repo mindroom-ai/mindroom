@@ -27,7 +27,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 
-_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
+BUILTIN_TEMPLATES_DIR = Path(__file__).resolve().parent / "cli" / "templates"
+_WORKSPACE_TEMPLATES = ("mind", "hermes", "coding", "legal", "finance")
 
 # Agent builds now run on worker threads (#1260), so concurrent scaffolding of
 # the same workspace must not interleave template copies or link reconciliation.
@@ -192,10 +193,11 @@ def _copy_workspace_template(
     *,
     template_dir: Path,
     force: bool = False,
-) -> None:
-    """Copy a local template directory into a workspace root."""
+) -> list[Path]:
+    """Copy a local template directory into a workspace root and return the relative paths of the files written."""
     workspace_path.mkdir(parents=True, exist_ok=True)
     resolved_template_dir = validate_workspace_template_dir(template_dir)
+    written: list[Path] = []
 
     with (
         _WORKSPACE_MUTATION_LOCK,
@@ -237,6 +239,8 @@ def _copy_workspace_template(
                                 ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
                             )
                             _copy_xattrs(source_file.fileno(), output_file.fileno())
+                written.append(relative_path)
+    return written
 
 
 def ensure_workspace_template(
@@ -244,13 +248,19 @@ def ensure_workspace_template(
     *,
     template: str,
     force: bool = False,
-) -> None:
-    """Create the built-in Mind workspace template used by config init."""
-    if template != "mind":
+) -> list[Path]:
+    """Copy one built-in workspace template and return the relative paths of the files written."""
+    if template not in _WORKSPACE_TEMPLATES:
         msg = f"Unsupported workspace template: {template}"
         raise ValueError(msg)
-    _copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)
-    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+    written = _copy_workspace_template(
+        workspace_path,
+        template_dir=BUILTIN_TEMPLATES_DIR / f"{template}_data",
+        force=force,
+    )
+    if template == "mind":
+        (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+    return written
 
 
 def _build_workspace_knowledge_links(

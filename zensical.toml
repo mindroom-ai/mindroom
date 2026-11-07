@@ -27,6 +27,7 @@ nav = [
   { "Configuration" = [
     { "Config File & Environment" = "configuration/index.md" },
     { "Agents" = "configuration/agents.md" },
+    { "Agent Templates" = "configuration/agent-templates.md" },
     { "Models" = "configuration/models.md" },
     { "Teams" = "configuration/teams.md" },
     { "Routing & Responder Selection" = "configuration/router.md" },
