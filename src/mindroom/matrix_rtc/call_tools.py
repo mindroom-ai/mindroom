@@ -32,7 +32,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.background_tasks import drain_tasks, wait_for_future_until_complete
+from mindroom.background_tasks import drain_tasks, run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.storage import new_scope_session
@@ -580,7 +580,8 @@ async def build_call_tools(
         execution_identity=execution_identity,
     )
     build = _spoken(
-        await asyncio.to_thread(
+        # Finished before a cancellation goes on, as the live agent cache does, so no build outlives the call.
+        await run_blocking_until_complete(
             functools.partial(
                 create_agent,
                 agent_name,
