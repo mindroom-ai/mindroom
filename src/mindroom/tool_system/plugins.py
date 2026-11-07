@@ -241,7 +241,7 @@ class ConfigPlugins:
 
     @cached_property
     def reserved_namespaces(self) -> tuple[str, ...]:
-        """Return the content-key and event-type prefixes the configured plugins the generation loaded reserve."""
+        """Return the content-key and event-type prefixes reserved by the configured plugins the generation loaded."""
         return tuple(namespace for plugin in self.loaded_plugins for namespace in plugin.reserved_namespaces)
 
     @cached_property

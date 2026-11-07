@@ -648,16 +648,16 @@ class MatrixApiTools(Toolkit):
     @classmethod
     def _send_event_policy_error(
         cls,
+        context: ToolRuntimeContext,
         *,
         room_id: str,
         event_type: str,
-        plugin_namespaces: tuple[str, ...],
     ) -> str | None:
         reserved_error = cls._reserved_event_type_error(
             action="send_event",
             room_id=room_id,
             event_type=event_type,
-            plugin_namespaces=plugin_namespaces,
+            plugin_namespaces=context.plugins.reserved_namespaces,
         )
         if reserved_error is not None:
             return reserved_error
@@ -722,8 +722,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message=event_type_error,
             )
-        plugin_namespaces = context.plugins.reserved_namespaces
-        normalized_content, content_error = self._validate_content(content, plugin_namespaces)
+        normalized_content, content_error = self._validate_content(content, context.plugins.reserved_namespaces)
         if content_error is not None:
             return self._error_payload(
                 action="send_event",
@@ -736,11 +735,7 @@ class MatrixApiTools(Toolkit):
         assert normalized_content is not None
 
         if (
-            policy_error := self._send_event_policy_error(
-                room_id=room_id,
-                event_type=normalized_event_type,
-                plugin_namespaces=plugin_namespaces,
-            )
+            policy_error := self._send_event_policy_error(context, room_id=room_id, event_type=normalized_event_type)
         ) is not None:
             return policy_error
 

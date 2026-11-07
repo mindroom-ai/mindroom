@@ -332,8 +332,9 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     if not isinstance(reserved_namespaces, list) or not all(
         isinstance(namespace, str) and namespace for namespace in reserved_namespaces
     ):
-        msg = f"Plugin reserved_namespaces must be a list of non-empty strings: {path}"
-        logger.error("Plugin reserved_namespaces must be a list of non-empty strings", path=str(path))
+        event = "Plugin reserved_namespaces must be a list of non-empty strings"
+        logger.error(event, path=str(path))
+        msg = f"{event}: {path}"
         raise PluginValidationError(msg)
 
     return _PluginManifest(
