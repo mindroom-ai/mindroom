@@ -10,7 +10,7 @@ import aiohttp
 from pydantic import TypeAdapter, ValidationError
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
-from mindroom.worker_computer.protocol import ComputerStatus
+from mindroom.worker_computer.protocol import MAX_SCREENCAST_FRAME_BYTES, SCREENCAST_PROTOCOL, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError
 
 if TYPE_CHECKING:
@@ -72,16 +72,18 @@ async def computer_stream(
     handle: WorkerHandle,
     session_id: str,
     generation: str,
+    protocol: str,
 ) -> AsyncIterator[aiohttp.ClientWebSocketResponse]:
-    """Connect only to a manager-issued worker; URL carries no credential."""
+    """Connect only to a manager-issued worker's desktop or screencast stream; URL carries no credential."""
+    screencast = protocol == SCREENCAST_PROTOCOL
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as client:  # noqa: SIM117 - own the client until response cleanup completes
             async with client.ws_connect(
-                _worker_url(handle) + "/stream",
+                _worker_url(handle) + ("/screencast" if screencast else "/stream"),
                 headers=_headers(handle),
                 params={"session_id": session_id, "generation": generation},
-                protocols=("binary",),
-                max_msg_size=4 * 1024 * 1024,
+                protocols=(protocol,),
+                max_msg_size=MAX_SCREENCAST_FRAME_BYTES if screencast else 4 * 1024 * 1024,
                 autoclose=True,
             ) as websocket:
                 yield websocket

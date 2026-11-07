@@ -711,6 +711,14 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
 
+    def worker_active_page(self) -> Page | None:
+        """Return the page a worker computer's browser shows: the active tab of the profile started last, if open."""
+        for state in reversed(self._worker_session.profiles.values()):
+            tab = state.tabs.get(state.active_target_id or "")
+            if not state.cleanup_required and tab is not None and not tab.page.is_closed():
+                return tab.page
+        return None
+
     def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
         if self._worker_session.profiles:
             msg = "Bind the worker display before starting browser profiles."

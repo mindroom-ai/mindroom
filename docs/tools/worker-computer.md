@@ -167,6 +167,42 @@ The browser keeps running between tool calls, including tabs the user opened.
 When the agent focuses a tab or acts on a page, that page comes to the foreground, so the agent's screenshots and snapshots show what the viewer sees.
 The `browser` provider identifies tabs by stable target IDs, while `browser_mcp` uses tab indices that can change.
 
+## Page stream
+
+Instead of the whole desktop, a client can show just the agent's browser page as a stream of JPEG frames, which is lighter and fits a side panel.
+The stream shows the active tab of the `browser` tool's browser in the Computer, and moves to another tab within about a second when the agent does, without reconnecting.
+Until that browser starts, and after it closes, the stream has no page and sends no frames.
+`browser_mcp` runs its browser in another process, so its page cannot be streamed; use the desktop stream with it.
+Watching needs no control; input needs **Take control**, which pauses the agent's browser calls as it does for the desktop.
+
+Open the WebSocket `GET /api/computers/sessions/{session_id}/screencast` with the subprotocols `mindroom-screencast` and `mindroom-ticket.<ticket>`, where the ticket comes from `POST /api/computers/sessions/{session_id}/stream-ticket`.
+As for the desktop stream, the `Origin` must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, each ticket opens one stream, and room access is rechecked while it runs.
+A session has one live stream: opening the page stream closes its desktop stream, and the reverse.
+Releasing control or stopping the Computer closes the stream; reconnect with a new ticket to keep watching.
+
+The server sends:
+
+| Message | Meaning |
+| --- | --- |
+| binary | One JPEG frame of the page, scaled to fit 1920×1200 pixels. |
+| `{"type": "viewport", "width": w, "height": h}` | The page's size in CSS pixels, sent before the first frame and whenever it changes. Map pointer positions from the frame to these coordinates. |
+| `{"type": "url-changed", "url": "...", "title": "..."}` | The shown page's address and title, sent on connect and on each change; both are empty while there is no page. |
+| `{"type": "error", "detail": "..."}` | A malformed or unknown message from the client. |
+
+The client sends JSON text messages of at most 64 KiB; a binary message closes the stream:
+
+| Message | Effect |
+| --- | --- |
+| `{"type": "mouse", "event": "down" \| "up" \| "move", "x", "y", "button", "buttons", "clicks", "modifiers"}` | A pointer event at CSS pixel `x`, `y`. `button` is `none`, `left`, `middle`, `right`, `back` or `forward`; `buttons` is the DOM bitmask. |
+| `{"type": "wheel", "x", "y", "dx", "dy", "modifiers"}` | Scrolls by `dx`, `dy` CSS pixels. |
+| `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "text", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held. |
+| `{"type": "text", "text"}` | Inserts text, such as a paste or an IME composition. |
+
+`modifiers` is a bitmask: Alt 1, Control 2, Meta 4, Shift 8.
+The browser runs on Linux, so editing shortcuts use Control; a client on macOS sends Control for Command.
+Input from a viewer without control is dropped silently.
+When a viewer disconnects, buttons and keys it still held are released.
+
 ## Native Playwright MCP provider
 
 `browser_mcp` gives the agent native Playwright tools such as `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_evaluate`, `browser_tabs`, `browser_take_screenshot`, `browser_file_upload`, and `browser_pdf_save` instead of the action-based `browser` tool:

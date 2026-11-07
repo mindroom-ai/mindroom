@@ -3236,6 +3236,34 @@ async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_h
 
 
 @pytest.mark.asyncio
+async def test_worker_active_page_is_the_active_tab_of_the_last_started_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A computer's screencast shows the tab the agent made active, in the profile it started last, while it is open."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapters = [LifecycleBrowser(), LifecycleBrowser()]
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapters.pop(0))
+    assert browser.worker_active_page() is None
+    first = json.loads(await browser.browser("open", targetUrl="https://example.org/first"))
+    await browser.browser("open", targetUrl="https://example.org/second")
+    assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/second"
+    await browser.browser("focus", targetId=first["targetId"])
+    assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/first"
+    await browser.browser("open", profile="work", targetUrl="https://example.org/work")
+    assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/work"
+    await browser.browser("stop", profile="work")
+    assert cast("LifecyclePage", browser.worker_active_page()).url == "https://example.org/first"
+    await browser.browser("close", targetId=first["targetId"])
+    # Closing the active tab makes the profile's first remaining tab, its start page, active.
+    assert cast("LifecyclePage", browser.worker_active_page()).url == "about:blank"
+    await browser.browser("stop")
+    assert browser.worker_active_page() is None
+
+
+@pytest.mark.asyncio
 async def test_native_page_creation_during_tab_listing_preserves_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

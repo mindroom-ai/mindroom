@@ -4,12 +4,16 @@ import asyncio
 import os
 import stat
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from mindroom.worker_computer.display import WorkerDisplay
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 
 
 class FakeDisplay:
@@ -132,6 +136,26 @@ async def test_browser_binding_reuses_page_and_closes_on_configuration_change() 
     assert runtime.status()["generation"] != before
     await runtime.stop()
     assert persisted == ["one", "two", "three"]
+
+
+@pytest.mark.asyncio
+async def test_agent_page_is_the_running_browser_page_until_the_computer_stops() -> None:
+    """A screencast shows the agent browser's page only while the computer runs that browser."""
+    runtime = WorkerComputerRuntime(FakeDisplay())
+    page = cast("Page", object())
+
+    async def unused(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    assert runtime.agent_page() is None
+    await runtime.run_browser_call("browser", lambda _display: BrowserSession(unused, unused, lambda: page), [], {})
+    assert runtime.agent_page() is page
+    await runtime.stop()
+    assert runtime.agent_page() is None
+    await runtime.run_browser_call("browser_mcp", lambda _display: BrowserSession(unused, unused), [], {})
+    assert runtime.status()["state"] == "ready"
+    assert runtime.agent_page() is None
+    await runtime.close()
 
 
 @pytest.mark.asyncio
