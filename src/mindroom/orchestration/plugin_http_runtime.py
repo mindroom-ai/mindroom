@@ -67,13 +67,15 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
         return frozenset(member.user_id for member in response.members)
 
     def forget(room_id: str, lookup: asyncio.Task[frozenset[str]]) -> None:
-        del lookups[room_id]
+        if lookups.get(room_id) is lookup:
+            del lookups[room_id]
         if not lookup.cancelled():
             lookup.exception()  # Retrieved, so a lookup that fails after all its callers went away logs no error.
 
     async def room_members(room_id: str) -> frozenset[str]:
         lookup = lookups.get(room_id)
-        if lookup is None:
+        # A finished lookup is never joined, even before its callback removes it.
+        if lookup is None or lookup.done():
             lookup = lookups[room_id] = asyncio.create_task(look_up(room_id))
             lookup.add_done_callback(lambda done: forget(room_id, done))
         # Waiting never cancels the lookup, so a caller that goes away leaves it running for the others.

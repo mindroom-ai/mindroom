@@ -5,6 +5,7 @@ The embedded API binds the reader as it serves, and entity restarts and reloads 
 
 import asyncio
 import gc
+import weakref
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -152,6 +153,57 @@ async def test_callers_share_a_running_lookup_but_not_a_finished_one() -> None:
     client.joined_members.return_value = joined_members_response(ROOM, "@bob:example.org")
     assert await _membership_status(app) == 403
     assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_after_a_lookup_answered_gets_a_fresh_answer() -> None:
+    """A caller that asks once a lookup answered starts a new one, even before the finished one is cleared away."""
+    late: list[asyncio.Task[int]] = []
+    release = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        if not late:
+            # This caller's first step runs after the lookup ends and before anything that ending scheduled.
+            late.append(asyncio.create_task(_membership_status(app)))
+            return joined_members_response(ROOM, "@alice:example.org")
+        await release.wait()
+        return joined_members_response(ROOM)
+
+    client = _client()
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    app = _bound(client)
+    assert await _membership_status(app) == 200
+    # Asks while the late caller's lookup runs, so it shares that one.
+    later = asyncio.create_task(_membership_status(app))
+    await asyncio.sleep(0)
+    release.set()
+    assert await asyncio.gather(late[0], later) == [403, 403]
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [(joined_members_response(ROOM, "@alice:example.org"), 200), (nio.JoinedMembersError("boom"), 503)],
+)
+async def test_a_finished_lookup_is_not_kept(
+    answer: nio.JoinedMembersResponse | nio.JoinedMembersError,
+    status: int,
+) -> None:
+    """Once a lookup answered or failed and its caller has the answer, the bound reader holds on to nothing of it."""
+    client = _client()
+    client.joined_members.return_value = answer
+    # Kept for the whole test: the reader, and whatever it holds, lives as long as the app it is bound to.
+    app = _bound(client)
+    caller = asyncio.create_task(_membership_status(app))
+    await asyncio.sleep(0)
+    (lookup,) = asyncio.all_tasks() - {caller, asyncio.current_task()}
+    finished = weakref.ref(lookup)
+    del lookup
+    assert await caller == status
+    gc.collect()
+    assert finished() is None
+    assert ensure_app_state(app).room_members is not None
 
 
 @pytest.mark.asyncio
