@@ -1005,6 +1005,43 @@ async def test_editing_a_waiting_message_asks_again_whether_it_is_for_general(
 
 
 @pytest.mark.asyncio
+async def test_editing_a_waiting_answer_to_a_question_asks_for_no_wrap_up(tmp_path: Path) -> None:
+    """An edit of a queued answer to an interactive question reserves no queued-message notice.
+
+    Such an answer never waits as a follow-up, and its dispatch would never release a notice reserved for it, so every
+    later response in the thread would keep being asked to wrap up.
+    """
+    research = AgentConfig(display_name="Research", rooms=[ROOM_ID])
+    async with _general_answering_in_its_thread(tmp_path, research=research) as (bot, room, paths, running):
+        await bot._turn_ingress.handle_text_event(room, _in_thread(paths, "$answer", "2", "research"))
+        await _queued(bot, "$answer")
+        keys = (
+            requester_coalescing_key(ROOM_ID, THREAD_ID, SENDER),
+            active_follow_up_coalescing_key(ROOM_ID, THREAD_ID),
+        )
+        (pending,) = [
+            pending
+            for key in keys
+            for pending in bot._coalescing_gate.queued_pending_events(key)
+            if pending.event.event_id == "$answer"
+        ]
+        pending.selection = MagicMock()
+        assert not running.has_pending_human_messages()
+
+        edit = {
+            "m.new_content": {
+                "body": "3",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_mention_id(paths, "general")]},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$answer"},
+        }
+        await bot._turn_ingress.handle_text_event(room, _text_message(paths, "$edit", "* 3", **edit))
+        assert not running.has_pending_human_messages()
+        assert pending.notice is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mentions", "waits"),
     [

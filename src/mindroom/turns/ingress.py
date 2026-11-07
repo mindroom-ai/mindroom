@@ -460,6 +460,9 @@ class TurnIngress:
 
     def _renew_queued_notice(self, room: nio.MatrixRoom, key: CoalescingKey, pending_event: PendingEvent) -> None:
         """Ask again whether an edited queued message waits for this agent's running response, as ingress asked."""
+        if pending_event.selection is not None:
+            # An answer to an interactive question never waits as a follow-up, and its dispatch releases no notice.
+            return
         event = pending_event.event
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
