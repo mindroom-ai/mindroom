@@ -1551,6 +1551,21 @@ async def test_requester_admin_is_explicit(tmp_path: Path, monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_reconciliation_gives_an_older_room_the_managed_state_power_levels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A personal room created before the router could publish a state type there lets it on the next reconcile."""
+    server = MatrixServer()
+    room_id = await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
+    power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
+    del power["events"]["io.mindroom.accounts"]
+    await service(tmp_path, server, monkeypatch).ensure("@alice:localhost", "!lobby:localhost", server)
+    power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
+    assert power["events"]["io.mindroom.accounts"] == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("revoke", ["access", "feature", "admin_setting"])
 async def test_policy_change_during_admin_state_read_prevents_grant(
     tmp_path: Path,

@@ -27,6 +27,7 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import (
     admin_join_room_user,
     create_room,
+    ensure_managed_room_power_levels,
     ensure_room_admin_power_levels,
     get_room_members,
     invite_to_room,
@@ -265,6 +266,8 @@ class PersonalRoomService:
                     source_room_id,
                     reinvite_departed_owner,
                 )
+                # A room created before a state type joined the managed power levels gains it once it is validated.
+                await ensure_managed_room_power_levels(self._client(), record.room_id)
                 if human_joined is None:
                     return record.room_id
                 await self._finish(record, path, source_room_id, human_joined=human_joined)
