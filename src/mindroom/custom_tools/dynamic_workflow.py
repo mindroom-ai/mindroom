@@ -15,7 +15,7 @@ from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
-from mindroom.approval.tool_approval import tool_may_require_approval
+from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
@@ -653,10 +653,10 @@ def _tool_approval_problem(
     """Say why one participant tool would need approval.
 
     A whole toolkit needs a pre-approval through ``allowed_tools``; a single function may instead be
-    auto-approved by an operator rule, which also matches before any pre-approval. A function whose approval alias
-    has another function's rules judge its calls also needs that function to run without approval: pre-approved
-    through one of the participant's toolkits ``owners`` lists for it, or auto-approved by an operator rule. Without
-    ``owners``, which a run knows once it builds the participant's toolkits, aliases are left to the run's check.
+    auto-approved by an operator rule, which also matches before any pre-approval. A named function whose approval
+    alias has another function's rules judge its calls also needs that function to run without approval:
+    pre-approved through one of the participant's toolkits ``owners`` lists for it, or auto-approved by an operator
+    rule. Without ``owners``, which a run knows once it builds the participant's toolkits, that is left to the run.
     """
     toolkit, separator, function = entry.partition(".")
     if not separator:
@@ -667,23 +667,20 @@ def _tool_approval_problem(
                 "is not pre-approved; add it to the dynamic_workflow allowed_tools setting "
                 "or name its auto-approved functions."
             )
-    elif tool_may_require_approval(
+        return None
+    if tool_may_require_approval(
         _participant_run_config(context, {function: frozenset({toolkit})}, allowed=allowed, reads_skills=False),
         function,
     ):
         return _NEEDS_APPROVAL
-    if owners is None:
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    alias = toolkit_approval_alias(context.config, tools, toolkit, function)
+    if owners is None or alias is None:
         return None
-    metadata = config_plugins(context.config, context.runtime_paths).tools.get(toolkit)
-    aliases = {} if metadata is None else metadata.approval_aliases
-    for name, alias in aliases.items():
-        if separator and name != function:
-            continue
-        judged_owners = {alias.judged_as: owners[alias.judged_as]} if alias.judged_as in owners else {}
-        judged_config = _participant_run_config(context, judged_owners, allowed=allowed, reads_skills=False)
-        if tool_may_require_approval(judged_config, alias.judged_as):
-            return f"calls {alias.judged_as} through {name}, which {_NEEDS_APPROVAL}"
-    return None
+    judged_owners = {alias.judged_as: owners[alias.judged_as]} if alias.judged_as in owners else {}
+    judged_config = _participant_run_config(context, judged_owners, allowed=allowed, reads_skills=False)
+    gated = tool_may_require_approval(judged_config, alias.judged_as)
+    return f"calls {alias.judged_as} through {function}, which {_NEEDS_APPROVAL}" if gated else None
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:

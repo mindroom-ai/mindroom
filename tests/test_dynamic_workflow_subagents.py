@@ -285,12 +285,11 @@ _ALIAS_REFUSAL = (
 @pytest.mark.parametrize(
     ("tools", "allowed", "rules", "refused"),
     [
-        pytest.param(["calculator"], ["calculator"], None, True, id="toolkit"),
         pytest.param(["calculator.add"], ["calculator"], None, True, id="function"),
         pytest.param(["calculator.subtract"], ["calculator"], None, False, id="other-function"),
-        pytest.param(["calculator", "shell"], ["calculator", "shell"], None, False, id="shell-pre-approved"),
+        pytest.param(["calculator.add", "shell"], ["calculator", "shell"], None, False, id="shell-pre-approved"),
         pytest.param(
-            ["calculator"],
+            ["calculator.add"],
             ["calculator"],
             {"run_shell_command": "auto_approve"},
             False,
@@ -298,7 +297,7 @@ _ALIAS_REFUSAL = (
         ),
     ],
 )
-async def test_a_function_judged_as_a_gated_function_is_refused_before_saving(
+async def test_a_named_function_judged_as_a_gated_function_is_refused_before_saving(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tools: list[str],
@@ -306,10 +305,11 @@ async def test_a_function_judged_as_a_gated_function_is_refused_before_saving(
     rules: dict[str, str] | None,
     refused: bool,
 ) -> None:
-    """The calculator says ``add`` runs shell commands, so a participant may use it only where the shell needs no approval.
+    """The calculator says ``add`` runs shell commands, so a participant may name it only where the shell needs no approval.
 
     The shell runs without approval when the participant's own pre-approved tools include it or an operator rule
-    auto-approves it; otherwise validation refuses the participant instead of building it without ``add``.
+    auto-approves it; otherwise validation refuses the participant that names ``add``, as it refuses one naming a
+    function an operator rule gates.
     """
     judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
     toolkits = sorted({entry.partition(".")[0] for entry in tools})
@@ -328,13 +328,30 @@ async def test_a_function_judged_as_a_gated_function_is_refused_before_saving(
 
 
 @pytest.mark.asyncio
+async def test_a_whole_toolkit_leaves_a_function_judged_as_a_gated_function_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant naming the whole calculator gets its functions but ``add``, as when an operator rule gates ``add``."""
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["calculator"]}}, "calculator"])
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}]))
+
+    assert run["status"] == "completed", run
+    assert "subtract" in workflow.model.offered[0]
+    assert "add" not in workflow.model.offered[0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tools", "error"),
     [
-        pytest.param(["calculator", "file"], None, id="pre-approved"),
+        pytest.param(["calculator.add", "file"], None, id="pre-approved"),
         pytest.param(
-            ["calculator", "file.save_file"],
-            "Dynamic Workflow participant 'adder' tool 'calculator' calls read_file through add, which requires "
+            ["calculator.add", "file.save_file"],
+            "Dynamic Workflow participant 'adder' tool 'calculator.add' calls read_file through add, which requires "
             "approval, and workflow participants cannot pause for approval; check the operator tool_approval rules "
             "and the dynamic_workflow allowed_tools setting.",
             id="not-selected",
