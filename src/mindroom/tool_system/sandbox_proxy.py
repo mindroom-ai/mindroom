@@ -1019,8 +1019,8 @@ def worker_call(stand_ins: WorkerStandIns, function_name: str, *, start: bool = 
 
     The request carries no arguments, nor what sending adds: the job flag, the cancellation id, and a credential lease.
     Otherwise it is the request a sent call carries, for the worker that would serve it. That worker starts unless
-    ``start`` is False; then a dedicated worker that is not running stays stopped and the answer is None, while a
-    running one is marked used.
+    ``start`` is False; then a dedicated worker is only marked used, as ``_worker_route`` describes, and the answer
+    is None while it is not running.
     """
     runtime_paths = stand_ins.runtime_paths
     proxy_config = sandbox_proxy_config(runtime_paths)
