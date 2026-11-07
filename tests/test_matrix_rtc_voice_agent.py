@@ -451,6 +451,31 @@ async def test_bridge_keeps_call_while_a_roster_device_is_in_the_sfu(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_vacated_roster_ends_the_call_once_its_devices_leave_the_sfu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the Matrix roster empties, the caller's media decides: still connected keeps it, gone ends it now."""
+    room = _PresenceRoom(_ALICE)
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room, absent_timeout_s=3600)
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._VACATED_ROSTER_ABSENT_TIMEOUT_S", 0)
+
+    bridge.vacate_roster()
+    await _settle()
+    assert terminations == []
+
+    # The lapsed membership returns, which restores the long grace for an SFU reconnect.
+    bridge.set_participant_identities(frozenset({_ALICE}))
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
+
+    room.connect_participant(_ALICE)
+    bridge.vacate_roster()
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == [False]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
 async def test_bridge_reports_an_empty_room_after_its_own_sfu_loss_as_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
