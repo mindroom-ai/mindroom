@@ -122,6 +122,26 @@ async def test_arguments_that_cannot_tell_ask_whenever_the_judged_rules_may(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "asks"),
+    [("ls; rm -rf build", True), ("rm -rf build; ls", True), ("ls; pwd", False)],
+)
+async def test_a_call_that_amounts_to_several_judged_calls_asks_when_any_of_them_would(
+    tmp_path: Path,
+    command: str,
+    asks: bool,
+) -> None:
+    """A line of several shell commands asks when the shell's rules would ask about any one of them."""
+    config, runtime_paths = _config(tmp_path, _shell_review())
+    alias = ApprovalAlias(
+        judged_as=_SHELL,
+        judge=lambda arguments: [{"args": part.strip()} for part in str(arguments["command"]).split(";")],
+    )
+
+    assert (await _asks(config, runtime_paths, {"command": command}, alias))[0] is asks
+
+
+@pytest.mark.asyncio
 async def test_a_call_that_amounts_to_no_judged_call_follows_its_own_rules(tmp_path: Path) -> None:
     """Unlike arguments that cannot tell, a call the judge maps to no shell command asks nothing of the shell's rules."""
     config, runtime_paths = _config(tmp_path, {"match": _SHELL, "action": "require_approval"})
