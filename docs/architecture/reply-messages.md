@@ -47,6 +47,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 ### Writes and restarts
 
 - Recovery renders from what a reply may already show, counting writes Matrix has not acknowledged, so a restart continues an interrupted reply in place below what it showed and a retried regeneration rewrites the same message; neither starts a second message.
+- No progress edit is written ahead once a Stop is committed, so only an edit already in flight may land before the Stop's note; what live frames already showed is still recorded, for that note to keep.
 - A span's rows, and the Matrix transaction IDs derived from them, are named by every message of the turn it answers, not by its newest message, because a retry can answer a coalesced turn's messages one by one and a one-message turn must never resolve to the rows the coalesced turn wrote (4).
   Naming every reply's rows by the reply was rejected because it renames every reply's rows for this one path, and renaming only the later reply's rows depends on the earlier reply's records still being kept.
 - A tool call is recorded as started before the tool runs and as completed when it returns, whether or not the reply shows tool calls, so a restarted reply can be told which calls already ran.
@@ -129,7 +130,7 @@ The numbers in parentheses refer to the outcomes in [What counts as a defect](#w
 - I5. Every non-terminal reply has a durable path to progress: pending span sources, an approval continuation, or the next bot instance's takeover (2, 5).
 - I6. A span's sources settle with its terminal transition, except spans that hand them to a continuation, a retry, or a replay, so a crash can neither answer them again nor drop them (2, 3).
 - I7. Every reply write is recorded before it is sent, so recovery knows what Matrix may already show.
-  Live frames are not reply writes: they are never recorded, recovery never reads them, and every durable write names the last frame it covers.
+  Live frames are not reply writes: a stream that ends early records what they showed past the last landed edit as what the reply may show, which can include text streamed after the last frame, and every durable write names the last frame it covers.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place for an approval, since that span still runs.
 - I9. Every unfinished continuation has an owner that moves it: draining every owner leaves no continuation, owed write, or deferred claim, and every source settled; a stranded approval would hold its conversation and reply forever (1, 5).
 - I10. Retention never forgets a reply whose spans a continuation names, because the continuation reads its room, thread, event, and sources from them (I-S4).

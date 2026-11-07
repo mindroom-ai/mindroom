@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn, Protocol
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -497,12 +497,20 @@ class ProgressPermission(Enum):
     """What a reply's records allow for one direct progress edit."""
 
     SEND = "send"
-    # An earlier durable write of the reply is unresolved; a later edit shows this progress.
+    # An earlier durable write of the reply is unresolved, and a later edit shows this progress; or a Stop is
+    # recorded, and its note is the only write left.
     DEFER = "defer"
     REFUSE = "refuse"
 
 
-type ProgressWriteAhead = Callable[[ProgressState], Awaitable[ProgressPermission]]
+class ProgressWriteAhead(Protocol):
+    """Records one direct progress edit before it is sent, or with ``shown_live``, what live frames already showed."""
+
+    def __call__(self, progress: ProgressState, *, shown_live: bool = False) -> Awaitable[ProgressPermission]:
+        """Return whether to send the edit."""
+        ...
+
+
 # Reports the progress edit that landed on the reply's event.
 type ProgressDelivered = Callable[[ProgressState, str], None]
 type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
@@ -612,6 +620,8 @@ class StreamingResponse:
         init=False,
         repr=False,
     )
+    # The last live frame the last landed progress edit covers.
+    _committed_live_seq: int = field(default=-1, init=False, repr=False)
     _inflight_nonterminal_capture: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
     _inflight_nonterminal_capture_state: _CommittedDeliveryState | None = field(default=None, init=False, repr=False)
     # The model's reasoning this stream showed, which the terminal update keeps, and how long it was observed.
@@ -1041,6 +1051,7 @@ class StreamingResponse:
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
             )
             self._mark_delivery_committed(prepared_delivery.committed_state)
+            self._committed_live_seq = prepared_delivery.content.get(LIVE_CHECKPOINT_KEY, {}).get("seq", -1)
             self._mark_nonterminal_delivery(prepared_delivery, boundary_refresh=boundary_refresh)
         else:
             self.placeholder_progress_sent = False
@@ -1215,16 +1226,17 @@ class StreamingResponse:
 
         Frames record nothing as they go, so a Stop, failure, or interruption, whose note the reply's span exit writes
         below what the reply's records say it shows, would drop what readers saw since the last edit. Nothing is sent:
-        no write but that note may follow a committed Stop. Called once every progress task has exited, so no edit's
-        write-ahead races this one. Best effort: records that defer, refuse, or fail it leave the note below the last
-        edit.
+        no write but that note may follow a committed Stop. Nothing is recorded once the last landed edit covers the last
+        frame, as an edit that caught up with frames that stopped on their own does. Called once every progress task
+        has exited, so no edit's write-ahead races this one. Best effort: records that defer, refuse, or fail it leave
+        the note below the last edit.
         """
-        if self.live is None or self.live.seq < 0 or not self.has_uncommitted_presentation():
+        if self.live is None or self._committed_live_seq >= self.live.seq or not self.has_uncommitted_presentation():
             return
         try:
             prepared = await self._prepare_delivery_async(is_final=False, allow_empty_progress=False)
             if prepared is not None:
-                await self.progress_write_ahead(_progress_state(prepared.committed_state))
+                await self.progress_write_ahead(_progress_state(prepared.committed_state), shown_live=True)
         except Exception:
             logger.warning(
                 "live_presentation_not_recorded",

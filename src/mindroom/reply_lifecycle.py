@@ -823,17 +823,22 @@ def write_ahead(
     active_generation: str,
     durable_write_debt: bool,
     now_ns: int,
+    shown_live: bool = False,
 ) -> Transition:
-    """Record the presentation of the next direct progress edit before it is sent.
+    """Record the presentation of the next direct progress edit before it is sent, or what live frames showed.
 
     While an earlier durable write of the reply is unresolved the edit waits:
     sent later, that write would replace newer progress with what it shows.
+    Once a Stop is recorded no edit is sent, because only the Stop's note may
+    follow it; what frames already showed is still recorded, for that note to keep.
     """
     if span.bot_generation != active_generation:
         return _unchanged(Outcome.STALE, reply)
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
+    if reply.unapplied_stop and not shown_live:
+        return _unchanged(Outcome.STOPPED, reply)
     if durable_write_debt:
         return _unchanged(Outcome.DEFERRED, reply)
     updated, _ = _next_sequence(confirm_progress(reply, previous))

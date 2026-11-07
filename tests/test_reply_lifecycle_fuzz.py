@@ -425,9 +425,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self._live() is not None and self.model.reply is not None and self.model.reply.event_id is not None
         ),
     )
-    @rule(previous_ok=st.booleans())
-    def write_ahead(self, previous_ok: bool) -> None:
-        """A direct progress edit of the event the reply's create bound; the create is always a durable row."""
+    @rule(previous_ok=st.booleans(), shown_live=st.booleans())
+    def write_ahead(self, previous_ok: bool, shown_live: bool) -> None:
+        """A direct progress edit of the event the reply's create bound, or what live frames showed of it."""
         span = self._live()
         assert span is not None
         self._apply(
@@ -439,6 +439,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 active_generation=self.generation,
                 durable_write_debt=self._unresolved_rows(),
                 now_ns=self._now(),
+                shown_live=shown_live,
             ),
         )
 

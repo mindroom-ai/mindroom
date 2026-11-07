@@ -28,7 +28,7 @@ from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_
 from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
 
     import nio
@@ -486,21 +486,97 @@ async def test_a_terminal_update_cancelled_before_it_is_recorded_keeps_what_fram
             await response
 
     assert any("world" in json.dumps(frame) for frame in frames.sent)
-    assert [write.kind for write in records.writes] == ["create", "progress"]
+    assert [write.kind for write in records.writes] == ["create", "shown_live"]
     assert records.writes[-1].progress.text == "Hello world"
 
 
+async def _until(condition: Callable[[], bool]) -> None:
+    while not condition():  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
+
+
+def _shown_by(frames: _Frames, text: str) -> Callable[[], bool]:
+    return lambda: any(text in json.dumps(frame) for frame in frames.sent)
+
+
+async def _until_stopped(*chunks: str, ready: Callable[[], bool] | None = None) -> AsyncIterator[Any]:
+    """Yield ``chunks``, then wait forever, as a model the user stops; ``ready`` holds the last chunk back."""
+    for chunk in chunks[:-1]:
+        yield TextDelta(chunk)
+        await asyncio.sleep(0.05)
+    if ready is not None:
+        await asyncio.wait_for(_until(ready), timeout=5)
+    yield TextDelta(chunks[-1])
+    await asyncio.Event().wait()
+
+
 @pytest.mark.asyncio
-async def test_a_continued_reply_left_early_keeps_what_frames_showed(tmp_path: Path, frames: _Frames) -> None:
-    """Work resumed after an approval and then stopped leaves the records holding the text its frames showed."""
+@pytest.mark.parametrize("frames_state", ["switched off", "none sent yet"])
+async def test_a_reply_ending_early_without_a_frame_records_nothing_more(
+    tmp_path: Path,
+    frames: _Frames,
+    monkeypatch: pytest.MonkeyPatch,
+    frames_state: str,
+) -> None:
+    """Without a frame shown, the records keep what the edits wrote, so the note goes below the last edit."""
+    if frames_state == "none sent yet":
+        monkeypatch.setattr(publisher_module, "_FRAME_INTERVAL_SECONDS", 30.0)
+    config = _config(
+        tmp_path,
+        update_interval=60,
+        interval_ramp_seconds=0,
+        max_idle=30,
+        live_frames=frames_state == "none sent yet",
+    )
+    records, edits = _records(), _Edits()
+    stream = _until_stopped("Hello", " world", ready=lambda: bool(records.writes))
+    response = asyncio.create_task(_run(config, stream, records, edits))
+    await asyncio.sleep(0.2)
+    response.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await response
+
+    assert frames.sent == []
+    assert edits.contents == []
+    assert [write.kind for write in records.writes] == ["create"]
+
+
+@pytest.mark.asyncio
+async def test_frames_that_stopped_on_their_own_record_no_text_nothing_showed(tmp_path: Path, frames: _Frames) -> None:
+    """Once frames stop and an edit caught up with them, an early end records nothing that neither showed."""
+    frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.STOP]
+    config = _config(tmp_path, update_interval=60, interval_ramp_seconds=0.001, max_idle=30)
+    records, edits = _records(), _Edits()
+    caught_up = lambda: any(content["body"] == "Hello world" for content in edits.contents)  # noqa: E731
+    stream = _until_stopped("Hello", " world", " unseen", ready=caught_up)
+    response = asyncio.create_task(_run(config, stream, records, edits))
+    await asyncio.wait_for(_until(caught_up), timeout=5)
+    await asyncio.sleep(0.2)
+    response.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await response
+
+    assert len(frames.sent) == 2
+    assert not any("unseen" in json.dumps(frame) for frame in frames.sent)
+    assert not any("unseen" in content["body"] for content in edits.contents)
+    assert not any("unseen" in write.progress.text for write in records.writes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended_early", [True, False])
+async def test_a_continued_reply_left_early_keeps_what_frames_showed(
+    tmp_path: Path,
+    frames: _Frames,
+    ended_early: bool,
+) -> None:
+    """Work resumed after an approval and then stopped leaves the records holding the text its frames showed.
+
+    Work that ends normally records nothing more: its caller's terminal update follows.
+    """
     config = _config(tmp_path, update_interval=60)
     records = FakeReplyRecords()
 
-    async def frame_shows(text: str) -> None:
-        while not any(text in json.dumps(frame) for frame in frames.sent):  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
-
-    async def stopped_while_building() -> None:
+    async def building() -> None:
         async with stream_progress_edits(
             make_matrix_client_mock(user_id="@mindroom_code:localhost"),
             MessageTarget.resolve(_ROOM_ID, None, "$question"),
@@ -511,16 +587,68 @@ async def test_a_continued_reply_left_early_keeps_what_frames_showed(tmp_path: P
             **records.progress_hooks(),
         ) as publish:
             await publish(StructuredStreamChunk(content="Approved."))
-            await asyncio.wait_for(frame_shows("Approved."), timeout=5)
+            await asyncio.wait_for(_until(_shown_by(frames, "Approved.")), timeout=5)
             await publish(StructuredStreamChunk(content="Approved. Building now"))
-            await asyncio.wait_for(frame_shows("Building now"), timeout=5)
+            await asyncio.wait_for(_until(_shown_by(frames, "Building now")), timeout=5)
+            if ended_early:
+                raise asyncio.CancelledError
+
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=_Edits().edit)):
+        if ended_early:
+            with pytest.raises(asyncio.CancelledError):
+                await building()
+        else:
+            await building()
+
+    if not ended_early:
+        assert [write.kind for write in records.writes] == ["progress", "progress_delivered"]
+        return
+    assert [write.kind for write in records.writes] == ["progress", "progress_delivered", "shown_live"]
+    assert records.writes[-1].progress.text == "Approved. Building now"
+
+
+@pytest.mark.asyncio
+async def test_frames_are_recorded_only_after_the_edit_in_flight_landed(tmp_path: Path, frames: _Frames) -> None:
+    """An early end waits for the progress edit in flight, then records what frames showed past it."""
+    config = _config(tmp_path, update_interval=0.2)
+    records = FakeReplyRecords()
+    edits = _Edits()
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def edit(*args: Any) -> DeliveredMatrixEvent:  # noqa: ANN401
+        if edits.contents:
+            in_flight.set()
+            await release.wait()
+        return await edits.edit(*args)
+
+    async def stopped_while_a_checkpoint_is_in_flight() -> None:
+        async with stream_progress_edits(
+            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            MessageTarget.resolve(_ROOM_ID, None, "$question"),
+            config,
+            runtime_paths_for(config),
+            event_id="$answer",
+            show_tool_calls=True,
+            **records.progress_hooks(),
+        ) as publish:
+            await publish(StructuredStreamChunk(content="Approved."))
+            await asyncio.wait_for(_until(_shown_by(frames, "Approved.")), timeout=5)
+            await publish(StructuredStreamChunk(content="Approved. Building"))
+            # The checkpoint edit stays in flight while frames show more.
+            await asyncio.wait_for(in_flight.wait(), timeout=5)
+            await publish(StructuredStreamChunk(content="Approved. Building now"))
+            # The delta frame carries only the new words.
+            await asyncio.wait_for(_until(_shown_by(frames, " now")), timeout=5)
+            asyncio.get_running_loop().call_later(0.05, release.set)
             raise asyncio.CancelledError
 
     with (
-        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=_Edits().edit)),
+        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edit)),
         pytest.raises(asyncio.CancelledError),
     ):
-        await stopped_while_building()
+        await stopped_while_a_checkpoint_is_in_flight()
 
-    assert [write.kind for write in records.writes] == ["progress", "progress_delivered", "progress"]
+    kinds = [write.kind for write in records.writes]
+    assert kinds == ["progress", "progress_delivered", "progress", "progress_delivered", "shown_live"]
     assert records.writes[-1].progress.text == "Approved. Building now"
