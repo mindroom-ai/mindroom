@@ -19,7 +19,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 # Agents meet new rooms without limit, so once the set is full, rooms outside it warn on every refused write.
-_MAX_FORBIDDEN_ROOMS = 4096
+_MAX_REFUSED_ROOMS = 4096
+# A state event must stay under the homeserver's 64 KiB event limit, and a listed job takes about 300 bytes.
+_MAX_LISTED_JOBS = 100
+# Refusals the same content meets again: the room does not let the bot write this state, or the event is too large.
+_FINAL_REFUSALS = frozenset({"M_FORBIDDEN", "M_TOO_LARGE"})
 
 
 class _PublishingBot(Protocol):
@@ -46,12 +50,12 @@ def _job_state(job: BackgroundJob) -> dict[str, object]:
 
 
 def _jobs_state_content(jobs: Sequence[BackgroundJob]) -> dict[str, object]:
-    """Return the state content listing the live jobs among ``jobs``, oldest first."""
+    """Return the state content listing the newest live jobs among ``jobs``, oldest first, with how many are live."""
     live = sorted(
         (job for job in jobs if job.status not in TERMINAL_STATUSES),
         key=lambda job: (job.created_at, job.job_id),
     )
-    return {"jobs": [_job_state(job) for job in live]}
+    return {"jobs": [_job_state(job) for job in live[-_MAX_LISTED_JOBS:]], "total": len(live)}
 
 
 @dataclass
@@ -61,7 +65,7 @@ class JobStatePublisher:
     # What each (agent, room) state holds after its last successful write.
     _published: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
     # Each (agent, room) whose last write was refused, so the refusal warns once however often the jobs change.
-    _forbidden: set[tuple[str, str]] = field(default_factory=set)
+    _refused: set[tuple[str, str]] = field(default_factory=set)
 
     async def publish(self, bots: Callable[[str], _PublishingBot | None], jobs: Sequence[BackgroundJob]) -> None:
         """Rewrite the state of every agent and room whose live jobs changed; a failed write is retried next time.
@@ -93,23 +97,23 @@ class JobStatePublisher:
                 continue
             if isinstance(response, nio.RoomPutStateResponse):
                 self._published[(agent, room_id)] = content
-                self._forbidden.discard((agent, room_id))
-            elif isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN":
-                # The room does not let the bot write this state; retrying the same content cannot help.
-                self._warn_forbidden(agent, room_id)
+                self._refused.discard((agent, room_id))
+            elif isinstance(response, nio.RoomPutStateError) and response.status_code in _FINAL_REFUSALS:
+                self._warn_refused(agent, room_id, response.status_code)
                 self._published[(agent, room_id)] = content
             else:
                 logger.warning("Background jobs state was refused; retrying", room_id=room_id, response=str(response))
 
-    def _warn_forbidden(self, agent: str, room_id: str) -> None:
+    def _warn_refused(self, agent: str, room_id: str, status_code: str) -> None:
         """Warn that the room refused the agent's state, unless it already refused the agent's last write."""
-        if (agent, room_id) in self._forbidden:
+        if (agent, room_id) in self._refused:
             return
-        if len(self._forbidden) < _MAX_FORBIDDEN_ROOMS:
-            self._forbidden.add((agent, room_id))
+        if len(self._refused) < _MAX_REFUSED_ROOMS:
+            self._refused.add((agent, room_id))
         logger.warning(
-            "Background jobs state is forbidden in this room",
+            "Background jobs state was refused in this room",
             agent=agent,
             room_id=room_id,
+            status_code=status_code,
             event_type=BACKGROUND_JOBS_EVENT_TYPE,
         )
