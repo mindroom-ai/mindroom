@@ -242,11 +242,11 @@ async def test_release_stops_waiting_at_its_bound(tmp_path: Path, monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_one_time_send_cut_off_by_its_owners_stop_is_failed_and_never_resent(
+async def test_one_time_send_failed_during_its_owners_stop_is_saved_failed_and_never_resent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A one-time trigger whose client closed under it is marked failed once the owner runs again."""
+    """A one-time trigger the executor failed while its owner stopped is marked failed once the owner runs again."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
     monkeypatch.setattr(scheduling_runtime, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
     old_bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
@@ -285,6 +285,30 @@ async def test_one_time_send_cut_off_by_its_owners_stop_is_failed_and_never_rese
     save_status.assert_awaited_once()
     assert save_status.await_args.args[0] is new_bot.client
     assert save_status.await_args.args[2] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_one_time_retry_keeps_its_armed_approval_for_the_replacement_send(tmp_path: Path) -> None:
+    """A one-time send its owner's stop cut off runs again with its approval still armed, then completes."""
+    config, runtime_paths, _ids = _config_and_ids(tmp_path)
+    bot = scheduling_bot(make_matrix_client_mock(user_id="@general:localhost"), agent_name="general")
+    runtime = _runtime(runtime_paths, config, {"general": bot})
+    workflow = _workflow().model_copy(update={"pre_approved_call": True})
+    outcomes = [ScheduledWorkflowOutcome(status="retry"), ScheduledWorkflowOutcome(status="delivered")]
+
+    with (
+        patch("mindroom.scheduling.runtime._get_pending_task_record", new=AsyncMock(return_value=_record(workflow))),
+        patch("mindroom.scheduling.runtime._scheduled_task_creator_is_joined", new=AsyncMock(return_value=True)),
+        patch("mindroom.scheduling.runtime._arm_scheduled_call", new=AsyncMock(return_value="armed")),
+        patch("mindroom.scheduling.runtime._withdraw_unsent_scheduled_call", new=AsyncMock()) as withdraw,
+        patch("mindroom.scheduling.executor.execute_scheduled_workflow", new=AsyncMock(side_effect=outcomes)) as send,
+        patch("mindroom.scheduling.runtime._save_task_status", new=AsyncMock()) as save_status,
+    ):
+        await scheduling_runtime._TaskRunner(runtime, "general", ROOM_ID, TASK_ID).run_once(workflow)
+
+    assert send.await_count == 2
+    withdraw.assert_not_awaited()
+    assert save_status.await_args.args[2] == "completed"
 
 
 @pytest.mark.asyncio

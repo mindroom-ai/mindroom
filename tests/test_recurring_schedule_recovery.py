@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -78,6 +79,11 @@ def workflow(hour: str = "7") -> ScheduledWorkflow:
         created_by="@user:example.org",
         new_thread=True,
     )
+
+
+def close_owner_session(client: AsyncMock) -> None:
+    """Do to a fake client what a stopping bot's closed ingestion session does to a real one."""
+    client._durable_session = SimpleNamespace(_closed=True)
 
 
 def client_for(task: ScheduledWorkflow) -> AsyncMock:
@@ -556,13 +562,16 @@ async def test_owner_stopped_during_a_durable_wait_leaves_the_full_trigger_to_it
     async def upload_until_the_owner_stops(**_kwargs: object) -> object:
         if old_client.upload.await_count == 1:
             await runtime.release({ROUTER_AGENT_NAME})
+            close_owner_session(old_client)
             raise outage
         raise disposed
 
     old_client.upload.side_effect = upload_until_the_owner_stops
     due = datetime(2026, 1, 15, 7, 0, 5, tzinfo=UTC)
+    occurrence = await plan_at(tmp_path, task, due)
 
-    stopped = await runner._execute(task, await plan_at(tmp_path, task, due))
+    with capture_logs() as logs:
+        stopped = await runner._execute(task, occurrence)
 
     new_client = client_for(task)
     new_client.upload.return_value = (nio.UploadResponse("mxc://example.org/sidecar"), None)
@@ -571,10 +580,135 @@ async def test_owner_stopped_during_a_durable_wait_leaves_the_full_trigger_to_it
     resumed = await runner._execute(task, await plan_at(tmp_path, task, due))
 
     assert stopped.status == "retry"
+    levels = [(log["event"], log["log_level"]) for log in logs]
+    assert ("Failed to upload text", "warning") in levels
+    assert [entry for entry in levels if entry[1] == "error"] == []
     assert resumed.status == "delivered"
-    sent = new_client.room_send.await_args.kwargs["content"]
-    assert sent["file"]["url"] == "mxc://example.org/sidecar"
-    assert "truncated" not in sent["body"]
+    sent = new_client.room_send.await_args.kwargs
+    assert sent["tx_id"] == occurrence.transaction_id
+    assert sent["content"]["file"]["url"] == "mxc://example.org/sidecar"
+    assert "truncated" not in sent["content"]["body"]
+
+
+@pytest.mark.asyncio
+async def test_owner_stopped_after_the_freeze_leaves_the_frozen_trigger_without_an_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send its stopped owner's disposed client refuses after the freeze is a retry, logged at warning."""
+    monkeypatch.setattr(scheduling, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    task = workflow()
+    old_client = client_for(task)
+    old_client.room_send.side_effect = nio.LocalProtocolError(
+        "durable sync session is poisoned; reopen with a fresh client",
+    )
+    runtime = scheduled_task_runtime(runtime_paths(tmp_path), scheduling_bot(old_client), config=Config())
+    runner = scheduling._TaskRunner(runtime, ROUTER_AGENT_NAME, "!room:example.org", "daily")
+    freeze = scheduling_executor.prepare_recurring_delivery
+
+    async def freeze_then_stop(*args: object) -> RecurringOccurrence:
+        frozen = await freeze(*args)
+        await runtime.release({ROUTER_AGENT_NAME})
+        close_owner_session(old_client)
+        return frozen
+
+    monkeypatch.setattr(scheduling_executor, "prepare_recurring_delivery", freeze_then_stop)
+    occurrence = await plan_at(tmp_path, task, datetime(2026, 1, 15, 7, 0, 5, tzinfo=UTC))
+
+    with capture_logs() as logs:
+        stopped = await runner._execute(task, occurrence)
+
+    assert stopped.status == "retry"
+    levels = [(log["event"], log["log_level"]) for log in logs]
+    assert ("matrix_message_delivery_exception", "warning") in levels
+    assert [entry for entry in levels if entry[1] == "error"] == []
+
+
+def one_time_owner_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ScheduledWorkflow, scheduling._TaskRunner, AsyncMock, AsyncMock]:
+    """Return a due one-time task whose owner stops during its send, and the replacement's client."""
+    monkeypatch.setattr(scheduling, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    task = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 1, 15, 7, 0, tzinfo=UTC),
+        message="Remind the team about the deadline",
+        description="Deadline reminder",
+        room_id="!room:example.org",
+        created_by="@user:example.org",
+    )
+    paths = runtime_paths(tmp_path)
+    old_client = client_for(task)
+    persist_schedule_writer(paths, old_client.user_id)
+    runtime = scheduled_task_runtime(paths, scheduling_bot(old_client), config=Config())
+    runner = scheduling._TaskRunner(runtime, ROUTER_AGENT_NAME, "!room:example.org", "daily")
+    new_client = client_for(task)
+    new_client.room_send.return_value = nio.RoomSendResponse("$trigger", "!room:example.org")
+    new_client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!room:example.org")
+
+    async def stop_during_the_send(**_kwargs: object) -> object:
+        await runtime.release({ROUTER_AGENT_NAME})
+        close_owner_session(old_client)
+        runtime.bots()[ROUTER_AGENT_NAME] = scheduling_bot(new_client)
+        raise refused
+
+    refused = nio.LocalProtocolError("durable sync session is poisoned; reopen with a fresh client")
+    old_client.room_send.side_effect = stop_during_the_send
+    return task, runner, old_client, new_client
+
+
+@pytest.mark.asyncio
+async def test_owner_stopped_during_a_one_time_send_leaves_the_trigger_to_its_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-time send its stopping owner's closed session refused is sent once by the replacement, not failed.
+
+    Both tries carry the task's own transaction ID, so a send the homeserver already accepted stays one event.
+    """
+    task, runner, old_client, new_client = one_time_owner_stop(tmp_path, monkeypatch)
+
+    with capture_logs() as logs:
+        await runner.run_once(task)
+
+    assert old_client.room_send.await_count == new_client.room_send.await_count == 1
+    assert new_client.room_send.await_args.kwargs["tx_id"] == old_client.room_send.await_args.kwargs["tx_id"]
+    assert new_client.room_send.await_args.kwargs["tx_id"] == "schedule_!room:example.org_daily"
+    assert task.message in new_client.room_send.await_args.kwargs["content"]["body"]
+    assert [call.kwargs["content"]["status"] for call in new_client.room_put_state.await_args_list] == ["completed"]
+    assert [(log["event"], log["log_level"]) for log in logs if log["log_level"] == "error"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["cancelled", "deleted"])
+async def test_one_time_task_cancelled_or_deleted_while_its_owner_restarts_is_not_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """The replacement reads the task again before sending, so a task cancelled or deleted meanwhile is not sent."""
+    task, runner, old_client, new_client = one_time_owner_stop(tmp_path, monkeypatch)
+    new_client.room_get_state_event.return_value = (
+        nio.RoomGetStateEventResponse.from_dict(
+            {"workflow": task.model_dump_json(), "status": "cancelled"},
+            room_id="!room:example.org",
+            event_type="com.mindroom.scheduled.task",
+            state_key="daily",
+        )
+        if change == "cancelled"
+        else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+    )
+
+    with capture_logs() as logs:
+        await asyncio.wait_for(runner.run_once(task), 10)
+
+    assert old_client.room_send.await_count == 1
+    assert new_client.room_send.await_count == 0
+    assert new_client.room_put_state.await_count == old_client.room_put_state.await_count == 0
+    assert ("One-time task is no longer pending, stopping", "info") in [
+        (log["event"], log["log_level"]) for log in logs
+    ]
 
 
 @pytest.mark.asyncio
