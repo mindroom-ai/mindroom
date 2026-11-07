@@ -804,7 +804,8 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
 
     With tool calls hidden, a tool start first flushes the text streamed so far,
     and that flush waits behind the held write. The model already asked for the
-    tool, which never runs.
+    tool, which never runs. The flush reaches the reply's records only after the
+    Stop committed, so it is not sent and the note goes below what the room showed.
     """
     turn_requested_tool = asyncio.Event()
 
@@ -840,8 +841,9 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
     assert echo_tool.calls == []
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.CANCELLED
+    assert not any("answer" in body for body in turn.homeserver.bodies)
     assert (turn.homeserver.bodies[-1], turn.homeserver.statuses[-1]) == (
-        f"Partial answer\n\n{_CANCEL_NOTE}",
+        f"Partial\n\n{_CANCEL_NOTE}",
         "cancelled",
     )
     run = _interrupted(turn.agent_runs())
