@@ -161,14 +161,15 @@ def test_posting_the_transcript_deletes_the_lines_and_closes_the_call(tmp_path: 
     assert store.lines(call.id) == []
 
 
-def test_a_calls_writes_wait_after_a_failure_and_count_a_failed_message(tmp_path: Path) -> None:
-    """Postponing holds the call's writes until its new time, counting a failed message attempt only when asked."""
+def test_a_calls_writes_wait_after_a_failure_and_its_failed_notes_are_counted(tmp_path: Path) -> None:
+    """Postponing holds the call's writes until its new time; failed notes attempts are counted on their own."""
     store = CallTranscriptStore(tmp_path)
     call, _ = store.ensure_live_call(ROOM, at=100.0)
     store.end_call(call.id, at=200.0)
 
-    store.postpone(call.id, until=280.0, failed=True)
-    store.postpone(call.id, until=340.0, failed=False)
+    store.postpone(call.id, until=280.0)
+    store.count_failed_notes(call.id)
+    store.postpone(call.id, until=340.0)
 
     postponed = CallTranscriptStore(tmp_path).call(call.id)
     assert postponed is not None

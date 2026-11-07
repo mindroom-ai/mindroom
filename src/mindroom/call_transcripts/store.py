@@ -188,12 +188,13 @@ class CallTranscriptStore:
         """Record the event ID of the call's posted row."""
         self._write("UPDATE calls SET row_event_id = ? WHERE id = ?", (event_id, call_id))
 
-    def postpone(self, call_id: str, *, until: float, failed: bool) -> None:
-        """Hold the call's Matrix writes until ``until``, counting a failed notes attempt if ``failed``."""
-        self._write(
-            "UPDATE calls SET retry_at = ?, transcript_attempts = transcript_attempts + ? WHERE id = ?",
-            (until, int(failed), call_id),
-        )
+    def postpone(self, call_id: str, *, until: float) -> None:
+        """Hold the call's Matrix writes until ``until``."""
+        self._write("UPDATE calls SET retry_at = ? WHERE id = ?", (until, call_id))
+
+    def count_failed_notes(self, call_id: str) -> None:
+        """Count a failed attempt at the call's notes."""
+        self._write("UPDATE calls SET transcript_attempts = transcript_attempts + 1 WHERE id = ?", (call_id,))
 
     def finish_transcript(self, call_id: str, *, at: float, event_id: str | None = None) -> float | None:
         """Mark an ended call's transcript message done at ``at``, posted as ``event_id``, and delete its lines.

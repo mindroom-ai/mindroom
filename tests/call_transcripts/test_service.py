@@ -960,6 +960,24 @@ async def test_failed_notes_are_retried_once_after_60_seconds_then_the_transcrip
 
 
 @pytest.mark.asyncio
+async def test_notes_that_failed_twice_are_not_asked_for_again_while_posts_fail(world: World) -> None:
+    """The second failed notes attempt counts too, so posts that keep failing after it never ask for notes again."""
+    world.notes.failing = True
+    world.room.failed_transcript_posts = 4
+    await world.end_by_leaving(ANN)
+    world.clock.advance(20)
+
+    await world.tick()
+    for _ in range(5):
+        world.clock.advance(60)
+        await world.tick()
+
+    [message] = world.room.transcripts
+    assert message.body == "Call · 1 min"
+    assert len(world.notes.transcripts) == 2
+
+
+@pytest.mark.asyncio
 async def test_notes_that_never_come_count_as_failed_notes(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
     """A notes model that does not answer within 90 seconds fails that attempt, so it holds up no other call for long."""
     monkeypatch.setattr(service_module, "_NOTES_TIMEOUT_SECONDS", 0.01)
