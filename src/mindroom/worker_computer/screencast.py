@@ -36,11 +36,9 @@ _MAX_FRAME_WIDTH = 1920
 _MAX_FRAME_HEIGHT = 1200
 _CTRL_OR_META = 2 | 4
 _MOUSE_EVENTS = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
-# A pointer may lie outside the page, as when a drag leaves the viewer's panel.
-_Coordinate = Annotated[float, Field(ge=-16384, le=16384)]
-_Modifiers = Annotated[int, Field(ge=0, le=15)]
 
 
+# Fields take any value of their type: the viewer holds control of this page, and Chromium refuses what it cannot use.
 class _Message(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -48,38 +46,37 @@ class _Message(BaseModel):
 class _Mouse(_Message):
     type: Literal["mouse"]
     event: Literal["down", "up", "move"]
-    x: _Coordinate
-    y: _Coordinate
+    x: float
+    y: float
     button: Literal["none", "left", "middle", "right", "back", "forward"] = "none"
-    buttons: int = Field(default=0, ge=0, le=31)
-    clicks: int = Field(default=1, ge=0, le=3)
-    modifiers: _Modifiers = 0
+    buttons: int = 0
+    clicks: int = 1
+    modifiers: int = 0
 
 
 class _Wheel(_Message):
     type: Literal["wheel"]
-    x: _Coordinate
-    y: _Coordinate
-    dx: float = Field(default=0, ge=-10000, le=10000)
-    dy: float = Field(default=0, ge=-10000, le=10000)
-    modifiers: _Modifiers = 0
+    x: float
+    y: float
+    dx: float = 0
+    dy: float = 0
+    modifiers: int = 0
 
 
 class _Key(_Message):
     type: Literal["key"]
     event: Literal["down", "up"]
-    key: str = Field(min_length=1, max_length=32)
-    code: str = Field(default="", max_length=32)
-    key_code: int = Field(default=0, ge=0, le=255, alias="keyCode")
-    text: str | None = Field(default=None, max_length=4)
-    modifiers: _Modifiers = 0
+    key: str
+    code: str = ""
+    key_code: int = Field(default=0, alias="keyCode")
+    modifiers: int = 0
     repeat: bool = False
-    location: int = Field(default=0, ge=0, le=3)
+    location: int = 0
 
 
 class _Text(_Message):
     type: Literal["text"]
-    text: str = Field(min_length=1)
+    text: str
 
 
 _ViewerInput = _Mouse | _Wheel | _Key | _Text
@@ -87,9 +84,9 @@ _ViewerMessage = TypeAdapter(Annotated[_ViewerInput, Field(discriminator="type")
 
 
 def _key_event(message: _Key) -> dict[str, Any]:
-    """Map a DOM keyboard event onto CDP's, producing text only for keys that type it."""
-    text = message.text
-    if text is None and not message.modifiers & _CTRL_OR_META:
+    """Map a DOM keyboard event onto CDP's; printable keys and Enter type their text unless Control or Meta is held."""
+    text = None
+    if not message.modifiers & _CTRL_OR_META:
         text = "\r" if message.key == "Enter" else message.key if len(message.key) == 1 else None
     params: dict[str, Any] = {
         "type": "keyUp" if message.event == "up" else "keyDown" if text else "rawKeyDown",

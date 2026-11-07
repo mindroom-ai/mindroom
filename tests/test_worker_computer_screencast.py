@@ -163,7 +163,11 @@ async def test_screencast_shows_the_page_and_applies_input_only_while_the_viewer
         await page.evaluate("released.length = 0")
         await viewer.receive(json.dumps({"type": "mouse", "event": "down", "x": 5, "y": 5, "button": "left"}))
         await viewer.receive(json.dumps({"type": "mouse", "event": "up", "x": -20, "y": 5, "button": "left"}))
-        assert await page.evaluate("released") == ["button 0"]
+        # A fourth quick click counts on, as macOS browsers report it.
+        fourth = {"type": "mouse", "x": 5, "y": 5, "button": "left", "clicks": 4}
+        await viewer.receive(json.dumps({**fourth, "event": "down"}))
+        await viewer.receive(json.dumps({**fourth, "event": "up"}))
+        assert await page.evaluate("released") == ["button 0", "button 0"]
 
         await viewer.receive("{}")
         assert await sent.message("error") == {"type": "error", "detail": "Invalid screencast message."}

@@ -193,7 +193,7 @@ The client sends JSON text messages of at most 64 KiB; a binary message closes t
 | --- | --- |
 | `{"type": "mouse", "event": "down" \| "up" \| "move", "x", "y", "button", "buttons", "clicks", "modifiers"}` | A pointer event at CSS pixel `x`, `y`, which may lie outside the page, as when a drag leaves the panel. `button` is `none`, `left`, `middle`, `right`, `back` or `forward`; `buttons` is the DOM bitmask; `clicks` is the click count, 2 on the second press of a double click. |
 | `{"type": "wheel", "x", "y", "dx", "dy", "modifiers"}` | Scrolls by `dx`, `dy` CSS pixels. |
-| `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "text", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held; set `text` to type a character anyway, such as one typed with AltGr. |
+| `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held; send any other character, such as one typed with AltGr, which browsers report with Control held, as a `text` message. |
 | `{"type": "text", "text"}` | Inserts text, such as a paste or an IME composition. |
 
 `modifiers` is a bitmask: Alt 1, Control 2, Meta 4, Shift 8.
