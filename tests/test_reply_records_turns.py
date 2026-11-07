@@ -287,11 +287,9 @@ async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: 
     """A Stop recorded on the reply cancels exactly its span, which writes the cancelled terminal row."""
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    streaming = asyncio.Event()
 
     async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         yield "Partial"
-        streaming.set()
         await asyncio.Event().wait()
         yield "never"
 
@@ -301,7 +299,8 @@ async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: 
         typing_indicator=_noop_typing,
     ):
         response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
-        await asyncio.wait_for(streaming.wait(), timeout=5)
+        # A Stop keeps only what the reply already showed, so it waits for the edit that shows "Partial".
+        await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
         reply = await _reply(bot)
         assert reply.event_id is not None
         stop = await _stop(bot, reply.event_id, 7)
@@ -1531,6 +1530,8 @@ async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_
     """The reply's records take the Stop at once, without waiting for the conversation or naming it on the turn."""
     bot = await _streaming_bot(tmp_path)
     response = await _blocked_stream(bot)
+    # A Stop keeps only what the reply already showed, so it waits for the edit that shows "Partial".
+    await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
     reply = await _reply(bot)
     assert reply.event_id is not None
     await _pending_turn(bot)
