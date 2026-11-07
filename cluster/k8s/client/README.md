@@ -157,7 +157,8 @@ basePath: /mindroom
 MindRoom Chat releases do not work under a sub-path yet: their asset URLs and `config.json` request start at `/`, so keep `basePath` at `/` with them.
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
 It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
-Files under `assets/` and `public/` are cached as immutable.
+Files under `assets/` are cached as immutable because their names change with their content.
+Files under `public/`, such as `public/locales/<lang>.json`, keep their names across releases, so they revalidate on every use; the hashed `public/element-call/assets/` that older images bundle stays immutable.
 Missing files there get no immutable caching header.
 The client always loads `/runtime-config.js` from the origin root, so route the full origin host to this Service even when `basePath` is not `/`.
 The chart serves `/runtime-config.js` directly from nginx because the image entrypoint would otherwise write it into the app directory, which the unprivileged read-only container forbids.

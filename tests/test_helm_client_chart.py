@@ -90,6 +90,7 @@ def test_client_chart_serves_nested_build_files_from_their_own_path(base_path: s
     Resolving its hashed files against the app's top-level assets/ returned 404, and the immutable header on that 404
     pinned the broken call in the browser.
     Base paths and route segments named assets or public must still resolve to the top-level build files.
+    Files under public/, such as translations, keep their names across releases, so they must revalidate.
     """
     files = {
         "/usr/share/nginx/html/assets/app-1a2b.js": "app bundle",
@@ -104,8 +105,8 @@ def test_client_chart_serves_nested_build_files_from_their_own_path(base_path: s
             "/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
             "/rooms/abc/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
             "/rooms/public/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
-            "/rooms/assets/public/locales/en.json": ("200", _IMMUTABLE, "translations"),
-            "/public/locales/en.json": ("200", _IMMUTABLE, "translations"),
+            "/rooms/assets/public/locales/en.json": ("200", "no-cache", "translations"),
+            "/public/locales/en.json": ("200", "no-cache", "translations"),
             "/public/element-call/index.html": ("200", "no-cache", "call page"),
             "/public/element-call/assets/call-3c4d.js": ("200", _IMMUTABLE, "call bundle"),
             "/rooms/abc/public/element-call/assets/call-3c4d.js": ("200", _IMMUTABLE, "call bundle"),
@@ -135,6 +136,7 @@ def test_client_chart_serves_pairing_notices_and_app_links_like_the_image(base_p
     The pairing page approves a sign-in, so no origin may frame it, unlike the rest of the app.
     Notices come from the image's notices directory, which operators replace, not from the build output.
     iOS reads app links from the origin root whatever the base path.
+    Older images load the PDF.js worker from the base path.
     """
     prefix = base_path.rstrip("/")
     app_links = '{"applinks":{}}'
@@ -143,6 +145,7 @@ def test_client_chart_serves_pairing_notices_and_app_links_like_the_image(base_p
         "/usr/share/nginx/html/notices.json": "[]",
         "/usr/share/nginx/html/.well-known/apple-app-site-association": app_links,
         "/opt/mindroom/notices/notices.json": '[{"id":"maintenance"}]',
+        "/usr/share/nginx/html/pdf.worker.min.js": "pdf worker",
     }
     no_store = "no-store, no-cache, must-revalidate, max-age=0"
     pairing = ("200", "text/html", no_store, "frame-ancestors 'none'", "DENY", "app shell")
@@ -157,10 +160,12 @@ def test_client_chart_serves_pairing_notices_and_app_links_like_the_image(base_p
     responses = _serve(
         _client_nginx_conf(f"basePath={base_path}", "nginx.ipv6=false"),
         files,
-        list(expected),
+        [*expected, f"{prefix}/pdf.worker.min.js"],
         ("content-type", "cache-control", "content-security-policy", "x-frame-options"),
     )
 
+    pdf_worker = responses.pop(f"{prefix}/pdf.worker.min.js")
+    assert (pdf_worker[0], pdf_worker[1], pdf_worker[-1]) == ("200", "application/javascript", "pdf worker")
     assert responses == expected
 
 
@@ -263,7 +268,7 @@ def test_client_chart_requires_an_image_tag(tmp_path: Path) -> None:
     )
 
     assert completed.returncode != 0
-    assert "image.tag must name a MindRoom Chat release" in completed.stderr
+    assert "image.tag is required" in completed.stderr
 
 
 def _client_main_nginx_conf(tmp_path: Path, values: str) -> str | None:

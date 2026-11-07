@@ -40,7 +40,7 @@ app.kubernetes.io/component: client
 {{- end -}}
 
 {{- define "mindroom-client.image" -}}
-{{- $tag := required "image.tag must name a MindRoom Chat release (vYYYY.M.N)" .Values.image.tag -}}
+{{- $tag := required "image.tag is required, for example a MindRoom Chat release such as v2026.11.0" .Values.image.tag -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
 {{- else -}}
@@ -205,6 +205,13 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 # Additional http directives supplied through nginx.httpSnippet.
 {{ tpl . $ }}
 {{ end -}}
+# Only names under assets/ change with their content. Files under public/,
+# such as locales/<lang>.json, keep their names across releases.
+map $client_build_dir $client_build_cache_control {
+  assets "public, max-age=31536000, immutable";
+  default "no-cache";
+}
+
 server {
   listen {{ .Values.nginx.port }};
 {{- if .Values.nginx.ipv6 }}
@@ -368,6 +375,12 @@ server {
     alias /usr/share/nginx/html/manifest.json;
     add_header Cache-Control "no-store, max-age=0" always;
   }
+
+  # Older images selected through image.tag, such as latest, load the PDF.js
+  # worker from basePath.
+  location = {{ $prefix }}/pdf.worker.min.js {
+    alias /usr/share/nginx/html/pdf.worker.min.js;
+  }
 {{- end }}
 
   # The device pairing page approves a sign-in, so no origin may frame it.
@@ -397,12 +410,12 @@ server {
     add_header Cache-Control "no-cache";
   }
 
-  # Hashed build assets are referenced relative to the current route, so strip
-  # any route prefix before the assets/ or public/ segment.
-  location ~ ^/(?:.+/)?(assets|public)/(.+)$ {
+  # Build files are referenced relative to the current route, so strip any
+  # route prefix before the assets/ or public/ segment.
+  location ~ ^/(?:.+/)?(?<client_build_dir>assets|public)/(.+)$ {
     root /usr/share/nginx/html;
     try_files /$1/$2 =404;
-    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Cache-Control $client_build_cache_control;
   }
 {{- if eq $base "/" }}
 
