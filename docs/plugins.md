@@ -570,6 +570,28 @@ The provider uses the model entry's credentials, base URL, and request settings.
 With `schema`, `result.content` is an instance of that model, or the raw text when the answer does not parse; without it, `result.content` is the answer text.
 Each call is one request with no tools and no conversation history.
 
+### Fetching public URLs
+
+To download a page or file from a URL a model or user supplied, use `fetch_public_url` from `mindroom.plugin_api` in async code, or `fetch_public_url_sync` in synchronous code that runs off the event loop, such as a synchronous tool:
+
+```python
+from mindroom.plugin_api import PublicFetchError, fetch_public_url
+
+
+async def feed_xml(url: str) -> str:
+    try:
+        feed = await fetch_public_url(url, max_bytes=1_000_000)
+    except PublicFetchError as error:
+        return f"Could not read the feed: {error}"
+    return feed.content.decode("utf-8", errors="replace")
+```
+
+A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
+It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
+Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
+In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
+
 ### Dispatch-time worker targets
 
 A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically, and the tools the call's config can build:
