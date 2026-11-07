@@ -6,7 +6,7 @@ icon: lucide/layout
 
 ## Components
 
-- [Matrix Integration](matrix.md) - The Matrix identity invariant and the model-selection client protocol
+- [Matrix Integration](matrix.md) - The Matrix identity invariant, the room accounts list, and the model-selection client protocol
 - [Internal Turn CLI](agent-cli.md) - Why minimal-mode CLI calls are owned by one response turn, and how they recover
 - [Agent Orchestration](orchestration.md) - Room setup, session-storage recovery, and runtime replacement rationale
 - [Bot Runtime](bot-runtime.md) - Why the turn runtime is split as it is, the invariants its seams protect, and planned simplifications
