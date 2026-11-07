@@ -44,7 +44,6 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -302,23 +301,9 @@ class _GatedRun:
             tool_call("write_report", f"write-{index}", title=title, **budget) for index, title in enumerate(titles, 1)
         ]
         model = ScriptedModel([calls(*made), answer("done")])
-        middleware = (build_tool_hook_middleware(self.context.hooks, self.config, self.paths),)
         if generated:
-            return await run_job_turn(
-                job_actor(),
-                model,
-                "Write",
-                generated=(function,),
-                run_id=run_id,
-                middleware=middleware,
-            )
-        return await run_job_turn(
-            job_actor(replace(tool, function=function)),
-            model,
-            "Write",
-            run_id=run_id,
-            middleware=middleware,
-        )
+            return await run_job_turn(job_actor(), model, "Write", generated=(function,), run_id=run_id)
+        return await run_job_turn(job_actor(replace(tool, function=function)), model, "Write", run_id=run_id)
 
     def decide(self, status: Literal["approved", "denied"]) -> None:
         self.cards.decision.set_result(BackgroundApprovalDecision(status, None if status == "approved" else "No."))
@@ -595,14 +580,16 @@ async def test_a_stop_before_the_job_posts_its_card_leaves_no_card(
 async def test_a_stopped_reply_s_jobs_get_no_approval_after_the_stop(tmp_path: Path) -> None:
     """A Stop cancels the reply's jobs that wait on their cards and refuses its other jobs every later approval.
 
-    A job whose call runs keeps running until it asks for an approval; another reply's jobs are untouched.
+    A job whose call runs passes every check that is not an approval and finishes; another reply's jobs are untouched.
     """
     runtime = await tool_job_runtime(tmp_path)
-    ask = asyncio.Event()
+    ask, go = asyncio.Event(), asyncio.Event()
 
-    async def forever() -> BackgroundOutcome:
-        await asyncio.Event().wait()
-        raise AssertionError
+    async def runs() -> BackgroundOutcome:
+        await go.wait()
+        # The check a running job passes before each later tool call, as a working subagent's next call does.
+        job_checkpoint()
+        return BackgroundOutcome("completed", "done")
 
     async def asks_later() -> BackgroundOutcome:
         await ask.wait()
@@ -611,7 +598,7 @@ async def test_a_stopped_reply_s_jobs_get_no_approval_after_the_stop(tmp_path: P
 
     jobs = {
         "waits": ("reply", partial(awaiting_approval, runtime, "waits")),
-        "runs": ("reply", forever),
+        "runs": ("reply", runs),
         "asks later": ("reply", asks_later),
         "other": ("other", partial(awaiting_approval, runtime, "other")),
     }
@@ -632,15 +619,58 @@ async def test_a_stopped_reply_s_jobs_get_no_approval_after_the_stop(tmp_path: P
         await runtime.cancel_stopped_reply("reply")
         await asyncio.wait_for(wait_for_status(runtime, "waits", "cancelled"), JOB_TEST_TIMEOUT)
         ask.set()
+        go.set()
         await asyncio.wait_for(wait_for_status(runtime, "asks later", "cancelled"), JOB_TEST_TIMEOUT)
+        await asyncio.wait_for(wait_for_status(runtime, "runs", "completed"), JOB_TEST_TIMEOUT)
         assert {job.job_id: job.status for job in runtime.retained_jobs()} == {
             "waits": "cancelled",
-            "runs": "running",
+            "runs": "completed",
             "asks later": "cancelled",
             "other": "awaiting_approval",
         }
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_shutdown_leaves_the_reply_s_jobs_to_the_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop that lands while the runtime shuts down only marks the reply's jobs; the shutdown alone settles them."""
+    runtime = await tool_job_runtime(tmp_path)
+    original_save = ToolJobStore.save
+    saved: list[str] = []
+
+    async def recording(
+        store: ToolJobStore,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        approval_end_reason: str | None,
+    ) -> None:
+        saved.append(json.loads(job_json)["status"])
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
+
+    await start_job(
+        runtime,
+        "waits",
+        tool_name="write_report",
+        depth=0,
+        adapter={},
+        owner=job_owner(),
+        operation=partial(awaiting_approval, runtime, "waits"),
+        reply_id="reply",
+    )
+    await asyncio.wait_for(wait_for_status(runtime, "waits", "awaiting_approval"), JOB_TEST_TIMEOUT)
+    monkeypatch.setattr(ToolJobStore, "save", recording)
+    shutdown = asyncio.create_task(runtime.shutdown())
+    await asyncio.sleep(0)
+    assert runtime._shutdown_task is not None
+    await runtime.cancel_stopped_reply("reply")
+    await asyncio.wait_for(shutdown, JOB_TEST_TIMEOUT)
+    assert saved == ["interrupted"]
 
 
 @pytest.mark.asyncio
@@ -835,7 +865,6 @@ async def test_stop_during_approval_state_save(
                 assert run.effects == [], "call executed after Stop marked it during the decision's save"
                 if phase == "starting-wait":
                     assert run.cards.requested == [], "new approval card posted after Stop marked the job"
-                assert entry.control.cancelled
                 await asyncio.wait_for(wait_for_status(run.runtime, job.job_id, "cancelled"), JOB_TEST_TIMEOUT)
             finally:
                 release.set()

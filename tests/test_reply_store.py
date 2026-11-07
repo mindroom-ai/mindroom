@@ -1614,6 +1614,20 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
     assert stored.stop_receipt_order == 9
 
 
+async def test_a_stop_older_than_the_one_the_reply_took_reaches_none_of_its_jobs(
+    journal_store: EventJournalStore,
+) -> None:
+    """A Stop older than the one the reply recorded, as can follow an edit's regeneration, stops none of its jobs."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, _span = await _claimed(principal)
+    first = await principal.replies.stop(reply.reply_id, receipt_order=9, now_ns=100)
+    assert first is not None
+    assert ReplyStopped(reply.reply_id) in first.post_commit
+    late = await principal.replies.stop(reply.reply_id, receipt_order=8, now_ns=200)
+    assert late is not None
+    assert ReplyStopped(reply.reply_id) not in late.post_commit
+
+
 @pytest.mark.parametrize("own_room_stop", [False, True])
 async def test_a_pending_stop_from_another_room_never_reaches_the_reply(
     journal_store: EventJournalStore,

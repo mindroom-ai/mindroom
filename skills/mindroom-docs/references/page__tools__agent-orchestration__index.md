@@ -284,7 +284,8 @@ MindRoom Chat shows a jobs bar in the room or thread with each running job, a âœ
 The bar lists an agent's jobs only in rooms where the agent may send the `io.mindroom.background_jobs` state event, which the rooms MindRoom creates allow; elsewhere, use `!jobs`.
 In any client, `!jobs` lists the conversation's running jobs by short ID and `!cancel_job <id|all>` cancels them, taking any part of an ID from its start that names one job; sent outside any thread, both cover the whole room.
 Anyone who may talk to the agent in the room may cancel its jobs, as with **Stop**; another agent never may.
-After **Stop** on a reply, or an edit that regenerates a reply that is still answering, no job of that reply gets a new approval; a call approved before the Stop finishes, like a command already executing.
+After **Stop** on a reply that is still running, or an edit that regenerates a reply that is still answering, no job of that reply gets a new approval; a call approved before the Stop finishes, like a command already executing.
+A reply that finished ignores **Stop**; cancel a job it left waiting for approval from the jobs bar or with `!cancel_job`.
 Jobs waiting for approval are cancelled and their cards denied, so approving one later runs nothing, and any other job of the reply, such as a subagent still working, is cancelled when it next needs an approval.
 Deleting a message stops only its reply.
 An edit that regenerates a finished reply leaves its jobs alone, but the regenerated answer is the same reply, so a later **Stop** on it reaches them too.
@@ -342,7 +343,7 @@ The job posts the approval card, reports `awaiting_approval`, and runs the call 
 The reply waits for the decision for `background_tool_jobs.approval_wait_timeout` seconds, then goes on while the job keeps waiting; the result arrives like any other job's.
 The setting is a non-negative number of seconds, defaulting to `300`; `0` goes on at once, and `null` waits until the decision or a newer human message.
 A call's own `background_after`, or a newer human message, releases the reply the same way.
-Cancelling the job before the decision denies its card, and so does **Stop** on the reply that made the call, even before the card posts.
+Cancelling the job before the decision denies its card, and so does **Stop** on the reply that made the call while that reply is still running, even before the card posts.
 Calls that must finish inside the run keep pausing it for their approval: tools that always ask for confirmation themselves, such as an agent updating its own configuration, tools that can stop the current model step (such as model switching) or ask the user for input, run-connected toolkits, excluded toolkits, subagent calls, and minimal mode.
 
 A managed child that needs approval also stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.

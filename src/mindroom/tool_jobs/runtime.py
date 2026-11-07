@@ -582,7 +582,6 @@ class ToolJobRuntime:
         await self._publish(entry, entry.job, accepted=True)
         self._add_entry(entry)
         if span_stopped is not None and span_stopped():
-            entry.control.reply_stopped = True
             await self._request_cancel(entry)
             return
         entry.task = asyncio.create_task(self._run(entry, operation), name=f"tool-job:{entry.job.job_id}")
