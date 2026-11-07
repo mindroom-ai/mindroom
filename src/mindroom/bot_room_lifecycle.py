@@ -384,7 +384,7 @@ class BotRoomLifecycle:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
                 if await self.deps.change_membership(room_id, "join"):
-                    await self.deps.on_room_joined(room_id)
+                    await self._room_joined(room_id)
                     await self.deps.on_configured_room_joined(room_id)
                 else:
                     self._logger().warning(
@@ -396,7 +396,7 @@ class BotRoomLifecycle:
             if await self._join_room_with_decrypt_notice_fence(room_id):
                 current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
-                await self.deps.on_room_joined(room_id)
+                await self._room_joined(room_id)
                 await self.deps.on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
@@ -698,7 +698,7 @@ class BotRoomLifecycle:
             await self._send_invite_welcome(room.room_id, sender)
             if not joined:
                 await self._send_managed_room_notice(room, sender)
-            await self.deps.on_room_joined(room.room_id)
+            await self._room_joined(room.room_id)
             await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:
@@ -719,3 +719,103 @@ class BotRoomLifecycle:
         self._logger().error("Failed to join room", room_id=room_id)
         msg = f"Failed to join invited room {room_id}"
         raise RuntimeError(msg)
+
+    async def _room_joined(self, room_id: str) -> None:
+        """Finish a room this bot joined or rejoined, its state now synced, and follow the rooms it lists."""
+        await self.deps.on_room_joined(room_id)
+        self._follow_listed_rooms(room_id)
+
+    async def on_space_child(self, room: nio.MatrixRoom, event: nio.RoomSpaceChildEvent) -> None:
+        """Follow the rooms a room this bot is in lists under it, or leave one that room took off its list.
+
+        The event only starts the work, in the background because joining waits for this bot's own sync, and the rooms'
+        current state decides it, so a replayed or superseded event changes nothing.
+        """
+        if event.source["content"].get("via"):
+            self._follow_listed_rooms(room.room_id)
+            return
+        create_background_task(
+            self._leave_unlisted_room(room.room_id, event.state_key),
+            name=f"unlisted_room_leave_{self.deps.agent_name}",
+            owner=self.deps.runtime,
+        )
+
+    def _follow_listed_rooms(self, parent_id: str) -> None:
+        """Join, in the background, the rooms a room this bot is in lists under it.
+
+        The room is read only when its synced list names a room this bot is not in.
+        """
+        rooms = self._client().rooms
+        if parent_id not in rooms or not rooms[parent_id].children - rooms.keys():
+            return
+        create_background_task(
+            self._join_listed_rooms(parent_id),
+            name=f"listed_rooms_join_{self.deps.agent_name}",
+            owner=self.deps.runtime,
+        )
+
+    async def _join_listed_rooms(self, parent_id: str) -> None:
+        """Join each room a room lists whose listing this bot's invitation rule would accept from whoever listed it."""
+        if not self._should_accept_invite():
+            return
+        for room_id, lister in (await _listed_rooms(self._client(), parent_id) or {}).items():
+            if is_inviter_allowed(self._config(), self.deps.runtime_paths, self.deps.agent_name, lister):
+                await self._join_listed_room(parent_id, room_id)
+
+    async def _join_listed_room(self, parent_id: str, room_id: str) -> None:
+        """Join one listed room, keeping it only when it names the room that lists it as its canonical parent."""
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            if self._client_has_joined_room(room_id):
+                return
+            # Kept as an accepted invitation is, and before the join, so a cleanup pass meanwhile never leaves it.
+            await self._remember_invited_room(room_id)
+            joined = await self._join_room_with_decrypt_notice_fence(room_id)
+            if joined and await _names_parent(self._client(), room_id, parent_id):
+                self._logger().info("Joined listed room", room_id=room_id, parent_id=parent_id)
+                await self._room_joined(room_id)
+                return
+            await self.forget_invited_room(room_id)
+            if joined:
+                # Listed, but not a room under the one listing it.
+                await self.deps.change_membership(room_id, "leave")
+            else:
+                self._logger().warning("Failed to join listed room", room_id=room_id, parent_id=parent_id)
+
+    async def _leave_unlisted_room(self, parent_id: str, room_id: str) -> None:
+        """Leave a room its canonical parent no longer lists; a Space's rooms, and any doubt, keep this bot in."""
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            if not self._client_has_joined_room(room_id):
+                return
+            client = self._client()
+            listed = await _listed_rooms(client, parent_id)
+            if listed is None or room_id in listed or not await _names_parent(client, room_id, parent_id):
+                return
+            self._logger().info("Leaving room taken off its parent's list", room_id=room_id, parent_id=parent_id)
+            await self.deps.change_membership(room_id, "leave")
+
+
+async def _listed_rooms(client: nio.AsyncClient, room_id: str) -> dict[str, str] | None:
+    """Return each room one room lists under it with `m.space.child`, mapped to whoever listed it.
+
+    A Space's rooms are its own, so a Space, like a room whose state cannot be read, returns None.
+    """
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return None
+    listed: dict[str, str] = {}
+    for event in response.events:
+        if event["type"] == "m.room.create" and event["content"].get("type") == "m.space":
+            return None
+        if event["type"] == "m.space.child" and event["content"].get("via"):
+            listed[event["state_key"]] = event["sender"]
+    return listed
+
+
+async def _names_parent(client: nio.AsyncClient, room_id: str, parent_id: str) -> bool:
+    """Return whether a room names `parent_id` as its canonical parent with `m.space.parent`."""
+    response = await client.room_get_state_event(room_id, "m.space.parent", parent_id)
+    return (
+        isinstance(response, nio.RoomGetStateEventResponse)
+        and response.content.get("canonical") is True
+        and bool(response.content.get("via"))
+    )

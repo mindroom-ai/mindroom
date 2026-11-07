@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.config.main import Config
@@ -99,7 +100,11 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
 async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: Path) -> None:
     """Restart setup runs even when the room is already joined."""
     config = _bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-    bot, restore_room = _bot_with_scheduled_task_runtime(ROUTER_AGENT_NAME, config, {"lobby": object()})
+    bot, restore_room = _bot_with_scheduled_task_runtime(
+        ROUTER_AGENT_NAME,
+        config,
+        {"lobby": nio.MatrixRoom("lobby", f"@{ROUTER_AGENT_NAME}:mindroom.com")},
+    )
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
