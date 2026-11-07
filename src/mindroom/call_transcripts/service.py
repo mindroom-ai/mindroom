@@ -500,7 +500,7 @@ class CallTranscriptService:
 
         Runs under the room's lock.
         """
-        await self._require_in_call(call, user_id, now)
+        await self._require_in_call(call, user_id, now, said_at=said_at)
         if call.ended_at is None and call.paused_since is not None:
             raise CallRefusedError(code="paused", message="Transcription is paused.")
         if call.ended_at is not None and said_at >= call.ended_at:
@@ -516,18 +516,28 @@ class CallTranscriptService:
             raise CallRefusedError(code="paused", message="That was said while transcription was paused.")
         self._count_speech(user_id, now)
 
-    async def _require_in_call(self, call: StoredCall, user_id: str, now: float) -> None:
+    async def _require_in_call(
+        self,
+        call: StoredCall,
+        user_id: str,
+        now: float,
+        *,
+        said_at: float | None = None,
+    ) -> None:
         """Take speech from someone whose app is in the live call, or was in the ended call, for 20 seconds after its end.
 
-        The transcript message is begun no sooner, so a retry of its post sends just what the first attempt did.
+        From someone who left the ended call before it ended, only a stretch ``said_at`` before they left. The
+        transcript message is begun no sooner, so a retry of its post sends just what the first attempt did.
         """
         if call.ended_at is None:
             if user_id not in await self._present(call, now):
                 raise CallRefusedError(code="forbidden", message=_NOT_IN_CALL)
         elif call.transcript_done_at is not None or now >= call.ended_at + _TRANSCRIPT_DELAY_SECONDS:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
-        elif user_id not in await asyncio.to_thread(self._store.presence, call.id):
+        elif (app := (await asyncio.to_thread(self._store.presence, call.id)).get(user_id)) is None:
             raise CallRefusedError(code="forbidden", message="You were not in this call.")
+        elif said_at is not None and app.left and said_at >= app.present_at:
+            raise CallRefusedError(code="forbidden", message="That was said after you left the call.")
 
     def _count_speech(self, user_id: str, now: float) -> None:
         """Refuse a second stretch in flight, or more than 240 a minute, from one person; otherwise count this one."""

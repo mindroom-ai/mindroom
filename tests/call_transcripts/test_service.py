@@ -1654,6 +1654,25 @@ async def test_speech_said_before_the_end_is_accepted_until_the_transcript_is_po
 
 
 @pytest.mark.asyncio
+async def test_late_speech_from_someone_who_left_before_the_end_is_taken_only_if_said_before_they_left(
+    world: World,
+) -> None:
+    """After the end, a stretch from someone who had left counts only if they began it before leaving."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    world.clock.advance(5)
+    await world.service.leave(call.id, ANN)
+    world.clock.advance(50)
+    await world.service.leave(call.id, BOB)
+    world.clock.advance(5)
+
+    await _refused("forbidden", lambda: world.say(call.id, ANN, ago=10))
+    late = await world.say(call.id, ANN, ago=57)
+
+    assert late.said_at == START + 3
+
+
+@pytest.mark.asyncio
 async def test_late_speech_is_taken_for_20_seconds_after_the_end_whatever_the_posting_state(world: World) -> None:
     """A late stretch gets in only within 20 seconds of the end, so a retried post repeats exactly its first attempt."""
     world.notes.markdown = None
