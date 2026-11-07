@@ -3,7 +3,8 @@
 Plugins import MindRoom's entry points from here; the modules that own them may change between releases.
 `GoogleCloudToolkit` and the `mindroom.memory` helpers stay in their documented modules, because those modules load
 Agno at import and this one stays free of Agno and provider SDKs.
-`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, and each enum's member names.
+`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, and each enum's member names,
+and fails on a change to them until `PLUGIN_API_VERSION`, this surface's version, is bumped.
 """
 
 from __future__ import annotations
@@ -99,6 +100,7 @@ from mindroom.tool_system.google_workspaces import (
     register_google_workspace_tools,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -135,6 +137,7 @@ __all__ = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "PLUGIN_API_VERSION",
     "ROUTER_AGENT_NAME",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "VOICE_PREFIX",
