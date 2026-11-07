@@ -402,6 +402,25 @@ async def test_a_room_that_cannot_be_read_for_a_while_ends_no_call(world: World)
 
 
 @pytest.mark.asyncio
+async def test_a_leave_refused_while_the_room_cannot_be_read_keeps_nobody_in_the_call(world: World) -> None:
+    """A leave is never a check-in: one answered unavailable leaves the person to drop out 60 seconds after their last."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    world.clock.advance(50)
+    world.room.readable = False
+    await _refused("unavailable", lambda: world.service.join(ROOM, BOB))
+    await _refused("unavailable", lambda: world.service.leave(call.id, ANN))
+
+    world.clock.advance(15)
+    await world.tick()
+    world.room.readable = True
+
+    live = (await world.service.live(ROOM, BOB)).call
+    assert live is not None
+    assert live.members == (BOB,)
+
+
+@pytest.mark.asyncio
 async def test_someone_removed_from_the_room_is_out_of_the_call_at_their_next_request_it_can_tell(
     world: World,
 ) -> None:

@@ -262,9 +262,12 @@ class CallTranscriptService:
     async def leave(self, call_id: str, user_id: str) -> None:
         """Take the person's app out of the call at once; the last one out ends the call.
 
-        Someone whose app was never in the call records nothing.
+        Someone whose app was never in the call records nothing. A leave is never a check-in, so one refused while the
+        room cannot be read leaves the person to drop out of the call a minute after their app last checked in.
         """
-        await self._leave(await self._call_for(call_id, user_id), user_id)
+        call = await self._fresh(call_id)
+        await self._require_member(call.room_id, user_id, _NO_SUCH_CALL)
+        await self._leave(call, user_id)
 
     async def pause(self, call_id: str, user_id: str, *, paused: bool) -> Call:
         """Pause or resume transcription for everyone in the call; only someone in the call can do either."""
