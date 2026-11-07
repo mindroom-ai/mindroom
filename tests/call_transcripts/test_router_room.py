@@ -12,6 +12,7 @@ import aiohttp
 import nio
 import pytest
 
+from mindroom.call_transcripts import router_room
 from mindroom.call_transcripts.router_room import RouterCallRoom
 from mindroom.call_transcripts.service import CallTranscript, EndedRow, TranscriptMessage, _Turn
 from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
@@ -326,6 +327,21 @@ async def test_a_read_that_raises_cannot_tell_and_never_raises(error: BaseExcept
 
 
 # Who is in the room, and who may post
+
+
+@pytest.mark.asyncio
+async def test_a_read_of_the_room_that_takes_too_long_cannot_tell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A homeserver that does not answer a read of the room in time is a room that cannot be read, never a wait."""
+    monkeypatch.setattr(router_room, "_STATE_READ_TIMEOUT_SECONDS", 0.01)
+    client = FakeRouterClient(state={ROOM: [_member(ANN)]}, gate=asyncio.Event())
+    room = _room(client)
+
+    async with asyncio.timeout(5):
+        assert await room.is_member(ROOM, ANN) is None
+
+    client.gate.set()
+    assert await room.is_member(ROOM, ANN) is True
+    assert client.state_reads == 2
 
 
 @pytest.mark.asyncio

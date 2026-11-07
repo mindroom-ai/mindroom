@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
     from pathlib import Path
 
 type _LineKind = Literal["speech", "gap"]
@@ -200,11 +200,11 @@ class CallTranscriptStore:
             ).fetchall()
         return [_call(row) for row in rows]
 
-    def next_transcript_due_at(self) -> float | None:
-        """Return when the soonest pending transcript message is due, None if none is pending."""
+    def next_transcript_due_at(self, *, besides: Collection[str] = ()) -> float | None:
+        """Return when the soonest pending transcript message is due, but those of the calls ``besides``; None if none."""
         with closing(self._connect()) as connection:
-            (due_at,) = connection.execute("SELECT min(transcript_due_at) FROM calls").fetchone()
-        return due_at
+            rows = connection.execute("SELECT id, transcript_due_at FROM calls WHERE transcript_due_at IS NOT NULL")
+            return min((row["transcript_due_at"] for row in rows if row["id"] not in besides), default=None)
 
     def postpone_transcript(self, call_id: str, *, due_at: float, failed: bool = True) -> None:
         """Make the call's transcript message due again at ``due_at``, counting a failed attempt unless ``failed`` is False."""

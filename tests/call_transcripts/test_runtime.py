@@ -227,6 +227,26 @@ async def test_a_failing_pass_never_stops_the_loop(tmp_path: Path, monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_stopping_stops_the_service_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stop cancels the transcript messages the service is posting, once the loop that starts them has stopped."""
+    paths = test_runtime_paths(tmp_path)
+    config = _config(enabled=True)
+    coordinator = _coordinator(paths, lambda: config, _Sleeps())
+    service = coordinator.service()
+    assert service is not None
+    stopped: list[CallTranscriptService] = []
+
+    async def stop(stopping: CallTranscriptService) -> None:
+        stopped.append(stopping)
+
+    monkeypatch.setattr(CallTranscriptService, "stop", stop)
+
+    await coordinator.stop()
+
+    assert stopped == [service]
+
+
+@pytest.mark.asyncio
 async def test_stopping_ends_the_loop_and_unbinds_the_router(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """After a stop no pass runs and the room cannot be checked."""
     paths = test_runtime_paths(tmp_path)

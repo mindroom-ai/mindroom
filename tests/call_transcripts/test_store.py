@@ -234,7 +234,7 @@ def test_a_failed_transcript_is_due_again_later(tmp_path: Path) -> None:
 
 
 def test_the_next_transcript_due_is_known(tmp_path: Path) -> None:
-    """The soonest due time among pending transcript messages, none once all are done."""
+    """The soonest due time among pending transcript messages but those being posted, none once all are done."""
     store = CallTranscriptStore(tmp_path)
     assert store.next_transcript_due_at() is None
     first, _ = store.ensure_live_call(ROOM, at=100.0)
@@ -243,6 +243,8 @@ def test_the_next_transcript_due_is_known(tmp_path: Path) -> None:
     store.end_call(second.id, at=190.0, transcript_due_at=210.0)
 
     assert store.next_transcript_due_at() == 210.0
+    assert store.next_transcript_due_at(besides={second.id}) == 220.0
+    assert store.next_transcript_due_at(besides={first.id, second.id}) is None
     store.finish_transcript(second.id, at=211.0)
     assert store.next_transcript_due_at() == 220.0
     store.finish_transcript(first.id, at=221.0)

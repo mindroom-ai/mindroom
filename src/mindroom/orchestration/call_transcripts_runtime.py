@@ -62,9 +62,14 @@ class CallTranscriptsRuntimeCoordinator:
         self._router = None
 
     async def stop(self) -> None:
-        """Unbind the router and stop the loop, cancelling a pass in progress: no row or message it sent is posted twice."""
+        """Unbind the router, stop the loop and the service, cancelling a pass and the messages being posted.
+
+        No row or message they sent is posted twice.
+        """
         self.unbind()
         await self._loop.stop()
+        if self._service is not None:
+            await self._service.stop()
 
     def service(self) -> CallTranscriptService | None:
         """Return the service while call transcripts are on, the same one each time; None while they are off."""

@@ -38,6 +38,8 @@ _ROW_BODY = "Call started"
 _MATRIX_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError, ValueError)
 # How long one full read of a room's state answers the questions asked about the room.
 _STATE_REUSE_SECONDS = 5.0
+# A read of a room's state not answered in this long counts as a room that cannot be read.
+_STATE_READ_TIMEOUT_SECONDS = 20.0
 _MENTION_START = re.compile(r"(?<!\w)@")
 
 
@@ -266,9 +268,10 @@ def _retrieve_failure(read: asyncio.Future[_RoomState | None]) -> None:
 
 
 async def _read_state(client: nio.AsyncClient, room_id: str) -> _RoomState | None:
-    """Read the room's whole state; None when it cannot be read."""
+    """Read the room's whole state; None when it cannot be read, as when the homeserver does not answer in time."""
     try:
-        response = await client.room_get_state(room_id)
+        async with asyncio.timeout(_STATE_READ_TIMEOUT_SECONDS):
+            response = await client.room_get_state(room_id)
     except _MATRIX_ERRORS as error:
         logger.warning("call_transcript_room_state_unreadable", room_id=room_id, error=str(error))
         return None
