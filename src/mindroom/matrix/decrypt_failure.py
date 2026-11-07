@@ -134,13 +134,28 @@ def _forget_notice_sent(runtime_paths: RuntimePaths, room_id: str, session_id: s
         _write_notice_ledger(ledger_path, entries)
 
 
-async def _send_decrypt_failure_notice(client: nio.AsyncClient, room_id: str, event: nio.MegolmEvent) -> bool:
+async def _send_decrypt_failure_notice(
+    client: nio.AsyncClient,
+    room_id: str,
+    event: nio.MegolmEvent,
+    resolve_related_thread: Callable[[str, str], Awaitable[str | None]] | None = None,
+) -> bool:
     # why-lazy: client_delivery imports Matrix formatting helpers that import config at module import time.
     from mindroom.matrix.client_delivery import send_message_result  # noqa: PLC0415
 
     # Reply where an agent reply would go: clients that list threads hide room-level notices.
+    # Room-mode rooms too: Chat opens them in Threads, which hides room-level notices as well.
     event_info = EventInfo.from_event(event.source)
-    thread_id = event_info.thread_id or (event.event_id if event_info.can_be_thread_root else None)
+    thread_id = event_info.thread_id
+    related_event_id = event_info.next_related_event_id(event.event_id)
+    if thread_id is None and related_event_id is not None and resolve_related_thread is not None:
+        # An edit's or reply's clear relation names only its target, whose thread the notice joins.
+        try:
+            thread_id = await resolve_related_thread(room_id, related_event_id)
+        except Exception as exc:  # A plain reply beats dropping the notice.
+            logger.warning("e2ee_decrypt_notice_thread_unresolved", room_id=room_id, error=str(exc))
+    if thread_id is None and event_info.can_be_thread_root:
+        thread_id = event.event_id
     delivered = await send_message_result(
         client,
         room_id,
@@ -163,6 +178,7 @@ async def handle_decrypt_failure(
     agent_name: str,
     runtime_paths: RuntimePaths,
     can_notify: Callable[[], Awaitable[bool]] | None = None,
+    resolve_related_thread: Callable[[str, str], Awaitable[str | None]] | None = None,
 ) -> None:
     """Log one undecryptable event, request its key, and optionally notify."""
     session_id = event.session_id
@@ -209,7 +225,7 @@ async def handle_decrypt_failure(
     _record_notice_sent(runtime_paths, room.room_id, session_id)
     delivered = False
     try:
-        delivered = await _send_decrypt_failure_notice(client, room.room_id, event)
+        delivered = await _send_decrypt_failure_notice(client, room.room_id, event, resolve_related_thread)
     finally:
         if not delivered:
             _forget_notice_sent(runtime_paths, room.room_id, session_id)

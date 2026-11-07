@@ -32,6 +32,7 @@ class DecryptionDiagnostics:
     read_position: Callable[[str], Awaitable[RoomMembershipPosition | None]]
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
     notice_is_fenced: Callable[[str], bool]
+    resolve_related_thread: Callable[[str, str], Awaitable[str | None]]
     _pending: set[tuple[str, str, int]] = field(default_factory=set, init=False)
 
     def schedule(self, record: SyncRecord) -> None:
@@ -102,4 +103,5 @@ class DecryptionDiagnostics:
                 agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,
                 can_notify=can_notify,
+                resolve_related_thread=self.resolve_related_thread,
             )
