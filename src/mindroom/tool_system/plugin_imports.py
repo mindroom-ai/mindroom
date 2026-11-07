@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
+PLUGIN_API_VERSION = (1, 0)
+_PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
@@ -311,6 +314,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Invalid plugin manifest name", path=str(path), plugin_name=name, error=str(exc))  # noqa: TRY400
         msg = f"{exc} ({path})"
         raise PluginValidationError(msg) from exc
+    _check_plugin_api(data.get("mindroom_plugin_api"), normalized_name, path)
 
     tools_module = _manifest_module(data, "tools_module", path)
     hooks_module = _manifest_module(data, "hooks_module", path)
@@ -333,6 +337,22 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         routes_module=routes_module,
         skills=raw_skills,
     )
+
+
+def _check_plugin_api(needed: object, plugin_name: str, path: Path) -> None:
+    """Refuse a plugin whose manifest needs another plugin API major, or a later minor of this one."""
+    if needed is None:
+        return
+    match = _PLUGIN_API_PATTERN.fullmatch(needed) if isinstance(needed, str) else None
+    if match is None:
+        msg = f'Plugin mindroom_plugin_api must be a "MAJOR.MINOR" string such as "1.0": {path}'
+        raise PluginValidationError(msg)
+    major, minor = PLUGIN_API_VERSION
+    version = (int(match[1]), int(match[2]))
+    if not (major, 0) <= version <= (major, minor):
+        advice = "upgrade MindRoom" if version > (major, minor) else "update the plugin"
+        msg = f"Plugin {plugin_name!r} needs plugin API {needed}, but this MindRoom provides {major}.{minor}: {advice} ({path})"
+        raise PluginValidationError(msg)
 
 
 def _manifest_module(data: dict[str, Any], field: str, path: Path) -> str | None:
