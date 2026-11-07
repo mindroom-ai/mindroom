@@ -840,8 +840,13 @@ def get_tool_by_name(
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
+        available = toolkit_function_names(toolkit)
+        unknown_aliases = sorted(set(metadata.approval_aliases) - set(available) - set(metadata.function_names))
+        if unknown_aliases:
+            msg = f"Tool '{tool_name}' declares approval aliases for functions it does not have: {', '.join(unknown_aliases)}"
+            raise ToolMetadataValidationError(msg)
         offered = _offered_function_names(
-            toolkit_function_names(toolkit),
+            available,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
             declared_functions=frozenset(metadata.function_names or ()),
@@ -1060,7 +1065,8 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
     tools: list[dict[str, Any]] = []
 
     for metadata in tool_metadata.values():
-        tool_dict = asdict(metadata)
+        # asdict copies every value deeply, which code such as a judge bound to a lock cannot survive.
+        tool_dict = asdict(replace(metadata, factory=None, approval_aliases={}))
         tool_dict["category"] = metadata.category.value
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value

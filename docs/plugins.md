@@ -413,6 +413,7 @@ def lines_tools() -> type[LineTools]:
 A call then needs approval when its own rules ask for it or when the `judged_as` rules would ask about any call `judge` returns, so a rule that auto-approves `run_line` does not lift a `run_shell_command` rule.
 `judge` reads only the call's arguments, since an approval covers exactly those: return an empty list for a call that amounts to no call of `judged_as`, and `None` when the arguments cannot tell, which asks whenever the `judged_as` rules may ask.
 The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
+Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, so no agent gets it, and the log names the alias.
 In a [background script](tools/background-scripts.md#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](tools/agent-orchestration.md#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
 
 ### Dependencies
@@ -521,6 +522,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
+| `SHARED_DIRECTORY_ROOTS` | `shared_directory_roots` | A function that returns the constructing agent's [shared directories](tools/execution-and-coding.md#shared_directories), each with its `path` and whether it is `writable`; call it on each use, since the agent can join or leave one while it replies |
 
 ```python
 from mindroom.plugin_api import (
