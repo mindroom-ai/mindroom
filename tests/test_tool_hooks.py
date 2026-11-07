@@ -1104,7 +1104,10 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
+        del mentions, wake_mentioned
         sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return f"${body}-event"
 
@@ -1185,8 +1188,10 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent.append(extra_content)
         return "$dispatch-event"
 
@@ -1288,7 +1293,10 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
+        del mentions, wake_mentioned
         sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return "$dispatch-event"
 
@@ -1434,8 +1442,10 @@ async def test_a_sync_tool_call_keeps_its_hooks_on_the_loop_and_its_body_off_it(
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
+        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch, mentions, wake_mentioned
         current_loop = asyncio.get_running_loop()
         current_thread = threading.get_ident()
         seen.append(("sender", current_thread, id(current_loop)))
@@ -1971,8 +1981,10 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent.append(extra_content)
         return "$dispatch-event"
 

@@ -1040,6 +1040,10 @@ SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report mar
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
+# Marks a message's ``m.mentions`` as every mention it makes, so receivers do not look for more in its text.
+EXACT_MENTIONS_KEY = "io.mindroom.exact_mentions"
+# False on a message whose mentions must not wake the agents among them.
+WAKE_MENTIONED_KEY = "io.mindroom.wake_mentioned"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 VOICE_TRANSCRIPT_KEY = "com.mindroom.voice_transcript"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
