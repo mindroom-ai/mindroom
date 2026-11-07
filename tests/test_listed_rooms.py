@@ -203,6 +203,19 @@ async def test_a_listed_room_the_bot_cannot_join_is_not_kept(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("listed_key", ["", "#alias:localhost"])
+async def test_a_listing_that_names_no_room_id_is_ignored(tmp_path: Path, listed_key: str) -> None:
+    """Only room IDs are followed, so a malformed listing is never joined or kept, and later setups still run."""
+    bot = _Bot(tmp_path, {PARENT: [_create(), _child(listed_key)]})
+
+    await bot.on_space_child(listed_key)
+    await bot.lifecycle.join_configured_rooms()
+
+    assert bot.memberships == [(PARENT, "join")]
+    assert bot.lifecycle.invited_room_ids() == frozenset()
+
+
+@pytest.mark.asyncio
 async def test_a_bot_follows_only_listings_its_invite_rule_admits(tmp_path: Path) -> None:
     """Whoever listed the room must be someone the bot would accept an invitation from."""
     state = {PARENT: [_create(), _child(ROOM, sender=MALLORY)], ROOM: [_create(), _parent(PARENT)]}

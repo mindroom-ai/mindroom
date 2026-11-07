@@ -799,7 +799,7 @@ class BotRoomLifecycle:
 
 
 async def _listed_rooms(client: nio.AsyncClient, room_id: str) -> dict[str, str] | None:
-    """Return each room one room lists under it with `m.space.child`, mapped to whoever listed it.
+    """Return each room ID one room lists under it with `m.space.child`, mapped to whoever listed it.
 
     A Space's rooms are its own, so a Space, like a room whose state cannot be read, returns None.
     """
@@ -810,7 +810,7 @@ async def _listed_rooms(client: nio.AsyncClient, room_id: str) -> dict[str, str]
     for event in response.events:
         if event["type"] == "m.room.create" and event["content"].get("type") == "m.space":
             return None
-        if event["type"] == "m.space.child" and event["content"].get("via"):
+        if event["type"] == "m.space.child" and event["state_key"].startswith("!") and event["content"].get("via"):
             listed[event["state_key"]] = event["sender"]
     return listed
 

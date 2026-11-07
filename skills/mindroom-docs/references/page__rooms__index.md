@@ -86,6 +86,7 @@ If the alias of a recorded room is deleted, the router restores it, and creates 
 
 A room can list other rooms under it with `m.space.child` events, each listed room naming it back as its canonical `m.space.parent`.
 The router, agents, and teams in a room join every room it lists this way, each only when its `accept_invites` would accept an invitation from whoever listed the room.
+A listed room they cannot join without an invitation, such as a private one, needs them invited.
 They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
 Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
 A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.
