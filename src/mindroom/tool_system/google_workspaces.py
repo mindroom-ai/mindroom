@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.oauth.google import google_oauth_providers, with_google_account_picker
 from mindroom.oauth.providers import OAuthConsentGroup
-from mindroom.tool_system.registry import builtin_tool_registry, register_tool
+from mindroom.tool_system.registry import builtin_tool_registry, register_tool, require_plugin_load
 
 __all__ = ["GoogleWorkspaceConfig", "google_workspace_oauth_providers", "register_google_workspace_tools"]
 
@@ -132,6 +132,7 @@ def _workspace_tool_factory(
 
 def register_google_workspace_tools(workspace: GoogleWorkspaceConfig) -> None:
     """Register workspace tools from a plugin tools module, using its normal ownership."""
+    require_plugin_load("register_google_workspace_tools")
     builtins = builtin_tool_registry().entries
     for service, provider in zip(workspace.services, google_workspace_oauth_providers(workspace), strict=True):
         base = builtins[service]

@@ -6907,9 +6907,11 @@ expose = [
     "plugin_module_registrations",
     "record_plugin_root",
     "register_tool",
+    "require_plugin_load",
 ]
 from = ["mindroom.tool_system.registry"]
 visibility = [
+    "mindroom.tool_system.atlassian_connections",
     "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",

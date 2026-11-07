@@ -38,6 +38,13 @@ def record_plugin_root(root: Path) -> None:
     _PLUGIN_ROOTS.add(root)
 
 
+def require_plugin_load(caller: str) -> None:
+    """Refuse ``caller``, which registers plugin tools whose factories live in MindRoom, outside a plugin load."""
+    if getattr(_REGISTRATION_SCOPE, "registrations", None) is None:
+        msg = f"{caller} registers plugin tools, so it may run only while a plugin module loads."
+        raise ToolMetadataValidationError(msg)
+
+
 def _plugin_root(module_name: str) -> Path | None:
     """Return the recorded plugin directory holding module ``module_name``'s file, if any."""
     module_file = getattr(sys.modules.get(module_name), "__file__", None)

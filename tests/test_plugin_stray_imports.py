@@ -24,12 +24,39 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _package_plugin_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Config, Path]:
-    """Return a config naming the importable plugin package ``stray_pkg``, and the package's directory."""
+_HELPER_TOOLS_SOURCES = {
+    "secondary_gmail": (
+        "from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools\n"
+        "register_google_workspace_tools(GoogleWorkspaceConfig(name='secondary', display_name='Secondary', "
+        "client_config_service='secondary_google_oauth_client', allowed_hosted_domains=('secondary.example',), "
+        "services=('gmail',)))\n"
+    ),
+    "partner_atlassian": (
+        "from mindroom.tool_system.atlassian_connections import (\n"
+        "    AtlassianConnectionConfig,\n"
+        "    register_atlassian_connection_tools,\n"
+        ")\n"
+        "register_atlassian_connection_tools(AtlassianConnectionConfig(name='partner', display_name='Partner', "
+        "site_url='https://partner.atlassian.net', products=('confluence',)))\n"
+    ),
+}
+
+
+def _package_plugin_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools_source: str | None = None,
+) -> tuple[Config, Path]:
+    """Return a config naming the importable plugin package ``stray_pkg``, and the package's directory.
+
+    Its tools module registers ``stray_pkg_tool``, or runs ``tools_source`` instead.
+    """
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "stray_pkg"
     _write_working_tool_plugin(plugin_root, plugin_name="stray-pkg", tool_name="stray_pkg_tool")
     (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    if tools_source is not None:
+        (plugin_root / "tools.py").write_text(tools_source, encoding="utf-8")
     # Python imports the package through a link, as from a linked install.
     linked_site_packages = tmp_path / "linked-site-packages"
     linked_site_packages.symlink_to(site_packages)
@@ -78,3 +105,22 @@ def test_a_module_outside_loaded_plugins_still_registers_a_builtin(
         return object
 
     assert "registered_outside_plugins" in builtin_tool_registry()
+
+
+@pytest.mark.parametrize("tool_name", sorted(_HELPER_TOOLS_SOURCES))
+@pytest.mark.usefixtures("restored_builtin_tools")
+def test_stray_import_of_a_module_registering_through_a_plugin_helper_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    """A plugin helper whose factories live in MindRoom's modules registers nothing outside a plugin load."""
+    config, _ = _package_plugin_config(tmp_path, monkeypatch, _HELPER_TOOLS_SOURCES[tool_name])
+
+    with _forgetting_modules("stray_pkg"):
+        assert tool_name in _load(config, runtime_paths_for(config)).tools
+
+        with pytest.raises(ToolMetadataValidationError, match="only while a plugin module loads"):
+            importlib.import_module("stray_pkg.tools")
+        assert tool_name not in builtin_tool_registry()
+        assert tool_name in _load(config, runtime_paths_for(config)).tools
