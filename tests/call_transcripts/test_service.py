@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import threading
+import time
 import wave
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -1558,6 +1559,57 @@ async def test_the_transcript_waits_for_a_stretch_still_being_transcribed(world:
 
     [message] = world.room.transcripts
     assert message.transcript.turns == (_Turn(sender=ANN, text="Hello there"),)
+
+
+@pytest.mark.parametrize("slow", ["overlaps_pause", "add_speech"], ids=["being-let-in", "being-written"])
+@pytest.mark.asyncio
+async def test_a_stretch_still_being_let_in_or_written_when_the_message_falls_due_is_in_it(
+    world: World,
+    slow: str,
+) -> None:
+    """A stretch let in before the message fell due is in it, though the store is slow to let it in or write it."""
+    loop = asyncio.get_running_loop()
+    storing = asyncio.Event()
+
+    class SlowStore(CallTranscriptStore):
+        def __getattribute__(self, name: str) -> object:
+            """Make the ``slow`` method take half a second, as on a slow disk."""
+            attribute = super().__getattribute__(name)
+            if name != slow:
+                return attribute
+
+            def slowly(*args: object, **kwargs: object) -> object:
+                loop.call_soon_threadsafe(storing.set)
+                time.sleep(0.5)
+                return attribute(*args, **kwargs)
+
+            return slowly
+
+    world.service = CallTranscriptService(
+        SlowStore(world.tmp_path),
+        world.room,
+        world.transcriber,
+        world.notes,
+        clock=world.clock,
+    )
+    call = await world.service.join(ROOM, ANN)
+    await world.settled()
+    world.clock.advance(60)
+    world.room.edit_gate = asyncio.Event()
+    await world.service.leave(call.id, ANN)
+    await world.room.edit_started.wait()
+    world.clock.advance(19)
+    upload = asyncio.create_task(world.say(call.id, ANN, ago=21, seconds=1))
+    await storing.wait()
+    world.clock.advance(1)
+
+    world.room.edit_gate.set()
+    late = await upload
+    await world.tick()
+
+    [message] = world.room.transcripts
+    assert message.transcript.turns == (_Turn(sender=ANN, text="Hello there"),)
+    assert late.said_at == START + 58
 
 
 # Who may do what

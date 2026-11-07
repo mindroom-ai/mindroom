@@ -296,7 +296,6 @@ class CallTranscriptService:
                 # Speech-to-text heard no words: nothing is missing from the transcript, so there is no gap either.
                 return None
             async with self._room_lock(call.room_id):
-                self._done_speaking(user_id, stretch)
                 if text is not None:
                     line = await asyncio.to_thread(
                         self._store.add_speech,
@@ -316,6 +315,8 @@ class CallTranscriptService:
                         seconds=seconds,
                         reason="not-transcribed",
                     )
+                # In flight until its line is written, so the message cannot fall due without it.
+                self._done_speaking(user_id, stretch)
         finally:
             self._done_speaking(user_id, stretch)
         if line is None:
@@ -623,7 +624,11 @@ class CallTranscriptService:
         A call in which people spoke but none of it could be transcribed posts a message that says so, without turns.
         """
         assert call.ended_at is not None
-        lines = await asyncio.to_thread(self._store.lines, call.id)
+        # Due and read under the room's lock, so every stretch let in before then has its line written first.
+        async with self._room_lock(call.room_id):
+            if not self._transcript_due(call, self._clock()):
+                return
+            lines = await asyncio.to_thread(self._store.lines, call.id)
         turns = _turns(lines)
         if not turns and all(line.reason != "not-transcribed" for line in lines):
             await self._finish(call)
