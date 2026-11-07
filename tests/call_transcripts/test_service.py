@@ -76,6 +76,8 @@ class FakeRoom:
     failed_transcript_posts: int = 0
     crashing_rooms: set[str] = field(default_factory=set)
     on_read: Callable[[], None] | None = None
+    read_gate: asyncio.Event | None = None
+    read_started: asyncio.Event = field(default_factory=asyncio.Event)
     row_gate: asyncio.Event | None = None
     row_started: asyncio.Event = field(default_factory=asyncio.Event)
     row_attempts: int = 0
@@ -100,9 +102,12 @@ class FakeRoom:
         return user_id in self.members if self.readable else None
 
     async def may_post(self, room_id: str, user_id: str) -> bool | None:
-        """Answer from ``posters``, or not at all while the room is unreadable."""
+        """Answer from ``posters`` once ``read_gate`` opens, or not at all while the room is unreadable."""
         del room_id
         self._read()
+        self.read_started.set()
+        if self.read_gate is not None:
+            await self.read_gate.wait()
         return user_id in self.posters if self.readable else None
 
     async def display_names(self, room_id: str, user_ids: Collection[str]) -> dict[str, str | None] | None:
@@ -410,6 +415,49 @@ async def test_someone_removed_from_the_room_is_out_of_the_call_at_their_next_re
     assert stored is not None
     assert stored.ended_at == START + 20
     assert [edit.call_id for edit in world.room.row_edits] == [call.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("others", [(), (BOB,)])
+async def test_a_heartbeat_overtaken_by_its_persons_leave_neither_starts_a_call_nor_rejoins(
+    world: World,
+    others: tuple[str, ...],
+) -> None:
+    """A heartbeat that arrived before the person's leave landed ends with the call they left; a later join works."""
+    call = await world.service.join(ROOM, ANN)
+    for user_id in others:
+        await world.service.join(ROOM, user_id)
+    world.clock.advance(10)
+    world.room.read_gate = asyncio.Event()
+    heartbeat = asyncio.create_task(world.service.join(ROOM, ANN))
+    await world.room.read_started.wait()
+    world.clock.advance(1)
+    await world.service.leave(call.id, ANN)
+    world.room.read_gate.set()
+
+    refused = await _refused("not-found", lambda: heartbeat)
+
+    assert refused.message == "This call has ended."
+    assert world.room.rows == [(ROOM, call.id)]
+    live = world.store.live_call(ROOM)
+    assert (None if live is None else live.id) == (call.id if others else None)
+    assert (await world.service.live(ROOM, ANN)).call == (
+        None
+        if not others
+        else Call(
+            id=call.id,
+            room_id=ROOM,
+            row_event_id="$row-1",
+            started_at=START,
+            ended_at=None,
+            members=others,
+            paused_by=None,
+        )
+    )
+    world.clock.advance(1)
+    again = await world.service.join(ROOM, ANN)
+    assert (again.id == call.id) == bool(others)
+    assert ANN in again.members
 
 
 # Ending
