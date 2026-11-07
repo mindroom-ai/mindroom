@@ -457,7 +457,7 @@ An explicit `target: host` uses the worker even when `default_target: desktop` i
 ## Worker tool results
 
 Worker-routed tools can return images, audio, video, and files.
-The worker downloads public HTTP(S) media URLs itself, following at most five redirects, and refuses local and metadata-service destinations; the primary runtime never reads a worker path or follows a media URL from the result.
+The worker downloads public HTTP(S) media URLs itself, following at most ten redirects and giving up on a URL after 30 seconds, and refuses local and metadata-service destinations; the primary runtime never reads a worker path or follows a media URL from the result.
 Each result may contain at most eight media items, 10 MiB per item, and 20 MiB of media in total, plus at most 4,194,304 characters of text and 64 KiB of JSON metadata.
 Unsupported resources or oversized results produce a tool error.
 
