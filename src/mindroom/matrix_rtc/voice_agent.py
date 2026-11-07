@@ -1233,13 +1233,15 @@ def _drop_live_backlog_on_caller_speech(session: AgentSession) -> None:  # noqa:
             self._segment_cleared = False
 
         async def capture_frame(self, frame: rtc.AudioFrame) -> None:
-            await super().capture_frame(frame)
-            self._capturing = True
             held_until = 0.0
             if not self._segment_cleared and (now := time.monotonic()) >= self._playout_end:
                 # Nothing is left to play: start this audio with a cushion.
                 held_until = now + _LIVE_OUTPUT_PLAYOUT_LEAD_S
                 await asyncio.sleep(_LIVE_OUTPUT_PLAYOUT_LEAD_S)
+            # Counted only once the frame goes on: speech interrupted during the cushion left
+            # nothing in RoomIO, so a segment counted here would never report its playout.
+            await super().capture_frame(frame)
+            self._capturing = True
             await self._sink.capture_frame(frame)
             if not self._segment_cleared:
                 self._playout_end = max(self._playout_end, time.monotonic(), held_until) + frame.duration
