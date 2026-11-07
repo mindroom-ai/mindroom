@@ -482,6 +482,7 @@ class _TaskRunner:
                 self.task_id,
                 bot.hook_context.matrix_admin(),
                 occurrence=occurrence,
+                owner_stopped=lambda: bot in self.runtime._fenced,
             )
 
     async def _send_failure_notice(self, target: MessageTarget, message: str) -> None:
