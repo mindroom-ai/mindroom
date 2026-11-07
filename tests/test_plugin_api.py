@@ -47,6 +47,7 @@ _EXPORTS = [
     "VOICE_PREFIX",
     "AfterResponseContext",
     "AgentLifecycleContext",
+    "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
     "AutomationContext",
@@ -132,6 +133,7 @@ _EXPORTS = [
     "resolve_turn_model",
     "tool",
     "toolkit_functions",
+    "write_agent_file",
     "write_file_within_root",
 ]
 
@@ -151,6 +153,7 @@ _SIGNATURES = {
     "AgentLifecycleContext": (
         f"({_HOOK}, entity_name, entity_type, rooms, matrix_user_id, joined_room_ids, stop_reason, *, {_HOOK_HELPERS})"
     ),
+    "ApprovalAlias": "(judged_as, judge)",
     "Ask": "(text, new_thread, then, summary)",
     "AutomationContext": (
         "(agent_name, config, runtime_paths, entry, options, settings, requester_id, execution_identity, workspace, "
@@ -235,11 +238,11 @@ _SIGNATURES = {
     "SystemEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "ToolAfterCallContext": (
         f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, result, "
-        "error, blocked, duration_ms, message_received_depth)"
+        "error, blocked, duration_ms, message_received_depth, shown)"
     ),
     "ToolBeforeCallContext": (
         f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, "
-        "message_received_depth, declined, decline_reason)"
+        "message_received_depth, shown, declined, decline_reason)"
     ),
     "ToolEnvironmentContext": (
         f"({_TOOL_HOOK}, function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, "
@@ -250,7 +253,7 @@ _SIGNATURES = {
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
         "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
-        "cli_approval_handler, hook_source, tool_output_paths)"
+        "cli_approval_handler, hook_source, tool_output_paths, tool_calls_shown)"
     ),
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
@@ -292,7 +295,7 @@ _SIGNATURES = {
         "(*, name, display_name, description, category, status, setup_type, default_execution_target, "
         "requires_primary_runtime, consumes_workspace_paths, file_access, executes_code, requires_room_context, "
         "requires_conversation, icon, icon_color, config_fields, agent_override_fields, authored_override_validator, "
-        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, "
+        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, approval_aliases, "
         "worker_inert_agent_functions, managed_init_args, supports_toolkit_filters)"
     ),
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
@@ -300,6 +303,7 @@ _SIGNATURES = {
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
     "tool": "(function, /, *, name, description)",
     "toolkit_functions": "(toolkit)",
+    "write_agent_file": "(raw_path, payload, *, workspace_root, file_access)",
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
 }
 

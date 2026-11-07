@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import BinaryIO
 
-    from mindroom.config.models import FileAccess
-
 _BASE_DIR_ESCAPE_HINT = "Set the agent's file_access to 'unrestricted' to allow paths outside the workspace."
 # A toolkit rooted at a shared directory reports paths as the caller spelled that directory, never relative to it,
 # so a listed name is never read back from the workspace instead.
@@ -217,27 +215,6 @@ def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes | BinaryI
                     os.fchown(output.fileno(), uid, existing.st_gid)
                     break
             _write_payload(output, payload)
-
-
-def write_agent_file(
-    raw_path: str,
-    payload: bytes | BinaryIO,
-    *,
-    workspace_root: Path | None,
-    file_access: FileAccess,
-) -> Path:
-    """Publish one model-supplied path where the agent's ``file_access`` allows and return the resolved path.
-
-    Relative paths resolve from the workspace; ``workspace`` mode refuses paths outside it and agents without one.
-    """
-    restrict = file_access == "workspace"
-    if restrict and workspace_root is None:
-        msg = f"Path '{raw_path}' requires an agent workspace; file_access is 'workspace'."
-        raise ValueError(msg)
-    base_dir = resolve_tool_base_dir(workspace_root)
-    resolved = resolve_base_dir_path(base_dir, raw_path, restrict)
-    write_resolved_file(base_dir, resolved, payload)
-    return resolved
 
 
 def remove_resolved_path(base_dir: Path, resolved: Path) -> None:

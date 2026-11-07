@@ -1432,6 +1432,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.events",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.approval.continuation_runner",
@@ -2275,6 +2276,7 @@ depends_on = [
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_runner_scripts",
     "mindroom.api.validation_errors",
+    "mindroom.api.worker_preview",
 ]
 
 [[modules]]
@@ -5246,6 +5248,7 @@ depends_on = [
     "mindroom.hooks.types",
     "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
+    "mindroom.tool_system.events",
     "mindroom.tool_system.plugin_identity",
     "mindroom.tool_system.tool_environment",
 ]
@@ -5266,6 +5269,7 @@ depends_on = [
     "mindroom.failure_text",
     "mindroom.config.resolution",
     "mindroom.scheduling.ownership",
+    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]
@@ -5442,6 +5446,7 @@ depends_on = [
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.catalog",
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
 ]
 visibility = ["mindroom.cli.plugins", "mindroom.plugin_install"]
@@ -6811,6 +6816,7 @@ exclusive = true
 
 [[interfaces]]
 expose = [
+    "ApprovalAlias",
     "ConfigField",
     "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
@@ -6837,6 +6843,7 @@ expose = [
     "open_upload_source",
     "read_upload_source",
     "resolve_agent_file",
+    "write_agent_file",
 ]
 from = ["mindroom.file_access"]
 
@@ -7229,6 +7236,7 @@ expose = [
     "render_tool_trace_for_context",
     "serialize_tool_trace",
     "strip_visible_tool_markers",
+    "tool_args_chat_preview",
     "tool_marker_text",
     "tool_markers_match_trace",
     "with_stored_calls",
@@ -7394,6 +7402,7 @@ expose = [
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "toolkit_approval_alias",
 ]
 from = ["mindroom.approval.tool_approval"]
 
@@ -8131,6 +8140,18 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.runtime"
 depends_on = ["mindroom.worker_computer.protocol"]
+
+[[modules]]
+path = "mindroom.api.worker_preview"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_runner",
+    "mindroom.previews.relay",
+]
+
+[[modules]]
+path = "mindroom.previews.relay"
+depends_on = []
 
 [[modules]]
 path = "mindroom.worker_computer.screencast"

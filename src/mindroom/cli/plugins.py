@@ -30,31 +30,31 @@ _PLUGINS_DIR_OPTION: Path | None = typer.Option(
 
 @plugins_app.command("check")
 def plugin_check(
-    path: Path = typer.Argument(  # noqa: B008
+    path: str = typer.Argument(
         ...,
-        exists=True,
-        file_okay=False,
-        dir_okay=True,
-        resolve_path=True,
-        help="Plugin directory containing mindroom.plugin.json.",
+        help="Plugin directory or Python package spec, in any form a config.yaml plugins entry takes.",
     ),
     strict: bool = typer.Option(False, "--strict", help="Treat imports from outside the plugin API as errors."),
     json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
     """Strictly validate one plugin against this MindRoom version."""
-    from mindroom.plugin_check import check_plugin, imports_outside_plugin_api  # noqa: PLC0415
+    from mindroom.plugin_check import check_plugin, imports_outside_plugin_api, resolve_plugin_root  # noqa: PLC0415
 
-    outside_imports = imports_outside_plugin_api(path)
-    internal_imports = [
-        {"path": found.path.as_posix(), "line": found.line, "name": found.name} for found in outside_imports
-    ]
+    outside_imports: list[OutsideImport] = []
     try:
         # With --json, logs and anything the plugin prints go to stderr, so stdout carries only the JSON document.
         with redirect_stdout(sys.stderr) if json_output else nullcontext():
-            result = check_plugin(path)
+            plugin_root = resolve_plugin_root(path)
+            outside_imports = imports_outside_plugin_api(plugin_root)
+            result = check_plugin(plugin_root)
     except Exception as exc:
         if json_output:
-            typer.echo(json.dumps({"status": "failed", "detail": str(exc), "internal_imports": internal_imports}))
+            failure = {
+                "status": "failed",
+                "detail": str(exc),
+                "internal_imports": _internal_imports_json(outside_imports),
+            }
+            typer.echo(json.dumps(failure))
         else:
             console.print(f"[red]Plugin check failed:[/red] {escape(str(exc))}")
             _print_outside_imports(outside_imports, strict=strict)
@@ -69,7 +69,7 @@ def plugin_check(
             "hooks": result.hook_names,
             "automations": result.automation_names,
             "skills": result.skill_directories,
-            "internal_imports": internal_imports,
+            "internal_imports": _internal_imports_json(outside_imports),
         }
         if strict_failure:
             summary |= {"status": "failed", "detail": _OUTSIDE_IMPORTS}
@@ -85,6 +85,10 @@ def plugin_check(
     _print_outside_imports(outside_imports, strict=strict)
     if strict_failure:
         raise typer.Exit(1)
+
+
+def _internal_imports_json(outside_imports: list[OutsideImport]) -> list[dict[str, str | int]]:
+    return [{"path": found.path.as_posix(), "line": found.line, "name": found.name} for found in outside_imports]
 
 
 def _print_outside_imports(outside_imports: list[OutsideImport], *, strict: bool) -> None:

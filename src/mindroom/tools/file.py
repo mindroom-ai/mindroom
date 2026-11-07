@@ -13,18 +13,7 @@ from agno.tools.file.file import TEXT_EXTENSIONS, _extract_snippet, _format_size
 from agno.utils.log import log_debug, log_error
 
 from mindroom.path_confinement import is_git_metadata_path, read_regular_file_within_root
-from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
-from mindroom.tool_system.declarations import (
-    ConfigField,
-    SetupType,
-    ToolCategory,
-    ToolExecutionTarget,
-    ToolFileAccess,
-    ToolManagedInitArg,
-    ToolStatus,
-)
-from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.path_safety import (
+from mindroom.path_safety import (
     blocked_file_action_message,
     blocked_git_metadata_message,
     format_path_for_output,
@@ -36,6 +25,17 @@ from mindroom.tools.path_safety import (
     split_search_pattern,
     write_resolved_file,
 )
+from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolExecutionTarget,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

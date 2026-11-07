@@ -28,6 +28,7 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
     scheduled_call_offers_any_arguments,
+    toolkit_approval_alias,
 )
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
@@ -50,6 +51,7 @@ from mindroom.scheduling.errors import (
 from mindroom.scheduling.ownership import decide_task_owner
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -1350,6 +1352,7 @@ async def _checked_scheduled_call(
             tool_name,
             arguments,
             agent_name,
+            toolkit_approval_alias(config, config_plugins(config, runtime_paths).tools, call.toolkit_name, tool_name),
         )
     except ToolApprovalScriptError as exc:
         msg = f"Could not evaluate the approval policy for `{tool_name}`: {exc}"

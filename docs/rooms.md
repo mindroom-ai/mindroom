@@ -4,7 +4,7 @@ icon: lucide/layout-grid
 
 # Rooms & Spaces
 
-This page covers the Matrix rooms MindRoom creates and manages, their join, listing, encryption, invitation, and admin settings, and the root Matrix Space that groups them.
+This page covers the Matrix rooms MindRoom creates and manages, their join, listing, encryption, invitation, and admin settings, the root Matrix Space that groups them, and rooms listed under other rooms.
 Who may talk to an agent in a room is a separate setting covered in [Access Control](authorization.md).
 
 ## Configuration
@@ -79,12 +79,21 @@ MindRoom applies this policy to new and existing managed rooms on startup and on
 - Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
-Agents and teams leave rooms they are no longer configured for, except direct-message rooms and rooms they joined by accepting an invitation.
+Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms they joined because [one of their rooms lists them](#rooms-under-a-room).
 
 On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
 Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.
 A recorded room stays in use even when its alias now points elsewhere, which logs `managed_alias_points_elsewhere`.
 If the alias of a recorded room is deleted, the router restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
+
+## Rooms Under a Room
+
+A room can list other rooms under it with `m.space.child` events, each listed room naming it back as its canonical `m.space.parent`.
+The router, agents, and teams in a room join every room it lists this way, each only when its `accept_invites` would accept an invitation from whoever listed the room.
+A listed room they cannot join without an invitation, such as a private one, needs them invited.
+They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
+Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
+A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.
 
 ## Room Cleanup
 

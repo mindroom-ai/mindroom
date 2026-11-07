@@ -27,6 +27,7 @@ from uuid import uuid4
 import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, ValidationError
@@ -724,10 +725,10 @@ def app_runner_token(app: FastAPI) -> str | None:
 
 
 async def validate_runner_token(
-    request: Request,
+    request: HTTPConnection,
     x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
 ) -> None:
-    """Reject requests that do not carry the configured runner token."""
+    """Reject requests and WebSockets that do not carry the configured runner token."""
     proxy_token = app_runner_token(request.app)
     # An empty token would match a missing header, so treat it as unconfigured.
     if not proxy_token:
