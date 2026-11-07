@@ -1612,6 +1612,7 @@ class ResponseRunner:
             attachment_ids=request.attachment_ids,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
+            turn_id=request.turn_id,
         )
         execution_identity = tool_context.execution_identity
         configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
@@ -2054,6 +2055,7 @@ class ResponseRunner:
             attachment_ids=request.attachment_ids,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
+            turn_id=request.turn_id,
         )
         return PreparedResponseRuntime(
             media_inputs=media_inputs,

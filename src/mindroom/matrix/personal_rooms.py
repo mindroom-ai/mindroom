@@ -27,6 +27,7 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import (
     admin_join_room_user,
     create_room,
+    ensure_managed_room_power_levels,
     ensure_room_admin_power_levels,
     get_room_members,
     invite_to_room,
@@ -41,6 +42,7 @@ from mindroom.matrix.personal_room_store import (
     read_personal_room,
     write_personal_room,
 )
+from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix_identifiers import managed_room_alias
@@ -265,6 +267,16 @@ class PersonalRoomService:
                     source_room_id,
                     reinvite_departed_owner,
                 )
+                # Keep the validated room's MindRoom state power levels current, then let the router, whose client
+                # observed the trigger, publish the room's accounts if it is already in the room.
+                await ensure_managed_room_power_levels(self._client(), record.room_id)
+                if record.room_id in source_client.rooms:
+                    await reconcile_room_accounts(
+                        source_client,
+                        self.runtime.config,
+                        self.runtime_paths,
+                        record.room_id,
+                    )
                 if human_joined is None:
                     return record.room_id
                 await self._finish(record, path, source_room_id, human_joined=human_joined)

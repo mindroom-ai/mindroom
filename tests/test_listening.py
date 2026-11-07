@@ -142,6 +142,7 @@ class _Bot:
         target: MessageTarget,
         *,
         user_id: str | None,
+        turn_id: str,
         active_model_name: str | None = None,
     ) -> ToolRuntimeContext:
         plugins = config_plugins(self.config, self.runtime_paths)
@@ -157,6 +158,7 @@ class _Bot:
             conversation_reader=self.conversation_reader,
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
+            turn_id=turn_id,
             # The bot binds the hooks of the plugins a turn captured into its context.
             hooks=HookBindings(registry=plugins.hooks),
         )
@@ -1636,6 +1638,42 @@ async def test_a_script_started_by_a_silent_turn_is_granted_only_listen_tools(
 
     # The agent's matrix_message, and the attachments it brings, stay out of reach.
     assert grants == [(ScriptToolGrant("react", "react"),)]
+
+
+async def test_each_silent_turn_runs_its_tools_under_a_turn_id_of_its_own(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two silent turns are two turns: the tool calls of each carry a turn ID the other's do not."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    turn_ids: list[str | None] = []
+
+    async def record_turn_id(*_args: object, **_kwargs: object) -> TurnResult:
+        context = get_tool_runtime_context()
+        assert context is not None
+        turn_ids.append(context.turn_id)
+        return TurnResult(text="")
+
+    monkeypatch.setattr(turn_module, "ai_response", record_turn_id)
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    for event_id in ("$a", "$b"):
+        await run_silent_turn(
+            bot=cast("AgentBot", bot),
+            agent_name="scribe",
+            room_id=ROOM,
+            heard=[_heard_message(event_id)],
+            listen=listen,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    assert len(turn_ids) == 2
+    assert len(set(turn_ids) - {None}) == 2
 
 
 async def test_usage_recorded_as_listening(

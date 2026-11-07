@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, Literal
@@ -64,7 +65,7 @@ logger = get_logger(__name__)
 
 
 class ToolApprovalScriptError(RuntimeError):
-    """One approval-script load or execution failure."""
+    """One approval-script load or execution failure, or one approval alias judge failure."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +253,7 @@ async def evaluate_tool_approval(
     requires_approval, timeout_seconds = await _evaluate_rules(config, runtime_paths, tool_name, arguments, agent_name)
     if requires_approval or alias is None:
         return requires_approval, timeout_seconds
-    judged_calls = alias.judge(arguments)
+    judged_calls = _judged_calls(alias, tool_name, arguments)
     if judged_calls is None:
         judged = _rules_may_ask(config, alias.judged_as)
         return judged if judged[0] else (False, timeout_seconds)
@@ -261,6 +262,31 @@ async def evaluate_tool_approval(
         if judged[0]:
             return judged
     return False, timeout_seconds
+
+
+def _judged_calls(
+    alias: ApprovalAlias,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> Sequence[Mapping[str, object]] | None:
+    """Return the calls ``alias``'s judge says one call of ``tool_name`` amounts to, failing as an approval script does."""
+    try:
+        judged_calls = alias.judge(arguments)
+    except Exception as exc:
+        logger.warning("Approval alias judge raised", tool_name=tool_name, exc_info=True)
+        msg = f"Approval alias judge of '{tool_name}' failed with {type(exc).__name__}"
+        raise ToolApprovalScriptError(msg) from exc
+    if judged_calls is None:
+        return None
+    # Text is a sequence too, but never of calls: an empty one would otherwise approve the call.
+    if (
+        not isinstance(judged_calls, Sequence)
+        or isinstance(judged_calls, str | bytes)
+        or not all(isinstance(call, Mapping) for call in judged_calls)
+    ):
+        msg = f"Approval alias judge of '{tool_name}' returned neither a sequence of argument mappings nor None."
+        raise ToolApprovalScriptError(msg)
+    return judged_calls
 
 
 async def _evaluate_rules(
