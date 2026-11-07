@@ -357,6 +357,7 @@ The rules:
 
 - Starting or joining a call needs permission to post messages in the room; reading the live call needs room membership.
 - A person's app is in the call while it checks in at least every 60 seconds, which it does every 20 seconds; leaving takes it out at once.
+- Leaving from one device takes the person out of the call and releases their hold on Pause; their other device in the call rejoins with its next check-in.
 - People in the call from other Matrix apps are listed as in it, but not transcribed.
 - A call ends when nobody is in it, and a call membership a crashed client left behind does not keep it going.
 - A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB; each person has one stretch at a time at speech-to-text, and at most 240 a minute.
