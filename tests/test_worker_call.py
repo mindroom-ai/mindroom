@@ -21,7 +21,7 @@ from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -221,3 +221,19 @@ def test_a_call_to_the_shared_runner_needs_its_proxy_url(tmp_path: Path, start: 
 
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_URL must be set"):
         worker_call(stand_ins, "run_shell_command", start=start)
+
+
+@pytest.mark.parametrize(
+    ("debug_metadata", "api_root"),
+    [
+        ({}, "http://worker-1:8766/api/sandbox-runner"),
+        ({"api_root": "http://worker-1:9000/runner"}, "http://worker-1:9000/runner"),
+    ],
+    ids=["from-endpoint", "named"],
+)
+def test_a_worker_s_api_root_is_the_one_its_backend_names(debug_metadata: dict[str, str], api_root: str) -> None:
+    """A worker's API root is the one its backend names, else the root of its execute endpoint."""
+    workers = _DedicatedWorkers()
+    handle = workers.ensure_worker(WorkerSpec(worker_key="v1:default:user:~@alice:localhost"))
+
+    assert worker_api_root(replace(handle, debug_metadata=debug_metadata)) == api_root
