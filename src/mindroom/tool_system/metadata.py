@@ -840,11 +840,17 @@ def get_tool_by_name(
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
+        available = toolkit_function_names(toolkit)
+        declared = frozenset(metadata.function_names or ())
+        unknown_aliases = sorted(set(metadata.approval_aliases) - set(available) - declared)
+        if unknown_aliases:
+            msg = f"Tool '{tool_name}' declares approval aliases for functions it does not have: {', '.join(unknown_aliases)}"
+            raise ToolMetadataValidationError(msg)
         offered = _offered_function_names(
-            toolkit_function_names(toolkit),
+            available,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
-            declared_functions=frozenset(metadata.function_names or ()),
+            declared_functions=declared,
         )
         output_file_policy = (
             ToolOutputFilePolicy.from_runtime(
@@ -1060,7 +1066,8 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
     tools: list[dict[str, Any]] = []
 
     for metadata in tool_metadata.values():
-        tool_dict = asdict(metadata)
+        # asdict copies every value deeply, which code such as a judge bound to a lock cannot survive.
+        tool_dict = asdict(replace(metadata, factory=None, approval_aliases={}))
         tool_dict["category"] = metadata.category.value
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
@@ -1072,6 +1079,7 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
             tool_dict.pop("oauth_fallback_fields", None)
         if not metadata.requires_primary_runtime:
             tool_dict.pop("requires_primary_runtime", None)
+        tool_dict.pop("approval_aliases", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("worker_inert_agent_functions", None)

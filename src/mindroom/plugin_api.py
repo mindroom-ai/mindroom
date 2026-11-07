@@ -1,17 +1,20 @@
 """The supported import surface for plugin code.
 
-Plugins import MindRoom's entry points from here; the modules that own them may change between releases.
+Plugins import MindRoom's entry points and the types they annotate with from here; the modules that own them may
+change between releases.
 `GoogleCloudToolkit` and the `mindroom.memory` helpers stay in their documented modules, because those modules load
 Agno at import and this one stays free of Agno and provider SDKs.
-`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, and each enum's member names.
+`tests/test_plugin_api.py` pins this surface's names, parameter names and kinds, and the other parts its docstring
+lists, and fails on a change to them until the change is pinned there with `PLUGIN_API_VERSION`, this surface's version.
 """
 
 from __future__ import annotations
 
 from mindroom.agent_loop.helper import HelperResult, complete_prompt
 from mindroom.automations import Ask, AutomationContext, Done, automation, automation_threads
-from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, resolve_config_relative_path
-from mindroom.file_access import resolve_agent_file
+from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, RuntimePaths, resolve_config_relative_path
+from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.hooks import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EVENT_AGENT_STARTED,
@@ -49,6 +52,9 @@ from mindroom.hooks import (
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookBindings,
+    HookContext,
+    HookMatrixAdmin,
+    HookMessageSender,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
@@ -78,6 +84,7 @@ from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
 from mindroom.providers.registry import build_model_provider
+from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
@@ -85,6 +92,7 @@ from mindroom.tool_system.atlassian_connections import (
 )
 from mindroom.tool_system.authoring import CurrentCall, Toolkit, current_call, tool, toolkit_functions
 from mindroom.tool_system.declarations import (
+    ApprovalAlias,
     ConfigField,
     SetupType,
     ToolCategory,
@@ -93,12 +101,14 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolStatus,
 )
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.google_workspaces import (
     GoogleWorkspaceConfig,
     google_workspace_oauth_providers,
     register_google_workspace_tools,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -135,17 +145,20 @@ __all__ = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "PLUGIN_API_VERSION",
     "ROUTER_AGENT_NAME",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "VOICE_PREFIX",
     "AfterResponseContext",
     "AgentLifecycleContext",
+    "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
     "AutomationContext",
     "BeforeResponseContext",
     "CancelledResponseContext",
     "CompactionHookContext",
+    "Config",
     "ConfigField",
     "ConfigReloadedContext",
     "ContactBeforeSendContext",
@@ -158,6 +171,9 @@ __all__ = [
     "GoogleWorkspaceConfig",
     "HelperResult",
     "HookBindings",
+    "HookContext",
+    "HookMatrixAdmin",
+    "HookMessageSender",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -167,12 +183,15 @@ __all__ = [
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
+    "PublicFetchError",
+    "PublicFetchResult",
     "ReactionReceivedContext",
     "ResolvedWorkerTarget",
     "ResponseDraft",
     "ResponseResult",
     "RoomMemberJoinedContext",
     "RoomMemberLeftContext",
+    "RuntimePaths",
     "ScheduleFiredContext",
     "SenderKind",
     "SessionHookContext",
@@ -187,6 +206,7 @@ __all__ = [
     "ToolManagedInitArg",
     "ToolRuntimeContext",
     "ToolStatus",
+    "ToolTraceEntry",
     "ToolValue",
     "Toolkit",
     "TranscriptLine",
@@ -203,6 +223,8 @@ __all__ = [
     "current_call",
     "current_execution_identity",
     "emit_custom_event",
+    "fetch_public_url",
+    "fetch_public_url_sync",
     "get_logger",
     "get_tool_by_name",
     "get_tool_runtime_context",
@@ -221,5 +243,6 @@ __all__ = [
     "resolve_turn_model",
     "tool",
     "toolkit_functions",
+    "write_agent_file",
     "write_file_within_root",
 ]

@@ -99,7 +99,12 @@ from tests.scheduling_helpers import joined_member_state, run_once_task, schedul
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
-from tests.tool_approval_helpers import gated_functions, scheduled_call_approvals
+from tests.tool_approval_helpers import (
+    gated_functions,
+    judge_test_tool_function_as_shell,
+    scheduled_call_approvals,
+    timed_out_judge,
+)
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -1032,13 +1037,13 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
         await manager.shutdown()
 
 
-def _gated_config() -> Config:
+def _gated_config(match: str = "post_slack_message") -> Config:
     return _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
+                rules=[ApprovalRuleConfig(match=match, action="require_approval")],
             ),
         ),
     )
@@ -1424,6 +1429,48 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
         await _schedule_from_tool(arguments_json=arguments_json, execute_at=execute_at, agent=live_agent)
 
     context.client.room_put_state.assert_not_awaited()
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_call_judged_as_a_gated_function_can_be_scheduled_pre_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No rule gates ``post_slack_message``, but its toolkit says its calls are shell commands, which a rule gates."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message")
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_fails_refuses_the_schedule_as_a_failing_approval_script_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A judge that times out leaves the call unscheduled with the approval-policy error and posts no card."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message", timed_out_judge)
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(
+            SchedulingError,
+            match=r"Could not evaluate the approval policy for `post_slack_message`: .*failed with TimeoutError",
+        ),
+    ):
+        await _schedule_from_tool()
+
     request.assert_not_awaited()
 
 
@@ -2129,6 +2176,36 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
         assert runs == []
         assert observed == [("post_slack_message", declined, True), ("run_scheduled_call", declined, False)]
         assert await _binding_column(journal, "outcome") == "failed"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stored_call_reads_as_hidden_while_the_runner_that_runs_it_reads_as_shown(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A reply that shows tool calls shows the runner's call; the stored call's arguments stay out of Matrix."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    seen: list[tuple[str, bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def mirror(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.shown, ctx.chat_preview()))
+
+    registry = HookRegistry.from_plugins([_plugin("mirror", [mirror])])
+    agent = _live_agent(middleware=(detached_policy(registry),))
+    try:
+        await _armed(manager)
+
+        context = replace(_turn_context(_code_config()), hooks=HookBindings(registry=registry), tool_calls_shown=True)
+        await _run(manager, agent, context=context)
+
+        assert seen == [
+            ("run_scheduled_call", True, f"task_id={_TASK}, arguments_json=null"),
+            ("post_slack_message", False, None),
+        ]
     finally:
         await manager.shutdown()
 

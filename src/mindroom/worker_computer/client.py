@@ -1,4 +1,4 @@
-"""Backend-only authenticated HTTP and binary websocket worker transport."""
+"""Backend-only authenticated HTTP and WebSocket stream transport to a worker computer."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import aiohttp
 from pydantic import TypeAdapter, ValidationError
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
-from mindroom.worker_computer.protocol import ComputerStatus
+from mindroom.worker_computer.protocol import MAX_WORKER_STREAM_MESSAGE_BYTES, SCREENCAST_PROTOCOL, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError
 
 if TYPE_CHECKING:
@@ -72,16 +72,17 @@ async def computer_stream(
     handle: WorkerHandle,
     session_id: str,
     generation: str,
+    protocol: str,
 ) -> AsyncIterator[aiohttp.ClientWebSocketResponse]:
-    """Connect only to a manager-issued worker; URL carries no credential."""
+    """Connect only to a manager-issued worker's desktop or screencast stream; URL carries no credential."""
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as client:  # noqa: SIM117 - own the client until response cleanup completes
             async with client.ws_connect(
-                _worker_url(handle) + "/stream",
+                _worker_url(handle) + ("/screencast" if protocol == SCREENCAST_PROTOCOL else "/stream"),
                 headers=_headers(handle),
                 params={"session_id": session_id, "generation": generation},
-                protocols=("binary",),
-                max_msg_size=4 * 1024 * 1024,
+                protocols=(protocol,),
+                max_msg_size=MAX_WORKER_STREAM_MESSAGE_BYTES,
                 autoclose=True,
             ) as websocket:
                 yield websocket

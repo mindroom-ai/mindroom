@@ -94,6 +94,7 @@ plugins:
 | --- | --- | --- | --- |
 | `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
 | `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
+| `required` | bool | `false` | Set to `true` to make startup fail, and a reload be refused, when the plugin is skipped for any reason, instead of running without it; see [Broken plugins](#broken-plugins) |
 | `settings` | dict | `{}` | Free-form values passed to the plugin's hooks, automations, and OAuth module; masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
@@ -126,6 +127,8 @@ plugins:
 ```
 
 The `python:`, `pkg:`, and `module:` prefixes always resolve a package, and `:sub/path` after the package name points to a subdirectory inside it.
+In a dotted name such as `python:my_skill_pack.plugins.demo`, each part after the first must be a package directory, or a namespace package directory, inside the one before.
+MindRoom finds those parts on disk without running any `__init__.py`, so it does not find a part that only a `pkgutil.extend_path` call or a custom import hook would provide.
 The resolved directory must contain `mindroom.plugin.json`.
 
 ## Live development (hot reload)
@@ -153,15 +156,17 @@ Keep in mind:
 
 ### Broken plugins
 
-`mindroom run` startup does not crash on a broken plugin.
+`mindroom run` startup does not crash on a broken plugin unless its entry sets `required: true`, which stops startup with `Required plugin <path> failed to load: <reason>`.
 It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
+Only the primary process enforces `required`; a worker that cannot load the plugin skips it like any other.
 If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
 Agents keep a disabled tool in their config, including the tools a generated agent's owner chose, and offer it again once the plugin loads.
 Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.
 `mindroom config validate` and `mindroom plugins check` report the same problems as errors instead.
 
 When a save breaks a plugin during hot reload, MindRoom skips that plugin the same way and keeps the other plugins active.
-When the configured plugins cannot load together, such as two plugins sharing a `name`, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
+When the configured plugins cannot load together, such as two plugins sharing a `name`, or a required plugin would be skipped, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
+A config change that would leave a required plugin skipped is refused, and the running config stays.
 The next valid save reloads normally.
 For hooks that raise while handling an event, see [Errors and timeouts](hooks.md#errors-and-timeouts).
 
@@ -182,7 +187,7 @@ The reply lists the active plugins, the number of cancelled background tasks, an
 ```
 
 Only users listed in `administrators` in `config.yaml` may run it; others get `❌ Admin only.`
-A reload whose plugins cannot load together keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
+A reload whose plugins cannot load together, or that would skip a required plugin, keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
 `!reload_plugins` is an alias.
 
 ## Compatibility checks
@@ -191,12 +196,31 @@ Validate a plugin against the installed MindRoom version before deployment:
 
 ```bash
 mindroom plugins check ./my-plugin
+mindroom plugins check pkg:my_skill_pack:plugins/demo
 ```
 
+The argument takes every form a `plugins:` entry takes, as listed in [Path resolution](#path-resolution) and [Python package plugins](#python-package-plugins), and relative paths resolve against the current directory instead of the config directory.
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
+It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
+It leaves out the plugin's top-level `tests/` directory and any directory inside the plugin with its own manifest, which is a separate plugin.
+It also accepts `mindroom.script_sdk`, the client that [background scripts](tools/background-scripts.md#calling-agent-tools-from-a-script), such as a skill's scripts, call tools with.
+Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
+The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
+
+## Plugin API versions
+
+`PLUGIN_API_VERSION` in `mindroom.plugin_api` is the version, as `(major, minor)`, of what this page and [Hooks](hooks.md) let plugins use: the manifest format, and the names they say to import from `mindroom.plugin_api` and the other modules they name.
+A change that only adds to the API bumps the minor version, so a plugin written for an earlier minor of the same major keeps working.
+A breaking change, one that removes or changes anything a plugin uses, bumps the major version.
+Anything a major bump removes or changes is first deprecated for at least 30 days, announced in this section with the date from which it may go.
+
+A plugin states the version it needs as `mindroom_plugin_api` in its manifest, such as `"1.2"` for major 1 at minor 2 or later.
+MindRoom checks it before running any of the plugin's code and skips a plugin that needs another major or a later minor, logging `Failed to load plugin, skipping` with a reason such as `Plugin 'my-plugin' needs plugin API 1.3, but this MindRoom provides 1.2: upgrade MindRoom`.
+`mindroom plugins check` fails with the same reason, so `mindroom plugins install` and `mindroom plugins update` refuse such a plugin too.
+A plugin without `mindroom_plugin_api` loads on every version.
 
 ## Plugin structure
 
@@ -214,6 +238,7 @@ my-plugin/
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, and skills.
 Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
+`mindroom.plugin_api` also exports the types to annotate with: `Config` and `RuntimePaths` for the `config` and `runtime_paths` that hooks, tools, and automations receive, `HookContext` for any hook's context, `HookMessageSender` and `HookMatrixAdmin` for `message_sender` and `matrix_admin`, and `ToolTraceEntry` for the entries of a response draft's `tool_trace`.
 Other `mindroom` modules can change in any release.
 
 ## Manifest format
@@ -221,22 +246,26 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
+  "mindroom_plugin_api": "1.0",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
   "hooks_module": "hooks.py",
   "routes_module": "routes.py",
-  "skills": ["skills"]
+  "skills": ["skills"],
+  "reserved_namespaces": ["com.example.my_plugin."]
 }
 ```
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | string | **yes** | Plugin identifier using only lowercase ASCII letters, digits, `-`, and `_`; must be unique among configured plugins |
+| `mindroom_plugin_api` | string | no | Plugin API version the plugin needs, as `"MAJOR.MINOR"`; see [Plugin API versions](#plugin-api-versions) |
 | `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
 | `hooks_module` | string | no | Relative path to the module with `@hook` functions and `@automation` checks; when omitted, `tools_module` is scanned for them |
 | `routes_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served under `/api/plugins/<name>/`; see [HTTP routes](#http-routes) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
+| `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -330,7 +359,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 `ToolFileAccess` values:
 
 - `NONE`: the tool takes no local file paths.
-- `AGENT`: the tool resolves every model-supplied path through `mindroom.plugin_api.resolve_agent_file`, so it follows the agent's `file_access` setting.
+- `AGENT`: the tool reads and writes every model-supplied path through `resolve_agent_file` and `write_agent_file` (see [Agent files](#agent-files)), so it follows the agent's `file_access` setting.
 - `UNCONFINED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
 
 See [Security Posture](architecture/security-posture.md#file-access) for how each class is treated.
@@ -359,12 +388,56 @@ See [Security Posture](architecture/security-posture.md#file-access) for how eac
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](tools/index.md#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
+| `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
 
 Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
 An Agno toolkit function that reads its injected `agent`, `team`, or `run_context` needs the primary runtime too.
 If it accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
 `requires_room_context` and `requires_primary_runtime` describe where a tool can run; they do not grant or replace tool authorization.
+
+### Approval aliases
+
+A function that does what another function does, such as one that types command lines into a shell, can have that function's [approval rules](tool-approval.md) judge its calls too.
+Map its name to an `ApprovalAlias` whose `judged_as` names the other function and whose `judge` returns the arguments of each call of that function one call amounts to:
+
+```python
+from mindroom.plugin_api import ApprovalAlias, ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+
+class LineTools(Toolkit):
+    name = "lines"
+
+    @tool
+    def run_line(self, command: str) -> str:
+        """Run one command line in the agent's shell session."""
+        ...
+
+
+def shell_calls(arguments):
+    command = arguments.get("command")
+    return [{"args": command}] if isinstance(command, str) else None
+
+
+@register_tool_with_metadata(
+    name="lines",
+    display_name="Lines",
+    description="Run command lines",
+    category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.UNCONFINED,
+    executes_code=True,
+    approval_aliases={"run_line": ApprovalAlias(judged_as="run_shell_command", judge=shell_calls)},
+)
+def lines_tools() -> type[LineTools]:
+    return LineTools
+```
+
+A call then needs approval when its own rules ask for it or when the `judged_as` rules would ask about any call `judge` returns, so a rule that auto-approves `run_line` does not lift a `run_shell_command` rule.
+`judge` reads only the call's arguments, since an approval covers exactly those: return an empty list for a call that amounts to no call of `judged_as`, and `None` when the arguments cannot tell, which asks whenever the `judged_as` rules may ask.
+The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
+Each key must name one of the toolkit's functions: a toolkit with an alias for any other name fails to build, and the log names the alias.
+When an option can turn an aliased function off, pass every function the toolkit can offer as `function_names` to `register_tool_with_metadata`, so the toolkit still builds without it.
+In a [background script](tools/background-scripts.md#which-tools-a-script-can-call-and-when-it-needs-approval) or a [Dynamic Workflow](tools/agent-orchestration.md#allowing-participant-tools), listing the toolkit in `allowed_tools` does not pre-approve the `judged_as` function: unless a toolkit with that function is pre-approved for the same script or participant, a call asks whenever `judge` returns a call that no rule auto-approves or lets through, and a workflow participant gets the aliased function only when it would not ask.
 
 ### Dependencies
 
@@ -468,10 +541,11 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `AGENT_NAME` | `agent_name` | The constructing agent's name, when available |
 | `FILE_ACCESS` | `file_access` | The constructing agent's effective `file_access` setting |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
-| `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
+| `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | The constructing agent's workspace root, where managed tool-output saves go |
 | `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
+| `SHARED_DIRECTORY_ROOTS` | `shared_directory_roots` | A function that returns the [shared directories](tools/execution-and-coding.md#shared_directories) the tool can reach where it runs, each with its `path` and whether it is `writable`: in the primary process the constructing agent's, or none when tools run in dedicated workers or through the sandbox proxy, and in a worker every directory it mounts (see [Access by deployment](tools/execution-and-coding.md#access-by-deployment)); call it on each use, since the agent can join or leave one while it replies |
 
 ```python
 from mindroom.plugin_api import (
@@ -509,6 +583,78 @@ def needs_runtime_tools() -> type[NeedsRuntimeTools]:
     return NeedsRuntimeTools
 ```
 
+### Agent files
+
+A tool that takes file paths from the model reads them with `resolve_agent_file` and writes them with `write_agent_file` from `mindroom.plugin_api`, passing the values of the `TOOL_OUTPUT_WORKSPACE_ROOT` and `FILE_ACCESS` managed init args.
+Both resolve relative paths from the agent's workspace and follow the agent's `file_access`: under `workspace` they raise `ValueError` for a path outside the workspace, and under `unrestricted` they reach any path the tool's process can.
+They work the same when the tool runs in a worker, where the workspace is the agent's workspace in that worker.
+`resolve_agent_file` returns an existing regular file, which its `open()` opens for reading, and names `field_name` in its errors.
+`write_agent_file` creates missing directories, replaces an existing file whole, and returns the path it wrote.
+
+```python
+from pathlib import Path
+from typing import Literal
+
+from mindroom.plugin_api import (
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    Toolkit,
+    register_tool_with_metadata,
+    resolve_agent_file,
+    tool,
+    write_agent_file,
+)
+
+
+class NotesTools(Toolkit):
+    name = "notes"
+
+    def __init__(
+        self,
+        *,
+        tool_output_workspace_root: Path | None,
+        file_access: Literal["workspace", "unrestricted"],
+    ) -> None:
+        super().__init__()
+        self.workspace_root = tool_output_workspace_root
+        self.file_access = file_access
+
+    @tool
+    def save_note(self, path: str, text: str) -> str:
+        """Save a note.
+
+        Args:
+            path: Where to save the note, relative to the workspace.
+            text: The note.
+        """
+        written = write_agent_file(path, text.encode(), workspace_root=self.workspace_root, file_access=self.file_access)
+        return f"Saved {written}."
+
+    @tool
+    def read_note(self, path: str) -> str:
+        """Read a note.
+
+        Args:
+            path: The note's path, relative to the workspace.
+        """
+        note = resolve_agent_file(path, workspace_root=self.workspace_root, file_access=self.file_access, field_name="path")
+        with note.open() as file:
+            return file.read().decode()
+
+
+@register_tool_with_metadata(
+    name="notes",
+    file_access=ToolFileAccess.AGENT,
+    display_name="Notes",
+    description="Save and read notes in the agent workspace",
+    category=ToolCategory.PRODUCTIVITY,
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
+)
+def notes_tools() -> type[NotesTools]:
+    return NotesTools
+```
+
 ### Tool runtime context
 
 Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
@@ -517,6 +663,8 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 `context.execution_identity` names who the call runs for: the agent, inside a team the member that called the tool, the account that answers, the requester, and the conversation.
 `mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
 `context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
+`await context.hooks.message_sender(room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch=False, mentions=None, wake_mentioned=True)` sends a message from the turn's bot, with `source_hook` such as `"my-plugin:my-tool"` naming what sent it; `extra_content`, `trigger_dispatch`, `mentions`, and `wake_mentioned` work as in a hook's [`ctx.send_message`](hooks.md#sending-messages), but the message does not carry the turn's requester.
+`context.turn_id` names the agent turn the call belongs to, which that turn's hooks carry as `ctx.turn_id`, or is `None` for a call outside a turn, such as a background script's; in a delegated subagent's turn, `context.parent_turn_id` names the turn that delegated it.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -569,6 +717,29 @@ Pass a model name from `config.yaml` to `build_model_provider` instead to call a
 The provider uses the model entry's credentials, base URL, and request settings.
 With `schema`, `result.content` is an instance of that model, or the raw text when the answer does not parse; without it, `result.content` is the answer text.
 Each call is one request with no tools and no conversation history.
+
+### Fetching public URLs
+
+To download a page or file from a URL a model or user supplied, use `fetch_public_url` from `mindroom.plugin_api` in async code, or `fetch_public_url_sync` in synchronous code that runs off the event loop, such as a synchronous tool:
+
+```python
+from mindroom.plugin_api import PublicFetchError, fetch_public_url
+
+
+async def feed_xml(url: str) -> str:
+    try:
+        feed = await fetch_public_url(url, max_bytes=1_000_000)
+    except PublicFetchError as error:
+        return f"Could not read the feed: {error}"
+    return feed.content.decode("utf-8", errors="replace")
+```
+
+A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
+It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+Pass `user_agent` to send your own `User-Agent` header instead of HTTPX's default.
+It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
+Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
+In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
 
 ### Dispatch-time worker targets
 
@@ -904,10 +1075,24 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
+A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
+The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
+
+```json
+{"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
+```
+
 ## Plugin skills
 
 Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
 See [Skills](skills.md) for the `SKILL.md` format, precedence, and the per-agent `skills:` allowlist that plugin skills also require.
+
+## Reserved namespaces
+
+A plugin whose Matrix events clients trust, such as cards it sends, lists their prefixes in the manifest `reserved_namespaces` so agents cannot forge them.
+While the plugin is loaded, the `matrix_api` tool refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
+Every other built-in tool fixes the event type and top-level content keys it sends, and the plugin's own sends are not affected.
+An agent whose code execution tools run in the primary process instead of a worker is fully trusted and can still send anything; see [Security posture](architecture/security-posture.md).
 
 ## Hooks
 

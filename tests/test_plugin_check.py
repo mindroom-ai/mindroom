@@ -381,6 +381,47 @@ def test_plugins_check_cli_reports_compatibility(tmp_path: Path) -> None:
     assert "Automations: none" in result.stdout
 
 
+def test_plugins_check_cli_prints_markup_in_names_literally(tmp_path: Path) -> None:
+    """Markup and emoji codes in tool, hook, and skill names should print as is in the summary."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={
+            "name": "compat-demo",
+            "tools_module": "tools.py",
+            "hooks_module": "hooks.py",
+            "skills": ["skills:100: [/x]"],
+        },
+        modules={
+            "tools.py": (
+                "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata\n"
+                "@register_tool_with_metadata(\n"
+                "    name='demo:100: [/x]',\n"
+                "    file_access=ToolFileAccess.NONE,\n"
+                "    display_name='Demo',\n"
+                "    description='Demo tool',\n"
+                "    category=ToolCategory.DEVELOPMENT,\n"
+                ")\n"
+                "def demo_tools():\n"
+                "    return Toolkit\n"
+            ),
+            "hooks.py": (
+                "from mindroom.plugin_api import hook\n"
+                "@hook(event='message:received', name='audit:100: [/x]')\n"
+                "async def audit_hook(ctx):\n"
+                "    del ctx\n"
+            ),
+        },
+    )
+    (plugin_root / "skills:100: [/x]").mkdir(parents=True)
+
+    result = runner.invoke(app, ["plugins", "check", str(plugin_root)])
+
+    assert result.exit_code == 0
+    assert "Tools:       demo:100: [/x]" in result.stdout
+    assert "Hooks:       audit:100: [/x]" in result.stdout
+    assert "Skills:      skills:100: [/x]" in result.stdout
+
+
 def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> None:
     """CI output should preserve the plugin error without a Typer traceback."""
     plugin_root = _write_plugin(
@@ -399,15 +440,15 @@ def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> 
     assert result.exception is not None
 
 
+@pytest.mark.usefixtures("wide_cli_consoles")
 def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None:
-    """Typer should reject a missing plugin path before runtime loading."""
+    """A missing plugin path fails the check, naming the path, without a traceback."""
     missing_plugin = tmp_path / "missing-plugin"
 
-    # Typer's error panel wraps at the terminal width, which could split the message around a long temporary path.
-    result = runner.invoke(app, ["plugins", "check", str(missing_plugin)], env={"COLUMNS": "1000"})
+    result = runner.invoke(app, ["plugins", "check", str(missing_plugin)])
 
-    assert result.exit_code == 2
-    assert "does not exist" in result.output
+    assert result.exit_code == 1
+    assert f"Configured plugin path does not exist: {missing_plugin.resolve()}" in result.stdout
     assert "Traceback (most recent call last)" not in result.output
 
 
@@ -425,6 +466,13 @@ def test_plugins_check_cli_prints_compatibility_as_json(tmp_path: Path) -> None:
         "hooks": ["compat-demo-hook"],
         "automations": [],
         "skills": ["skills"],
+        "internal_imports": [
+            {"path": "hooks.py", "line": 1, "name": "mindroom.hooks.hook"},
+            {"path": "oauth.py", "line": 1, "name": "mindroom.oauth.OAuthProvider"},
+            {"path": "tools.py", "line": 2, "name": "mindroom.tool_system.declarations.ToolCategory"},
+            {"path": "tools.py", "line": 2, "name": "mindroom.tool_system.declarations.ToolFileAccess"},
+            {"path": "tools.py", "line": 3, "name": "mindroom.tool_system.registration.register_tool_with_metadata"},
+        ],
     }
 
 
@@ -440,7 +488,7 @@ def test_plugins_check_cli_prints_failure_as_json(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
-    assert set(payload) == {"status", "detail"}
+    assert set(payload) == {"status", "detail", "internal_imports"}
     assert payload["status"] == "failed"
     assert payload["detail"].endswith("plugin exploded: list[str]")
 
@@ -468,6 +516,7 @@ def test_plugins_check_cli_json_stdout_holds_only_the_document(tmp_path: Path) -
         "hooks": [],
         "automations": [],
         "skills": [],
+        "internal_imports": [],
     }
     assert "chatty plugin imported" in completed.stderr
 

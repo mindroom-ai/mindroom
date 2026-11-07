@@ -15,6 +15,7 @@ from mindroom.hooks import (
     RoomMemberLeftContext,
     emit,
 )
+from mindroom.matrix.room_accounts import reconcile_room_accounts
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.room_member_joins import (
     RoomMemberJoin,
@@ -89,19 +90,23 @@ class RouterDuties:
         await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
 
     def joined(self, room_id: str) -> None:
-        """Publish the thread mode of a room the router joined by any path, once a sync frame carries its members."""
+        """Publish the room state of a room the router joined by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
 
-    async def publish_joined_room_thread_modes(self) -> None:
-        """Reconcile the rooms the router joined and still holds; failures wait for a later trigger."""
+    async def publish_joined_room_state(self) -> None:
+        """Reconcile the thread mode and MindRoom accounts of the rooms the router joined and still holds.
+
+        Failures wait for a later trigger.
+        """
         runtime = self.deps.runtime
         room_ids, self._joined_room_ids = self._joined_room_ids, set()
         if runtime.client is not None:
             await asyncio.gather(
                 *(
-                    reconcile_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room_id)
+                    reconcile(runtime.client, runtime.config, runtime.runtime_paths, room_id)
                     for room_id in room_ids
                     if room_id in runtime.client.rooms
+                    for reconcile in (reconcile_room_thread_mode, reconcile_room_accounts)
                 ),
             )
 
@@ -133,7 +138,7 @@ class RouterDuties:
         )
 
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
-        """Refresh responder presentation and emit human membership hooks."""
+        """Refresh responder presentation and the room's MindRoom accounts, and emit human membership hooks."""
         registry = self.deps.hook_context.registry
         runtime = self.deps.runtime
         if (
@@ -141,7 +146,10 @@ class RouterDuties:
             and runtime.client is not None
             and event.state_key in prepared_entity_names_by_user_id(runtime.config, runtime.runtime_paths)
         ):
-            await reconcile_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room.room_id)
+            await asyncio.gather(
+                reconcile_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room.room_id),
+                reconcile_room_accounts(runtime.client, runtime.config, runtime.runtime_paths, room.room_id),
+            )
         if registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
             leave = room_member_left_from_event(room, event, config=runtime.config, runtime_paths=runtime.runtime_paths)
             if leave is not None:

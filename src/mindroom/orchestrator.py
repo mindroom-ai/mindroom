@@ -85,6 +85,7 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.token_counting.families import start_loading_o200k
+from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.plugins import (
     PluginGeneration,
     PluginReloadResult,
@@ -449,7 +450,7 @@ class _MultiAgentOrchestrator:
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
             rebind_published_config_consumers=lambda: self._bind_trigger_runtimes(),
             finish_reload=self._script_runtime.finish_reload,
-            after_reload=self._rooms.publish_thread_modes,
+            after_reload=self._rooms.publish_room_state,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -931,7 +932,11 @@ class _MultiAgentOrchestrator:
         await preload_matrix_call_dependencies(config)
         freeze_startup_heap()
         watch = self.plugin_watch.capture(config)
-        generation = prepare_plugins(config, self.runtime_paths)
+        try:
+            generation = prepare_plugins(config, self.runtime_paths)
+        except PluginValidationError as exc:
+            # A refused plugin set, such as one missing a required plugin, fails until it or the config changes.
+            raise PermanentStartupError(str(exc)) from exc
         try:
             entity_names = configured_entity_names(config)
             entity_users = await prepare_managed_accounts(
@@ -1587,7 +1592,7 @@ async def _run_api_server(
     script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime())
-    # The reader picks a running bot at each call, so restarts and reloads never need to withdraw it.
+    # The reader picks a running bot at each lookup, so restarts and reloads never need to withdraw it.
     bind_room_members(api_main.app, orchestrator.agent_bots)
     config = uvicorn.Config(
         api_main.app,

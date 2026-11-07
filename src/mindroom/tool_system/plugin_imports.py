@@ -8,7 +8,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from importlib import util
+from importlib import machinery, util
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -18,13 +18,16 @@ from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.plugin_identity import validate_plugin_name
-from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, record_plugin_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
+# The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
+PLUGIN_API_VERSION = (1, 3)
+_PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
@@ -40,11 +43,14 @@ class _PluginManifest:
     """Validated plugin manifest data."""
 
     name: str
+    # The plugin API version the plugin needs, as the manifest states it.
+    mindroom_plugin_api: str | None
     tools_module: str | None
     hooks_module: str | None
     oauth_module: str | None
     routes_module: str | None
     skills: list[str]
+    reserved_namespaces: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,7 @@ class _PluginBase:
     """Loaded plugin details that depend only on the manifest."""
 
     name: str
+    mindroom_plugin_api: str | None
     root: Path
     manifest_path: Path
     tools_module_path: Path | None
@@ -59,6 +66,7 @@ class _PluginBase:
     oauth_module_path: Path | None
     routes_module_path: Path | None
     skill_dirs: list[Path]
+    reserved_namespaces: tuple[str, ...]
 
 
 @dataclass
@@ -115,15 +123,25 @@ def _collect_plugin_bases(
         root: Path | None = None
         try:
             root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
+            # Before its manifest loads, so a plugin whose manifest fails still adds no built-in tools.
+            record_plugin_root(root)
             plugin_base = _load_plugin_base(root)
         except Exception as exc:
-            _log_skipped_plugin_entry(plugin_entry.path, root, exc)
+            _log_failed_plugin_entry(plugin_entry, root, exc)
             skipped.append(SkippedPlugin(plugin_entry.path, exc, root))
             continue
 
         plugin_bases.append((plugin_base, plugin_entry))
     _reject_duplicate_plugin_manifest_names(plugin_bases)
     return plugin_bases, skipped
+
+
+def _log_failed_plugin_entry(plugin_entry: PluginEntryConfig, root: Path | None, exc: BaseException) -> None:
+    """Log one configured plugin that failed to load, not calling a required one skipped, since the primary refuses it."""
+    if plugin_entry.required:
+        logger.warning("Required plugin failed to load", plugin_path=plugin_entry.path, error=str(exc))
+    else:
+        _log_skipped_plugin_entry(plugin_entry.path, root, exc)
 
 
 def _log_skipped_plugin_entry(
@@ -194,13 +212,19 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         return None
 
     module_name, subpath, _explicit = parsed
+    # Find each later part on disk inside the one before, so finding a plugin runs no package's __init__.py.
+    first, *rest = module_name.split(".")
     try:
-        spec = util.find_spec(module_name)
-    except ModuleNotFoundError:
-        return None
-    except (Exception, SystemExit) as exc:
+        # The first part goes through sys.modules and sys.meta_path, which raise for a module without a spec.
+        spec = util.find_spec(first)
+    except Exception as exc:
         msg = f"Failed to resolve plugin module {plugin_path}: {exc}"
         raise PluginValidationError(msg) from exc
+    for part in rest:
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        # By its bare name, a namespace package's path never looks up its unimported parent in sys.modules.
+        spec = machinery.PathFinder.find_spec(part, list(spec.submodule_search_locations))
     if spec is None:
         return None
 
@@ -277,6 +301,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
 
     return _PluginBase(
         name=manifest.name,
+        mindroom_plugin_api=manifest.mindroom_plugin_api,
         root=root,
         manifest_path=manifest_path,
         tools_module_path=tools_module_path,
@@ -284,6 +309,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         oauth_module_path=oauth_module_path,
         routes_module_path=routes_module_path,
         skill_dirs=skill_dirs,
+        reserved_namespaces=manifest.reserved_namespaces,
     )
 
 
@@ -311,6 +337,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Invalid plugin manifest name", path=str(path), plugin_name=name, error=str(exc))  # noqa: TRY400
         msg = f"{exc} ({path})"
         raise PluginValidationError(msg) from exc
+    mindroom_plugin_api = _check_plugin_api(data.get("mindroom_plugin_api"), normalized_name, path)
 
     tools_module = _manifest_module(data, "tools_module", path)
     hooks_module = _manifest_module(data, "hooks_module", path)
@@ -325,14 +352,42 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Plugin skills must be a list of strings", path=str(path))
         raise PluginValidationError(msg)
 
+    reserved_namespaces = data.get("reserved_namespaces", [])
+    if not isinstance(reserved_namespaces, list) or not all(
+        isinstance(namespace, str) and namespace for namespace in reserved_namespaces
+    ):
+        event = "Plugin reserved_namespaces must be a list of non-empty strings"
+        logger.error(event, path=str(path))
+        msg = f"{event}: {path}"
+        raise PluginValidationError(msg)
+
     return _PluginManifest(
         name=normalized_name,
+        mindroom_plugin_api=mindroom_plugin_api,
         tools_module=tools_module,
         hooks_module=hooks_module,
         oauth_module=oauth_module,
         routes_module=routes_module,
         skills=raw_skills,
+        reserved_namespaces=tuple(reserved_namespaces),
     )
+
+
+def _check_plugin_api(needed: object, plugin_name: str, path: Path) -> str | None:
+    """Return the plugin API version the manifest needs, refusing another major or a later minor of this one."""
+    if needed is None:
+        return None
+    match = _PLUGIN_API_PATTERN.fullmatch(needed) if isinstance(needed, str) else None
+    if match is None:
+        msg = f'Plugin mindroom_plugin_api must be a "MAJOR.MINOR" string such as "1.0": {path}'
+        raise PluginValidationError(msg)
+    major, minor = PLUGIN_API_VERSION
+    version = (int(match[1]), int(match[2]))
+    if not (major, 0) <= version <= (major, minor):
+        advice = "upgrade MindRoom" if version > (major, minor) else "update the plugin"
+        msg = f"Plugin {plugin_name!r} needs plugin API {needed}, but this MindRoom provides {major}.{minor}: {advice} ({path})"
+        raise PluginValidationError(msg)
+    return match[0]
 
 
 def _manifest_module(data: dict[str, Any], field: str, path: Path) -> str | None:

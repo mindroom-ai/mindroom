@@ -546,40 +546,77 @@ def test_explicit_python_plugin_spec_requires_importable_module(tmp_path: Path) 
         _bind_runtime_paths(Config(plugins=["python:missing_demo_pkg"]), config_path)
 
 
-def test_plugin_loading_skips_system_exit_while_resolving_explicit_python_spec(
+def test_a_dotted_package_spec_resolves_through_nested_namespace_packages_without_importing_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Broken package import side effects should not terminate tolerant plugin loading."""
+    """`python:outer.inner.demo` finds `demo` inside the PEP 420 namespace packages `outer` and `outer.inner`."""
+    outer = f"ns_{uuid.uuid4().hex}"
     site_packages = tmp_path / "site-packages"
-    package_root = site_packages / "bad_pkg"
-    package_root.mkdir(parents=True)
-    (package_root / "__init__.py").write_text("raise SystemExit('package exit')\n", encoding="utf-8")
+    plugin_root = site_packages / outer / "inner" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(json.dumps({"name": "ns-demo", "skills": []}), encoding="utf-8")
     monkeypatch.syspath_prepend(str(site_packages))
 
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["python:bad_pkg.sub"])
+    plugins = _loaded(Config(plugins=[f"python:{outer}.inner.demo"]), _minimal_runtime_paths(tmp_path))
 
-    with _forgetting_modules("bad_pkg"):
-        assert _loaded(config, runtime_paths) == []
+    assert [plugin.root for plugin in plugins] == [plugin_root.resolve()]
+    assert outer not in sys.modules
 
 
-def test_plugin_loading_propagates_keyboard_interrupt_while_resolving_explicit_python_spec(
+@pytest.mark.parametrize("middle", ["missing", "module"])
+def test_a_dotted_package_spec_whose_middle_part_is_not_a_package_does_not_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    middle: str,
+) -> None:
+    """Each part before the last must be a package inside the one before; the search never restarts from sys.path."""
+    vendor = f"vendor_{uuid.uuid4().hex}"
+    demo = f"demo_{uuid.uuid4().hex}"
+    site_packages = tmp_path / "site-packages"
+    (site_packages / vendor).mkdir(parents=True)
+    (site_packages / vendor / "__init__.py").write_text("", encoding="utf-8")
+    (site_packages / vendor / "module.py").write_text("", encoding="utf-8")
+    # A top-level plugin of the last part's name, which a search restarted from sys.path would find.
+    (site_packages / demo).mkdir()
+    (site_packages / demo / "mindroom.plugin.json").write_text(json.dumps({"name": "demo", "skills": []}), "utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    spec = f"python:{vendor}.{middle}.{demo}"
+    [skipped] = _publish(Config(plugins=[spec]), _minimal_runtime_paths(tmp_path)).skipped
+
+    assert str(skipped.error) == f"Configured plugin module could not be resolved: {spec}"
+
+
+@pytest.mark.parametrize("suffix", [".", "..demo"])
+def test_a_dotted_package_spec_with_an_empty_part_does_not_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+) -> None:
+    """`python:vendor.` and `python:vendor..demo` name no module, so neither loads the plugin `python:vendor` names."""
+    vendor = f"vendor_{uuid.uuid4().hex}"
+    site_packages = tmp_path / "site-packages"
+    for root, name in ((site_packages / vendor, "vendor"), (site_packages / vendor / "demo", "demo")):
+        root.mkdir(parents=True)
+        (root / "mindroom.plugin.json").write_text(json.dumps({"name": name, "skills": []}), "utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    spec = f"python:{vendor}{suffix}"
+    [skipped] = _publish(Config(plugins=[spec]), _minimal_runtime_paths(tmp_path)).skipped
+
+    assert str(skipped.error) == f"Configured plugin module could not be resolved: {spec}"
+
+
+def test_configured_plugin_roots_leave_out_a_package_spec_python_cannot_look_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Operator interrupts during plugin spec resolution should still terminate startup."""
-    site_packages = tmp_path / "site-packages"
-    package_root = site_packages / "bad_pkg"
-    package_root.mkdir(parents=True)
-    (package_root / "__init__.py").write_text("raise KeyboardInterrupt('stop')\n", encoding="utf-8")
-    monkeypatch.syspath_prepend(str(site_packages))
+    """A spec whose package Python cannot look up, such as a module without `__spec__`, resolves to no root."""
+    name = f"nospec_{uuid.uuid4().hex}"
+    monkeypatch.setitem(sys.modules, name, ModuleType(name))
 
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    config = Config(plugins=["python:bad_pkg.sub"])
-
-    with _forgetting_modules("bad_pkg"), pytest.raises(KeyboardInterrupt):
-        _loaded(config, runtime_paths)
+    assert get_configured_plugin_roots(Config(plugins=[f"python:{name}.demo"]), _minimal_runtime_paths(tmp_path)) == ()
 
 
 def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> None:

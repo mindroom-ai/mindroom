@@ -25,6 +25,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.session_context import load_scope_session, resolve_bound_team_scope
+from mindroom.hooks import render_system_enrichment_block
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import HistoryScope, ResolvedReplayPlan
+    from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
     from mindroom.llm.runs import RunRequirement
@@ -277,12 +279,14 @@ async def continue_paused_team_run(
     show_tool_calls: bool,
     tool_trace_collector: list[ToolTraceEntry],
     progress: ProgressPublisher | None,
+    system_enrichment_items: tuple[EnrichmentItem, ...],
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
     ``configured_team_name`` is the entity the approval was saved under: the configured team, or for an ad hoc team
     the member whose account handles it. ``progress``, when given, shows the resumed document live in the reply
-    being continued; the terminal delivery stays with the caller.
+    being continued; the terminal delivery stays with the caller. The resumed runs keep their stored system prompts,
+    and each member run the resume starts renders ``system_enrichment_items`` into its own.
     """
     if not member_names:
         # Saved approvals name their members; without them no member could run the approved calls.
@@ -363,6 +367,7 @@ async def continue_paused_team_run(
             model_name=model_name,
             configured_team_name=team_name,
             timezone=entity_timezone(config, configured_team_name),
+            system_enrichment=render_system_enrichment_block(system_enrichment_items),
         )
         await _build_paused_members(built.spec, persisted)
         native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)

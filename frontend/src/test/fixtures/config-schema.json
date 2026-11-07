@@ -4430,6 +4430,12 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "required": {
+          "default": false,
+          "description": "Fail startup, and refuse a reload, when this plugin does not load, instead of running without it",
+          "title": "Required",
+          "type": "boolean"
+        },
         "settings": {
           "additionalProperties": true,
           "default": {},

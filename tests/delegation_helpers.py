@@ -304,7 +304,8 @@ async def respond(
         execution_identity=runtime.execution_identity,
         supports_native_tool_approval=True,
     )
-    with tool_runtime_context(runtime):
+    # The turn's tool context says whether its reply shows tool calls, as the response runner builds it.
+    with tool_runtime_context(replace(runtime, tool_calls_shown=ctx.show_tool_calls)):
         try:
             return (await ai_response(ctx, runtime_paths, config)).text
         except ResponsePausedForApproval as suspended:
@@ -377,6 +378,7 @@ async def resume(
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
+        system_enrichment_items=(),
     )
 
 
@@ -563,6 +565,7 @@ async def resume_team(
             history_scope=None,
             show_tool_calls=True,
             tool_trace_collector=[],
+            system_enrichment_items=(),
         )
 
 

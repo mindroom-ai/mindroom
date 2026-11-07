@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import httpx
+from email.message import Message
+
 import newspaper
 from requests.utils import get_encodings_from_content
 
-from mindroom.bounded_bytes import collect_bounded_bytes_sync
-from mindroom.server_fetch_url import (
-    ServerFetchHTTPTransport,
-    validate_server_fetch_redirect_url,
-    validate_server_fetch_url,
-)
+from mindroom.public_fetch import fetch_public_url_sync
 
-_DOWNLOAD_TIMEOUT_SECONDS = 7  # Newspaper4k's default request timeout.
-_MAX_REDIRECTS = 10
 _MAX_PAGE_BYTES = 10 * 1024 * 1024
-_HEADERS = {"User-Agent": f"newspaper/{newspaper.__version__}", "Accept-Encoding": "identity"}
+_USER_AGENT = f"newspaper/{newspaper.__version__}"
 # The HTML standard requires a charset declaration within the first 1024 bytes; scanning only those keeps
 # the declaration regexes linear on hostile pages.
 _DECLARED_CHARSET_PREFIX_BYTES = 1024
@@ -29,9 +23,11 @@ class _TextOnlyArticle(newspaper.Article):
         """Leave image fields empty; the toolkit returns only text fields."""
 
 
-def _decode_page(body: bytes, header_charset: str | None) -> str:
+def _decode_page(body: bytes, content_type: str | None) -> str:
     """Decode a page as newspaper4k does: the Content-Type charset, else the charset the page declares, else UTF-8."""
-    charset = header_charset
+    header = Message()
+    header["Content-Type"] = content_type or ""
+    charset = header.get_content_charset()
     if not charset:
         prefix = body[:_DECLARED_CHARSET_PREFIX_BYTES].decode("utf-8", errors="replace")
         charset = next(iter(get_encodings_from_content(prefix)), "utf-8")
@@ -42,36 +38,11 @@ def _decode_page(body: bytes, header_charset: str | None) -> str:
         return body.decode("utf-8", errors="replace")
 
 
-def _download_html(url: str) -> str:
-    """Download one page after validating the URL, every redirect hop, and each dialed address.
-
-    Bodies are requested uncompressed and read raw, so the size limit bounds memory before any decoding.
-    """
-    request_url = validate_server_fetch_url(url)
-    with httpx.Client(
-        transport=ServerFetchHTTPTransport(),
-        headers=_HEADERS,
-        timeout=_DOWNLOAD_TIMEOUT_SECONDS,
-    ) as client:
-        for _redirect_count in range(_MAX_REDIRECTS + 1):
-            with client.stream("GET", request_url) as response:
-                if not response.is_redirect:
-                    response.raise_for_status()
-                    if response.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
-                        msg = "The page must use identity content encoding."
-                        raise httpx.DecodingError(msg, request=response.request)
-                    body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_PAGE_BYTES)
-                    return _decode_page(body, response.charset_encoding)
-                location = response.headers.get("location")
-            request_url = validate_server_fetch_redirect_url(request_url, location)
-    msg = "Newspaper4k download stopped after too many redirects."
-    raise httpx.TooManyRedirects(msg)
-
-
 def _guarded_article(url: str) -> newspaper.Article:
     """Download and parse one article without any download newspaper4k would make itself."""
+    page = fetch_public_url_sync(url, max_bytes=_MAX_PAGE_BYTES, user_agent=_USER_AGENT)
     article = _TextOnlyArticle(url)
-    article.download(input_html=_download_html(url))
+    article.download(input_html=_decode_page(page.content, page.content_type))
     article.parse()
     return article
 

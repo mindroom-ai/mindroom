@@ -26,9 +26,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.path_confinement import is_git_metadata_path
-from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
-from mindroom.tool_system.authoring import Toolkit
-from mindroom.tools.path_safety import (
+from mindroom.path_safety import (
     blocked_git_metadata_message,
     format_path_for_output,
     is_within_base_dir,
@@ -39,6 +37,8 @@ from mindroom.tools.path_safety import (
     split_search_pattern,
     write_resolved_file,
 )
+from mindroom.shared_directories.tool_roots import no_shared_directory_roots, shared_directory_aware
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable

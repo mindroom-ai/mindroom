@@ -148,7 +148,8 @@ calls:
 
 ### Cascaded
 
-Each finalized transcript goes through the agent's normal response path, with the same model resolution, system prompt, instructions, knowledge, skills, hooks, tools, requester identity, and history.
+Each finalized transcript goes through the agent's normal response path, with the same model resolution, system prompt, instructions, knowledge, skills, tools, requester identity, and history.
+`tool:*` hooks run on the agent's tool calls, but `message:*` and `system:enrich` hooks do not run for call transcripts.
 The profile's `model` changes only the LLM; speech services, prompts, history, memory, and tools stay the same.
 Turn ends are detected locally, and the caller can interrupt the agent by speaking.
 
@@ -238,9 +239,9 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](personal-rooms.md) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](configuration/agents.md) setting.
+An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](personal-rooms.md) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](configuration/agents.md) setting or that [one of its rooms lists](rooms.md#rooms-under-a-room).
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
-A configured room assignment wins over personal rooms and invites; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
+A configured room assignment wins over personal rooms, invites, and listed rooms; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
@@ -254,6 +255,7 @@ It also leaves and logs `call_roster_absent_from_sfu` after a minute in which no
 After that it joins the call again only when the caller rejoins it or MindRoom restarts; after a restart it leaves again a minute later if the caller is still not connected.
 A restart also drops it from the call, and so does any configuration change applied while the agent is in a call, except a change limited to the `knowledge_graph` section.
 
+The agent prepares its voice session while it connects to the call's media, and logs `call_join_timing` once it is in the call, with the milliseconds from the start of the join to each step.
 If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
 For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
 
@@ -425,6 +427,7 @@ LiveKit media still needs a static public IP and open TCP and UDP media ports, w
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables it with `matrix_rtc_enabled: true`.
 
 The agent joins only calls started on your own MatrixRTC backend, meaning the one in `calls.livekit_service_url` or the agent homeserver's `.well-known`; calls started through a different backend are ignored.
+The agent reuses the `.well-known` service for 10 minutes, and reads it again sooner when a call advertises a different one.
 [Managed rooms](rooms.md#room-management) already let every member join calls.
 In other rooms, such as ad-hoc rooms, the power levels must let members send `org.matrix.msc3401.call.member` state events, which Element Call-capable clients set up when they create rooms.
 Calls work in both encrypted and unencrypted rooms.

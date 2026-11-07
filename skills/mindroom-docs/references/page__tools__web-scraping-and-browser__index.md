@@ -32,6 +32,7 @@ For a visible, persistent browser that the user can watch or control in MindRoom
 
 Tools that fetch pages from MindRoom itself (`website`, `trafilatura`, `newspaper`, `crawl4ai`, `agentql`, and the `browser` host target) reach only public HTTP(S) addresses.
 Private, loopback, link-local, multicast, reserved, and cloud-metadata targets are refused, and so are redirects, crawled links, and page resources that lead to them.
+`website`, `trafilatura`, and `newspaper` also refuse URLs that carry a user name or password, and fail on a page a server sends compressed or otherwise encoded or that does not finish downloading within 30 seconds.
 Unless a worker egress proxy is set, DNS answers that change after a URL is checked cannot redirect the connection to an internal service.
 Only the `browser` tool can opt into private networks, with [`allow_private_networks`](#browser-configuration).
 In Computer mode, the `browser` tool also opens worker-local loopback previews such as `http://localhost:5173` without that option; see [Preview a local web app](https://docs.mindroom.chat/tools/worker-computer/#preview-a-local-web-app).
@@ -54,7 +55,7 @@ WebRTC cannot send UDP from these browsers.
 ### [`website`]
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
-Pages larger than 2 MiB fail, as do pages a server sends compressed.
+Pages larger than 2 MiB fail.
 
 ```yaml
 agents:
@@ -68,7 +69,6 @@ agents:
 `trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
 `extract_batch()` returns one JSON payload listing successes and failures.
 `crawl_website()` stops with an error when it reaches a refused target, while `extract_content=True` reports each refused page individually.
-A server that sends a compressed body fails the download.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |

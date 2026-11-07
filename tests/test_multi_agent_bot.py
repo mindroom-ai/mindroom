@@ -202,7 +202,10 @@ class TestAgentBot(AgentBotTestBase):
         # either of the superseded public sync/admission engines.
         mock_client.add_event_admission_callback.assert_not_called()
         mock_client.add_response_callback.assert_not_called()
-        mock_client.add_event_callback.assert_called_once_with(bot._room_lifecycle.on_invite, nio.InviteEvent)
+        assert mock_client.add_event_callback.call_args_list == [
+            call(bot._room_lifecycle.on_invite, nio.InviteEvent),
+            call(bot._room_lifecycle.on_space_child, nio.RoomSpaceChildEvent),
+        ]
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
 
     @pytest.mark.asyncio

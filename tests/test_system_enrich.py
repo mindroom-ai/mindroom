@@ -36,6 +36,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import Owned, ResponseSources
+from mindroom.response_turn import CompletedApprovalRun
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
@@ -44,6 +45,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.turn_origin import TurnIntent
 from tests.access_schema_support import with_current_room_member_access
+from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
@@ -58,7 +60,9 @@ from tests.conftest import (
     unstored_team_scope_context,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import turn_tool_context
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, stream_transport
 from tests.test_reply_records_turns import (
     _acknowledge_selection,
@@ -69,6 +73,7 @@ from tests.test_reply_records_turns import (
     _streaming_bot,
 )
 from tests.test_response_payload_preparation import _preparation, _request
+from tests.test_response_runner_focused import _admit_approval_source
 from tests.test_tool_job_follow_ups import _ended, _follow_up, _runner_key, _runner_owner, _runner_runtime
 
 if TYPE_CHECKING:
@@ -679,3 +684,59 @@ async def test_a_team_turn_tells_system_enrich_its_members(tmp_path: Path) -> No
     assert model.await_args.args[1].system_enrichment_items == (_MARKER,)
     [ctx] = seen
     assert (ctx.target_entity_name, ctx.target_member_names) == ("general", ("general",))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("entity_kind", "member_names"), [("agent", None), ("team", ("alpha", "beta"))])
+async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
+    tmp_path: Path,
+    entity_kind: str,
+    member_names: tuple[str, ...] | None,
+) -> None:
+    """A reply resumed after a tool approval runs the hook once, on its paused message, and resumes with its instructions.
+
+    A team's resume names the team's members to the hook.
+    """
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.replies.store)
+    seen = _install_marker_hook(bot)
+    tool_context = turn_tool_context(
+        runner.deps.runtime.config,
+        runner.deps.runtime_paths,
+        approval_continuation().execution_identity,
+    )
+    continuation = approval_continuation(
+        entity_kind=entity_kind,
+        correlation_id="corr-resume",
+        execution_identity=tool_context.execution_identity,
+        runtime_model_name="default",
+        team_member_names=member_names or (),
+        team_mode="coordinate" if member_names else None,
+    )
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    target = _target(thread_id="$thread")
+    agent_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+    team_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+
+    with (
+        patch.object(runner.deps.tool_runtime, "build_turn_context", return_value=tool_context),
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=agent_resume),
+        patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=team_resume),
+    ):
+        async with resumed_approval(bot, continuation) as claimed:
+            await runner.approvals._continue_entity_call(
+                claimed,
+                request=runner.approvals.approval_response_request(claimed, target=target),
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+                cli_approval_handler=None,
+            )
+
+    [ctx] = seen
+    assert (ctx.target_entity_name, ctx.target_member_names) == ("general", member_names)
+    assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("$source", "corr-resume")
+    resumed, skipped = (team_resume, agent_resume) if member_names else (agent_resume, team_resume)
+    skipped.assert_not_awaited()
+    assert resumed.await_args.kwargs["system_enrichment_items"] == (_MARKER,)
