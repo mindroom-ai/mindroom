@@ -276,11 +276,13 @@ def _judged_calls(
         logger.warning("Approval alias judge raised", tool_name=tool_name, exc_info=True)
         msg = f"Approval alias judge of '{tool_name}' failed with {type(exc).__name__}"
         raise ToolApprovalScriptError(msg) from exc
+    if judged_calls is None:
+        return None
     # Text is a sequence too, but never of calls: an empty one would otherwise approve the call.
-    if judged_calls is not None and not (
-        isinstance(judged_calls, Sequence)
-        and not isinstance(judged_calls, str | bytes)
-        and all(isinstance(call, Mapping) for call in judged_calls)
+    if (
+        not isinstance(judged_calls, Sequence)
+        or isinstance(judged_calls, str | bytes)
+        or not all(isinstance(call, Mapping) for call in judged_calls)
     ):
         msg = f"Approval alias judge of '{tool_name}' returned neither a sequence of argument mappings nor None."
         raise ToolApprovalScriptError(msg)

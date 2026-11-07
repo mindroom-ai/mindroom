@@ -72,6 +72,12 @@ def judge_test_tool_function_as_shell(
     )
 
 
+def timed_out_judge(_arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]] | None:
+    """Fail as a judge whose service timed out, with ``judging service timed out`` as its own message."""
+    msg = "judging service timed out"
+    raise TimeoutError(msg)
+
+
 def scheduled_call_approvals(**methods: object) -> AbstractContextManager[object]:
     """Stand in for the approval manager with the scheduled-call methods a test names, as scheduling reaches it."""
     return patch.object(approval_manager, "get_approval_store", return_value=SimpleNamespace(**methods))

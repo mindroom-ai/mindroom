@@ -22,6 +22,7 @@ from mindroom.tool_system.plugins import candidate_tool_registry
 from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.conftest import bind_runtime_paths, publish_test_plugins, register_test_tool, test_runtime_paths
+from tests.tool_approval_helpers import timed_out_judge
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -410,21 +411,17 @@ def test_the_tools_catalog_lists_a_tool_whose_alias_and_factory_hold_uncopyable_
     assert "factory" not in tool
 
 
-def _timed_out_judge(_arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]] | None:
-    msg = "judging service timed out"
-    raise TimeoutError(msg)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("judge", "error"),
     [
-        pytest.param(_timed_out_judge, "failed with TimeoutError", id="raises"),
+        pytest.param(timed_out_judge, "failed with TimeoutError", id="raises"),
         pytest.param(lambda arguments: arguments["command"], "neither a sequence", id="text"),
         pytest.param(lambda arguments: {"args": arguments["command"]}, "neither a sequence", id="one-mapping"),
         pytest.param(lambda arguments: [arguments["command"]], "neither a sequence", id="list-of-text"),
         pytest.param(lambda _arguments: "", "neither a sequence", id="empty-text"),
         pytest.param(lambda _arguments: b"", "neither a sequence", id="empty-bytes"),
+        pytest.param(lambda _arguments: {}, "neither a sequence", id="empty-mapping"),
     ],
 )
 async def test_a_judge_that_fails_is_an_approval_policy_error_like_a_failing_script(
@@ -432,7 +429,7 @@ async def test_a_judge_that_fails_is_an_approval_policy_error_like_a_failing_scr
     judge: Callable[[Mapping[str, object]], Any],
     error: str,
 ) -> None:
-    """A judge that raises or returns no list of calls fails the decision the way a failing approval script does.
+    """A judge that raises or returns no sequence of calls fails the decision the way a failing approval script does.
 
     Its error names the function, never the judge's own message, and a malformed result never approves the call.
     """

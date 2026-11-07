@@ -841,7 +841,8 @@ def get_tool_by_name(
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
         available = toolkit_function_names(toolkit)
-        unknown_aliases = sorted(set(metadata.approval_aliases) - set(available) - set(metadata.function_names))
+        declared = frozenset(metadata.function_names or ())
+        unknown_aliases = sorted(set(metadata.approval_aliases) - set(available) - declared)
         if unknown_aliases:
             msg = f"Tool '{tool_name}' declares approval aliases for functions it does not have: {', '.join(unknown_aliases)}"
             raise ToolMetadataValidationError(msg)
@@ -849,7 +850,7 @@ def get_tool_by_name(
             available,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
-            declared_functions=frozenset(metadata.function_names or ()),
+            declared_functions=declared,
         )
         output_file_policy = (
             ToolOutputFilePolicy.from_runtime(

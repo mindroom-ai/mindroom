@@ -99,11 +99,16 @@ from tests.scheduling_helpers import joined_member_state, run_once_task, schedul
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
-from tests.tool_approval_helpers import gated_functions, judge_test_tool_function_as_shell, scheduled_call_approvals
+from tests.tool_approval_helpers import (
+    gated_functions,
+    judge_test_tool_function_as_shell,
+    scheduled_call_approvals,
+    timed_out_judge,
+)
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.build import AgentBuild
@@ -1450,12 +1455,7 @@ async def test_a_judge_that_fails_refuses_the_schedule_as_a_failing_approval_scr
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A judge that times out leaves the call unscheduled with the approval-policy error and posts no card."""
-
-    def timed_out(_arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]] | None:
-        msg = "judging service timed out"
-        raise TimeoutError(msg)
-
-    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message", timed_out)
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message", timed_out_judge)
     config = _gated_config("run_shell_command")
     context = _tool_context(config)
     request = AsyncMock(return_value=True)
