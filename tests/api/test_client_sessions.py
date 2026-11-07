@@ -177,10 +177,43 @@ def test_expired_session_is_rejected(client: TestClient, monkeypatch: pytest.Mon
     assert response.status_code == 401
 
 
+def test_revoked_session_is_rejected_at_once(client: TestClient) -> None:
+    """A client that revokes its session, as at sign-out, gets 401 for that token from then on, revoking included."""
+    headers = {"Authorization": f"Bearer {exchange(client)['session_token']}"}
+    assert client.get("/api/plugins/x/whoami", headers=headers).status_code == 200
+    revoked = client.delete("/api/client-sessions", headers=headers)
+    assert revoked.status_code == 204
+    assert not revoked.content
+    assert client.get("/api/plugins/x/whoami", headers=headers).status_code == 401
+    assert client.delete("/api/client-sessions", headers=headers).status_code == 401
+
+
+def test_revoke_ends_only_the_presented_session(client: TestClient) -> None:
+    """Revoking one of a user's sessions, such as one device's, leaves that user's other sessions working."""
+    first, second = ({"Authorization": f"Bearer {exchange(client)['session_token']}"} for _ in range(2))
+    assert client.delete("/api/client-sessions", headers=first).status_code == 204
+    assert client.get("/api/plugins/x/whoami", headers=first).status_code == 401
+    assert client.get("/api/plugins/x/whoami", headers=second).json() == {"user_id": "@alice:example.org"}
+
+
+def test_revoke_needs_a_live_session(client: TestClient) -> None:
+    """Revoking with no session, a non-bearer header or an unknown token is a 401 that ends no session."""
+    headers = {"Authorization": f"Bearer {exchange(client)['session_token']}"}
+    for bad in ({}, {"Authorization": "Basic abc"}, {"Authorization": "Bearer nope"}):
+        response = client.delete("/api/client-sessions", headers=bad)
+        assert response.status_code == 401, bad
+        assert response.headers["www-authenticate"] == "Bearer", bad
+    assert client.get("/api/plugins/x/whoami", headers=headers).status_code == 200
+
+
 def test_cors_allows_client_origin_on_plugin_paths(client: TestClient) -> None:
     """Only origins in MINDROOM_COMPUTER_ALLOWED_ORIGINS pass a preflight on plugin and session paths."""
-    for path in ("/api/plugins/x/y", "/api/client-sessions"):
-        headers = {"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization"}
+    for path, method in (
+        ("/api/plugins/x/y", "POST"),
+        ("/api/client-sessions", "POST"),
+        ("/api/client-sessions", "DELETE"),
+    ):
+        headers = {"Access-Control-Request-Method": method, "Access-Control-Request-Headers": "authorization"}
         allowed = client.options(path, headers={**headers, "Origin": CLIENT_ORIGIN})
         assert allowed.status_code == 200
         assert allowed.headers["access-control-allow-origin"] == CLIENT_ORIGIN

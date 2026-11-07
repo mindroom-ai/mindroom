@@ -8190,6 +8190,7 @@ visibility = ["mindroom.api.main"]
 path = "mindroom.plugin_http"
 depends_on = [
     "mindroom.api.app_state",
+    "mindroom.api.client_sessions",
 ]
 
 [[modules]]
