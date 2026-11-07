@@ -113,7 +113,8 @@ def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, st
 def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChild) -> ToolRuntimeContext:
     """Rebind a caller's tool context to the child turn running here, carrying its persona as the cap on copies it authors.
 
-    The child's turn carries the ID of its child run and names the caller's turn as its parent.
+    The child's turn carries the ID of its child run and names the caller's turn as its parent. It hides its tool calls
+    whatever its caller's reply shows, so they never read as shown.
     """
     observation = _CHILD_RUN.get()
     assert observation is not None, "A child's tool context is built inside the child's run"
@@ -125,6 +126,7 @@ def child_tool_runtime_context(context: ToolRuntimeContext, child: DelegationChi
         persona=child.persona,
         turn_id=observation.turn_id,
         parent_turn_id=context.turn_id,
+        tool_calls_shown=False,
     )
 
 

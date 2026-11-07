@@ -20,6 +20,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.config.main import Config
+from mindroom.config.resolution import show_tool_calls
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ORIGINAL_SENDER_KEY,
@@ -31,6 +32,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.event_journal import ConversationCursor, EventKind, RefreshRequest
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, ToolBeforeCallContext, hook
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.listening import service as service_module
 from mindroom.listening import turn as turn_module
@@ -49,6 +51,7 @@ from mindroom.script_runs.policy import resolve_script_launch_grants
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.tool_system.events import FailedReply
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.access_schema_support import joined_members_response, with_responder_access
 from tests.authorization_helpers import isolated_membership_index, make_test_tool_runtime_context
@@ -57,6 +60,7 @@ from tests.conftest import (
     install_model_providers,
     make_matrix_client_mock,
     make_relation_lookup,
+    publish_hook_plugin,
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
@@ -141,6 +145,7 @@ class _Bot:
         turn_id: str,
         active_model_name: str | None = None,
     ) -> ToolRuntimeContext:
+        plugins = config_plugins(self.config, self.runtime_paths)
         return make_test_tool_runtime_context(
             agent_name=self.agent_name,
             target=target,
@@ -148,11 +153,14 @@ class _Bot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            plugins=plugins,
             relations=make_relation_lookup(),
             conversation_reader=self.conversation_reader,
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
             turn_id=turn_id,
+            # The bot binds the hooks of the plugins a turn captured into its context.
+            hooks=HookBindings(registry=plugins.hooks),
         )
 
 
@@ -1510,6 +1518,41 @@ async def test_silent_turn_reacts_and_remembers_only_through_its_allowlist(
     assert sent["content"]["m.relates_to"] == {"rel_type": "m.annotation", "event_id": "$tea", "key": "👍"}
     memories = await list_all_agent_memories("scribe", config, runtime_paths, limit=10)
     assert any("Alice prefers tea." in memory.get("memory", "") for memory in memories)
+
+
+async def test_a_silent_turn_s_calls_tell_their_hooks_that_no_reply_shows_them(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent turn posts no reply, so its calls read as hidden, though the agent shows tool calls in its replies."""
+    seen: list[tuple[str, bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.shown, ctx.chat_preview()))
+
+    config = _config(tmp_path, {"tools": ["react"]})
+    runtime_paths = test_runtime_paths(tmp_path)
+    assert show_tool_calls(config, "scribe")
+    publish_hook_plugin(config, runtime_paths, "call-mirror", [before])
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    model = ScriptedModel([calls(tool_call("react", "call-1", event_id="$tea", emoji="👍")), answer("")])
+    install_model_providers(monkeypatch, {"default": model})
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    await run_silent_turn(
+        bot=cast("AgentBot", bot),
+        agent_name="scribe",
+        room_id=ROOM,
+        heard=[_heard_message("$tea")],
+        listen=listen,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert seen == [("react", False, None)]
 
 
 async def test_a_silent_turns_calls_cannot_pick_a_file_for_their_result(

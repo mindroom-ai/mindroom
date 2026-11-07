@@ -1563,6 +1563,10 @@ class AgentBot:
                 self._room_lifecycle.on_invite,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
+            client.add_event_callback(
+                self._room_lifecycle.on_space_child,  # ty: ignore[invalid-argument-type]
+                nio.RoomSpaceChildEvent,
+            )
             await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(
                 self.config,
