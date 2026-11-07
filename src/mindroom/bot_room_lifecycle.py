@@ -480,8 +480,8 @@ class BotRoomLifecycle:
     async def _rooms_to_leave(self) -> list[str]:
         """Return joined rooms this bot should now leave before DM filtering.
 
-        A room that one of the rooms this bot stays in lists, as this bot would follow it, is not left but kept as followed
-        from then on, so a listed room taken out of the configuration is not left.
+        A room that one of the rooms this bot stays in lists, as this bot would follow it, is not returned but kept as
+        followed from then on.
         """
         client = self._client()
         joined_rooms = await get_joined_rooms(client)
@@ -505,8 +505,9 @@ class BotRoomLifecycle:
 
         leaving, parent_ids = current_rooms - configured_rooms, current_rooms & configured_rooms
         # A room kept this way can list others in turn, so the rooms it lists are checked against it next.
-        while kept := {room_id for room_id in leaving if await self._keep_listed_room(room_id, parent_ids)}:
-            leaving, parent_ids = leaving - kept, kept
+        while parent_ids:
+            parent_ids = {room_id for room_id in leaving if await self._keep_listed_room(room_id, parent_ids)}
+            leaving -= parent_ids
         return list(leaving)
 
     async def send_welcome_message_if_empty(
@@ -772,12 +773,16 @@ class BotRoomLifecycle:
     async def _keep_listed_room(self, room_id: str, parent_ids: set[str]) -> bool:
         """Keep a joined room as followed when one of `parent_ids` lists it as this bot would follow it.
 
-        A room another task is handling is not kept, so a cleanup never waits on work that a config reload holds back.
+        A room another task is handling or waiting for is not kept, so a cleanup never waits on work that a config
+        reload holds back.
         """
         lock = self._lock_for_room(self._invite_join_locks, room_id)
-        if lock.locked():
+        try:
+            async with asyncio.timeout(0):
+                await lock.acquire()
+        except TimeoutError:
             return False
-        async with lock:
+        try:
             client = self._client()
             for parent_id in parent_ids:
                 parent = client.rooms.get(parent_id)
@@ -795,6 +800,8 @@ class BotRoomLifecycle:
                     await self._remember_invited_room(room_id)
                     return True
             return False
+        finally:
+            lock.release()
 
     async def _leave_unlisted_room(self, parent_id: str, room_id: str) -> None:
         """Leave a room its canonical parent no longer lists; a Space's rooms, and any doubt, keep this bot in.

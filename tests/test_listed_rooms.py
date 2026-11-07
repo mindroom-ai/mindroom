@@ -528,15 +528,28 @@ async def test_rooms_taken_out_of_the_config_stay_under_a_room_that_stays_howeve
 
 @pytest.mark.asyncio
 async def test_a_cleanup_never_waits_for_a_room_another_task_is_handling(tmp_path: Path) -> None:
-    """A config reload's cleanup finishes even while an invitation's handling holds the room, waiting on that reload."""
+    """A config reload's cleanup finishes while an invitation's handling holds the room, waiting on that reload.
+
+    The room is treated as it was before rooms were kept, and so is one just handed to a task waiting for it.
+    """
     bot = _Bot(
         tmp_path,
         {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]},
         joined=(PARENT, ROOM),
     )
+    lock = bot.lifecycle._lock_for_room(bot.lifecycle._invite_join_locks, ROOM)
 
-    async with bot.lifecycle._lock_for_room(bot.lifecycle._invite_join_locks, ROOM), asyncio.timeout(5):
+    await lock.acquire()
+    async with asyncio.timeout(5):
         await bot.lifecycle.leave_unconfigured_rooms()
+    assert bot.memberships == [(ROOM, "leave")]
+
+    waiting = asyncio.create_task(lock.acquire())
+    await asyncio.sleep(0)
+    lock.release()
+    async with asyncio.timeout(5):
+        assert not await bot.lifecycle._keep_listed_room(ROOM, {PARENT})
+    assert await waiting
 
 
 @pytest.mark.asyncio

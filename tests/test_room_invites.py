@@ -697,7 +697,7 @@ async def test_unconfigured_leave_uses_durable_gateway_without_direct_http(
         rooms=[],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock(rooms={})
+    bot.client = AsyncMock()
     principal = MagicMock()
     principal.ingestion_membership_position = AsyncMock(
         return_value=RoomMembershipPosition("join", 4),
