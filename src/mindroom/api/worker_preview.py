@@ -1,0 +1,197 @@
+"""Sandbox runner routes that relay the primary's requests to apps listening on this worker's loopback.
+
+``GET /api/sandbox-runner/ports`` lists the ports apps listen on at loopback, and ``/api/sandbox-runner/ports/{port}/{path}``
+passes any method, its body streamed both ways, or a WebSocket, to ``{path}`` on the app at ``127.0.0.1:{port}``, or at
+``[::1]:{port}`` when it listens only there.
+Only a dedicated worker's runner relays: the shared runner's loopback is every agent's, and in a pod it is the primary's too.
+The runner's own token never reaches an app.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import secrets
+import sys
+from contextlib import suppress
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+import aiohttp
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
+from starlette.responses import StreamingResponse
+from yarl import URL
+
+from mindroom.api.sandbox_exec import runner_uses_dedicated_worker
+from mindroom.api.sandbox_runner import app_runner_token, app_runtime_paths, validate_runner_token
+from mindroom.previews.relay import relay_websocket
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from starlette.requests import HTTPConnection
+    from starlette.types import Receive, Scope, Send
+
+router = APIRouter(prefix="/api/sandbox-runner/ports", tags=["sandbox-runner"])
+
+# Marks the runner's own refusals, so a caller tells them from an app's answers.
+_REFUSED_HEADER = "x-mindroom-relay-refused"
+_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105 - a header name, not a secret
+_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+# Hop-by-hop headers (RFC 9110 7.6.1) belong to one connection, so the relay passes them on in neither direction.
+_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    },
+)
+# A browser's handshake headers an app may read; the relay makes its own WebSocket handshake.
+_WEBSOCKET_HEADERS = frozenset({"accept-language", "authorization", "cookie", "origin", "user-agent"})
+# uvicorn's limit on the messages the relay receives from the primary, applied to the app's messages too.
+_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+# Each /proc/net table, the loopback address its listening sockets are reached at, and that address in a URL.
+_TABLES = (
+    ("tcp", ipaddress.ip_address("127.0.0.1"), "127.0.0.1"),
+    ("tcp6", ipaddress.ip_address("::1"), "[::1]"),
+)
+_TCP_LISTEN = "0A"
+
+
+def _refused(status_code: int, detail: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail=detail, headers={_REFUSED_HEADER: "1"})
+
+
+def _address(hex_words: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Decode a /proc/net address: 32-bit words in hex, each in host byte order."""
+    words = (int(hex_words[start : start + 8], 16) for start in range(0, len(hex_words), 8))
+    return ipaddress.ip_address(b"".join(word.to_bytes(4, sys.byteorder) for word in words))
+
+
+def _loopback_ports() -> dict[int, str]:
+    """Return each port a TCP socket listens on at loopback or every address, with the loopback host that reaches it."""
+    ports: dict[int, str] = {}
+    for table, loopback, host in _TABLES:
+        try:
+            lines = Path("/proc/net", table).read_text(encoding="ascii").splitlines()[1:]
+        except OSError:  # No IPv6 in this network namespace.
+            continue
+        for line in lines:
+            _, local, _, state, *_ = line.split()
+            hex_address, _, hex_port = local.partition(":")
+            address = _address(hex_address)
+            if state == _TCP_LISTEN and (address == loopback or address.is_unspecified):
+                ports.setdefault(int(hex_port, 16), host)
+    return ports
+
+
+def _relay_ports(connection: HTTPConnection) -> dict[int, str]:
+    """Return the ports the relay reaches, every loopback port but the runner's own, with their hosts."""
+    if not runner_uses_dedicated_worker(app_runtime_paths(connection.app)):
+        raise _refused(403, "Only a dedicated worker's runner relays to its ports.")
+    ports = _loopback_ports()
+    ports.pop(connection.scope["server"][1], None)
+    return ports
+
+
+def _upstream_url(connection: HTTPConnection, port: int, scheme: Literal["http", "ws"]) -> URL:
+    """Return the URL of the app on ``port`` that ``connection`` asks for."""
+    host = _relay_ports(connection).get(port)
+    if host is None:
+        raise _refused(502, f"No app listens on port {port} at this worker's loopback.")
+    # The path below the port as the primary sent it, still percent-encoded.
+    target = connection.scope["raw_path"].decode("latin-1").removeprefix(f"{router.prefix}/").partition("/")[2]
+    query = connection.scope["query_string"].decode("latin-1")
+    return URL(f"{scheme}://{host}:{port}/{target}{'?' if query else ''}{query}", encoded=True)
+
+
+def _end_to_end(headers: Iterable[tuple[str, str]], drop: frozenset[str] = frozenset()) -> list[tuple[str, str]]:
+    """Return ``headers`` without the hop-by-hop ones, those their Connection header names, and ``drop``."""
+    pairs = [(name.lower(), value) for name, value in headers]
+    named = {token.strip().lower() for name, value in pairs if name == "connection" for token in value.split(",")}
+    return [(name, value) for name, value in pairs if name not in _HOP_HEADERS | named | drop]
+
+
+class _AppResponse(StreamingResponse):
+    """An app's answer, streamed as it arrives, whose connection closes however the stream ends."""
+
+    def __init__(self, upstream: aiohttp.ClientResponse, session: aiohttp.ClientSession) -> None:
+        super().__init__(upstream.content.iter_any(), status_code=upstream.status)
+        self.raw_headers = [
+            (name.encode("latin-1"), value.encode("latin-1"))
+            for name, value in _end_to_end(
+                (name.decode("latin-1"), value.decode("latin-1")) for name, value in upstream.raw_headers
+            )
+        ]
+        self._upstream = upstream
+        self._session = session
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Stream the answer, then close the app connection."""
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._upstream.close()
+            await self._session.close()
+
+
+@router.get("", dependencies=[Depends(validate_runner_token)])
+async def listening_ports(request: Request) -> list[int]:
+    """List the ports apps listen on at this worker's loopback, which the relay reaches."""
+    return sorted(_relay_ports(request))
+
+
+@router.api_route("/{port}/{path:path}", methods=_METHODS, dependencies=[Depends(validate_runner_token)])
+async def relay(request: Request, port: int) -> StreamingResponse:
+    """Pass one request to the app on ``port`` at this worker's loopback and stream its answer back."""
+    url = _upstream_url(request, port, "http")
+    has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
+    session = aiohttp.ClientSession(
+        auto_decompress=False,
+        cookie_jar=aiohttp.DummyCookieJar(),
+        timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
+    )
+    try:
+        upstream = await session.request(
+            request.method,
+            url,
+            headers=_end_to_end(request.headers.items(), frozenset({"host", _TOKEN_HEADER})),
+            data=request.stream() if has_body else None,
+            allow_redirects=False,
+            skip_auto_headers=("User-Agent", "Accept-Encoding", "Content-Type"),
+        )
+    except (aiohttp.ClientError, TimeoutError, OSError):
+        await session.close()
+        raise _refused(502, f"The app on port {port} did not answer.") from None
+    return _AppResponse(upstream, session)
+
+
+@router.websocket("/{port}/{path:path}")
+async def relay_socket(websocket: WebSocket, port: int) -> None:
+    """Pass one WebSocket to the app on ``port`` at this worker's loopback, message by message."""
+    token = app_runner_token(websocket.app)
+    if not token or not secrets.compare_digest(websocket.headers.get(_TOKEN_HEADER, ""), token):
+        await websocket.close(code=1008)
+        return
+    try:
+        url = _upstream_url(websocket, port, "ws")
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+    protocols = [name.strip() for offer in websocket.scope["subprotocols"] for name in offer.split(",") if name.strip()]
+    headers = [(name, value) for name, value in websocket.headers.items() if name in _WEBSOCKET_HEADERS]
+    try:
+        async with (
+            aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10)) as session,
+            session.ws_connect(url, protocols=protocols, headers=headers, max_msg_size=_MAX_MESSAGE_BYTES) as upstream,
+        ):
+            await websocket.accept(subprotocol=upstream.protocol)
+            await relay_websocket(websocket, upstream)
+    except (aiohttp.ClientError, TimeoutError, OSError):
+        with suppress(RuntimeError, OSError):
+            await websocket.close(code=1011)
