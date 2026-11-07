@@ -36,7 +36,7 @@ from mindroom.constants import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
-from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
 
 if TYPE_CHECKING:
@@ -702,6 +702,7 @@ async def upload_json_sidecar(
             content_type=prepared.content_type,
             filename=prepared.filename,
             durable=durable,
+            room_id=room_id,
         )
 
         # Check if upload was successful
@@ -721,7 +722,8 @@ async def upload_json_sidecar(
         file_info["url"] = mxc_uri
 
     except Exception:
-        logger.exception("Failed to upload text")
+        log = logger.warning if durable_session_closed(client) else logger.exception
+        log("Failed to upload text")
         return None, None
     else:
         return mxc_uri, file_info
@@ -877,6 +879,7 @@ async def prepare_large_message(
             room_id,
             content,
             room_encrypted=encrypted_delivery_safe,
+            durable=prepare_for_encrypted_delivery,
         )
         if not sidecar_upload_is_usable(
             mxc_uri,
