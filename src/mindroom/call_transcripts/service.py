@@ -252,7 +252,7 @@ class CallTranscriptService:
     async def leave(self, call_id: str, user_id: str) -> None:
         """Take the person's app out of the call at once; the last one out ends the call.
 
-        Someone whose app was never in the call records nothing. A leave is never a check-in, so one refused while the
+        Someone whose app is not in the call records nothing. A leave is never a check-in, so one refused while the
         room cannot be read leaves the person to drop out of the call a minute after their app last checked in.
         """
         call = await self._fresh(call_id)
@@ -770,16 +770,18 @@ class CallTranscriptService:
             return True
 
     async def _leave(self, call: StoredCall, user_id: str) -> None:
-        """Take the person's app out of a live call at once, unless it was never in it; the last one out ends it.
+        """Take the person's app out of a live call at once; the last one out ends it.
 
-        An ending edits the row at once, in the call's own task.
+        An app not in the call, never or no longer, records no leave, so a late one cannot move the call's end. An
+        ending edits the row at once, in the call's own task.
         """
         async with self._room_lock(call.room_id):
             call = await self._fresh(call.id)
-            if call.ended_at is not None or user_id not in await asyncio.to_thread(self._store.presence, call.id):
+            if call.ended_at is not None:
                 return
             now = self._clock()
-            await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now, left=True)
+            if user_id in await self._present(call, now):
+                await asyncio.to_thread(self._store.record_presence, call.id, user_id, at=now, left=True)
             self._settle(await self._end_if_empty(call, now), now)
 
     def _room_lock(self, room_id: str) -> asyncio.Lock:

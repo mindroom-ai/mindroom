@@ -395,6 +395,25 @@ async def test_an_app_that_leaves_is_out_at_once(world: World) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_leave_from_an_app_that_already_dropped_out_does_not_move_the_end(world: World) -> None:
+    """Ann's app dropped out at the start; her leave long after Bob's last check-in ends the call at that check-in."""
+    call = await world.service.join(ROOM, ANN)
+    await world.service.join(ROOM, BOB)
+    for _ in range(2):
+        world.clock.advance(50)
+        await world.service.join(ROOM, BOB)
+    world.clock.advance(61)
+
+    await world.service.leave(call.id, ANN)
+
+    ended = world.store.call(call.id)
+    assert ended is not None
+    assert ended.ended_at == START + 100
+    ann = world.store.presence(call.id)[ANN]
+    assert (ann.present_at, ann.left) == (START, False)
+
+
+@pytest.mark.asyncio
 async def test_a_join_after_every_app_dropped_out_starts_a_new_call(world: World) -> None:
     """A call ends when its last app drops out, though no check noticed it yet: a join after that starts another call."""
     old = await world.service.join(ROOM, ANN)
@@ -612,9 +631,9 @@ async def test_the_row_is_posted_once_the_router_is_ready(world: World) -> None:
 async def test_the_row_is_edited_when_the_call_ends_and_again_once_its_transcript_is_posted(world: World) -> None:
     """The end says how long the call lasted at once; the transcript message adds where to find it."""
     call = await world.service.join(ROOM, ANN)
-    world.clock.advance(50)
+    world.clock.advance(60)
     await world.say(call.id, ANN)
-    world.clock.advance(70)
+    world.clock.advance(60)
     await world.service.leave(call.id, ANN)
     await world.settled()
 
