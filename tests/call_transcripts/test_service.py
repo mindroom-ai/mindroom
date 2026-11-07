@@ -87,6 +87,8 @@ class FakeRoom:
     row_started: asyncio.Event = field(default_factory=asyncio.Event)
     row_attempts: int = 0
     rows: list[tuple[str, str]] = field(default_factory=list)
+    transcript_gate: asyncio.Event | None = None
+    transcript_started: asyncio.Event = field(default_factory=asyncio.Event)
     transcripts: list[TranscriptMessage] = field(default_factory=list)
     edit_gate: asyncio.Event | None = None
     edit_started: asyncio.Event = field(default_factory=asyncio.Event)
@@ -142,8 +144,14 @@ class FakeRoom:
         return f"$row-{self.rows.index((room_id, call_id)) + 1}"
 
     async def post_transcript(self, message: TranscriptMessage) -> str | None:
-        """Post the message while the router is ready, after the failures asked for; crash for ``crashing_rooms``."""
+        """Post the message while the router is ready, after ``transcript_gate`` opens and the failures asked for.
+
+        Crash for ``crashing_rooms``.
+        """
+        self.transcript_started.set()
         await asyncio.sleep(0)
+        if self.transcript_gate is not None:
+            await self.transcript_gate.wait()
         if message.room_id in self.crashing_rooms:
             msg = "A bug in the room side."
             raise RuntimeError(msg)
@@ -1133,6 +1141,46 @@ async def test_a_message_not_posted_within_a_day_of_the_end_is_given_up_before_a
         assert (stored.ended_at, stored.transcript_event_id) == (ended_at, None)
         assert stored.transcript_done_at is not None
         assert world.store.lines(call_id) == []
+
+
+@pytest.mark.asyncio
+async def test_a_post_still_under_way_a_day_after_the_end_is_stopped_and_its_message_given_up(world: World) -> None:
+    """A post that stalls, as an upload can, is stopped once the day is up: the lines go, and nothing is posted later."""
+    world.room.transcript_gate = asyncio.Event()
+    call_id = await world.end_by_leaving(ANN)
+    world.clock.advance(20)
+    await world.service.tick()
+    await world.room.transcript_started.wait()
+    world.clock.advance(86_400)
+
+    await world.service.tick()
+    world.room.transcript_gate.set()
+    await world.settled()
+
+    assert world.room.transcripts == []
+    assert world.store.lines(call_id) == []
+    stored = world.store.call(call_id)
+    assert stored is not None
+    assert (stored.transcript_done_at, stored.transcript_event_id) == (START + 86_430, None)
+
+
+@pytest.mark.asyncio
+async def test_notes_written_after_the_day_is_up_are_not_posted(world: World) -> None:
+    """Each write checks the day first: notes that come back after it leave the message to be given up, not posted."""
+    world.notes.gate = asyncio.Event()
+    call_id = await world.end_by_leaving(ANN)
+    world.clock.advance(20)
+    await world.service.tick()
+    await world.notes.started.wait()
+    world.clock.advance(86_400)
+
+    world.notes.gate.set()
+    await world.settled()
+    assert world.room.transcripts == []
+    await world.tick()
+
+    assert world.room.transcripts == []
+    assert world.store.lines(call_id) == []
 
 
 @pytest.mark.asyncio

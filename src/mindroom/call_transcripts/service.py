@@ -409,7 +409,11 @@ class CallTranscriptService:
                 return None
             if fresh.ended_at is None:
                 fresh = await self._end_if_empty(fresh, now)
-            if fresh.id not in self._settling and (reason := self._lost_cause(fresh, now)) is not None:
+            if (reason := self._lost_cause(fresh, now)) is not None:
+                if (task := self._settling.get(fresh.id)) is not None:
+                    # A write still under way, such as a stalled upload, is stopped before the message is given up.
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
                 await self._finish(fresh, given_up=reason)
                 fresh = await self._fresh(fresh.id)
             self._settle(fresh, now)
@@ -419,7 +423,7 @@ class CallTranscriptService:
         """Return why the ended call's pending message can no longer be posted, None if it still can be."""
         if call.ended_at is None or call.transcript_done_at is not None:
             return None
-        if now - call.ended_at >= _GIVE_UP_AFTER_SECONDS:
+        if _past_a_day(call, now):
             return "not-posted-for-a-day"
         if self._transcript_due(call, now) and self._room.router_joined(call.room_id) is False:
             return "router-not-in-room"
@@ -569,7 +573,7 @@ class CallTranscriptService:
         """
         if self._room.router_joined(call.room_id) is not True or (call.retry_at is not None and call.retry_at > now):
             return False
-        if call.ended_at is not None and now - call.ended_at >= _GIVE_UP_AFTER_SECONDS:
+        if _past_a_day(call, now):
             return False
         return call.row_event_id is None or self._transcript_due(call, now) or _owed_row_edit(call) is not None
 
@@ -668,6 +672,8 @@ class CallTranscriptService:
             body=notes if notes is not None else _summary(transcript),
             transcript=transcript,
         )
+        if _past_a_day(call, self._clock()):
+            return  # A tick gives the message up.
         event_id = await self._room.post_transcript(message)
         if event_id is None:
             await self._postpone(call, reason="transcript-not-posted")
@@ -787,6 +793,11 @@ def _speech_seconds(audio: bytes) -> float:
     if seconds > _MAX_SPEECH_SECONDS:
         raise CallRefusedError(code="too-large", message=f"The audio is longer than {_MAX_SPEECH_SECONDS:g} seconds.")
     return seconds
+
+
+def _past_a_day(call: StoredCall, now: float) -> bool:
+    """Return whether the call ended a day or more ago, after which none of its Matrix writes is made."""
+    return call.ended_at is not None and now - call.ended_at >= _GIVE_UP_AFTER_SECONDS
 
 
 def _call_view(call: StoredCall, members: Iterable[str] = ()) -> Call:
