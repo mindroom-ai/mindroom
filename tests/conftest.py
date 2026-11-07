@@ -602,23 +602,27 @@ def build_unseen_context_messages_for_test(
     return _build_unseen_context_messages(prompt, thread_history, **(turn_options | options))
 
 
-def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
-    """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
+def call_proxy_sync_for_test(
+    *,
+    function_name: str,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    **stand_ins: Any,  # noqa: ANN401
+) -> object:
+    """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the stand-in options a test names.
 
     The others take a plain call's values: an entrypoint that leaves the call's agent alone, no overrides,
     execution env, extra passthrough, or resolved worker target, and the built-in tools.
     """
-    plain: dict[str, Any] = {
-        "function_entrypoint": lambda *_args, **_kwargs: None,
-        "tool_config_overrides": None,
-        "tool_init_overrides": None,
-        "execution_env": None,
-        "extra_env_passthrough": None,
-        "worker_target": None,
-        "runtime_config": None,
-        "tools": tool_registry_module.builtin_tool_registry(),
-    }
-    return sandbox_proxy_module._call_proxy_sync(**(plain | call))
+    return sandbox_proxy_module._call_proxy_sync(
+        stand_ins=sandbox_proxy_module.WorkerStandIns(
+            **({"tools": tool_registry_module.builtin_tool_registry()} | stand_ins),
+        ),
+        function_name=function_name,
+        args=args,
+        kwargs=kwargs,
+        function_entrypoint=lambda *_args, **_kwargs: None,
+    )
 
 
 @contextmanager
