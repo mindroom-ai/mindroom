@@ -1075,7 +1075,6 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     allow_placeholder_send = asyncio.Event()
     normalization_started = asyncio.Event()
     placeholder_send_started = asyncio.Event()
-    normalization_count = 0
     normalized_event = PreparedIngress(
         sender=event.sender,
         event_id=event.event_id,
@@ -1093,8 +1092,6 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
     )
 
     async def normalize_voice(*_args: object, **_kwargs: object) -> _VoiceNormalizationResult:
-        nonlocal normalization_count
-        normalization_count += 1
         normalization_started.set()
         await allow_normalization.wait()
         return _VoiceNormalizationResult(event=normalized_event)
@@ -1109,7 +1106,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
             bot._turn_ingress.deps.normalizer,
             "prepare_voice_event",
             new=AsyncMock(side_effect=normalize_voice),
-        ),
+        ) as prepare_voice_event,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):
         bot._delivery_gateway.send_text.side_effect = send_placeholder
@@ -1121,7 +1118,7 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
             # The redelivery must decide while the first delivery still owns the turn: once that turn is answered,
             # a redelivery is ignored as already handled.
             assert await asyncio.wait_for(redelivery, timeout=SETTLE_TIMEOUT_SECONDS) is TurnDispatchOutcome.DEFERRED
-            assert normalization_count == 1
+            assert prepare_voice_event.await_count == 1
             assert bot._delivery_gateway.send_text.await_count == 1
         finally:
             allow_normalization.set()
