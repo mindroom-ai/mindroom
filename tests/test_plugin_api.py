@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import enum
 import hashlib
-import importlib
 import inspect
 import json
+import pkgutil
 
 import typing_extensions
 
@@ -357,8 +357,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
 }
 
-# The plugin API version these pins describe and their digest. A change to the pins fails
-# `test_the_pins_record_the_plugin_api_version_they_describe` until `PLUGIN_API_VERSION` is bumped and this is updated.
+# The plugin API version these pins describe, and their digest.
 _PINNED_VERSION = ((1, 0), "8b45e625144b350ee8861837198a3ba9906763123d910032fa4a3720b7779013")
 
 
@@ -405,10 +404,7 @@ def test_each_exported_enum_keeps_its_member_names() -> None:
 
 def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter_names_and_kinds() -> None:
     """`mindroom.plugin_http` exports exactly the route helpers, and each named entry point keeps its parameters."""
-    shapes = {}
-    for path in _ELSEWHERE_SIGNATURES:
-        module_name, _, name = path.rpartition(".")
-        shapes[path] = _parameter_shape(getattr(importlib.import_module(module_name), name))
+    shapes = {path: _parameter_shape(pkgutil.resolve_name(path)) for path in _ELSEWHERE_SIGNATURES}
 
     assert plugin_http.__all__ == _HTTP_EXPORTS
     assert shapes == _ELSEWHERE_SIGNATURES

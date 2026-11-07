@@ -927,7 +927,7 @@ class _MultiAgentOrchestrator:
         try:
             generation = prepare_plugins(config, self.runtime_paths)
         except PluginValidationError as exc:
-            # A plugin set that cannot load, such as one missing a required plugin, fails again until the config changes.
+            # A refused plugin set, such as one missing a required plugin, fails until it or the config changes.
             raise PermanentStartupError(str(exc)) from exc
         try:
             entity_names = configured_entity_names(config)

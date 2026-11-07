@@ -25,8 +25,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The (major, minor) version of the plugin API, which `mindroom.plugin_api` exports; docs/plugins.md says when to bump
-# it, and `tests/test_plugin_api.py` fails on a change to the names and parameters it pins until it is bumped.
+# The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
 PLUGIN_API_VERSION = (1, 0)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
@@ -348,11 +347,11 @@ def _check_plugin_api(needed: object, plugin_name: str, path: Path) -> None:
     if match is None:
         msg = f'Plugin mindroom_plugin_api must be a "MAJOR.MINOR" string such as "1.0": {path}'
         raise PluginValidationError(msg)
+    major, minor = PLUGIN_API_VERSION
     version = (int(match[1]), int(match[2]))
-    if version[0] != PLUGIN_API_VERSION[0] or version > PLUGIN_API_VERSION:
-        advice = "upgrade MindRoom" if version > PLUGIN_API_VERSION else "update the plugin"
-        provided = ".".join(map(str, PLUGIN_API_VERSION))
-        msg = f"Plugin {plugin_name!r} needs plugin API {needed}, but this MindRoom provides {provided}: {advice} ({path})"
+    if not (major, 0) <= version <= (major, minor):
+        advice = "upgrade MindRoom" if version > (major, minor) else "update the plugin"
+        msg = f"Plugin {plugin_name!r} needs plugin API {needed}, but this MindRoom provides {major}.{minor}: {advice} ({path})"
         raise PluginValidationError(msg)
 
 
