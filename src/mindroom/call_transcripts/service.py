@@ -390,11 +390,15 @@ class CallTranscriptService:
             ended_before=now - _GIVE_UP_AFTER_SECONDS,
         )
 
-    async def stop(self) -> None:
-        """Cancel the calls' Matrix writes in progress: each is made after the next start, and posted once."""
-        tasks = list(self._settling.values())
-        for task in tasks:
+    def cancel_writes(self) -> None:
+        """Cancel the calls' Matrix writes in progress at once: each is made after the next start, and posted once."""
+        for task in self._settling.values():
             task.cancel()
+
+    async def stop(self) -> None:
+        """Cancel the calls' Matrix writes in progress and wait for them to stop."""
+        tasks = list(self._settling.values())
+        self.cancel_writes()
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _check(self, call: StoredCall) -> StoredCall | None:

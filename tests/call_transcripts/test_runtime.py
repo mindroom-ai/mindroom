@@ -165,6 +165,49 @@ async def test_binding_waits_for_a_running_router_and_for_call_transcripts_to_be
     await coordinator.stop()
 
 
+@pytest.mark.asyncio
+async def test_turning_call_transcripts_off_stops_the_writes_under_way_and_sends_no_more(tmp_path: Path) -> None:
+    """Off, no write is sent from then on, and one under way is cancelled once the runtime rebinds, before any pass."""
+    paths = test_runtime_paths(tmp_path)
+    config = _config(enabled=True)
+
+    async def no_next_pass(_seconds: float) -> None:
+        await asyncio.Event().wait()
+
+    coordinator = CallTranscriptsRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        sleep=no_next_pass,
+    )
+    router = _router()
+    sending = asyncio.Event()
+
+    async def room_send(*_args: object, **_kwargs: object) -> nio.RoomSendResponse:
+        """Never answer the first send; answer the others at once."""
+        if not sending.is_set():
+            sending.set()
+            await asyncio.Event().wait()
+        return nio.RoomSendResponse("$sent", ROOM)
+
+    router.client.room_send.side_effect = room_send
+    coordinator.bind_if_ready(config, _bots(router))
+    service = coordinator.service()
+    assert service is not None
+    call = await service.join(ROOM, ANN)
+    async with asyncio.timeout(5):
+        await sending.wait()
+    [write] = service._settling.values()
+
+    config = _config(enabled=False)
+    assert await service._room.post_row(ROOM, call.id) is None
+    coordinator.bind_if_ready(config, _bots(router))
+    await asyncio.wait([write], timeout=5)
+
+    assert write.cancelled()
+    assert router.client.room_send.await_count == 1
+    await coordinator.stop()
+
+
 # The loop
 
 

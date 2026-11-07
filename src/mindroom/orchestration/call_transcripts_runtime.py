@@ -51,6 +51,9 @@ class CallTranscriptsRuntimeCoordinator:
     def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:
         """Start the loop, and read and post through the router while it runs and call transcripts are on."""
         self._loop.start()
+        if not config.calls.transcripts.enabled and self._service is not None:
+            # Writes under way stop now; the loop's next pass ends the calls and gives up their messages.
+            self._service.cancel_writes()
         router = bots.get(ROUTER_AGENT_NAME)
         if not config.calls.transcripts.enabled or router is None or router.client is None or not router.running:
             self.unbind()
@@ -89,11 +92,11 @@ class CallTranscriptsRuntimeCoordinator:
         return self._service
 
     def _router_client(self) -> nio.AsyncClient | None:
-        """Return the bound router's client once it runs and has synced its rooms."""
+        """Return the bound router's client once it runs and has synced its rooms, while call transcripts are on."""
         router = self._router
         if router is None or not router.running or not router.first_sync_complete:
             return None
-        return router.client
+        return router.client if self.config_provider().calls.transcripts.enabled else None
 
     async def _run(self) -> None:
         while True:
