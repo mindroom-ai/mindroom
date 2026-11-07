@@ -554,16 +554,21 @@ class CallTranscriptService:
             self._posts.pop(call.id, None)
 
     async def _post_transcript_now(self, call: StoredCall) -> None:
-        """Post the ended call's one message, with notes while they can be had; postpone it a minute on failure."""
+        """Post the ended call's one message, with notes while they can be had; postpone it a minute on failure.
+
+        A call in which people spoke but none of it could be transcribed posts a message that says so, without turns.
+        """
         assert call.ended_at is not None
         lines = await asyncio.to_thread(self._store.lines, call.id)
         turns = _turns(lines)
-        if not turns:
+        if not turns and all(line.reason != "not-transcribed" for line in lines):
             await asyncio.to_thread(self._store.finish_transcript, call.id, at=self._clock())
             logger.info("call_transcript_had_no_speech", room_id=call.room_id, call_id=call.id)
             return
         notes = self._written_notes.get(call.id)
-        writes_notes = notes is None and call.transcript_attempts < _NOTES_ATTEMPTS and self._notes.writes_notes()
+        writes_notes = (
+            bool(turns) and notes is None and call.transcript_attempts < _NOTES_ATTEMPTS and self._notes.writes_notes()
+        )
         # Only notes name people, by display name; until the room can be read they wait, without using an attempt.
         names = await self._room.display_names(call.room_id, {turn.sender for turn in turns}) if writes_notes else {}
         if names is None:
@@ -597,7 +602,7 @@ class CallTranscriptService:
             room_id=call.room_id,
             call_id=call.id,
             row_event_id=row_event_id,
-            body=notes if notes is not None else f"Call · {_minutes(transcript.duration_seconds)} min",
+            body=notes if notes is not None else _summary(transcript),
             transcript=transcript,
         )
         event_id = await self._room.post_transcript(message)
@@ -790,6 +795,12 @@ def _turns(lines: Sequence[StoredLine]) -> tuple[_Turn, ...]:
                 turns.append(_Turn(sender=line.user_id, text=line.text))
         previous = line
     return tuple(turns)
+
+
+def _summary(transcript: CallTranscript) -> str:
+    """Return the message's body without notes: the call's length, and that nothing could be transcribed if so."""
+    summary = f"Call · {_minutes(transcript.duration_seconds)} min"
+    return summary if transcript.turns else f"{summary}. Nothing could be transcribed."
 
 
 def _minutes(duration_seconds: int) -> int:

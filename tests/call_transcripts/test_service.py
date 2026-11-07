@@ -836,11 +836,11 @@ async def test_without_a_notes_model_the_message_says_how_long_the_call_was(worl
 
 @pytest.mark.asyncio
 async def test_a_call_with_no_speech_posts_nothing(world: World) -> None:
-    """Without anything transcribed there is no message, and the call's lines still go."""
+    """Without words heard, a pause alone included, there is no message, and the call's lines still go."""
     call = await world.service.join(ROOM, ANN)
     world.clock.advance(30)
-    world.transcriber.text = None
-    await world.say(call.id, ANN)
+    world.transcriber.text = ""
+    assert await world.service.speech(call.id, ANN, audio=_wav(), started_at=world.clock.now - 3) is None
     await world.service.pause(call.id, ANN, paused=True)
     await world.service.leave(call.id, ANN)
     world.clock.advance(20)
@@ -853,6 +853,23 @@ async def test_a_call_with_no_speech_posts_nothing(world: World) -> None:
     stored = world.store.call(call.id)
     assert stored is not None
     assert stored.transcript_done_at == START + 50
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_every_stretch_failed_to_transcribe_says_so(world: World) -> None:
+    """People spoke but none of it could be transcribed: the message says so, with no turns and no notes."""
+    world.transcriber.text = None
+    call_id = await world.end_by_leaving(ANN, BOB)
+    world.clock.advance(20)
+
+    await world.tick()
+
+    [message] = world.room.transcripts
+    assert message.body == "Call · 1 min. Nothing could be transcribed."
+    assert message.transcript.turns == ()
+    assert world.notes.transcripts == []
+    assert world.store.lines(call_id) == []
+    assert [edit.transcript_event_id for edit in world.room.row_edits] == [None, "$transcript-1"]
 
 
 @pytest.mark.asyncio
