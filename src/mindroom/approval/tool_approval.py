@@ -6,7 +6,7 @@ import importlib.util
 import inspect
 import json
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, Literal
@@ -27,7 +27,7 @@ from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
     from types import ModuleType
 
@@ -65,7 +65,7 @@ logger = get_logger(__name__)
 
 
 class ToolApprovalScriptError(RuntimeError):
-    """One approval-script load or execution failure."""
+    """One approval-script load or execution failure, or one approval alias judge failure."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,10 +276,13 @@ def _judged_calls(
         logger.warning("Approval alias judge raised", tool_name=tool_name, exc_info=True)
         msg = f"Approval alias judge of '{tool_name}' failed with {type(exc).__name__}"
         raise ToolApprovalScriptError(msg) from exc
+    # Text is a sequence too, but never of calls: an empty one would otherwise approve the call.
     if judged_calls is not None and not (
-        isinstance(judged_calls, list | tuple) and all(isinstance(call, Mapping) for call in judged_calls)
+        isinstance(judged_calls, Sequence)
+        and not isinstance(judged_calls, str | bytes)
+        and all(isinstance(call, Mapping) for call in judged_calls)
     ):
-        msg = f"Approval alias judge of '{tool_name}' returned neither a list of argument mappings nor None."
+        msg = f"Approval alias judge of '{tool_name}' returned neither a sequence of argument mappings nor None."
         raise ToolApprovalScriptError(msg)
     return judged_calls
 

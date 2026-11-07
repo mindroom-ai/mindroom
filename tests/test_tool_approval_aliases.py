@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import UserList
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -143,6 +144,19 @@ async def test_a_call_that_amounts_to_several_judged_calls_asks_when_any_of_them
     )
 
     assert (await _asks(config, runtime_paths, {"command": command}, alias))[0] is asks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sequence", [list, tuple, UserList], ids=["list", "tuple", "user-list"])
+async def test_a_judge_may_return_its_calls_as_any_sequence(
+    tmp_path: Path,
+    sequence: Callable[[list[dict[str, object]]], Sequence[Mapping[str, object]]],
+) -> None:
+    """The shell's rules judge the calls a judge returns in any sequence, not only in a list."""
+    config, runtime_paths = _config(tmp_path, _shell_review())
+    alias = ApprovalAlias(judged_as=_SHELL, judge=lambda arguments: sequence([{"args": arguments["command"]}]))
+
+    assert (await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias))[0] is True
 
 
 @pytest.mark.asyncio
@@ -406,10 +420,11 @@ def _timed_out_judge(_arguments: Mapping[str, object]) -> Sequence[Mapping[str, 
     ("judge", "error"),
     [
         pytest.param(_timed_out_judge, "failed with TimeoutError", id="raises"),
-        pytest.param(lambda arguments: arguments["command"], "neither a list", id="text"),
-        pytest.param(lambda arguments: {"args": arguments["command"]}, "neither a list", id="one-mapping"),
-        pytest.param(lambda arguments: [arguments["command"]], "neither a list", id="list-of-text"),
-        pytest.param(lambda _arguments: "", "neither a list", id="empty-text"),
+        pytest.param(lambda arguments: arguments["command"], "neither a sequence", id="text"),
+        pytest.param(lambda arguments: {"args": arguments["command"]}, "neither a sequence", id="one-mapping"),
+        pytest.param(lambda arguments: [arguments["command"]], "neither a sequence", id="list-of-text"),
+        pytest.param(lambda _arguments: "", "neither a sequence", id="empty-text"),
+        pytest.param(lambda _arguments: b"", "neither a sequence", id="empty-bytes"),
     ],
 )
 async def test_a_judge_that_fails_is_an_approval_policy_error_like_a_failing_script(
