@@ -130,7 +130,7 @@ The numbers in parentheses refer to the outcomes in [What counts as a defect](#w
 - I5. Every non-terminal reply has a durable path to progress: pending span sources, an approval continuation, or the next bot instance's takeover (2, 5).
 - I6. A span's sources settle with its terminal transition, except spans that hand them to a continuation, a retry, or a replay, so a crash can neither answer them again nor drop them (2, 3).
 - I7. Every reply write is recorded before it is sent, so recovery knows what Matrix may already show.
-  Live frames are not reply writes: a stream that ends early while they run records the text they showed as what the reply may show, and every durable write names the last frame it covers.
+  Live frames are not reply writes: a stream that ends early records what they showed past the last landed edit as what the reply may show, which can include text streamed after the last frame, and every durable write names the last frame it covers.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place for an approval, since that span still runs.
 - I9. Every unfinished continuation has an owner that moves it: draining every owner leaves no continuation, owed write, or deferred claim, and every source settled; a stranded approval would hold its conversation and reply forever (1, 5).
 - I10. Retention never forgets a reply whose spans a continuation names, because the continuation reads its room, thread, event, and sources from them (I-S4).

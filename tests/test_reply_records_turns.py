@@ -436,6 +436,7 @@ async def test_a_stop_before_the_catch_up_after_frames_stopped_keeps_what_frames
 
     # Only frames showed the later words, and no edit followed the Stop.
     assert not any("words after it" in body for body in _sent_bodies(bot)[:-1])
+    # " plus more" is the accepted over-record: only the refused frame carried it.
     assert _sent_bodies(bot)[-1] == "Partial and the words after it plus more\n\n**[Response cancelled by user]**"
 
 
