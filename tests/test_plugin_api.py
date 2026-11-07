@@ -74,6 +74,8 @@ _EXPORTS = [
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
+    "PublicFetchError",
+    "PublicFetchResult",
     "ReactionReceivedContext",
     "ResolvedWorkerTarget",
     "ResponseDraft",
@@ -110,6 +112,8 @@ _EXPORTS = [
     "current_call",
     "current_execution_identity",
     "emit_custom_event",
+    "fetch_public_url",
+    "fetch_public_url_sync",
     "get_logger",
     "get_tool_by_name",
     "get_tool_runtime_context",
@@ -206,6 +210,8 @@ _SIGNATURES = {
         "token_parser, token_exchanger, claim_validator, runtime_bootstrapper, account_claims_reader, "
         "legacy_credentials, consent_group)"
     ),
+    "PublicFetchError": "(message, *, code, status_code)",
+    "PublicFetchResult": "(url, content_type, content)",
     "ReactionReceivedContext": (
         f"({_HOOK}, room_id, event_id, sender_id, reaction_key, target_event_id, thread_id, *, {_HOOK_HELPERS})"
     ),
@@ -263,6 +269,8 @@ _SIGNATURES = {
     "current_call": "()",
     "current_execution_identity": "()",
     "emit_custom_event": "(plugin_name, event_name, payload)",
+    "fetch_public_url": "(url, *, max_bytes, use_env_proxy)",
+    "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy)",
     "get_logger": "(name)",
     "get_tool_by_name": (
         "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "
@@ -358,7 +366,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 0), "8b45e625144b350ee8861837198a3ba9906763123d910032fa4a3720b7779013")
+_PINNED_VERSION = ((1, 0), "ed0e0f7e8cc1ba4acf41846c8eb46e1410840154ff957dec000fc33a07ad823d")
 
 
 def _is_enum(obj: object) -> bool:
