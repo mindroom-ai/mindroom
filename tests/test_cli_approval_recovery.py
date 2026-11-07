@@ -40,11 +40,12 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.events import ToolCallOrigin
 from mindroom.llm.media import Audio, Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -228,7 +229,8 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
 ) -> None:
     """Recovery preserves knowledge, cancellation registration, typing and the remaining budget.
 
-    The follow-up turn, built afresh after the switch, sends the approval receipt the runner binds.
+    The follow-up turn, built afresh after the switch, sends the approval receipt the runner binds and the resume's
+    system enrichment.
     """
     runtime = _helper_runtime(tmp_path, tools=["shell", "thread_model"])
     # The switch reads the runtime's budgets, which this runtime has none of.
@@ -332,6 +334,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             **kwargs,
         ),
     )
+    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.", minimal_required=True)
     with approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id):
         result = await execution.continue_run(
             continuation,
@@ -340,6 +343,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
+            system_enrichment_items=(instruction,),
         )
     if continuation_count == 4:
         assert "Model switching did not produce a final answer" in result.response_text
@@ -349,6 +353,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         assert "Recovered with knowledge." in result.response_text
         assert len(model.requests) == 1
         assert carries_approval_receipt(model.requests[0])
+        assert instruction.text in system_text(model.requests[0].messages)
         assert len(builds) == 2
         # The fresh minimal turn is built with the knowledge the recovery resolved.
         assert [source.description for source in builds[-1].surface.knowledge_sources] == ["Saved notes"]
@@ -446,6 +451,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
+            system_enrichment_items=(),
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -1304,6 +1310,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             tool_trace_collector=[],
             tool_context=runtime,
             progress=publish,
+            system_enrichment_items=(),
         )
 
     def stored_runs() -> list[dict]:
@@ -1456,6 +1463,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
+            system_enrichment_items=(),
         )
 
     if available and permitted:
@@ -1572,6 +1580,7 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
+            system_enrichment_items=(),
         )
 
     assert result.response_text == "Listed"

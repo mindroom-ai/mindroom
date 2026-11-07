@@ -318,4 +318,5 @@ async def _exercise_team_member_assembly(
             prior_presentation_state=None,
             show_tool_calls=True,
             tool_trace_collector=[],
+            system_enrichment_items=(),
         )

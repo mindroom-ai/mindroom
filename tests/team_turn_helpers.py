@@ -380,6 +380,7 @@ class TeamTurn:
         kwargs.setdefault("tool_trace_collector", [])
         kwargs.setdefault("progress", None)
         kwargs.setdefault("history_scope", self.scope)
+        kwargs.setdefault("system_enrichment_items", ())
         with tool_runtime_context(self.runtime):
             return await continue_paused_team_run(
                 member_names=self.member_names,
