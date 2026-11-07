@@ -44,7 +44,7 @@ def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClie
 def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     """Publish a reader of a room's joined users, answered by a running bot in that room, the router first.
 
-    ``bots`` must be the orchestrator's live mapping, read at each call, so a bot that stopped, left the room, or
+    ``bots`` must be the orchestrator's live mapping, read at each lookup, so a bot that stopped, left the room, or
     restarted with a new client counts as it is now, and one binding lasts for as long as the API serves.
     Callers that ask about a room while its lookup runs share that lookup, its answer or its failure, so a burst of
     requests makes one Matrix call; no answer is kept once its lookup ends, so a later caller asks again.
