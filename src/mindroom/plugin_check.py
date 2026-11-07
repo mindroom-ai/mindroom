@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,18 @@ from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit, tool_attributes
 from mindroom.tool_system.catalog import load_toolkit_class
 from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
+
+# The plugin API, as docs/plugins.md documents it: the modules a plugin may import whole, and the names it may import
+# from other modules. Every other `mindroom` module can change in any release.
+_PLUGIN_API = frozenset(
+    {
+        "mindroom.custom_tools.google_service.GoogleCloudToolkit",
+        "mindroom.memory.refresh_agent_memory_search",
+        "mindroom.memory.write_scope_markdown_file",
+        "mindroom.plugin_api",
+        "mindroom.plugin_http",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,3 +120,31 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 )
             finally:
                 dispose_plugins(generation)
+
+
+def imports_outside_plugin_api(plugin_root: Path) -> list[str]:
+    """Statically list each import from ``mindroom`` outside the plugin API in the plugin's Python files, as ``path:line: name``."""
+    found: list[tuple[Path, int, str]] = []
+    for directory, subdirectories, file_names in plugin_root.walk():
+        # Installed packages, such as a virtual environment's copy of MindRoom, and hidden directories are not plugin code.
+        subdirectories[:] = [name for name in subdirectories if name != "site-packages" and not name.startswith(".")]
+        for path in (directory / name for name in file_names if name.endswith(".py")):
+            try:
+                tree = ast.parse(path.read_bytes(), filename=str(path))
+            except (OSError, SyntaxError):
+                # A file Python cannot read or parse imports nothing, and the load check fails on any module it loads.
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [(alias.lineno, alias.name) for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module is not None:
+                    names = [(alias.lineno, f"{node.module}.{alias.name}") for alias in node.names]
+                else:
+                    continue
+                found.extend(
+                    (path.relative_to(plugin_root), line, name)
+                    for line, name in names
+                    if f"{name}.".startswith("mindroom.")
+                    and not any(f"{name}.".startswith(f"{public}.") for public in _PLUGIN_API)
+                )
+    return [f"{path}:{line}: {name}" for path, line, name in sorted(found)]

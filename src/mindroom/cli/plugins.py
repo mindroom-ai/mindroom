@@ -31,9 +31,10 @@ def plugin_check(
         resolve_path=True,
         help="Plugin directory containing mindroom.plugin.json.",
     ),
+    strict: bool = typer.Option(False, "--strict", help="Treat imports from outside the plugin API as errors."),
 ) -> None:
     """Strictly validate one plugin against this MindRoom version."""
-    from mindroom.plugin_check import check_plugin  # noqa: PLC0415
+    from mindroom.plugin_check import check_plugin, imports_outside_plugin_api  # noqa: PLC0415
 
     try:
         result = check_plugin(path)
@@ -46,6 +47,13 @@ def plugin_check(
     console.print(f"  Hooks:       {', '.join(result.hook_names) or 'none'}")
     console.print(f"  Automations: {', '.join(result.automation_names) or 'none'}")
     console.print(f"  Skills:      {', '.join(result.skill_directories) or 'none'}")
+    if outside_imports := imports_outside_plugin_api(path):
+        label = "[red]Error:[/red]" if strict else "[yellow]Warning:[/yellow]"
+        console.print(f"{label} imports from outside the plugin API can break in any MindRoom release:")
+        for outside_import in outside_imports:
+            console.print(f"  {outside_import}", markup=False, soft_wrap=True)
+        if strict:
+            raise typer.Exit(1)
 
 
 @plugins_app.command("install")
