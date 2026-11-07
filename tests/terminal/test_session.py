@@ -157,6 +157,27 @@ async def test_without_pidfds_a_session_still_ends(
     assert await _exit_code(viewer) == 4
 
 
+async def test_an_ended_session_is_kept_for_the_idle_time_after_its_shell_exits(
+    tmp_path: Path,
+    manager: TerminalManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell that exits late in its idle time keeps its scrollback and exit code for the whole idle time after."""
+    monkeypatch.setattr(session_module, "_IDLE_SECONDS", 1.0)
+    loop = asyncio.get_running_loop()
+    session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
+    session.write(b"sleep 0.6; exit 3\n")
+
+    await _ended(session)
+    ended_at = loop.time()
+    async with asyncio.timeout(10):
+        while manager.sessions("owner"):  # noqa: ASYNC110 - forgetting has no event to await
+            await asyncio.sleep(0.01)
+
+    assert session.exit_code == 3
+    assert loop.time() - ended_at >= 0.95
+
+
 async def test_a_shell_with_no_input_and_no_viewer_is_hung_up_and_forgotten(
     tmp_path: Path,
     manager: TerminalManager,

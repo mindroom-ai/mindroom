@@ -261,6 +261,8 @@ class TerminalSession:
                 os.close(self._master_fd)
             self._master_fd = None
         self._pending_input.clear()
+        # An ended session's scrollback and exit code stay for the idle time from its end.
+        self._last_active = self._loop.time()
         self.exit_code = code
         self._publish(TerminalEvent("exit", code=code))
         self._viewers.clear()

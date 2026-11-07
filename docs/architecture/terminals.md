@@ -26,7 +26,7 @@ The sandbox runner keeps terminals, and the primary reaches them through `Worker
 
 - A session ends when its shell exits, when it has had no input and no attached viewer for 30 minutes, or when the runner stops.
   Output alone does not keep a session alive, so a forgotten shell is reclaimed even while a process in it keeps printing.
-- An ended session keeps its scrollback for viewers until it has had no viewer for 30 minutes, or until it is closed.
+- An ended session keeps its scrollback and exit code for 30 minutes after its shell ends or its last viewer leaves, whichever is later, or until it is closed.
 - Each session keeps its last 256 KiB of output for viewers that attach later.
 - A viewer that falls 4 MiB behind is dropped and must attach again, so a slow viewer cannot grow the runner's memory without bound.
 - A runner holds at most 8 sessions per owner and 64 in total; an owner at its limit first forgets its oldest ended session.
