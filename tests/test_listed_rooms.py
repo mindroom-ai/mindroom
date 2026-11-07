@@ -248,6 +248,20 @@ async def test_a_listing_the_room_no_longer_holds_changes_nothing(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_a_listing_in_a_room_the_bot_has_left_changes_nothing(tmp_path: Path) -> None:
+    """Nio still delivers the last events of a room the bot left; a listing among them brings no bot in."""
+    bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM)], ROOM: [_create(), _parent(PARENT)]}, joined=())
+    left_parent = nio.MatrixRoom(PARENT, HELPER)
+    event = _space_child_event(ROOM)
+    left_parent.handle_event(event)
+
+    await bot.lifecycle.on_space_child(left_parent, event)
+    await bot.settle()
+
+    assert bot.memberships == []
+
+
+@pytest.mark.asyncio
 async def test_a_room_taken_off_its_parents_list_is_left(tmp_path: Path) -> None:
     """A room still naming its parent, which no longer lists it, loses the bots in it."""
     bot = _Bot(tmp_path, {PARENT: [_create(), _child(ROOM, listed=False)], ROOM: [_create(), _parent(PARENT)]})
