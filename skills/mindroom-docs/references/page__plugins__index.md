@@ -732,6 +732,7 @@ async def feed_xml(url: str) -> str:
 
 A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
 It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+Pass `user_agent` to send your own `User-Agent` header instead of HTTPX's default.
 It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
 Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
 In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
@@ -1070,6 +1071,13 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
+A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
+The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
+
+```json
+{"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
+```
+
 ## Plugin context
 
 A plugin's HTTP routes and tools read their own plugin's settings, state directory, and config from a `PluginContext`.
@@ -1096,7 +1104,7 @@ Each call returns the context of the config MindRoom serves at that moment, so a
 
 A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call in a Matrix conversation or in an OpenAI-compatible API request whose API key is [mapped to a user](https://docs.mindroom.chat/openai-api/#requester-identities-and-delegation).
 Anywhere else, such as in the MCP gateway or a worker, it raises `RuntimeError`, so a tool that uses it sets [`requires_primary_runtime=True`](#decorator-fields).
-A plugin that uses its context states `"mindroom_plugin_api": "1.3"` in its manifest, so an older MindRoom skips it with a clear reason.
+A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 | Member | Value |
 |--------|-------|

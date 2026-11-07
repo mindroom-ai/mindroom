@@ -5643,7 +5643,8 @@ calls:
 
 ### Cascaded
 
-Each finalized transcript goes through the agent's normal response path, with the same model resolution, system prompt, instructions, knowledge, skills, hooks, tools, requester identity, and history.
+Each finalized transcript goes through the agent's normal response path, with the same model resolution, system prompt, instructions, knowledge, skills, tools, requester identity, and history.
+`tool:*` hooks run on the agent's tool calls, but `message:*` and `system:enrich` hooks do not run for call transcripts.
 The profile's `model` changes only the LLM; speech services, prompts, history, memory, and tools stay the same.
 Turn ends are detected locally, and the caller can interrupt the agent by speaking.
 
@@ -11298,6 +11299,7 @@ For a visible, persistent browser that the user can watch or control in MindRoom
 
 Tools that fetch pages from MindRoom itself (`website`, `trafilatura`, `newspaper`, `crawl4ai`, `agentql`, and the `browser` host target) reach only public HTTP(S) addresses.
 Private, loopback, link-local, multicast, reserved, and cloud-metadata targets are refused, and so are redirects, crawled links, and page resources that lead to them.
+`website`, `trafilatura`, and `newspaper` also refuse URLs that carry a user name or password, and fail on a page a server sends compressed or otherwise encoded or that does not finish downloading within 30 seconds.
 Unless a worker egress proxy is set, DNS answers that change after a URL is checked cannot redirect the connection to an internal service.
 Only the `browser` tool can opt into private networks, with [`allow_private_networks`](#browser-configuration).
 In Computer mode, the `browser` tool also opens worker-local loopback previews such as `http://localhost:5173` without that option; see [Preview a local web app](https://docs.mindroom.chat/tools/worker-computer/#preview-a-local-web-app).
@@ -11320,8 +11322,7 @@ WebRTC cannot send UDP from these browsers.
 ### [`website`]
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
-Pages larger than 2 MiB fail, as do pages a server sends compressed or otherwise encoded and pages that do not finish downloading within 30 seconds.
-URLs that carry a user name or password are refused.
+Pages larger than 2 MiB fail.
 
 ```yaml
 agents:
@@ -11335,7 +11336,6 @@ agents:
 `trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
 `extract_batch()` returns one JSON payload listing successes and failures.
 `crawl_website()` stops with an error when it reaches a refused target, while `extract_content=True` reports each refused page individually.
-A server that sends a compressed body fails the download.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -15899,7 +15899,7 @@ A body larger than 8 MiB, or one the server compressed despite being asked not t
 | `api_key` | `password` | `null` | Bearer token. |
 | `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
 | `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
-| `timeout` | `number` | `30` | Request timeout in seconds. |
+| `timeout` | `number` | `30` | Seconds the whole request may take, including redirects and the response body. |
 | `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
 | `all` | `boolean` | `false` | Enable `make_request()`. |
 
@@ -17271,9 +17271,10 @@ Plugin routes share the dashboard's origin, so a route that returned `text/html`
 MindRoom does not filter what plugin routes return, so they must answer with JSON; as a backstop, every response under `/api/plugins/` carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, replacing whatever the route set.
 A plugin route that raises answers 500 without the error's detail, except that one using its plugin context while the current config does not load the plugin answers 503 naming only the plugin.
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
+`GET /api/plugins` checks the session the same way and answers any session, whatever its user's rooms, with this MindRoom's plugin API version and the manifest `name` and `mindroom_plugin_api` of each enabled plugin that loaded, never a plugin's path, settings, or load error.
 Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
-CORS for `/api/client-sessions` and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
+CORS for `/api/client-sessions`, `/api/plugins`, and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
@@ -18270,6 +18271,7 @@ async def feed_xml(url: str) -> str:
 
 A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
 It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
+Pass `user_agent` to send your own `User-Agent` header instead of HTTPX's default.
 It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
 Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
 In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
@@ -18608,6 +18610,13 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
+A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
+The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
+
+```json
+{"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
+```
+
 ## Plugin context
 
 A plugin's HTTP routes and tools read their own plugin's settings, state directory, and config from a `PluginContext`.
@@ -18634,7 +18643,7 @@ Each call returns the context of the config MindRoom serves at that moment, so a
 
 A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call in a Matrix conversation or in an OpenAI-compatible API request whose API key is [mapped to a user](https://docs.mindroom.chat/openai-api/#requester-identities-and-delegation).
 Anywhere else, such as in the MCP gateway or a worker, it raises `RuntimeError`, so a tool that uses it sets [`requires_primary_runtime=True`](#decorator-fields).
-A plugin that uses its context states `"mindroom_plugin_api": "1.3"` in its manifest, so an older MindRoom skips it with a clear reason.
+A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 | Member | Value |
 |--------|-------|
@@ -19071,6 +19080,7 @@ Use stable keys and deterministic text for persisted items.
 
 `system:enrich` runs after `message:enrich` and adds instructions to the agent's system prompt for the current turn.
 For teams, the same instructions go to the team and to each member agent.
+A reply resumed after a tool approval runs the hook again, and its instructions reach the agent's or team's new runs, while a run that paused keeps the system prompt it paused with.
 Add items with `ctx.add_instruction()`, or return `EnrichmentItem` objects as with `message:enrich`:
 
 ```python
