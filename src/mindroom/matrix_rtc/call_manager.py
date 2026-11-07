@@ -746,6 +746,10 @@ class CallManager:
                     room_call = self._observe(room)
                     state = await self._fetch_room_call_state(room_id)
                     if state is None:
+                        if self._roster_gap_expired(room, room_call):
+                            # The roster was already empty: an unreachable homeserver cannot extend its grace.
+                            await room_call.end_call()
+                            return
                         # Transient state-fetch failure: keep any active session alive
                         # and retry even if no further call event arrives.
                         self._schedule_reconcile_retry(room, room_call)
@@ -868,28 +872,41 @@ class CallManager:
     ) -> bool:
         """Keep an active call whose Matrix roster emptied, and return whether it is held.
 
-        Only a caller still in the room keeps the call: their membership lapsed. The session
-        keeps its roster, so frame keys the caller rotates meanwhile still install, and its
-        bridge ends it once that roster's devices leave the SFU, as when the caller hung up.
-        A roster that stays empty past the grace ends the call at the next reconcile.
+        Only an authorized caller still in the room keeps the call: their membership lapsed.
+        The session keeps its roster, so frame keys the caller rotates meanwhile still install,
+        and its bridge ends it once that roster's devices leave the SFU, as when the caller hung
+        up. A roster that stays empty past the grace ends the call at the next reconcile.
         """
         session, logical_call = room_call.session, room_call.logical_call
-        if session is None or logical_call is None or session.requester_id not in joined_user_ids:
+        if (
+            session is None
+            or logical_call is None
+            or session.requester_id not in joined_user_ids
+            or not self._is_authorized_call_member(session.requester_id, room.room_id)
+            or self._roster_gap_expired(room, room_call)
+        ):
             return False
         now_ms = self._clock_ms()
-        if logical_call.roster_gap_deadline_ms is None:
-            logical_call.roster_gap_deadline_ms = now_ms + _ROSTER_GAP_GRACE_MS
+        deadline_ms = logical_call.roster_gap_deadline_ms
+        if deadline_ms is None:
+            deadline_ms = logical_call.roster_gap_deadline_ms = now_ms + _ROSTER_GAP_GRACE_MS
             session.vacate_roster()
             logger.info("call_roster_gap_held", room_id=room.room_id, agent=self._agent_name)
-        elif now_ms >= logical_call.roster_gap_deadline_ms:
-            logger.info("call_roster_gap_expired", room_id=room.room_id, agent=self._agent_name)
-            return False
         room_call.cancel_expiry()
         room_call.expiry_handle = asyncio.get_running_loop().call_later(
-            (logical_call.roster_gap_deadline_ms - now_ms) / 1000,
+            (deadline_ms - now_ms) / 1000,
             self._start_expiry_reconcile,
             room,
         )
+        return True
+
+    def _roster_gap_expired(self, room: nio.MatrixRoom, room_call: _RoomCall) -> bool:
+        """Return whether the call's empty roster has outlasted its grace."""
+        logical_call = room_call.logical_call
+        deadline_ms = logical_call.roster_gap_deadline_ms if logical_call is not None else None
+        if deadline_ms is None or self._clock_ms() < deadline_ms:
+            return False
+        logger.info("call_roster_gap_expired", room_id=room.room_id, agent=self._agent_name)
         return True
 
     def _call_room_owners(self) -> _CallRoomOwners:

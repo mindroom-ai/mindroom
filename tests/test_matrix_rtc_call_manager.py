@@ -4560,6 +4560,54 @@ async def test_roster_gap_ends_the_call_after_its_grace(
 
 
 @pytest.mark.asyncio
+async def test_roster_gap_deadline_ends_the_call_when_room_state_cannot_be_read(tmp_path: Path) -> None:
+    """An unreachable homeserver cannot keep a call whose roster already emptied past its grace."""
+    now_ms = [int(time.time() * 1000)]
+    joined_ts = now_ms[0]
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.roster_vacated
+
+    client.room_get_state.return_value = nio.RoomGetStateError("503 upstream unavailable")
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert not bridge.closed
+
+    now_ms[0] += 60_000
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.closed
+    assert _call_state(manager).logical_call is None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_caller_who_leaves_the_room_during_a_roster_gap_ends_the_call(tmp_path: Path) -> None:
+    """Only a caller still in the room holds a lapsed call; leaving the room ends it at once."""
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert not bridge.closed
+
+    lapsed = {**_remote_member_event(created_ts=joined_ts), "content": {}}
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        [lapsed, _room_member_event(membership="leave")],
+        ROOM_ID,
+    )
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.closed
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_hang_up_ends_a_held_call_when_the_caller_leaves_the_sfu(tmp_path: Path) -> None:
     """A caller who hangs up leaves the SFU right after their membership, which ends the held session."""
     joined_ts = int(time.time() * 1000)
