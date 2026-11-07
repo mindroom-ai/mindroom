@@ -1552,23 +1552,23 @@ async def test_speech_must_be_a_wav_of_at_most_30_seconds_and_1_mb(world: World,
 
 @pytest.mark.asyncio
 async def test_one_stretch_in_flight_per_person(world: World) -> None:
-    """A second stretch while the first is being transcribed is refused with when to try again."""
+    """A second upload while the first is being transcribed is refused with when to try again."""
     world.transcriber.gate = asyncio.Event()
     call = await world.service.join(ROOM, ANN)
     await world.service.join(ROOM, BOB)
     world.clock.advance(30)
+    await world.service.reserve_upload(call.id, ANN)
     first = asyncio.create_task(world.say(call.id, ANN))
     await world.transcriber.started.wait()
 
-    async with asyncio.timeout(5):  # Let in, the second stretch would wait at the gate with the first.
-        refused = await _refused("too-many-requests", lambda: world.say(call.id, ANN, ago=2.5))
+    refused = await _refused("too-many-requests", lambda: world.service.reserve_upload(call.id, ANN))
     assert refused.retry_after == 3
+    await world.service.reserve_upload(call.id, BOB)
     world.transcriber.gate.set()
-    bob = await world.say(call.id, BOB)
 
     assert (await first).user_id == ANN
-    assert bob.user_id == BOB
-    assert (await world.say(call.id, ANN, ago=2.5)).kind == "speech"
+    world.service.release_upload(ANN)
+    await world.service.reserve_upload(call.id, ANN)
 
 
 @pytest.mark.asyncio

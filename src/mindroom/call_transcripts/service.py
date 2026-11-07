@@ -194,13 +194,6 @@ class _NotesWriter(Protocol):
         ...
 
 
-@dataclass(eq=False, slots=True)
-class _Stretch:
-    """One person's stretch of speech between being let in and being written."""
-
-    call_id: str
-
-
 class CallTranscriptService:
     """Live calls between people in rooms, and the one message each leaves behind."""
 
@@ -221,9 +214,10 @@ class CallTranscriptService:
         self._started_at = clock()
         """When this MindRoom began serving calls: every app gets a full minute from then to check in."""
         self._room_locks: dict[str, asyncio.Lock] = {}
-        self._speaking: dict[str, _Stretch] = {}
         self._uploading: set[str] = set()
         """Who is sending a stretch now, from before its audio is read until it is answered."""
+        self._speaking: dict[str, str] = {}
+        """The call of each person's stretch let in and not yet written; one each, as each has one upload slot."""
         self._recent_speech: dict[str, deque[float]] = {}
         self._settling: dict[str, asyncio.Task[None]] = {}
         """Each call's one task making its Matrix writes, by call, so no call's writes wait for another's."""
@@ -284,14 +278,13 @@ class CallTranscriptService:
         """
         call = await self._call_for(call_id, user_id)
         seconds = _speech_seconds(audio)
-        stretch = _Stretch(call_id=call.id)
         async with self._room_lock(call.room_id):
             call = await self._fresh(call_id)
             now = self._clock()
             # A stretch has ended by the time it arrives, and none of the call's was said before the call began.
             said_at = max(call.started_at, min(started_at, now - seconds))
             await self._admit(call, user_id, said_at=said_at, seconds=seconds, now=now)
-            self._speaking[user_id] = stretch
+            self._speaking[user_id] = call.id
         try:
             text = await self._transcribe(audio, call_id=call.id, user_id=user_id, seconds=seconds)
             if text == "":
@@ -317,10 +310,9 @@ class CallTranscriptService:
                         seconds=seconds,
                         reason="not-transcribed",
                     )
-                # In flight until its line is written, so the message cannot fall due without it.
-                self._done_speaking(user_id, stretch)
         finally:
-            self._done_speaking(user_id, stretch)
+            # In flight until its line is written, with no wait between, so the message cannot fall due without it.
+            del self._speaking[user_id]
         if line is None:
             raise CallRefusedError(code="forbidden", message=_TOO_LATE)
         return line
@@ -540,13 +532,7 @@ class CallTranscriptService:
             raise CallRefusedError(code="forbidden", message="That was said after you left the call.")
 
     def _count_speech(self, user_id: str, now: float) -> None:
-        """Refuse a second stretch in flight, or more than 240 a minute, from one person; otherwise count this one."""
-        if user_id in self._speaking:
-            raise CallRefusedError(
-                code="too-many-requests",
-                message="Your previous stretch of speech is still being transcribed.",
-                retry_after=_SPEAKING_RETRY_AFTER_SECONDS,
-            )
+        """Refuse more than 240 stretches a minute from one person; otherwise count this one."""
         recent = self._recent_speech.setdefault(user_id, deque())
         while recent and recent[0] <= now - _SPEECH_WINDOW_SECONDS:
             recent.popleft()
@@ -566,10 +552,6 @@ class CallTranscriptService:
         except TimeoutError:
             logger.warning("call_transcript_transcription_timed_out", call_id=call_id, seconds=seconds)
             return None
-
-    def _done_speaking(self, user_id: str, stretch: _Stretch) -> None:
-        if self._speaking.get(user_id) is stretch:
-            del self._speaking[user_id]
 
     def _forget_quiet_speakers(self, now: float) -> None:
         """Drop the speech counts of people who sent nothing for a minute."""
@@ -636,7 +618,7 @@ class CallTranscriptService:
             call.ended_at is not None
             and call.transcript_done_at is None
             and now >= call.ended_at + _TRANSCRIPT_DELAY_SECONDS
-            and all(stretch.call_id != call.id for stretch in self._speaking.values())
+            and call.id not in self._speaking.values()
         )
 
     async def _post_transcript(self, call: StoredCall, row_event_id: str) -> None:
