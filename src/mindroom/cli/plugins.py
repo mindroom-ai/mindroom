@@ -9,7 +9,6 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
-from rich.text import Text
 
 from .config import CONFIG_PATH_OPTION, activate_cli_runtime, console
 
@@ -89,7 +88,7 @@ def plugin_check(
 
 def _print_literal(markup: str, text: object) -> None:
     """Print fixed Rich markup followed by text shown as is, with no markup or emoji codes read from the text."""
-    console.print(markup, console.highlighter(Text(str(text))), sep="")
+    console.print(markup, console.highlighter(str(text)), sep="")
 
 
 def _internal_imports_json(outside_imports: list[OutsideImport]) -> list[dict[str, str | int]]:

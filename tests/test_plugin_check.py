@@ -393,9 +393,7 @@ def test_plugins_check_cli_prints_markup_in_names_literally(tmp_path: Path) -> N
         },
         modules={
             "tools.py": (
-                "from agno.tools import Toolkit\n"
-                "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
-                "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+                "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata\n"
                 "@register_tool_with_metadata(\n"
                 "    name='demo:100: [/x]',\n"
                 "    file_access=ToolFileAccess.NONE,\n"
@@ -407,7 +405,7 @@ def test_plugins_check_cli_prints_markup_in_names_literally(tmp_path: Path) -> N
                 "    return Toolkit\n"
             ),
             "hooks.py": (
-                "from mindroom.hooks import hook\n"
+                "from mindroom.plugin_api import hook\n"
                 "@hook(event='message:received', name='audit:100: [/x]')\n"
                 "async def audit_hook(ctx):\n"
                 "    del ctx\n"
