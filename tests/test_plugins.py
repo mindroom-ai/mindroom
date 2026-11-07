@@ -588,6 +588,26 @@ def test_a_dotted_package_spec_whose_middle_part_is_not_a_package_does_not_resol
     assert str(skipped.error) == f"Configured plugin module could not be resolved: {spec}"
 
 
+@pytest.mark.parametrize("suffix", [".", "..demo"])
+def test_a_dotted_package_spec_with_an_empty_part_does_not_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+) -> None:
+    """`python:vendor.` and `python:vendor..demo` name no module, so neither loads the plugin `python:vendor` names."""
+    vendor = f"vendor_{uuid.uuid4().hex}"
+    site_packages = tmp_path / "site-packages"
+    for root, name in ((site_packages / vendor, "vendor"), (site_packages / vendor / "demo", "demo")):
+        root.mkdir(parents=True)
+        (root / "mindroom.plugin.json").write_text(json.dumps({"name": name, "skills": []}), "utf-8")
+    monkeypatch.syspath_prepend(str(site_packages))
+
+    spec = f"python:{vendor}{suffix}"
+    [skipped] = _publish(Config(plugins=[spec]), _minimal_runtime_paths(tmp_path)).skipped
+
+    assert str(skipped.error) == f"Configured plugin module could not be resolved: {spec}"
+
+
 def test_configured_plugin_roots_leave_out_a_package_spec_python_cannot_look_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

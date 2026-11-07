@@ -7,6 +7,7 @@ import sys
 import uuid
 from types import ModuleType
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -159,12 +160,18 @@ def test_plugins_check_reports_a_plugin_that_needs_a_newer_plugin_api(tmp_path: 
 @pytest.mark.parametrize("required", [True, False])
 def test_a_plugin_skipped_for_any_reason_fails_the_load_only_when_its_entry_requires_it(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     manifest: dict[str, str] | None,
     hooks: str,
     reason: str,
     required: bool,
 ) -> None:
-    """A required plugin that would be skipped refuses the whole load, with the reason; any other is skipped."""
+    """A required plugin that would be skipped refuses the whole load, with the reason; any other is skipped.
+
+    Only the skipped plugin is logged as skipped.
+    """
+    logger = MagicMock()
+    monkeypatch.setattr(plugin_imports, "logger", logger)
     if manifest is not None:
         _write_plugin(
             tmp_path / "plugins" / "needed",
@@ -177,9 +184,13 @@ def test_a_plugin_skipped_for_any_reason_fails_the_load_only_when_its_entry_requ
         refusal = rf"^Required plugin \./plugins/needed failed to load: .*{reason}"
         with pytest.raises(PluginValidationError, match=refusal):
             _prepare(tmp_path, entries)
+        warnings = {call.args[0]: call.kwargs for call in logger.warning.call_args_list}
+        assert reason in warnings["Required plugin failed to load"]["error"]
+        assert not any(message.endswith(", skipping") for message in warnings)
     else:
         [skipped] = _prepare(tmp_path, entries).skipped
         assert reason in str(skipped.error)
+        assert any(call.args[0].endswith(", skipping") for call in logger.warning.call_args_list)
 
 
 def test_a_disabled_required_entry_requires_nothing(tmp_path: Path) -> None:
