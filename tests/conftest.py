@@ -3773,6 +3773,12 @@ def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
 
 
+@pytest.fixture(autouse=True)
+def _reset_livekit_service_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a LiveKit service URL one test discovered from answering a later test's discovery."""
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._discovered_service_urls", {})
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _loaded_o200k() -> None:
     """Load the token encoder once, so no test's estimates depend on how far its background load has come."""

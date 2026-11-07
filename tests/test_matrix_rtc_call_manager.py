@@ -4473,7 +4473,6 @@ async def test_remembered_livekit_service_is_reread_when_a_caller_follows_a_chan
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A remembered discovery that differs from the caller's focus is read again before the call is refused."""
-    monkeypatch.setattr("mindroom.matrix_rtc.focus._discovered_service_urls", {})
     well_known = [SERVICE_URL]
     reads: list[str] = []
 
