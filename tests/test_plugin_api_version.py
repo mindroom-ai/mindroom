@@ -167,6 +167,18 @@ def test_a_plugin_skipped_for_any_reason_fails_the_load_only_when_its_entry_requ
         assert reason in str(skipped.error)
 
 
+def test_a_refused_load_names_every_required_plugin_that_did_not_load(tmp_path: Path) -> None:
+    """Each required plugin that would be skipped is named with its reason, not only the first."""
+    entries = [{"path": "./plugins/first", "required": True}, {"path": "./plugins/second", "required": True}]
+    refusal = (
+        r"^Required plugin \./plugins/first failed to load: Configured plugin path does not exist: .*; "
+        r"Required plugin \./plugins/second failed to load: Configured plugin path does not exist: "
+    )
+
+    with pytest.raises(PluginValidationError, match=refusal):
+        _prepare(tmp_path, entries)
+
+
 @pytest.mark.asyncio
 async def test_a_refused_load_ends_the_tasks_its_loaded_plugins_started(tmp_path: Path) -> None:
     """Nothing a load refused for a required plugin started keeps running."""
