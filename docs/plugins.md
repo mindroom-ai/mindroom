@@ -203,6 +203,7 @@ The argument takes every form a `plugins:` entry takes, as listed in [Path resol
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
+It leaves out the plugin's `tests/` directory and the separate plugins nested in it, each with its own manifest.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
 The document also lists the imports outside the plugin API in `internal_imports`, each with its `path`, `line`, and `name`, and with `--strict` any of them makes the `status` `failed`.
@@ -236,6 +237,7 @@ my-plugin/
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, and skills.
 Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
+A skill script that runs as a [background script](tools/background-scripts.md) may also import `mindroom.script_sdk`.
 Other `mindroom` modules can change in any release.
 
 ## Manifest format

@@ -91,6 +91,20 @@ def test_plugins_check_cli_lists_imports_outside_the_plugin_api_in_the_resolved_
     ]
 
 
+def test_plugins_check_cli_does_not_count_imports_of_plugins_nested_in_the_checked_one(working_directory: Path) -> None:
+    """A package-root plugin's import report leaves out the separate plugins it ships, each with its own manifest."""
+    (working_directory.parent / "site-packages" / "check_demo_pkg" / "plugins" / "demo" / "helpers.py").write_text(
+        "from mindroom.hooks import hook\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["plugins", "check", "--json", "--strict", "python:check_demo_pkg"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert (payload["status"], payload["name"], payload["internal_imports"]) == ("compatible", "packaged-root", [])
+
+
 def test_plugins_check_cli_json_reports_a_package_spec_that_does_not_resolve() -> None:
     """A spec that resolves to no plugin directory fails as JSON with the loader's reason and no imports to list."""
     result = runner.invoke(app, ["plugins", "check", "--json", "pkg:missing_check_demo_pkg:plugins/demo"])
