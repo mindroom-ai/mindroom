@@ -117,6 +117,7 @@ visibility = [
     "mindroom.cli.connect",
     "mindroom.matrix.provisioning",
     "mindroom.script_runs.worker_client",
+    "mindroom.terminal.client",
 ]
 
 [[modules]]
@@ -8155,6 +8156,7 @@ depends_on = []
 path = "mindroom.terminal.client"
 depends_on = [
     "mindroom.bounded_bytes",
+    "mindroom.http_error_detail",
     "mindroom.terminal.session",
     "mindroom.tool_system.sandbox_proxy",
 ]

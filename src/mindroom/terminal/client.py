@@ -23,6 +23,7 @@ import aiohttp
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.http_error_detail import validation_error_detail
 from mindroom.terminal.session import TerminalError, TerminalEvent, TerminalInfo
 from mindroom.tool_system.sandbox_proxy import worker_call
 
@@ -55,7 +56,8 @@ class _Exit(BaseModel):
 
 
 class _Refusal(BaseModel):
-    detail: str
+    # A request validation failure lists what was wrong with each field.
+    detail: str | list[object]
 
 
 class TerminalStream:
@@ -70,10 +72,8 @@ class TerminalStream:
         if message.type == aiohttp.WSMsgType.BINARY:
             return TerminalEvent("output", data=message.data)
         if message.type == aiohttp.WSMsgType.TEXT:
-            try:
+            with contextlib.suppress(ValidationError):
                 return TerminalEvent("exit", code=_Exit.model_validate_json(message.data).code)
-            except ValidationError:
-                pass
         raise TerminalDetachedError
 
     async def send_input(self, data: str) -> None:
@@ -105,10 +105,12 @@ def _session_path(session_id: str, rest: str = "") -> str:
 
 def _detail(answer: bytes) -> str:
     """Return the runner's reason for a refusal."""
+    fallback = "The agent's worker refused."
     try:
-        return _Refusal.model_validate_json(answer).detail
+        detail = _Refusal.model_validate_json(answer).detail
     except ValidationError:
-        return "The agent's worker refused."
+        return fallback
+    return detail if isinstance(detail, str) else validation_error_detail(detail, fallback=fallback)
 
 
 async def _send(worker: WorkerCall, method: str, path: str, *, body: dict[str, object] | None = None) -> bytes:
