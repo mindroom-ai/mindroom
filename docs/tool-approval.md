@@ -39,6 +39,9 @@ tool_approval:
 
 [`config_manager`](tools/agent-orchestration.md#config_manager) calls that only read configuration, `manage_config(operation="inspect")` and `manage_agent(operation="validate")`, never ask for approval, even when a rule matches them or `default` is `require_approval`.
 
+A tool can declare that its calls do what calls of another function do, such as a plugin function that types command lines into a shell; that function's rules then judge them too, so a `run_shell_command` rule also asks before such a tool runs a line it matches.
+The tool's own rules still apply, and a rule that auto-approves the tool does not lift the other function's rules; see [Approval aliases](plugins.md#approval-aliases).
+
 ## Approving and Denying
 
 - React to the approval card with `✅` to approve the tool call.

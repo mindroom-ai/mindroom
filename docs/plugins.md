@@ -358,12 +358,53 @@ See [Security Posture](architecture/security-posture.md#file-access) for how eac
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](tools/index.md#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
+| `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
 
 Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
 An Agno toolkit function that reads its injected `agent`, `team`, or `run_context` needs the primary runtime too.
 If it accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
 `requires_room_context` and `requires_primary_runtime` describe where a tool can run; they do not grant or replace tool authorization.
+
+### Approval aliases
+
+A function that does what another function does, such as one that types command lines into a shell, can have that function's [approval rules](tool-approval.md) judge its calls too.
+Map its name to an `ApprovalAlias` whose `judged_as` names the other function and whose `judge` returns the arguments of each call of that function one call amounts to:
+
+```python
+from mindroom.plugin_api import ApprovalAlias, ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+
+class LineTools(Toolkit):
+    name = "lines"
+
+    @tool
+    def run_line(self, command: str) -> str:
+        """Run one command line in the agent's shell session."""
+        ...
+
+
+def shell_calls(arguments):
+    command = arguments.get("command")
+    return [{"args": command}] if isinstance(command, str) else None
+
+
+@register_tool_with_metadata(
+    name="lines",
+    display_name="Lines",
+    description="Run command lines",
+    category=ToolCategory.DEVELOPMENT,
+    file_access=ToolFileAccess.UNCONFINED,
+    executes_code=True,
+    approval_aliases={"run_line": ApprovalAlias(judged_as="run_shell_command", judge=shell_calls)},
+)
+def lines_tools() -> type[LineTools]:
+    return LineTools
+```
+
+A call then needs approval when its own rules ask for it or when the `judged_as` rules would ask about any call `judge` returns, so a rule that auto-approves `run_line` does not lift a `run_shell_command` rule.
+`judge` reads only the call's arguments, since an approval covers exactly those: return an empty list for a call that amounts to no call of `judged_as`, and `None` when the arguments cannot tell, which asks whenever the `judged_as` rules may ask.
+The returned calls are judged by the `judged_as` function's own rules, never by an alias of its own, and an alias applies only to the toolkit that declares it.
 
 ### Dependencies
 

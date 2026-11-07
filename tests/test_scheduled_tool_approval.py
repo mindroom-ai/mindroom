@@ -71,9 +71,11 @@ from mindroom.scheduling.tasks import (
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
+from mindroom.tool_system.declarations import ApprovalAlias
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -89,6 +91,7 @@ from tests.conftest import (
     initialize_approval_store_for_test,
     install_model_providers,
     make_matrix_client_mock,
+    register_test_tool,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -1425,6 +1428,36 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
 
     context.client.room_put_state.assert_not_awaited()
     request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_call_judged_as_a_gated_function_can_be_scheduled_pre_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No rule gates ``post_slack_message``, but its toolkit says its calls are shell commands, which a rule gates."""
+    alias = ApprovalAlias(judged_as="run_shell_command", judge=lambda _arguments: None)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries[_TOOLKIT], approval_aliases={"post_slack_message": alias}),
+    )
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+            ),
+        ),
+    )
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_awaited_once()
 
 
 _CARD_REFUSED = "Could not post an approvable approval card for this call; nothing was scheduled."

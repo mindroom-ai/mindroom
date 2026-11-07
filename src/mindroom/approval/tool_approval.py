@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.config.main import Config
+    from mindroom.tool_system.declarations import ApprovalAlias
+    from mindroom.tool_system.registry import ToolRegistry
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -49,6 +51,7 @@ __all__ = [
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "toolkit_approval_alias",
 ]
 
 NO_APPROVER_REASON = "No approval recipient is configured; the tool was denied safely."
@@ -153,12 +156,44 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     return rule
 
 
-def tool_may_require_approval(config: Config, tool_name: str) -> bool:
-    """Return whether one tool must use the persisted confirmation boundary."""
+def _rules_may_ask(config: Config, tool_name: str) -> tuple[bool, float]:
+    """Return whether the rules matching ``tool_name`` may ask about a call of it, and how long its card stays open."""
     rule = _matching_tool_approval_rule(config, tool_name)
-    if rule is None:
-        return config.tool_approval.default == "require_approval"
-    return rule.action != "auto_approve"
+    may_ask = config.tool_approval.default == "require_approval" if rule is None else rule.action != "auto_approve"
+    timeout_days = config.tool_approval.timeout_days if rule is None or rule.timeout_days is None else rule.timeout_days
+    return may_ask, timeout_days * 24 * 60 * 60
+
+
+def tool_may_require_approval(config: Config, tool_name: str, alias: ApprovalAlias | None = None) -> bool:
+    """Return whether one tool must use the persisted confirmation boundary.
+
+    A function with an approval ``alias`` must also when the function it is judged as must.
+    """
+    return _rules_may_ask(config, tool_name)[0] or (alias is not None and _rules_may_ask(config, alias.judged_as)[0])
+
+
+def toolkit_approval_alias(
+    config: Config,
+    tools: ToolRegistry,
+    toolkit: str | None,
+    function_name: str,
+) -> ApprovalAlias | None:
+    """Return the approval alias that the tool ``toolkit`` names declares for its function ``function_name``.
+
+    ``toolkit`` is the registered tool the function comes from, or the authored toolkit a call names, whose preset or
+    implied tools each count; None, for a function generated for the agent, declares none.
+    """
+    if toolkit is None:
+        return None
+    return next(
+        (
+            alias
+            for name in config.expand_tool_names([toolkit])
+            if (metadata := tools.get(name)) is not None
+            and (alias := metadata.approval_aliases.get(function_name)) is not None
+        ),
+        None,
+    )
 
 
 def resolve_tool_approval_approver(
@@ -206,8 +241,35 @@ async def evaluate_tool_approval(
     tool_name: str,
     arguments: dict[str, Any],
     agent_name: str,
+    alias: ApprovalAlias | None,
 ) -> tuple[bool, float]:
-    """Return the approval decision for one tool call."""
+    """Return the approval decision for one tool call, and how long its card stays open.
+
+    A call of a function with an approval ``alias`` also needs approval when a call of the function it is judged as,
+    one its ``judge`` names, would under that function's own rules; when its arguments cannot tell, whenever those
+    rules may ask.
+    """
+    requires_approval, timeout_seconds = await _evaluate_rules(config, runtime_paths, tool_name, arguments, agent_name)
+    if requires_approval or alias is None:
+        return requires_approval, timeout_seconds
+    judged_calls = alias.judge(arguments)
+    if judged_calls is None:
+        return _rules_may_ask(config, alias.judged_as)
+    for judged_arguments in judged_calls:
+        judged = await _evaluate_rules(config, runtime_paths, alias.judged_as, dict(judged_arguments), agent_name)
+        if judged[0]:
+            return judged
+    return False, timeout_seconds
+
+
+async def _evaluate_rules(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_name: str,
+    arguments: dict[str, Any],
+    agent_name: str,
+) -> tuple[bool, float]:
+    """Return the decision of the rules that match ``tool_name`` itself for one call of it."""
     approval_config = config.tool_approval
     require_approval = approval_config.default == "require_approval"
     timeout_seconds = approval_config.timeout_days * 24 * 60 * 60

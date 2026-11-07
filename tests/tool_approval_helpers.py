@@ -9,6 +9,7 @@ from unittest.mock import patch
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -33,12 +34,14 @@ def gated_functions(
     under its registered name. A toolkit named like a tool the gate special-cases (``scheduler``, ``delegate``, a
     Matrix room-runtime tool) therefore gets that tool's rules unless it is registered under another name. A caller
     that cannot resume a paused run (``resumable`` False) is offered none of the functions that ask for approval.
+    The built-in tool registered under that name declares the toolkit's approval aliases.
     """
     registered = registered_tool_name or toolkit.name
     adapted = apply_tool_approval_capability(
         adapt_toolkit(toolkit, key=authored_as or registered),
         toolkit,
         config,
+        tools=builtin_tool_registry(),
         registered_tool_name=registered,
         resumable=resumable,
         approvals_as_jobs=approvals_as_jobs,

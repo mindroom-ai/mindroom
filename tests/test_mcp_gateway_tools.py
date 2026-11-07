@@ -20,6 +20,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry, lazy_loading_prohibited_reason
 from mindroom.config.plugin import PluginEntryConfig
@@ -37,6 +38,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.catalog import ConfigField
+from mindroom.tool_system.declarations import ApprovalAlias
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -503,6 +505,39 @@ async def test_policy_approval_is_excluded_and_rejected(context: AgentToolContex
     search_result = await gateway.search_tools(context, toolkit="calculator")
     assert "error" not in search_result
     assert search_result["results"] == []
+    schema_result = await gateway.get_tool(context, toolkit="calculator", function="add")
+    assert "inputSchema" not in schema_result
+    assert schema_result["error"]["code"] == "approval_required"
+    invocation_result = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function="add",
+        arguments={"a": 1, "b": 2},
+    )
+    assert "result" not in invocation_result
+    assert invocation_result["error"]["code"] == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_rejected(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule on the shell blocks ``add`` once the calculator says its calls are shell commands, and only ``add``."""
+    alias = ApprovalAlias(judged_as="run_shell_command", judge=lambda _arguments: None)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries["calculator"], approval_aliases={"add": alias}),
+    )
+    config = context.config.model_copy(deep=True)
+    config.tool_approval.rules = [ApprovalRuleConfig(match="run_shell_command", action="require_approval")]
+    context = replace(context, config=config)
+
+    search_result = await gateway.search_tools(context, toolkit="calculator")
+    assert "error" not in search_result
+    found = {item["function"] for item in search_result["results"]}
+    assert "add" not in found
+    assert "subtract" in found
     schema_result = await gateway.get_tool(context, toolkit="calculator", function="add")
     assert "inputSchema" not in schema_result
     assert schema_result["error"]["code"] == "approval_required"

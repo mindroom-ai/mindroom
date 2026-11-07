@@ -65,6 +65,8 @@ from mindroom.script_runs.store import (
     mint_script_capability,
 )
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.declarations import ApprovalAlias
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -79,6 +81,7 @@ from tests.conftest import (
     loop_runs_while_blocked,
     make_conversation_reader_mock,
     make_relation_lookup,
+    register_test_tool,
     runtime_paths_for,
 )
 from tests.scripted_agent_helpers import registered_toolkit
@@ -880,6 +883,30 @@ async def test_script_broker_requests_approval_before_body_and_denial_prevents_e
         "approval:run-1:approval-call",
         "tool:after_call",
     ]
+
+
+@pytest.mark.asyncio
+async def test_script_broker_judges_a_call_by_the_rules_of_the_function_its_alias_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule auto-approves ``add``, yet the run grants no shell, so an ``add`` the calculator calls a shell command asks."""
+    events: list[str] = []
+    alias = ApprovalAlias(judged_as="run_shell_command", judge=lambda _arguments: None)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries["calculator"], approval_aliases={"add": alias}),
+    )
+    broker, token = _broker(
+        tmp_path,
+        events=events,
+        approval_decision=ToolApprovalDecision(approved=False, reason="No shell commands."),
+    )
+
+    receipt = await _call_through_gateway(broker, _request(call_id="aliased-call"), token)
+
+    assert receipt.error == {"kind": "approval_denied", "message": "No shell commands.", "retryable": False}
+    assert "approval:run-1:aliased-call" in events
 
 
 @pytest.mark.asyncio

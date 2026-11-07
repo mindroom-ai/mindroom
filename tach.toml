@@ -1432,6 +1432,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.events",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.approval.continuation_runner",
@@ -5264,6 +5265,7 @@ depends_on = [
     "mindroom.failure_text",
     "mindroom.config.resolution",
     "mindroom.scheduling.ownership",
+    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]
@@ -6807,6 +6809,7 @@ exclusive = true
 
 [[interfaces]]
 expose = [
+    "ApprovalAlias",
     "ConfigField",
     "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
@@ -7390,6 +7393,7 @@ expose = [
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "toolkit_approval_alias",
 ]
 from = ["mindroom.approval.tool_approval"]
 
