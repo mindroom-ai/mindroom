@@ -254,7 +254,8 @@ async def evaluate_tool_approval(
         return requires_approval, timeout_seconds
     judged_calls = alias.judge(arguments)
     if judged_calls is None:
-        return _rules_may_ask(config, alias.judged_as)
+        judged = _rules_may_ask(config, alias.judged_as)
+        return judged if judged[0] else (False, timeout_seconds)
     for judged_arguments in judged_calls:
         judged = await _evaluate_rules(config, runtime_paths, alias.judged_as, dict(judged_arguments), agent_name)
         if judged[0]:

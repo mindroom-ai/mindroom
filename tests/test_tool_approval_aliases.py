@@ -101,7 +101,7 @@ async def test_the_judged_functions_rules_judge_the_calls_an_alias_names(
     [
         pytest.param(_shell_review(timeout_days=1), True, id="script"),
         pytest.param({"match": _SHELL, "action": "require_approval", "timeout_days": 1}, True, id="require"),
-        pytest.param({"match": _SHELL, "action": "auto_approve"}, False, id="never-asks"),
+        pytest.param({"match": _SHELL, "action": "auto_approve", "timeout_days": 3}, False, id="never-asks"),
     ],
 )
 async def test_arguments_that_cannot_tell_ask_whenever_the_judged_rules_may(
@@ -109,14 +109,16 @@ async def test_arguments_that_cannot_tell_ask_whenever_the_judged_rules_may(
     shell_rule: dict[str, object],
     asks: bool,
 ) -> None:
-    """A call whose arguments name no command fails closed: it asks unless no shell command ever would."""
+    """A call whose arguments name no command fails closed: it asks unless no shell command ever would.
+
+    A card it asks for stays open as long as the shell's rule says; otherwise its own rules say.
+    """
     config, runtime_paths = _config(tmp_path, shell_rule)
 
     requires_approval, timeout_seconds = await _asks(config, runtime_paths, {"command": ["rm", "-rf", "/"]})
 
     assert requires_approval is asks
-    if asks:
-        assert timeout_seconds == 24 * 60 * 60
+    assert timeout_seconds == (1 if asks else config.tool_approval.timeout_days) * 24 * 60 * 60
 
 
 @pytest.mark.asyncio
