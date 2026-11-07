@@ -310,22 +310,17 @@ def test_validate_server_fetch_url_blocks_link_local_dns_when_private_is_enabled
 
 
 @pytest.mark.asyncio
-async def test_server_fetch_http_transport_rejects_private_request_url_without_network() -> None:
-    """The HTTPX transport should deny unsafe request URLs before opening a socket."""
-    transport = ServerFetchAsyncHTTPTransport()
-    request = httpx.Request("GET", "http://127.0.0.1/admin")
-
-    with pytest.raises(ServerFetchUrlError) as exc_info:
-        await transport.handle_async_request(request)
-
-    assert exc_info.value.reason == "private_address"
-
-
-@pytest.mark.asyncio
-async def test_httpx2_transport_rejects_private_request_url_without_network() -> None:
-    """The httpx2 transport handed to the MCP SDK should deny unsafe request URLs before opening a socket."""
-    transport = ServerFetchAsyncHTTPX2Transport()
-    request = httpx2.Request("GET", "http://127.0.0.1/admin")
+@pytest.mark.parametrize(
+    ("transport_cls", "request_cls"),
+    [(ServerFetchAsyncHTTPTransport, httpx.Request), (ServerFetchAsyncHTTPX2Transport, httpx2.Request)],
+)
+async def test_transport_rejects_private_request_url_without_network(
+    transport_cls: type[ServerFetchAsyncHTTPTransport | ServerFetchAsyncHTTPX2Transport],
+    request_cls: type[httpx.Request | httpx2.Request],
+) -> None:
+    """The HTTPX transport, and the httpx2 one handed to the MCP SDK, deny unsafe request URLs before opening a socket."""
+    transport = transport_cls()
+    request = request_cls("GET", "http://127.0.0.1/admin")
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
         await transport.handle_async_request(request)

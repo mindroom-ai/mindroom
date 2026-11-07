@@ -16,8 +16,7 @@ _MAX_FILE_SIZE = DEFAULT_CONFIG.getint("DEFAULT", "MAX_FILE_SIZE")
 def _fetch_response(url: str, *, decode: bool = False) -> Response | None:
     """Download one page through the shared public fetch, within Trafilatura's download size limit.
 
-    A refused URL raises ``PublicFetchError``.
-    Other download failures, including a non-2xx response, return ``None`` like Trafilatura's own downloader.
+    A refused URL raises ``PublicFetchError``; any other failure, including a non-2xx response, returns ``None``.
     """
     try:
         page = fetch_public_url_sync(url, max_bytes=_MAX_FILE_SIZE, user_agent=USER_AGENT)

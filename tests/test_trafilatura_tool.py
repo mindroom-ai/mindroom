@@ -18,6 +18,7 @@ from trafilatura.downloads import USER_AGENT
 
 import mindroom.tools.agno_compat_trafilatura as compat
 from mindroom.tools.trafilatura import trafilatura_tools
+from tests.public_fetch_helpers import serve_routes
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -74,22 +75,6 @@ def connect_attempts(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     return attempts
 
 
-def _serve(
-    monkeypatch: pytest.MonkeyPatch,
-    routes: dict[str, httpx.Response],
-) -> list[httpx.Request]:
-    """Answer every request that passed MindRoom's URL checks with an unread canned response, and record it."""
-    requests: list[httpx.Request] = []
-
-    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        route = routes.get(str(request.url), httpx.Response(404))
-        return httpx.Response(route.status_code, headers=route.headers, stream=httpx.ByteStream(route.content))
-
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
-    return requests
-
-
 def _call_all_url_functions(url: str) -> list[str]:
     toolkit = trafilatura_tools()()
     return [
@@ -125,7 +110,7 @@ def test_trafilatura_rejects_unsafe_targets_without_connecting(url: str, connect
 def test_trafilatura_revalidates_redirects_before_following(monkeypatch: pytest.MonkeyPatch) -> None:
     """A public URL redirecting to the loopback dashboard should be refused at the hop."""
     start_url = "https://example.com/redirect"
-    requests = _serve(
+    requests = serve_routes(
         monkeypatch,
         {start_url: httpx.Response(302, headers={"Location": "http://127.0.0.1:8765/api/config/raw"})},
     )
@@ -195,7 +180,7 @@ def test_trafilatura_extracts_public_page(monkeypatch: pytest.MonkeyPatch) -> No
     """Public pages should still be downloaded and extracted."""
     start_url = "https://example.com/start"
     article_url = "https://example.com/article"
-    requests = _serve(
+    requests = serve_routes(
         monkeypatch,
         {
             start_url: httpx.Response(301, headers={"Location": "/article"}),
@@ -219,7 +204,7 @@ def test_trafilatura_extracts_public_page(monkeypatch: pytest.MonkeyPatch) -> No
 def test_trafilatura_rejects_oversized_download(monkeypatch: pytest.MonkeyPatch) -> None:
     """Responses beyond Trafilatura's size limit should not be buffered or extracted."""
     url = "https://example.com/large"
-    _serve(monkeypatch, {url: httpx.Response(200, text=_ARTICLE_HTML)})
+    serve_routes(monkeypatch, {url: httpx.Response(200, text=_ARTICLE_HTML)})
     monkeypatch.setattr(compat, "_MAX_FILE_SIZE", 64)
 
     result = trafilatura_tools()().extract_text(url)
@@ -231,7 +216,7 @@ def test_trafilatura_rejects_compressed_download(monkeypatch: pytest.MonkeyPatch
     """A compressed body could expand past the size limit during decoding, so it is refused unread."""
     url = "https://example.com/bomb"
     bomb = gzip.compress(b"\0" * 32 * 1024 * 1024)
-    requests = _serve(monkeypatch, {url: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=bomb)})
+    requests = serve_routes(monkeypatch, {url: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=bomb)})
 
     result = trafilatura_tools()().extract_text(url)
 
@@ -241,9 +226,13 @@ def test_trafilatura_rejects_compressed_download(monkeypatch: pytest.MonkeyPatch
 
 def _crawl(monkeypatch: pytest.MonkeyPatch, docs_response: httpx.Response) -> tuple[str, list[str]]:
     homepage = "https://example.com/"
-    requests = _serve(
+    requests = serve_routes(
         monkeypatch,
-        {homepage: httpx.Response(200, text=_ARTICLE_HTML), "https://example.com/docs": docs_response},
+        {
+            homepage: httpx.Response(200, text=_ARTICLE_HTML),
+            "https://example.com/docs": docs_response,
+            "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
+        },
     )
     result = trafilatura_tools()().crawl_website(homepage, extract_content=True)
     return result, [str(request.url) for request in requests]
@@ -261,19 +250,9 @@ def test_trafilatura_crawl_extracts_public_pages(monkeypatch: pytest.MonkeyPatch
 
 def test_trafilatura_crawl_counts_the_page_a_redirect_ends_on_as_visited(monkeypatch: pytest.MonkeyPatch) -> None:
     """A crawled link that redirects is recorded under the URL its redirect ended on."""
-    homepage = "https://example.com/"
-    _serve(
-        monkeypatch,
-        {
-            homepage: httpx.Response(200, text=_ARTICLE_HTML),
-            "https://example.com/docs": httpx.Response(301, headers={"Location": "/guide"}),
-            "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
-        },
-    )
+    result, _requested_urls = _crawl(monkeypatch, httpx.Response(301, headers={"Location": "/guide"}))
 
-    crawl = json.loads(trafilatura_tools()().crawl_website(homepage))
-
-    assert "https://example.com/guide" in crawl["known_links"]
+    assert "https://example.com/guide" in json.loads(result)["known_links"]
 
 
 def test_trafilatura_crawl_rejects_discovered_redirect_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:

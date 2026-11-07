@@ -76,6 +76,7 @@ from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_egress_helpers import socks5_connect
 from tests.conftest import preserved_builtin_tools
+from tests.public_fetch_helpers import serve
 
 _BUILTINS = builtin_tool_registry()
 _CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
@@ -677,13 +678,7 @@ def test_web_tools_give_up_on_a_server_that_trickles_its_response(
     """A server that keeps sending slowly ends the tool call at the download deadline with the tool's error."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 0.3)
     call = tool_function()
-    requests: list[httpx.Request] = []
-
-    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, headers={"Content-Type": "text/html"}, stream=_TrickleBody())
-
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
+    requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=_TrickleBody()))
     started = time.monotonic()
 
     result = call("http://93.184.216.34/slow")

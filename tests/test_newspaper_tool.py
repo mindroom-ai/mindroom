@@ -12,6 +12,7 @@ import pytest
 
 import mindroom.tools.agno_compat_newspaper4k as compat
 from mindroom.tools.newspaper4k import newspaper4k_tools
+from tests.public_fetch_helpers import serve_routes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,19 +54,6 @@ def connect_attempts(monkeypatch: pytest.MonkeyPatch) -> list[object]:
     return attempts
 
 
-def _serve(monkeypatch: pytest.MonkeyPatch, routes: dict[str, httpx.Response]) -> list[httpx.Request]:
-    """Answer every request that passed MindRoom's URL checks with an unread canned response, and record it."""
-    requests: list[httpx.Request] = []
-
-    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        route = routes.get(str(request.url), httpx.Response(404))
-        return httpx.Response(route.status_code, headers=route.headers, stream=httpx.ByteStream(route.content))
-
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
-    return requests
-
-
 @pytest.mark.parametrize(
     "url",
     [
@@ -87,7 +75,7 @@ def test_newspaper_rejects_unsafe_targets_without_connecting(
     article_file.write_text(_ARTICLE_HTML, encoding="utf-8")
     url = url.format(article_file=article_file.as_uri())
     redirect = httpx.Response(302, headers={"Location": "http://127.0.0.1:8765/api/config/raw"})
-    requests = _serve(monkeypatch, {"https://example.com/redirect-to-loopback": redirect})
+    requests = serve_routes(monkeypatch, {"https://example.com/redirect-to-loopback": redirect})
 
     result = newspaper4k_tools()().read_article(url)
 
@@ -102,7 +90,7 @@ def test_newspaper_extracts_public_article_without_fetching_its_images(
 ) -> None:
     """A public article still extracts, while the image URLs it lists are never requested."""
     url = "https://example.com/article"
-    requests = _serve(
+    requests = serve_routes(
         monkeypatch,
         {url: httpx.Response(200, headers={"Content-Type": "text/html; charset=utf-8"}, content=_ARTICLE_HTML)},
     )
@@ -122,7 +110,7 @@ def test_newspaper_refuses_a_page_over_its_size_limit(
 ) -> None:
     """A page larger than the download limit is refused instead of buffered and parsed."""
     url = "https://example.com/article"
-    _serve(monkeypatch, {url: httpx.Response(200, headers={"Content-Type": "text/html"}, content=_ARTICLE_HTML)})
+    serve_routes(monkeypatch, {url: httpx.Response(200, headers={"Content-Type": "text/html"}, content=_ARTICLE_HTML)})
     monkeypatch.setattr(compat, "_MAX_PAGE_BYTES", 64)
 
     result = newspaper4k_tools()().read_article(url)
@@ -150,7 +138,7 @@ def test_newspaper_decodes_page_with_charset_declared_only_in_meta(
         "Bridges connect",
         "Brücken verbinden Räume. Bridges connect",
     )
-    _serve(
+    serve_routes(
         monkeypatch,
         {url: httpx.Response(200, headers={"Content-Type": "text/html"}, content=page.encode(encoding))},
     )
@@ -168,7 +156,7 @@ def test_newspaper_decodes_page_with_charset_declared_only_in_content_type(
     """A page whose charset appears only in its Content-Type header is decoded with that charset."""
     url = "https://example.com/artikel"
     page = _ARTICLE_HTML.replace("Bridges connect", "Brücken verbinden Räume. Bridges connect")
-    _serve(
+    serve_routes(
         monkeypatch,
         {
             url: httpx.Response(
