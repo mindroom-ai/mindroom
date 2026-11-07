@@ -12,7 +12,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
+from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_SCHEDULE_FIRED,
@@ -160,21 +160,6 @@ async def test_hook_card_mentions_only_whom_the_hook_names(
         materializable_agent_names={"alpha", "beta"},
     )
     assert (team.outcome is TeamOutcome.TEAM) is (len(expected) > 1)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("route", ["bot", "schedule"])
-@pytest.mark.parametrize("wake_mentioned", [True, False])
-async def test_hook_send_can_keep_the_agents_it_mentions_from_answering(
-    config: Config,
-    route: _Route,
-    wake_mentioned: bool,
-) -> None:
-    """A send that does not wake its mentions asks every agent to ignore them, and still mentions them."""
-    content = await _sent_content(config, route, "@alpha takes this one", wake_mentioned=wake_mentioned)
-
-    assert content["m.mentions"] == {"user_ids": [ALPHA]}
-    assert (content.get(SKIP_MENTIONS_KEY) is True) is not wake_mentioned
 
 
 @pytest.mark.asyncio

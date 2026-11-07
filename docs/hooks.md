@@ -536,14 +536,13 @@ ResponseResult(
 
 ### Sending messages
 
-**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False, mentions=None, wake_mentioned=True)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
+**`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False, mentions=None)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
 
 - For contexts that come from a message, the original human or configured bot-account requester is carried along, so routing, permissions, and memory attribution use that requester rather than the relaying bot.
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `@name` mentions of agents and teams in `text` mention them, unless `mentions` lists the Matrix user IDs of everyone the message mentions.
   Names in `text` then still show as links, but only the listed users are mentioned, so another agent named in `text` neither answers the message nor counts as [mentioned earlier](configuration/teams.md#ad-hoc-teams) in its thread; `mentions=[]` mentions nobody.
-- `wake_mentioned=False` makes agents ignore the message's mentions, so no agent answers it just for being mentioned.
 - `extra_content` is merged into the message content last, so it can set standard fields, such as `"msgtype": "m.notice"` for a notice, which agents never answer, or a `formatted_body` of your own in place of the HTML rendered from `text`.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
 - Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
