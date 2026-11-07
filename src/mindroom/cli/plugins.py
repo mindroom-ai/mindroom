@@ -23,13 +23,9 @@ _PLUGINS_DIR_OPTION: Path | None = typer.Option(
 
 @plugins_app.command("check")
 def plugin_check(
-    path: Path = typer.Argument(  # noqa: B008
+    path: str = typer.Argument(
         ...,
-        exists=True,
-        file_okay=False,
-        dir_okay=True,
-        resolve_path=True,
-        help="Plugin directory containing mindroom.plugin.json.",
+        help="Plugin directory or Python package spec, in any form a config.yaml plugins entry takes.",
     ),
 ) -> None:
     """Strictly validate one plugin against this MindRoom version."""

@@ -398,14 +398,14 @@ def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> 
 
 
 def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None:
-    """Typer should reject a missing plugin path before runtime loading."""
+    """A missing plugin path fails the check, naming the path, without a traceback."""
     missing_plugin = tmp_path / "missing-plugin"
 
-    # Typer's error panel wraps at the terminal width, which could split the message around a long temporary path.
+    # The console wraps at the terminal width, which could split the message around a long temporary path.
     result = runner.invoke(app, ["plugins", "check", str(missing_plugin)], env={"COLUMNS": "1000"})
 
-    assert result.exit_code == 2
-    assert "does not exist" in result.output
+    assert result.exit_code == 1
+    assert f"Configured plugin path does not exist: {missing_plugin.resolve()}" in result.stdout
     assert "Traceback (most recent call last)" not in result.output
 
 

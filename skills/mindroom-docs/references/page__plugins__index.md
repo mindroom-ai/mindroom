@@ -187,8 +187,10 @@ Validate a plugin against the installed MindRoom version before deployment:
 
 ```bash
 mindroom plugins check ./my-plugin
+mindroom plugins check pkg:my_skill_pack:plugins/demo
 ```
 
+The argument takes every form a `plugins:` entry takes, as listed in [Path resolution](#path-resolution) and [Python package plugins](#python-package-plugins), and relative paths resolve against the current directory instead of the config directory.
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.

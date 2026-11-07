@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,6 +11,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import get_hook_metadata
 from mindroom.oauth.registry import oauth_provider_registry
+from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit, tool_attributes
 from mindroom.tool_system.catalog import load_toolkit_class
@@ -45,15 +46,21 @@ def _derive_owned_functions(tool_name: str, tool_class: type) -> None:
             raise ValueError(msg) from error
 
 
-def check_plugin(plugin_path: Path) -> _PluginCheckResult:
-    """Strictly load one plugin through every runtime registration surface, leaving the process's plugins as they were."""
-    plugin_root = plugin_path.expanduser().resolve()
+def check_plugin(plugin_path: str | Path) -> _PluginCheckResult:
+    """Strictly load one plugin through every runtime registration surface, leaving the process's plugins as they were.
+
+    ``plugin_path`` takes every form a ``plugins:`` entry takes and resolves as one in the working directory would.
+    """
     with TemporaryDirectory(prefix="mindroom-plugin-check-") as temporary_directory:
         temporary_root = Path(temporary_directory)
         runtime_paths = resolve_runtime_paths(
             config_path=temporary_root / "config.yaml",
             storage_path=temporary_root / "data",
             process_env={},
+        )
+        plugin_root = plugin_imports._resolve_plugin_root(
+            str(plugin_path),
+            replace(runtime_paths, config_dir=Path.cwd()),
         )
         config = Config.model_validate(
             {"plugins": [{"path": str(plugin_root)}]},
