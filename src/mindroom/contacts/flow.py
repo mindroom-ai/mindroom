@@ -18,7 +18,7 @@ from uuid import uuid4
 import yaml
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.constants import ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import CONVERSATION_CONTENT_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY
 from mindroom.contacts.parties import (
     agent_party,
     party_label,
@@ -212,7 +212,7 @@ async def _post_request_notice(actor: ContactActor, record: ContactRecord) -> Co
     _, client = running
     content = build_message_content(
         _notice_body(config, paths, record),
-        extra_content={"msgtype": "m.notice", SKIP_MENTIONS_KEY: True},
+        extra_content={"msgtype": "m.notice", SKIP_MENTIONS_KEY: True, CONVERSATION_CONTENT_KEY: True},
     )
     delivered = await send_message_result(client, room_id, content, transaction_id=f"contact-request-{record.id}")
     if delivered is None:
