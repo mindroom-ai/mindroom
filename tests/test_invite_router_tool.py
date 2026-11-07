@@ -514,6 +514,7 @@ async def test_same_named_external_function_does_not_bypass_approval(tmp_path: P
         "invite_router",
         {},
         "code",
+        None,
     )
     assert requires_approval
 

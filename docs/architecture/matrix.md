@@ -4,7 +4,7 @@ icon: lucide/message-square
 
 # Matrix Integration
 
-This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant, the custom key namespace, the room-level reply relation, and the model-selection wire protocol that external clients implement.
+This page records the Matrix contracts that MindRoom's code does not make obvious: one identity invariant, the custom key namespace, the room-level reply relation, the conversation-notice marker, and the room accounts list and model-selection wire protocol that external clients implement.
 User-facing Matrix behavior is on [Matrix Integration](../matrix.md), event-journal decisions and homeserver behaviour are on [Matrix Event-Journal Contracts](matrix-event-journal-contracts.md), and invites and delivery epochs are on [Bot Runtime](bot-runtime.md#durable-dispatch-boundary).
 
 ## Identity Invariant
@@ -22,6 +22,27 @@ A reply outside a thread, such as every reply in `thread_mode: room`, names its 
 The link stays inside `m.relates_to` rather than in a top-level content key because every path that handles an event's relation already carries or drops that object whole: nio copies it into the cleartext of an encrypted event, and long-message previews and segments, attachment-backed content, queued edits, and the room-level relation strip in dispatch treat it as one unit.
 A top-level key would need its own handling in each of those paths, and the reply would stop counting as a relation, so it would become eligible as a thread root.
 Clients, bridges, and homeservers treat a relation with neither `rel_type` nor `m.in_reply_to` as no relation, so the reply shows as a plain message.
+
+## Conversation Notices
+
+A notice that asks its reader to reply in its thread, such as a contact request asking its owner to accept or decline, carries `"io.mindroom.conversation": true` in its content, and in the `m.new_content` of any edit to it.
+MindRoom Chat lists an agent's notice as a conversation, and lets it make its room unread, only when the notice carries this key or its thread has replies, so an unmarked notice that asks for a reply would leave its room looking read.
+Informational notices stay unmarked.
+
+## Room Accounts List
+
+The router publishes which joined members of a room are MindRoom accounts, so clients can recognize agents and teams whose user names do not start with `mindroom_`, such as personal agents with a custom `matrix_username`.
+The room state event has type `io.mindroom.accounts`, the router's user ID as its state key, and the sorted user IDs of the joined router, agent, and team accounts of the router's installation:
+
+```json
+{"accounts":["@alice.mind:example.org","@mindroom_research:example.org","@mindroom_router:example.org"]}
+```
+
+The router publishes it on startup and after every config reload, and updates it when one of those accounts joins or leaves the room.
+Matrix accepts a state key that starts with `@` only from that user, but any member allowed to send the type can send it under another state key.
+So a client reads only the event keyed by a router's user ID, and trusts it only when its sender is a MindRoom router (`@mindroom_router:<server>`, or `@mindroom_router_<namespace>:<server>` for a namespaced installation) on the viewer's own homeserver.
+Each MindRoom installation in a room has its own router, which lists only its own accounts.
+The router can send the event only where the room's power levels allow it, which the rooms MindRoom creates do; managed rooms regain that power level at every startup, personal rooms regain it at startup while their owner is still in an onboarding room, other rooms keep the power levels they were created with, and a client that creates rooms should give the type power level 0 too.
 
 ## Model Selection Protocol
 

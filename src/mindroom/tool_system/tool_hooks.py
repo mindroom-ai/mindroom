@@ -185,6 +185,10 @@ class _ResolvedToolContext:
     correlation_id: str
     origin: BackgroundScriptToolOrigin | None
     message_received_depth: int = 0
+    # Whether the reply the call runs in shows it; a call without a Matrix conversation runs in none.
+    shown: bool = False
+    turn_id: str | None = None
+    parent_turn_id: str | None = None
 
     @property
     def agent_name(self) -> str | None:
@@ -220,6 +224,8 @@ class _ResolvedToolContext:
                 runtime_paths=self.runtime_paths,
                 correlation_id=self.correlation_id,
             ),
+            "turn_id": self.turn_id,
+            "parent_turn_id": self.parent_turn_id,
             "arguments": arguments,
             "agent_name": self.agent_name or "",
             "room_id": self.room_id,
@@ -233,6 +239,7 @@ class _ResolvedToolContext:
             **self.hook_context_kwargs(event_name, arguments),
             "thread_id": self.thread_id,
             "session_id": self.session_id,
+            "shown": self.shown,
         }
 
     def record_kwargs(self) -> dict[str, Any]:
@@ -289,6 +296,9 @@ def _resolve_tool_context(
             correlation_id=_correlation_id_for_runtime_context(context, origin),
             origin=origin,
             message_received_depth=context.message_received_depth,
+            shown=context.tool_calls_shown,
+            turn_id=context.turn_id,
+            parent_turn_id=context.parent_turn_id,
         )
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
     return _ResolvedToolContext(

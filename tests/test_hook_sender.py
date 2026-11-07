@@ -249,7 +249,10 @@ async def test_hook_context_send_message_supports_multiple_hook_sends(tmp_path: 
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
+        del mentions, wake_mentioned
         sent_messages.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return f"$event{len(sent_messages)}"
 
@@ -322,8 +325,10 @@ async def test_downstream_hook_dispatch_sends_one_hop_past_the_envelopes_message
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent_messages.append(extra_content)
         return "$event"
 
@@ -394,8 +399,10 @@ async def test_hook_send_message_failure_does_not_crash_later_hooks(tmp_path: Pa
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
+        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch, mentions, wake_mentioned
         msg = "boom"
         raise RuntimeError(msg)
 
@@ -735,6 +742,7 @@ async def test_apply_message_enrichment_preserves_hook_chain_metadata(tmp_path: 
         DispatchPayload(prompt="hello"),
         target_entity_name="code",
         target_member_names=None,
+        turn_id="turn-1",
     )
 
     assert prepared.envelope.hook_source == "origin-plugin:message:received"
@@ -767,6 +775,7 @@ async def test_transient_message_enrichment_stays_out_of_the_prompt_text(tmp_pat
         DispatchPayload(prompt="hello"),
         target_entity_name="code",
         target_member_names=None,
+        turn_id="turn-1",
     )
 
     assert "persisted profile" in (prepared.payload.model_prompt or "")
@@ -806,12 +815,14 @@ async def test_runtime_matrix_target_key_is_rejected_from_all_hook_enrichment_la
         DispatchPayload(prompt="hello"),
         target_entity_name="code",
         target_member_names=None,
+        turn_id="turn-1",
     )
     system_items = await bot._ingress_hook_runner.apply_system_enrichment(
         prepared.envelope,
         correlation_id=dispatch.correlation_id,
         target_entity_name="code",
         target_member_names=None,
+        turn_id="turn-1",
     )
 
     assert prepared.payload.model_prompt is None
@@ -849,12 +860,14 @@ async def test_payload_enrichment_timing_reports_hook_counts(tmp_path: Path) -> 
             DispatchPayload(prompt="hello"),
             target_entity_name="code",
             target_member_names=("code",),
+            turn_id="turn-1",
         )
         system_items = await bot._ingress_hook_runner.apply_system_enrichment(
             prepared.envelope,
             correlation_id=dispatch.correlation_id,
             target_entity_name="code",
             target_member_names=("code",),
+            turn_id="turn-1",
         )
 
     assert "message enrichment" in (prepared.payload.model_prompt or "")

@@ -104,6 +104,7 @@ class ResponsePayloadPreparer:
             payload,
             target_entity_name=self.agent_name,
             target_member_names=preparation.target_member_names,
+            turn_id=request.turn_id,
         )
         payload_ready_monotonic = time.monotonic()
         if pipeline_timing is not None:
@@ -140,6 +141,7 @@ class ResponsePayloadPreparer:
             correlation_id=correlation_id_for_request(request),
             target_entity_name=self.agent_name,
             target_member_names=target_member_names,
+            turn_id=request.turn_id,
         )
         return replace(request, system_enrichment_items=(*items, *request.system_enrichment_items))
 

@@ -54,7 +54,8 @@ WebRTC cannot send UDP from these browsers.
 ### [`website`]
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
-Pages larger than 2 MiB fail, as do pages a server sends compressed.
+Pages larger than 2 MiB fail, as do pages a server sends compressed or otherwise encoded and pages that do not finish downloading within 30 seconds.
+URLs that carry a user name or password are refused.
 
 ```yaml
 agents:

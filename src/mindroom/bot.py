@@ -1319,7 +1319,7 @@ class AgentBot:
         """Run side effects that do not own raw sync checkpoint safety."""
         if self._router is not None:
             await self._router.refresh_memberships_if_needed()
-            await self._router.publish_joined_room_thread_modes()
+            await self._router.publish_joined_room_state()
         self._schedule_delivery_recovery()
         self._schedule_handled_turn_cleanup()
         if first_sync_response:
@@ -1562,6 +1562,10 @@ class AgentBot:
             client.add_event_callback(
                 self._room_lifecycle.on_invite,  # ty: ignore[invalid-argument-type]
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
+            )
+            client.add_event_callback(
+                self._room_lifecycle.on_space_child,  # ty: ignore[invalid-argument-type]
+                nio.RoomSpaceChildEvent,
             )
             await self._register_call_manager_callbacks(client)
             register_desktop_pairing_receiver(

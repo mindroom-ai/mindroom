@@ -31,6 +31,9 @@ from mindroom.api.sandbox_runner_scripts import (
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.worker_computer import router as worker_computer_router
+from mindroom.api.worker_preview import router as worker_preview_router
+from mindroom.api.worker_terminal import close_worker_terminals
+from mindroom.api.worker_terminal import router as worker_terminal_router
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope
 from mindroom.worker_computer.display import WorkerDisplay
@@ -79,6 +82,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await prepare_script_worker_before_serving(app)
         yield
     finally:
+        await close_worker_terminals(app)
         if computer is not None:
             await computer.close()
         if browser is not None:
@@ -112,6 +116,8 @@ app.add_middleware(_RunnerTokenMiddleware)
 app.include_router(sandbox_runner_router)
 app.include_router(worker_computer_router)
 app.include_router(sandbox_runner_scripts_router)
+app.include_router(worker_preview_router)
+app.include_router(worker_terminal_router)
 
 
 @app.get("/healthz")

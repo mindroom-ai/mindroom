@@ -2078,6 +2078,71 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
 
 
 @pytest.mark.parametrize(
+    "proxy_url",
+    [
+        "http://sandbox-runner:8765",
+        "http://sandbox-runner:8765/",
+        "http://sandbox-runner:8765/api/sandbox-runner",
+        "http://sandbox-runner:8765/api/sandbox-runner/",
+    ],
+)
+@pytest.mark.parametrize("worker_scope", [None, "user"], ids=["unscoped", "scoped"])
+def test_shared_runner_calls_reach_its_routes_whether_its_url_names_the_runner_or_its_api(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_url: str,
+    worker_scope: str | None,
+) -> None:
+    """Scoped and unscoped calls lease and execute at the same runner routes for every spelling of its URL."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="code")
+    assert worker_key is not None
+    settings = {"github_private": {"api_key": "sk-test", "_source": "ui"}}
+    fake_credentials = FakeCredentialsManager(settings, worker_managers={worker_key: FakeCredentialsManager(settings)})
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=proxy_url,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+        credential_policy={"calculator.add": ("github_private",)},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "proxied"}
+            ),
+        ),
+    )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        credentials_manager=fake_credentials,
+        runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
+        worker_target=_worker_target(runtime_paths, worker_scope, "code", execution_identity),
+        tools=builtin_tool_registry(),
+    )
+
+    assert blocking_entrypoint(tool, "add")(1, 2) == "proxied"
+    assert [url for url, _payload in captured_calls] == [
+        "http://sandbox-runner:8765/api/sandbox-runner/leases",
+        "http://sandbox-runner:8765/api/sandbox-runner/execute",
+    ]
+
+
+@pytest.mark.parametrize(
     ("leased_service", "expected_token"),
     [
         # The called tool itself: a scoped call leases its primary-owned settings on every backend.
@@ -3039,14 +3104,16 @@ def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     assert _attachments_use_worker(runtime_paths, tools=["calculator"], worker_tools=worker_tools) is False
 
 
+@pytest.mark.parametrize("proxy_url", ["http://sandbox-runner:8765", "http://sandbox-runner:8765/api/sandbox-runner/"])
 def test_save_attachment_to_static_runner_posts_without_worker_key(
     monkeypatch: pytest.MonkeyPatch,
+    proxy_url: str,
 ) -> None:
     """Static proxy saves should use the shared runner endpoint without forcing a worker key."""
     captured: dict[str, Any] = {}
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
-        proxy_url="http://sandbox-runner:8765",
+        proxy_url=proxy_url,
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="selective",
         proxy_tools={"file"},
@@ -6385,11 +6452,13 @@ async def test_cancelling_a_worker_call_stops_its_work(
 def _proxied_shell(
     monkeypatch: pytest.MonkeyPatch,
     responder: Callable[[str, dict[str, Any]], object],
+    *,
+    proxy_url: str = "http://sandbox-runner:8765",
 ) -> tuple[Callable[..., Any], list[tuple[str, dict[str, Any]]]]:
     calls: list[tuple[str, dict[str, Any]]] = []
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
-        proxy_url="http://sandbox-runner:8765",
+        proxy_url=proxy_url,
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="selective",
         proxy_tools={"shell"},
@@ -6448,7 +6517,11 @@ def test_only_the_browser_tool_waits_for_its_own_time_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("proxy_url", ["http://sandbox-runner:8765", "http://sandbox-runner:8765/api/sandbox-runner/"])
+async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_url: str,
+) -> None:
     """Cancelling a dispatched call returns at once and posts the call's request ID to the runner's cancel route."""
     dispatched = threading.Event()
     stopped = threading.Event()
@@ -6464,7 +6537,7 @@ async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkey
         assert stopped.wait(10)
         return {"ok": False, "error": "Tool call was cancelled.", "failure_kind": "tool"}
 
-    entrypoint, calls = _proxied_shell(monkeypatch, responder)
+    entrypoint, calls = _proxied_shell(monkeypatch, responder, proxy_url=proxy_url)
     call = asyncio.create_task(entrypoint("sleep 30"))
     assert await asyncio.to_thread(dispatched.wait, 10)
     call.cancel()

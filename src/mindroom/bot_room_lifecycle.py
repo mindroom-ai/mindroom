@@ -101,7 +101,7 @@ class BotRoomLifecycleDeps:
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
-    # Every successful join, configured or invited, so the bot restores the room's schedules.
+    # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
     get_conversation_reader: Callable[[], ConversationReader]
 
@@ -115,7 +115,7 @@ class BotRoomLifecycle:
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
         # The file is read wherever invited rooms are needed; reading it here makes an unreadable record fail the
-        # bot's construction, as it did when construction loaded the rooms, rather than its first room setup.
+        # bot's construction rather than its first room setup.
         self.invited_room_ids()
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         self._invite_join_locks: dict[str, asyncio.Lock] = {}
@@ -155,6 +155,10 @@ class BotRoomLifecycle:
     def _should_accept_invite(self) -> bool:
         """Return whether this entity should accept one inbound room invite."""
         return should_accept_invites(self._config(), self.deps.agent_name)
+
+    def _inviter_allowed(self, sender: str) -> bool:
+        """Return whether this entity's invitation rule accepts an invitation from `sender`."""
+        return is_inviter_allowed(self._config(), self.deps.runtime_paths, self.deps.agent_name, sender)
 
     def _should_persist_invited_rooms(self) -> bool:
         """Return whether this entity persists invited room IDs across restarts."""
@@ -236,7 +240,7 @@ class BotRoomLifecycle:
         return pending_room_invites_path(self.deps.runtime_paths, self.deps.agent_name)
 
     def invited_room_ids(self) -> frozenset[str]:
-        """Return the rooms this entity keeps across restarts because it accepted their invites.
+        """Return the rooms this entity keeps across restarts because it accepted their invites or followed their listing.
 
         A personal agent's contact rooms never count, though it may have accepted their invites: it keeps a contact
         room only while the contact is active and the agent has contacts.
@@ -256,12 +260,7 @@ class BotRoomLifecycle:
         if not self._should_persist_invited_rooms():
             return frozenset()
         for room_id, sender in self._pending_room_invites.items():
-            if self._client_has_joined_room(room_id) and is_inviter_allowed(
-                self._config(),
-                self.deps.runtime_paths,
-                self.deps.agent_name,
-                sender,
-            ):
+            if self._client_has_joined_room(room_id) and self._inviter_allowed(sender):
                 await self._remember_invited_room(room_id)
         return await asyncio.to_thread(self.invited_room_ids)
 
@@ -384,7 +383,7 @@ class BotRoomLifecycle:
             if room_id in current_rooms:
                 self._logger().debug("Already joined room", room_id=room_id)
                 if await self.deps.change_membership(room_id, "join"):
-                    await self.deps.on_room_joined(room_id)
+                    await self._room_joined(room_id)
                     await self.deps.on_configured_room_joined(room_id)
                 else:
                     self._logger().warning(
@@ -394,9 +393,8 @@ class BotRoomLifecycle:
                 continue
 
             if await self._join_room_with_decrypt_notice_fence(room_id):
-                current_rooms.add(room_id)
                 self._logger().info("Joined room", room_id=room_id)
-                await self.deps.on_room_joined(room_id)
+                await self._room_joined(room_id)
                 await self.deps.on_configured_room_joined(room_id)
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
@@ -617,13 +615,7 @@ class BotRoomLifecycle:
             {
                 room.room_id: room.inviter
                 for room in tuple(client.invited_rooms.values())
-                if room.inviter is not None
-                and is_inviter_allowed(
-                    self._config(),
-                    self.deps.runtime_paths,
-                    self.deps.agent_name,
-                    room.inviter,
-                )
+                if room.inviter is not None and self._inviter_allowed(room.inviter)
             },
         )
         for room_id, sender in tuple(self._pending_room_invites.items()):
@@ -642,16 +634,7 @@ class BotRoomLifecycle:
         if current_invite is None or current_invite.inviter is None:
             return None
         sender = current_invite.inviter
-        return (
-            sender
-            if is_inviter_allowed(
-                self._config(),
-                self.deps.runtime_paths,
-                self.deps.agent_name,
-                sender,
-            )
-            else None
-        )
+        return sender if self._inviter_allowed(sender) else None
 
     async def _handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
         """Accept one recorded invite when its dedicated invitation policy allows it."""
@@ -663,16 +646,7 @@ class BotRoomLifecycle:
             allowed_sender = (
                 self._pending_room_invites.get(room.room_id) if joined else self._allowed_current_inviter(room.room_id)
             )
-            if (
-                joined
-                and allowed_sender is not None
-                and not is_inviter_allowed(
-                    self._config(),
-                    self.deps.runtime_paths,
-                    self.deps.agent_name,
-                    allowed_sender,
-                )
-            ):
+            if joined and allowed_sender is not None and not self._inviter_allowed(allowed_sender):
                 allowed_sender = None
             if allowed_sender is None:
                 self._logger().debug(
@@ -698,7 +672,7 @@ class BotRoomLifecycle:
             await self._send_invite_welcome(room.room_id, sender)
             if not joined:
                 await self._send_managed_room_notice(room, sender)
-            await self.deps.on_room_joined(room.room_id)
+            await self._room_joined(room.room_id)
             await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:
@@ -719,3 +693,107 @@ class BotRoomLifecycle:
         self._logger().error("Failed to join room", room_id=room_id)
         msg = f"Failed to join invited room {room_id}"
         raise RuntimeError(msg)
+
+    async def _room_joined(self, room_id: str) -> None:
+        """Finish a room this bot joined or rejoined, its state now synced, and follow the rooms it lists."""
+        await self.deps.on_room_joined(room_id)
+        self._follow_listed_rooms(room_id)
+
+    async def on_space_child(self, room: nio.MatrixRoom, event: nio.RoomSpaceChildEvent) -> None:
+        """Follow the rooms a room this bot is in lists under it, or leave one that room took off its list.
+
+        The event only starts the work, in the background because joining waits for this bot's own sync, and the rooms'
+        current state decides it, so a replayed or superseded event changes nothing.
+        """
+        if event.source["content"].get("via"):
+            self._follow_listed_rooms(room.room_id)
+            return
+        create_background_task(
+            self._leave_unlisted_room(room.room_id, event.state_key),
+            name=f"unlisted_room_leave_{self.deps.agent_name}",
+            owner=self.deps.runtime,
+        )
+
+    def _follow_listed_rooms(self, parent_id: str) -> None:
+        """Join, in the background, the rooms a room this bot is in lists under it.
+
+        The room is read only when its synced list names a room this bot is not in.
+        """
+        rooms = self._client().rooms
+        if parent_id not in rooms or not rooms[parent_id].children - rooms.keys():
+            return
+        create_background_task(
+            self._join_listed_rooms(parent_id),
+            name=f"listed_rooms_join_{self.deps.agent_name}",
+            owner=self.deps.runtime,
+        )
+
+    async def _join_listed_rooms(self, parent_id: str) -> None:
+        """Join each room a room lists whose listing this bot's invitation rule would accept from whoever listed it."""
+        if not self._should_accept_invite():
+            return
+        for room_id, lister in (await _listed_rooms(self._client(), parent_id) or {}).items():
+            if self._inviter_allowed(lister):
+                await self._join_listed_room(parent_id, room_id)
+
+    async def _join_listed_room(self, parent_id: str, room_id: str) -> None:
+        """Join one listed room, keeping it only when it names the room that lists it as its canonical parent."""
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            if self._client_has_joined_room(room_id):
+                return
+            # Kept as an accepted invitation is, and before the join, so a cleanup pass meanwhile never leaves it.
+            await self._remember_invited_room(room_id)
+            joined = await self._join_room_with_decrypt_notice_fence(room_id)
+            if joined and await _names_parent(self._client(), room_id, parent_id):
+                self._logger().info("Joined listed room", room_id=room_id, parent_id=parent_id)
+                await self._room_joined(room_id)
+                return
+            await self.forget_invited_room(room_id)
+            if joined:
+                # Listed, but not a room under the one listing it.
+                await self.deps.change_membership(room_id, "leave")
+            else:
+                self._logger().warning("Failed to join listed room", room_id=room_id, parent_id=parent_id)
+
+    async def _leave_unlisted_room(self, parent_id: str, room_id: str) -> None:
+        """Leave a room its canonical parent no longer lists; a Space's rooms, and any doubt, keep this bot in.
+
+        A room configured for this bot, or its personal room, stays too.
+        """
+        async with self._lock_for_room(self._invite_join_locks, room_id):
+            kept = {*self.deps.get_configured_rooms(), *self.deps.get_retained_room_ids()}
+            if not self._client_has_joined_room(room_id) or room_id in kept:
+                return
+            client = self._client()
+            listed = await _listed_rooms(client, parent_id)
+            if listed is None or room_id in listed or not await _names_parent(client, room_id, parent_id):
+                return
+            self._logger().info("Leaving room taken off its parent's list", room_id=room_id, parent_id=parent_id)
+            await self.deps.change_membership(room_id, "leave")
+
+
+async def _listed_rooms(client: nio.AsyncClient, room_id: str) -> dict[str, str] | None:
+    """Return each room ID one room lists under it with `m.space.child`, mapped to whoever listed it.
+
+    A Space's rooms are its own, so a Space, like a room whose state cannot be read, returns None.
+    """
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return None
+    listed: dict[str, str] = {}
+    for event in response.events:
+        if event["type"] == "m.room.create" and event["content"].get("type") == "m.space":
+            return None
+        if event["type"] == "m.space.child" and event["state_key"].startswith("!") and event["content"].get("via"):
+            listed[event["state_key"]] = event["sender"]
+    return listed
+
+
+async def _names_parent(client: nio.AsyncClient, room_id: str, parent_id: str) -> bool:
+    """Return whether a room names `parent_id` as its canonical parent with `m.space.parent`."""
+    response = await client.room_get_state_event(room_id, "m.space.parent", parent_id)
+    return (
+        isinstance(response, nio.RoomGetStateEventResponse)
+        and response.content.get("canonical") is True
+        and bool(response.content.get("via"))
+    )

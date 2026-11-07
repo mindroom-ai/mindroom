@@ -66,7 +66,10 @@ async def test_request_network_access_always_needs_approval_while_the_switch_is_
 ) -> None:
     """Only an authored rule that itself requires approval governs the call; every other rule is overridden."""
     config, runtime_paths = _config(tmp_path, tool_approval={"rules": rules})
-    assert await evaluate_tool_approval(config, runtime_paths, "request_network_access", _REQUEST, "code") == expected
+    assert (
+        await evaluate_tool_approval(config, runtime_paths, "request_network_access", _REQUEST, "code", None)
+        == expected
+    )
 
 
 @pytest.mark.asyncio
@@ -85,6 +88,7 @@ async def test_automation_preapproval_does_not_free_request_network_access(tmp_p
         "request_network_access",
         _REQUEST,
         "code",
+        None,
     )
     assert requires is True
 
@@ -97,7 +101,7 @@ async def test_switch_off_leaves_authored_rules_alone(tmp_path: Path) -> None:
         enabled=False,
         tool_approval={"rules": [{"match": "*", "action": "auto_approve"}]},
     )
-    requires, _ = await evaluate_tool_approval(config, runtime_paths, "request_network_access", _REQUEST, "code")
+    requires, _ = await evaluate_tool_approval(config, runtime_paths, "request_network_access", _REQUEST, "code", None)
     assert requires is False
 
 

@@ -1241,6 +1241,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 target_entity_name=mock_agent_user.agent_name,
                 target_member_names=None,
+                turn_id="turn-1",
             )
 
         assert prepared.payload.prompt == "hello"

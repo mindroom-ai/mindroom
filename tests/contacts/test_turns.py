@@ -40,10 +40,12 @@ from mindroom.final_delivery import Failed, FailureCause, Suppressed, Suppressio
 from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_REACTION_RECEIVED,
+    EVENT_TOOL_BEFORE_CALL,
     HookRegistry,
     MessageEnvelope,
     MessageReceivedContext,
     ReactionReceivedContext,
+    ToolBeforeCallContext,
     hook,
     render_system_enrichment_block,
 )
@@ -73,6 +75,7 @@ from tests.conftest import (
     make_visible_message,
     message_origin,
     patch_response_runner_module,
+    publish_hook_plugin,
     publish_test_plugins,
     test_runtime_paths,
 )
@@ -383,6 +386,7 @@ def _identity(room_id: str, agent_name: str) -> tuple[ResponseDraft, ResponseIde
         response_kind="ai",
         response_envelope=envelope,
         correlation_id="corr",
+        turn_id="turn-1",
         sources=ResponseSources((EVENT_ID,), (EVENT_ID,)),
     )
     return draft, identity
@@ -730,6 +734,32 @@ async def test_a_contact_turn_runs_its_tools_inline_while_the_instance_runs_back
     assert "background_after" not in json.dumps(add.parameters)
     assert "job" not in {tool.name for tool in first.tools}
     assert "3" in str(second.messages[-1].content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("room_id", "shown"), [(CONTACT_ROOM, False), (OTHER_ROOM, True)])
+async def test_a_contact_turn_s_calls_tell_their_hooks_that_no_reply_shows_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    room_id: str,
+    shown: bool,
+) -> None:
+    """A contact turn shows none of its calls, so its tool hooks read them as hidden, as the same agent's do not elsewhere."""
+    seen: list[tuple[bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.shown, ctx.chat_preview()))
+
+    config, paths = _setup(tmp_path)
+    _contact(paths)
+    publish_hook_plugin(config, paths, "call-mirror", [before])
+    model = ScriptedModel([calls(tool_call("add", "call-1", a=1, b=2)), answer("Told Alice's agent the sum.")])
+    install_model_providers(monkeypatch, {"default": model})
+
+    await _run(_bot(config, paths), room_id)
+
+    assert seen == [(shown, "a=1, b=2" if shown else None)]
 
 
 @pytest.mark.asyncio

@@ -1612,6 +1612,7 @@ class ResponseRunner:
             attachment_ids=request.attachment_ids,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
+            turn_id=request.turn_id,
         )
         execution_identity = tool_context.execution_identity
         configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
@@ -1629,7 +1630,7 @@ class ResponseRunner:
             model_prompt=prepared_prompt,
             active_model_name=team_models.team_model_name,
             show_tool_calls=show_tool_calls,
-            tool_context=tool_context,
+            tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
         )
         run_id = str(uuid4())
         mode = TeamMode(team.team_mode)
@@ -2054,13 +2055,16 @@ class ResponseRunner:
             attachment_ids=request.attachment_ids,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
+            turn_id=request.turn_id,
         )
         return PreparedResponseRuntime(
             media_inputs=media_inputs,
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
             show_tool_calls=show_tool_calls,
-            tool_context=tool_context,
+            # A quiet turn shows no progress, and a contact turn's or a silent schedule's answer may never be shown, so
+            # its tool hooks read its calls as hidden.
+            tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
             participation=participation
             if participation is not None
             else _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
