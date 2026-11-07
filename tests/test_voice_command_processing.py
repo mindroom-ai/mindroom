@@ -1118,13 +1118,14 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
         try:
             await asyncio.wait_for(normalization_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await asyncio.wait_for(placeholder_send_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-            await asyncio.sleep(0)
+            # The redelivery must decide while the first delivery still owns the turn: once that turn is answered,
+            # a redelivery is ignored as already handled.
+            assert await asyncio.wait_for(redelivery, timeout=SETTLE_TIMEOUT_SECONDS) is TurnDispatchOutcome.DEFERRED
             assert normalization_count == 1
             assert bot._delivery_gateway.send_text.await_count == 1
         finally:
             allow_normalization.set()
             allow_placeholder_send.set()
-        assert await asyncio.wait_for(redelivery, timeout=SETTLE_TIMEOUT_SECONDS) is TurnDispatchOutcome.DEFERRED
         await drain_coalescing(bot)
 
     bot._delivery_gateway.send_text.assert_awaited_once()
