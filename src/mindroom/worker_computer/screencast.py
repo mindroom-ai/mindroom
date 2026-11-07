@@ -36,11 +36,14 @@ _MAX_FRAME_WIDTH = 1920
 _MAX_FRAME_HEIGHT = 1200
 _CTRL_OR_META = 2 | 4
 _MOUSE_EVENTS = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
+# The DOM buttons bitmask, in the order a move names the held button.
+_BUTTON_BITS = (("left", 1), ("right", 2), ("middle", 4), ("back", 8), ("forward", 16))
 
 
 # Fields take any value of their type: the viewer holds control of this page, and Chromium refuses what it cannot use.
 class _Message(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # NaN and infinity would reach Playwright's driver, which cannot encode them.
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
 
 class _Mouse(_Message):
@@ -240,13 +243,17 @@ class ScreencastViewer:
             elif message.event == "up":
                 self._buttons.discard(message.button)
             self._pointer = (message.x, message.y)
+            button = message.button
+            if message.event == "move" and button == "none":
+                # Chromium drags only when a move names a held button, which DOM pointer moves report in buttons alone.
+                button = next((name for name, bit in _BUTTON_BITS if message.buttons & bit), "none")
             await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
                     "type": _MOUSE_EVENTS[message.event],
                     "x": message.x,
                     "y": message.y,
-                    "button": message.button,
+                    "button": button,
                     "buttons": message.buttons,
                     "clickCount": message.clicks,
                     "modifiers": message.modifiers,
