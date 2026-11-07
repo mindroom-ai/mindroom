@@ -47,7 +47,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 ### Writes and restarts
 
 - Recovery renders from what a reply may already show, counting writes Matrix has not acknowledged, so a restart continues an interrupted reply in place below what it showed and a retried regeneration rewrites the same message; neither starts a second message.
-- A progress edit is not sent once a Stop is committed, even one prepared before it, so the Stop's note is the reply's next write; what live frames already showed is still recorded, for that note to keep.
+- No progress edit is written ahead once a Stop is committed, so only an edit already in flight may land before the Stop's note; what live frames already showed is still recorded, for that note to keep.
 - A span's rows, and the Matrix transaction IDs derived from them, are named by every message of the turn it answers, not by its newest message, because a retry can answer a coalesced turn's messages one by one and a one-message turn must never resolve to the rows the coalesced turn wrote (4).
   Naming every reply's rows by the reply was rejected because it renames every reply's rows for this one path, and renaming only the later reply's rows depends on the earlier reply's records still being kept.
 - A tool call is recorded as started before the tool runs and as completed when it returns, whether or not the reply shows tool calls, so a restarted reply can be told which calls already ran.
