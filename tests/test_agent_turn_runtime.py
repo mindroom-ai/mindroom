@@ -987,12 +987,16 @@ async def test_a_model_switch_continuation_keeps_the_one_notice_the_run_it_conti
     """The switched run stored the reply's notice, which the continuation replays; a later batch moves that copy last.
 
     The copy stays replayed history, so the continuation stores no second notice. The queue empties before the switch,
-    since a run told to pause runs no further call, and a newer message arrives while the continuation's call runs.
+    since a run whose request carried the notice runs no further call, and refills while the continuation's first
+    request streams: that request ends without a notice, the copy sits before the switch, so its call runs.
     """
     queue = _QueuedState(pending=True)
 
     async def queue_empties() -> None:
         queue.pending = False
+
+    async def queue_refills() -> None:
+        queue.pending = True
 
     reply = _reply(
         tmp_path,
@@ -1000,13 +1004,12 @@ async def test_a_model_switch_continuation_keeps_the_one_notice_the_run_it_conti
         [
             calls(tool_call("touch", "call_1", label="a")),
             [Await(queue_empties), *calls(_switch_now("call_2"))],
-            calls(tool_call("touch", "call_3", label="b")),
+            [Await(queue_refills), *calls(tool_call("touch", "call_3", label="b"))],
             answer("ok"),
         ],
         tools=(PROBE_TOOL, "thread_model"),
     )
     with_current_room_member_access(reply.config)
-    monkeypatch.setattr(queue, "has_pending_human_messages", lambda: queue.pending or "b" in probe.calls)
 
     with queued_message_signal_context(queue):
         await _stream(reply)
