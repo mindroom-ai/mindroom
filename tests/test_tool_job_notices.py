@@ -343,8 +343,8 @@ async def test_an_interrupted_job_is_noted_as_one_that_may_have_partly_run(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_noticed_cancellation_needs_no_collect(tmp_path: Path) -> None:
-    """Being told of a cancellation acknowledges it; a finished job still waits for its collect."""
+async def test_a_noticed_cancellation_waits_for_collect_like_a_finished_job(tmp_path: Path) -> None:
+    """Being told of a cancellation acknowledges nothing: like a finished job, it waits for collect to report it."""
     conversation = await _conversation(tmp_path)
     try:
         await conversation.start("finished")
@@ -353,7 +353,7 @@ async def test_a_noticed_cancellation_needs_no_collect(tmp_path: Path) -> None:
         await conversation.cancel("cancelled")
         with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
             await _turn_start_job_note()
-        assert (await lookup(conversation.runtime, "cancelled", owner=conversation.owner, depth=0)).consumed
+        assert not (await lookup(conversation.runtime, "cancelled", owner=conversation.owner, depth=0)).consumed
         assert not (await lookup(conversation.runtime, "finished", owner=conversation.owner, depth=0)).consumed
     finally:
         await conversation.runtime.shutdown()

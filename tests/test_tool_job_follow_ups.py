@@ -175,15 +175,32 @@ async def test_jobs_ending_together_share_one_follow_up(tmp_path: Path) -> None:
         await runtime.shutdown()
 
 
-async def test_cancelled_jobs_get_no_follow_up(tmp_path: Path) -> None:
-    """A cancelled job never posts a message of its own; the next notice or turn tells the agent."""
+async def test_a_job_cancelled_from_the_jobs_bar_gets_a_follow_up(tmp_path: Path) -> None:
+    """A job a person cancelled is reported like any ended job, so the conversation shows it did not complete."""
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
+
+    async def runs_until_cancelled() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        return BackgroundOutcome("completed", "never")
+
     try:
-        await _ended(runtime, "job_a", BackgroundOutcome("cancelled"))
+        await start_job(
+            runtime,
+            "job_a",
+            tool_name="tool_job_a",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=runs_until_cancelled,
+        )
+        # The jobs bar and `!cancel_job` both cancel through `request_cancel`.
+        await runtime.request_cancel("job_a")
+        await wait_for_status(runtime, "job_a", "cancelled")
         await coordinator._admit_follow_ups(runtime)
-        bot.admit_job_follow_up.assert_not_awaited()
+        bot.admit_job_follow_up.assert_awaited_once()
+        assert bot.admit_job_follow_up.await_args.args[0] == _key(job_owner())
     finally:
         await runtime.shutdown()
 
