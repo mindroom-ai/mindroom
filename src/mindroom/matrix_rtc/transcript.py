@@ -152,6 +152,11 @@ class CallTranscript:
         """Return the finalized spoken turns so far, oldest first, each with its start in whole seconds."""
         return tuple(self._spoken)
 
+    def mark_call_active(self) -> None:
+        """Start the call's clock now, when the agent can hear the caller, so joining time is not part of the call."""
+        self.started_at = datetime.now(tz=UTC)
+        self._started_monotonic = time.monotonic()
+
     def elapsed_seconds(self) -> float:
         """Return the seconds since the call started, on a clock that never goes back."""
         return time.monotonic() - self._started_monotonic

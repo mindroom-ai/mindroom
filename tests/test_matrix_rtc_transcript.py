@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -145,10 +146,16 @@ async def test_same_speaker_fragments_continue_one_transcript_line(tmp_path: Pat
 def test_posted_turns_carry_their_speech_start_within_the_call(tmp_path: Path) -> None:
     """Each posted turn carries whole seconds from the call start to when its speech started, inside the call."""
     transcript = _transcript(tmp_path)
-    started = transcript.started_at.timestamp()
+    # Joining took 30 seconds; the call's clock starts once the agent can hear the caller.
+    transcript.started_at -= timedelta(seconds=30)
+    transcript._started_monotonic -= 30
+    transcript.mark_call_active()
+    started = time.time()
     # Turns arrive after they were spoken: here all of them once the call has run 80.4 seconds.
-    transcript._started_monotonic = time.monotonic() - 80.4
+    transcript._started_monotonic -= 80.4
     for speaker, text, spoken_after in (
+        # A greeting can start just before the clock does.
+        ("assistant", "Hello", -2.5),
         ("user", "Book the train", 5.9),
         ("user", "for tomorrow", 9.5),
         ("assistant", "Which time?", 11.5),
@@ -170,10 +177,11 @@ def test_posted_turns_carry_their_speech_start_within_the_call(tmp_path: Path) -
 
     assert writeback is not None
     offsets = [turn["offset_seconds"] for turn in writeback.transcript["turns"]]
-    assert offsets == [5, 11, 11, 80]
+    assert offsets == [0, 5, 11, 11, 80]
     assert offsets == sorted(offsets)
     assert offsets[-1] <= writeback.transcript["duration_seconds"] == 80
     assert writeback.body.split("\n\n")[2:] == [
+        "[0:00] Helper: Hello",
         "[0:05] Alice: Book the train for tomorrow",
         "[0:11] Helper: Which time?",
         "[0:11] Alice: Nine",

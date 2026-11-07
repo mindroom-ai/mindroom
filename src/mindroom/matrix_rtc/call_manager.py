@@ -1142,6 +1142,7 @@ class CallManager:
             return "retry"
         room_call.session = session
         logical_call.session_started_ms = self._clock_ms()
+        transcript.mark_call_active()
         self._replay_pending_keys(room_call, session)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
         return "joined"
