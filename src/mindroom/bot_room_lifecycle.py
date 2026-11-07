@@ -784,7 +784,7 @@ class BotRoomLifecycle:
     async def _leave_unlisted_room(self, parent_id: str, room_id: str) -> None:
         """Leave a room its canonical parent no longer lists; a Space's rooms, and any doubt, keep this bot in.
 
-        A configured or personal room stays, as it does when room cleanup runs.
+        A room configured for this bot, or its personal room, stays too.
         """
         async with self._lock_for_room(self._invite_join_locks, room_id):
             kept = {*self.deps.get_configured_rooms(), *self.deps.get_retained_room_ids()}
