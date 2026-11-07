@@ -4953,7 +4953,7 @@ The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventT
 ### Scheduled Task Restoration
 
 The router runs a schedule when, at the time the schedule is saved, it may post its trigger and save schedule state in the room; otherwise the agent that saved the schedule runs it, as in a DM or an agent's personal room.
-Every agent restores the schedules it runs in a room when it joins that room, at startup or when it accepts an invitation, and the router also restores the room's pending configuration changes.
+Every agent restores the schedules it runs in a room when it joins that room, at startup, when it accepts an invitation, or when it joins a [room listed under one of its rooms](https://docs.mindroom.chat/rooms/#rooms-under-a-room), and the router also restores the room's pending configuration changes.
 Schedules keep running when their agent restarts, for example after a config edit: a one-time task that came due during the restart runs once the agent is back, and a recurring task runs the occurrence that came due if it is still within the catch-up window.
 A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
 When an agent is removed from the config while MindRoom runs, each schedule it runs is marked failed and the agent says so in the schedule's thread, or in the room for a schedule without one; its schedules never move to another agent.
@@ -5732,9 +5732,9 @@ Different agents can use different profiles, for example one agent on `realtime`
 
 ## When an agent joins a call
 
-An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting.
+An agent joins a call when it starts in one of the agent's configured rooms, in a [personal room](https://docs.mindroom.chat/personal-rooms/) the agent created for its owner, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](https://docs.mindroom.chat/configuration/agents/) setting or that it [joined because one of its rooms lists it](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
-A configured room assignment wins over personal rooms and invites; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
+A configured room assignment wins over personal rooms, invites, and listed rooms; if several calls-enabled agents are in the same room only through those, none of them answers calls there.
 
 The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
 That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
@@ -7322,7 +7322,7 @@ Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_START
 
 # Rooms & Spaces
 
-This page covers the Matrix rooms MindRoom creates and manages, their join, listing, encryption, invitation, and admin settings, and the root Matrix Space that groups them.
+This page covers the Matrix rooms MindRoom creates and manages, their join, listing, encryption, invitation, and admin settings, the root Matrix Space that groups them, and rooms listed under other rooms.
 Who may talk to an agent in a room is a separate setting covered in [Access Control](https://docs.mindroom.chat/authorization/).
 
 ## Configuration
@@ -7397,12 +7397,21 @@ The router creates and maintains managed rooms:
 - Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
 - Applies the [room policy](#room-policy) above.
 
-Agents and teams leave rooms they are no longer configured for, except direct-message rooms and rooms they joined by accepting an invitation.
+Agents and teams leave rooms they are no longer configured for, except direct-message rooms, rooms they joined by accepting an invitation, and rooms they joined because [one of their rooms lists them](#rooms-under-a-room).
 
 On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
 Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.
 A recorded room stays in use even when its alias now points elsewhere, which logs `managed_alias_points_elsewhere`.
 If the alias of a recorded room is deleted, the router restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
+
+## Rooms Under a Room
+
+A room can list other rooms under it with `m.space.child` events, each listed room naming it back as its canonical `m.space.parent`.
+The router, agents, and teams in a room join every room it lists this way, each only when its `accept_invites` would accept an invitation from whoever listed the room.
+A listed room they cannot join without an invitation, such as a private one, needs them invited.
+They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
+Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
+A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.
 
 ## Room Cleanup
 
@@ -16151,7 +16160,7 @@ In an ad-hoc room an agent joined first, have the agent use its `invite_router` 
 
 ### Invitations
 
-`accept_invites` decides only whether an entity joins a room it is invited to.
+`accept_invites` decides only whether an entity joins a room it is invited to, or a [room listed under one of its rooms](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 Accepting an invitation never grants permission to interact; every later message still goes through `access`.
 
 ### Agents mentioning other agents

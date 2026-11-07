@@ -89,6 +89,7 @@ def test_sliding_config_preserves_discovery_explicit_rooms_and_extensions() -> N
             ["m.room.avatar", ""],
             ["m.room.encryption", ""],
             ["m.room.member", "$LAZY"],
+            ["m.space.child", "*"],
         ],
     }
     assert sliding.lists == {"mindroom": {"ranges": [[0, 99]], **room_config}}
