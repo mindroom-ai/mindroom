@@ -31,6 +31,7 @@ from mindroom.constants import (
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.models import IngestionConsumer
 from mindroom.matrix import _owned_session, client_session
+from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_session import (
     MindRoomAsyncClient,
     PermanentMatrixStartupError,
@@ -38,7 +39,6 @@ from mindroom.matrix.client_session import (
     login_flows,
     matrix_client_config,
 )
-from mindroom.matrix.client_delivery import send_room_event_result
 from tests.conftest import legacy_default_store_client
 
 if TYPE_CHECKING:
