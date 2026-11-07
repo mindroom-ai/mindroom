@@ -1617,25 +1617,7 @@ async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path) -
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> None:
-    config, paths = _config(tmp_path)
-    storage = seeded_storage(config, paths)
-    hook_context, observed = _observed_compaction_hooks(config, paths)
-
-    with tool_runtime_context(hook_context):
-        await _run(
-            _scoped_agent(ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
-            "Do the task",
-        )
-
-    assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
-    assert observed[1].token_count_after is not None
-    assert observed[1].token_count_after < observed[1].token_count_before
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("summary_calls")
-async def test_compaction_hooks_carry_the_turn_ids_of_the_turn_that_compacts(tmp_path: Path) -> None:
-    """A delegated child's compaction hooks name its turn and the turn that delegated it."""
+    """A delegated child's compaction hooks report the compaction and name its turn and the turn that delegated it."""
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     hook_context, observed = _observed_compaction_hooks(config, paths)
@@ -1646,7 +1628,9 @@ async def test_compaction_hooks_carry_the_turn_ids_of_the_turn_that_compacts(tmp
             "Do the task",
         )
 
-    assert observed
+    assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    assert observed[1].token_count_after is not None
+    assert observed[1].token_count_after < observed[1].token_count_before
     assert {(ctx.turn_id, ctx.parent_turn_id) for ctx in observed} == {("turn-child", "turn-parent")}
 
 

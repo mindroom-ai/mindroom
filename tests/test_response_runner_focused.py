@@ -4835,20 +4835,18 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
         _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
         correlation_id="correlation-original",
     )
-    observed: list[str | None] = []
-    turn_ids: list[str | None] = []
+    observed: list[tuple[str | None, str]] = []
     receipts: list[str] = []
     progress = AsyncMock()
     forwarded_progress: list[object] = []
 
     def build_turn_context(
         *_args: object,
-        correlation_id: str | None = None,
-        turn_id: str | None = None,
+        correlation_id: str | None,
+        turn_id: str,
         **_kwargs: object,
     ) -> ToolRuntimeContext:
-        observed.append(correlation_id)
-        turn_ids.append(turn_id)
+        observed.append((correlation_id, turn_id))
         return turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity)
 
     async def continue_run(*_args: object, **kwargs: object) -> CompletedApprovalRun:
@@ -4877,9 +4875,8 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
                 cli_approval_handler=None,
             )
 
-    assert observed == ["correlation-original"]
     # The resumed reply is a turn of its own, whose tools run under its request's turn ID.
-    assert turn_ids == [request.turn_id]
+    assert observed == [("correlation-original", request.turn_id)]
     assert forwarded_progress == [progress]
     assert receipts == [
         "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "

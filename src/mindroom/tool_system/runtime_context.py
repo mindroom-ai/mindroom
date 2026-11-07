@@ -134,8 +134,7 @@ class ToolRuntimeContext:
     # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
     hooks: HookBindings = field(default_factory=HookBindings)
     correlation_id: str | None = None
-    # The agent turn the calls run in, which its hooks carry too; a delegated child's turn has an ID of its own and
-    # names its caller's turn as its parent. None outside a turn.
+    # The agent turn the calls run in, and in a delegated child's turn the turn that delegated it; None outside a turn.
     turn_id: str | None = None
     parent_turn_id: str | None = None
     message_received_depth: int = 0

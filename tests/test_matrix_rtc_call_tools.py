@@ -770,13 +770,7 @@ async def test_each_transcript_of_a_call_runs_its_tools_under_a_turn_id_of_its_o
 ) -> None:
     """A call's transcripts are separate turns, so the tool calls of each carry a turn ID the other's do not."""
     runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={AGENT: AgentConfig(display_name="Helper")},
-            models={"default": ModelConfig(provider="ollama", id="test")},
-        ),
-        runtime_paths,
-    )
+    config = _ollama_config(runtime_paths)
     turn_ids: list[str | None] = []
 
     async def respond(*_args: object, **_kwargs: object) -> TurnResult:
@@ -784,24 +778,11 @@ async def test_each_transcript_of_a_call_runs_its_tools_under_a_turn_id_of_its_o
         return TurnResult("Sure.")
 
     monkeypatch.setattr("mindroom.ai.ai_response", respond)
-    support = SimpleNamespace(
-        build_context=lambda target, *, user_id, **_kwargs: make_test_tool_runtime_context(
-            agent_name=AGENT,
-            target=target,
-            requester_id=user_id,
-            client=MagicMock(),
-            config=config,
-            runtime_paths=runtime_paths,
-            relations=make_relation_lookup(),
-            conversation_reader=make_conversation_reader_mock(),
-            hooks=HookBindings(registry=MagicMock()),
-        ),
-    )
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=support,
+        tool_support=_tool_support(config, runtime_paths),
         room_id="!call:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,

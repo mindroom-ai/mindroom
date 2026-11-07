@@ -42,7 +42,6 @@ from tests.conftest import (
     make_turn_context,
     patch_response_runner_module,
     request_envelope,
-    unwrap_extracted_collaborator,
 )
 from tests.contacts.test_policy import _check, _tool_context
 from tests.contacts.test_policy import _config as _contact_config
@@ -193,9 +192,7 @@ async def test_a_delegated_child_s_tool_calls_carry_its_own_turn_id_and_its_call
         result = await ai_response(turn, paths, config)
 
     assert result.text.endswith("Done")
-    child_turns = {turn_id for _phase, agent, _tool, turn_id, _parent in seen if agent == "child"}
-    assert len(child_turns) == 1
-    [child_turn] = child_turns
+    [child_turn] = {turn_id for _phase, agent, _tool, turn_id, _parent in seen if agent == "child"}
     assert child_turn not in {None, "turn-leader"}
     assert seen == [
         ("before", "leader", "run_subagent", "turn-leader", None),
@@ -277,13 +274,12 @@ async def test_enrich_hooks_carry_the_turn_id_of_the_reply_they_prepare(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_name", _LIFECYCLE_EVENTS)
-async def test_each_reply_lifecycle_hook_carries_its_reply_s_turn_id(tmp_path: Path, event_name: str) -> None:
+async def test_each_reply_lifecycle_hook_carries_its_reply_s_turn_id(tmp_path: Path) -> None:
     """The before, final-transform, after, and cancelled hooks of a reply carry the turn ID its identity names."""
     seen: list[tuple[str, str | None, str | None]] = []
     _config, service = _response_hook_service(
         tmp_path,
-        HookRegistry.from_plugins([_plugin("turn-ids", _recording_hooks((event_name,), seen))]),
+        HookRegistry.from_plugins([_plugin("turn-ids", _recording_hooks(_LIFECYCLE_EVENTS, seen))]),
     )
     envelope = _envelope()
     identity = ResponseIdentity(
@@ -294,28 +290,23 @@ async def test_each_reply_lifecycle_hook_carries_its_reply_s_turn_id(tmp_path: P
         sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
     )
 
-    if event_name == EVENT_MESSAGE_BEFORE_RESPONSE:
-        await service.apply_before_response(identity=identity, response_text="Hi", tool_trace=None, extra_content=None)
-    elif event_name == EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM:
-        await service.apply_final_response_transform(identity=identity, response_text="Hi")
-    elif event_name == EVENT_MESSAGE_AFTER_RESPONSE:
-        await service._emit_after_response(
-            identity=identity,
-            response_text="Hi",
-            response_event_id="$reply",
-            delivery_kind="sent",
-        )
-    else:
-        await service._emit_cancelled_response(identity=identity)
+    await service.apply_before_response(identity=identity, response_text="Hi", tool_trace=None, extra_content=None)
+    await service.apply_final_response_transform(identity=identity, response_text="Hi")
+    await service._emit_after_response(
+        identity=identity,
+        response_text="Hi",
+        response_event_id="$reply",
+        delivery_kind="sent",
+    )
+    await service._emit_cancelled_response(identity=identity)
 
-    assert seen == [(event_name, "turn-reply", None)]
+    assert seen == [(event_name, "turn-reply", None) for event_name in _LIFECYCLE_EVENTS]
 
 
 @pytest.mark.asyncio
 async def test_a_team_reply_s_tools_run_under_its_request_s_turn_id(tmp_path: Path) -> None:
     """A team reply's members call their tools in the tool context of the team's turn."""
     bot = _team_bot(tmp_path)
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
     observed: list[str | None] = []
 
     async def team_stream(_spec: TeamTurnSpec, _ctx: ResponseTurnContext, *, sinks: TurnSinks) -> AsyncIterator[str]:
@@ -348,6 +339,6 @@ async def test_a_team_reply_s_tools_run_under_its_request_s_turn_id(tmp_path: Pa
             team_response_stream=MagicMock(side_effect=team_stream),
         ),
     ):
-        await coordinator.generate_team_response_helper(request, member_names=["code"], team_mode="coordinate")
+        await bot._response_runner.generate_team_response_helper(request, member_names=["code"], team_mode="coordinate")
 
     assert observed == [request.turn_id]
