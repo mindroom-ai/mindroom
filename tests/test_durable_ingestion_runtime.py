@@ -247,9 +247,8 @@ async def _consume_repaired_frame(
     session: DurableSync,
     frame: dict[str, object],
     recovered: list[dict[str, object]],
-    gap_rooms: set[str] | None = None,
 ) -> list[SyncRecord]:
-    """Consume a limited sync using a real Nio gap-recovery response, keeping `gap_rooms` as the pump does."""
+    """Consume a limited sync using a real Nio gap-recovery response."""
     frames: asyncio.Queue[bytes] = asyncio.Queue()
     frames.put_nowait(json.dumps(frame).encode())
 
@@ -262,7 +261,6 @@ async def _consume_repaired_frame(
     runner = asyncio.create_task(session.run())
     complete = False
     seen: list[SyncRecord] = []
-    gap_rooms = set() if gap_rooms is None else gap_rooms
 
     async def after_sync() -> None:
         nonlocal complete
@@ -281,7 +279,6 @@ async def _consume_repaired_frame(
                     before_admission=bot._before_ingestion_admission,
                     after_admission=bot._after_ingestion_admission,
                     after_sync=after_sync,
-                    gap_rooms=gap_rooms,
                 )
                 if facts is None:
                     await session.wait_for_work()

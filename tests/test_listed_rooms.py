@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -11,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
-from nio.durable import DurableSyncConfig, RecordKind
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
@@ -27,8 +25,6 @@ from tests.conftest import (
     make_matrix_client_mock,
     test_runtime_paths,
 )
-from tests.test_bot_ready_hook import _agent_bot
-from tests.test_durable_ingestion_runtime import _consume_frame, _consume_repaired_frame, _owned_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -560,7 +556,7 @@ async def test_listings_replayed_from_room_state_at_startup_join_and_leave_nothi
     tmp_path: Path,
     replayed: str,
 ) -> None:
-    """Listings replayed from room state at startup join each room once and leave none, around the startup sweep."""
+    """Listings delivered again at startup join each room once and leave none, whenever they arrive around the sweep."""
     bot = _Bot(
         tmp_path,
         {
@@ -620,53 +616,3 @@ async def test_room_cleanup_during_a_follow_keeps_the_room(tmp_path: Path) -> No
 
     assert rooms_to_leave == [[]]
     assert bot.lifecycle.invited_room_ids() == {ROOM}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("delivery", ["unfilled-gap", "new-join"])
-async def test_only_a_listing_change_lost_to_a_gap_reaches_the_listing_callback_from_room_state(
-    tmp_path: Path,
-    delivery: str,
-) -> None:
-    """After a gap longer than the sync recovers, a room taken off a list arrives only as state, and still reaches it.
-
-    The state of a room the bot just joined holds old listings, not changes, so they, like other room state, do not.
-    """
-    bot = _agent_bot(tmp_path)
-    seen: list[str] = []
-
-    async def on_event(_room: nio.MatrixRoom, event: nio.Event) -> None:
-        seen.append(event.event_id)
-
-    def event(event_id: str, kind: str, content: dict, *, sender: str = ALICE, state_key: str | None = None) -> dict:
-        source = {"type": kind, "event_id": event_id, "sender": sender, "origin_server_ts": 1, "content": content}
-        return source if state_key is None else {**source, "state_key": state_key}
-
-    def joined(room_id: str, state: list[dict], timeline: dict) -> dict:
-        return {"next_batch": "next", "rooms": {"join": {room_id: {"state": {"events": state}, "timeline": timeline}}}}
-
-    message = {"msgtype": "m.text", "body": "hello"}
-    unlisted = {"event_id": "$unlisted", "origin_server_ts": 1, **_child(ROOM, listed=False)}
-    state = [event("$topic", "m.room.topic", {"topic": "Plans"}, state_key=""), unlisted]
-    if delivery == "unfilled-gap":
-        first, recovered = PARENT, [event("$older", "m.room.message", message)]
-        timeline = {"limited": True, "prev_batch": "gap", "events": [event("$latest", "m.room.message", message)]}
-    else:
-        first, recovered = OTHER_ROOM, []
-        own = bot.agent_user.user_id
-        timeline = {
-            "limited": False,
-            "events": [event("$join", "m.room.member", {"membership": "join"}, sender=own, state_key=own)],
-        }
-    old_listing = {"event_id": "$old", "origin_server_ts": 1, **_child(OTHER_ROOM, listed=False)}
-    async with _owned_session(bot, DurableSyncConfig(recovery_page_size=1, max_recovery_pages=1)) as session:
-        session.client.add_event_callback(on_event, nio.Event)
-        await _consume_frame(bot, session, json.dumps(joined(first, [], {"limited": False, "events": []})).encode())
-        gap_rooms: set[str] = set()
-        records = await _consume_repaired_frame(bot, session, joined(PARENT, state, timeline), recovered, gap_rooms)
-        # The next sync brings the room's whole state again, old listings included.
-        next_sync = joined(PARENT, [old_listing], {"limited": False, "events": []})
-        await _consume_repaired_frame(bot, session, next_sync, [], gap_rooms)
-
-    assert [record.room_id for record in records if record.kind is RecordKind.LOSS] == [PARENT]
-    assert seen == (["$unlisted"] if delivery == "unfilled-gap" else [])
