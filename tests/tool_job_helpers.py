@@ -47,6 +47,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
+from mindroom.mid_turn import QueuedMessage
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.participation_hook import participation_hook
 from mindroom.run_storage import RunStorage
@@ -124,6 +125,18 @@ async def _no_cleanup(_job: BackgroundJob) -> None:
 def always_owned(*_args: object, **_kwargs: object) -> bool:
     """Own every call's execution, as a turn with background jobs on does."""
     return True
+
+
+class NewerMessageWaits:
+    """The reply's queue, which holds a newer message of its requester until the reply ends."""
+
+    def has_pending_human_messages(self) -> bool:
+        """Say a newer message waits."""
+        return True
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Return the one newer message."""
+        return (QueuedMessage("$newer", None),)
 
 
 def tool_job_journal(storage_root: Path) -> EventJournalStore:

@@ -36,7 +36,6 @@ from mindroom.event_journal import (
     tool_job_run_id,
 )
 from mindroom.llm.runs import RunStatus, ToolExecution
-from mindroom.mid_turn import QueuedMessage
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, SpanSlot, _current_slot
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
 from mindroom.tool_jobs import approvals as approvals_module
@@ -58,6 +57,7 @@ from tests.reply_span_helpers import reply_span
 from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    NewerMessageWaits,
     awaiting_approval,
     job_actor,
     job_card_decision,
@@ -351,16 +351,6 @@ async def test_gated_call_waits_for_its_approval_then_runs_once(
             assert run.effects == []
 
 
-class _NewerMessageWaits:
-    """The reply's queue, which holds a newer message of its requester until the reply ends."""
-
-    def has_pending_human_messages(self) -> bool:
-        return True
-
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$newer", None),)
-
-
 @pytest.mark.asyncio
 async def test_a_reply_told_to_pause_asks_for_no_more_approvals(
     tmp_path: Path,
@@ -409,7 +399,7 @@ async def test_a_reply_told_to_pause_asks_for_no_more_approvals(
             with (
                 tool_runtime_context(run.context),
                 pending_human_messages_context(newer),
-                queued_message_signal_context(_NewerMessageWaits()),
+                queued_message_signal_context(NewerMessageWaits()),
             ):
                 response = await asyncio.wait_for(
                     run_built_turn(build, config=run.config, runtime_paths=run.paths),
