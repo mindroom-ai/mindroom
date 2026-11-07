@@ -6,6 +6,7 @@ icon: lucide/phone
 
 MindRoom agents can join Element Call voice calls (MatrixRTC, also used by Element X and recent Cinny releases) in their rooms and talk with the caller in real time.
 Use this page to set up calls, choose a voice backend, and find out why an agent did or did not join a call.
+MindRoom can also transcribe calls between people; see [Call transcripts](#call-transcripts).
 Voice messages (recorded audio clips) are covered on [Voice Messages](voice.md).
 
 Each calls-enabled agent uses one of three backends:
@@ -317,6 +318,80 @@ The file, and the copy Mem0 stores, keep the order in which speech arrived, each
 | Requester-private, other memory | `calls/` in the requester-scoped state directory |
 
 When the call ends, file memory stores a reference to the transcript, Mem0 stores the transcript as recallable context, and `memory: none` keeps only the transcript file.
+
+## Call transcripts
+
+MindRoom transcribes calls between people in rooms where its router is a member, for people who call from MindRoom Chat.
+Each person's MindRoom Chat finds stretches of speech in the microphone it already sends to the call and uploads them to MindRoom, which turns them into text, so each line is under the right name and nobody extra joins the call.
+Calls with a MindRoom agent are not transcribed this way; the agent posts its own transcript, as described in [Calling an agent about a thread](#calling-an-agent-about-a-thread).
+
+```yaml
+calls:
+  transcripts:
+    enabled: true
+    notes_model: default
+    languages: [en]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `calls.transcripts.enabled` | bool | `false` | Transcribes calls between people. |
+| `calls.transcripts.notes_model` | string | none | Name of a top-level `models` entry that writes each call's notes; without one, a call gets no notes. |
+| `calls.transcripts.languages` | list of language codes | `[]` | Hints for speech-to-text; only the first is sent. |
+
+Speech-to-text uses the voice-message settings under [`voice.stt`](voice.md#configuration-reference), by default OpenAI's `gpt-transcribe` with the `openai` credential, whether or not `voice.enabled` is on.
+Changes to these settings apply to the next stretch of speech or call, without a restart.
+Configuration loading fails with `calls.transcripts.notes_model references unknown model: <name>` when the notes model is not in `models`.
+MindRoom Chat finds MindRoom as it does for [worker computers](tools/worker-computer.md) and signs in with a client session, so the homeserver must bind OpenID tokens to this deployment (see [Token Binding](connections-portal.md#token-binding)), and Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`; otherwise calls go on without transcripts.
+
+What people see in MindRoom Chat:
+
+- When a call starts, the router posts a `Call started` row in the room, which shows who is in the call, with Join and Transcript.
+- Transcript opens the live transcript: each person's words under their name as they speak, and a gap for a paused or untranscribed stretch.
+- Anyone in the call can hold Pause; while anyone holds it, nothing anyone says is transcribed, and the transcript shows one gap for the pause.
+- When the call ends, the router edits the row to `Call ended · N min`.
+- About 20 seconds after the end, the router posts one message in the row's thread: the notes (what the call was about, decisions, action items with who will do them, and open questions) above the full transcript, or `Call · N min` above it without a notes model; the row then links to it.
+- The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
+
+The rules:
+
+- Starting or joining a call needs permission to post messages in the room; reading the live call needs room membership.
+- A person's app is in the call while it checks in at least every 60 seconds, which it does every 20 seconds; leaving takes it out at once.
+- People in the call from other Matrix apps are listed as in it, but not transcribed.
+- A call ends when nobody is in it, and a call membership a crashed client left behind does not keep it going.
+- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB; each person has one stretch at a time at speech-to-text, and at most 240 a minute.
+- A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
+- A failed post or failed notes are tried again a minute later; after that, the transcript is posted without notes.
+- A call in which nobody spoke posts no message.
+
+Privacy:
+
+- Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
+- MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
+- Speech-to-text and notes count as internal AI work under `call_transcript` in [usage](usage.md#token-usage).
+
+### Routes for clients
+
+Clients reach the transcripts under `/api/call-transcripts/v1` with a client session, `Authorization: Bearer <session_token>` from `POST /api/client-sessions` (see [Plugin HTTP routes](plugins.md#http-routes)).
+
+| Route | Answer |
+|-------|--------|
+| `POST /rooms/{room_id}/calls.join` | `{"call": Call}`: the room's live call, started if there is none; also the heartbeat |
+| `POST /calls/{call_id}/leave` | `{}` |
+| `POST /calls/{call_id}/pause` with `{"holding": true}` or `{"holding": false}` | `{"call": Call}` |
+| `POST /calls/{call_id}/speech`, multipart form data with `audio` (WAV) and `startedAt` (ISO 8601 time with its time zone) | `{"line": Line}`, a line or a gap |
+| `GET /rooms/{room_id}/calls.live` | `{"call": Call or null, "lines": [Line], "names": {user ID: display name or null}}` |
+| `GET /rooms/{room_id}/calls.events` | Server-sent events, each with JSON `data`: `ready` (what `calls.live` answers), `call` (a Call), `line` (a Line), and `ended` (`{"callId"}`), with a comment every 20 seconds |
+
+A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members`, `holds` (who holds Pause), and `transcribedBy` (whose apps transcribe them), with times in ISO 8601 UTC.
+A `Line` has `id`, `callId`, `userId`, `saidAt`, `seconds`, `kind` (`speech` or `gap`), and either `text` or, for a gap, `reason` (`paused` or `not-transcribed`).
+Every route answers 404 while `calls.transcripts.enabled` is off.
+A call's routes take the room from the call and answer 404 to anyone not in that room.
+Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 403 `forbidden`, 404 `not-found`, 409 `paused`, 413 `too-large`, 429 `too-many-requests` with `Retry-After`, or 503 `unavailable` while the room cannot be checked.
+A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.
+An event stream ends when its session expires or is revoked, its reader leaves the room, call transcripts are turned off, or MindRoom stops, and a client reconnects for a new `ready`; each person can have 10 streams open at once.
+The row's content is `io.mindroom.call: {"call_id"}`; its edits add `ended_at`, `duration_seconds`, and, once the message is posted, `transcript_event_id`.
+The message carries `io.mindroom.call_transcript` (see [Calling an agent about a thread](#calling-an-agent-about-a-thread)) and `io.mindroom.call_notes: {"call_id"}`.
 
 ## Server requirements
 
