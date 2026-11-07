@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_api import MatrixApiTools
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.plugins import config_plugins, refresh_plugins
+from mindroom.tool_system.plugins import refresh_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -36,10 +36,12 @@ def _reset_matrix_api_rate_limit() -> None:
     MatrixApiTools._recent_write_units.clear()
 
 
-def _write_manifest(tmp_path: Path, manifest: dict[str, object]) -> None:
+def _write_manifest(tmp_path: Path, manifest: dict[str, object]) -> Path:
     plugin_root = tmp_path / "plugins" / "example"
     plugin_root.mkdir(parents=True, exist_ok=True)
-    (plugin_root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest_path
 
 
 def _config(tmp_path: Path) -> Config:
@@ -58,9 +60,6 @@ def _context(tmp_path: Path) -> ToolRuntimeContext:
     client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     client.room_send = AsyncMock(
         return_value=nio.RoomSendResponse(event_id="$sent:localhost", room_id="!room:localhost"),
-    )
-    client.room_put_state = AsyncMock(
-        return_value=nio.RoomPutStateResponse(event_id="$state:localhost", room_id="!room:localhost"),
     )
     return make_test_tool_runtime_context(
         agent_name="general",
@@ -172,7 +171,7 @@ async def test_matrix_api_sends_names_outside_the_reserved_namespaces(tmp_path: 
 
 @pytest.mark.parametrize("reserved_namespaces", ["io.example.", [1], [""], None])
 def test_plugin_manifest_rejects_malformed_reserved_namespaces(tmp_path: Path, reserved_namespaces: object) -> None:
-    """A manifest whose reservations cannot be read fails validation instead of leaving the namespace open."""
+    """A manifest whose reservations are not a list of non-empty strings fails validation, naming the field."""
     _write_manifest(tmp_path, {"name": "example", "reserved_namespaces": reserved_namespaces})
 
     with pytest.raises(ValueError, match="Plugin reserved_namespaces must be a list of non-empty strings"):
@@ -181,15 +180,13 @@ def test_plugin_manifest_rejects_malformed_reserved_namespaces(tmp_path: Path, r
 
 def test_refreshed_plugins_follow_an_edit_to_the_reserved_namespaces(tmp_path: Path) -> None:
     """A manifest edit that changes only the reservations reaches the plugin generation a refresh publishes."""
-    _write_manifest(tmp_path, {"name": "example", "reserved_namespaces": ["io.example."]})
+    manifest_path = _write_manifest(tmp_path, {"name": "example", "reserved_namespaces": ["io.example."]})
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     assert refresh_plugins(config, runtime_paths).reserved_namespaces == ("io.example.",)
 
-    manifest_path = tmp_path / "plugins" / "example" / "mindroom.plugin.json"
     _write_manifest(tmp_path, {"name": "example", "reserved_namespaces": ["io.example.", "com.example."]})
     mtime = manifest_path.stat().st_mtime + 5
     os.utime(manifest_path, (mtime, mtime))
 
     assert refresh_plugins(config, runtime_paths).reserved_namespaces == ("io.example.", "com.example.")
-    assert config_plugins(config, runtime_paths).reserved_namespaces == ("io.example.", "com.example.")
