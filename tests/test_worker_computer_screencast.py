@@ -269,7 +269,8 @@ async def test_slow_viewer_gets_the_newest_frame_and_chromium_every_acknowledgem
         fake.session.frame(2, b"second")
         assert await sent.frame() == b"second"
         assert [await acknowledged(), await acknowledged()] == [1, 2]
-        fake.session.frame(3, b"x" * (MAX_WORKER_STREAM_MESSAGE_BYTES + 1))
+        # A frame at the limit is one message too big for the backend hop.
+        fake.session.frame(3, b"x" * MAX_WORKER_STREAM_MESSAGE_BYTES)
         assert await acknowledged() == 3
         fake.session.frame(4, b"fourth")
         assert await sent.frame() == b"fourth"
@@ -301,16 +302,19 @@ async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() 
 
 
 @pytest.mark.asyncio
-async def test_a_page_frozen_by_its_script_cannot_hold_a_leaving_viewer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Releasing what a leaving viewer holds gives up on a page that never answers, and the viewer still detaches."""
-    monkeypatch.setattr("mindroom.worker_computer.screencast._RELEASE_SECONDS", 0.05)
+async def test_a_page_frozen_by_its_script_holds_neither_input_nor_a_leaving_viewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Input to a page that never answers gives up, so the viewer keeps reading, and still detaches when it leaves."""
+    monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
     fake = _FakePage()
     sent = _Viewer()
     viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: True, sent.send_text, sent.send_bytes)
     follow = asyncio.create_task(viewer.follow())
     await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
-    await viewer.receive(json.dumps({"type": "mouse", "event": "down", "x": 1, "y": 1, "button": "left"}))
     fake.session.frozen = True
+    down = json.dumps({"type": "mouse", "event": "down", "x": 1, "y": 1, "button": "left"})
+    await asyncio.wait_for(viewer.receive(down), _TIMEOUT)
     follow.cancel()
     await asyncio.gather(follow, return_exceptions=True)
     await asyncio.wait_for(viewer.close(), _TIMEOUT)

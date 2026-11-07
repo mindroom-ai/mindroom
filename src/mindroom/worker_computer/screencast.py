@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from playwright.async_api import CDPSession, Page
 
 _POLL_SECONDS = 1.0
-# A page its script froze never answers input, so releasing what a leaving viewer holds gives up after this.
-_RELEASE_SECONDS = 2.0
+# A page its script froze never answers input, so input, and releasing what a leaving viewer holds, give up after this.
+_INPUT_SECONDS = 2.0
 _JPEG_QUALITY = 80
 # Chromium scales frames down to fit, which keeps every frame below MAX_WORKER_STREAM_MESSAGE_BYTES.
 _MAX_FRAME_WIDTH = 1920
@@ -214,7 +214,7 @@ class ScreencastViewer:
             cdp, params = frame
             jpeg = base64.b64decode(params["data"])
             viewport = (round(params["metadata"]["deviceWidth"]), round(params["metadata"]["deviceHeight"]))
-            if len(jpeg) <= MAX_WORKER_STREAM_MESSAGE_BYTES:
+            if len(jpeg) < MAX_WORKER_STREAM_MESSAGE_BYTES:
                 if viewport != self._viewport:
                     self._viewport = viewport
                     await self._send_text(json.dumps({"type": "viewport", "width": viewport[0], "height": viewport[1]}))
@@ -237,9 +237,10 @@ class ScreencastViewer:
         cdp = self._cdp
         if cdp is None or not self._controls():
             return
-        with suppress(PlaywrightError):
-            # The page may close under this input; the next poll moves to the agent's next page.
-            await self._dispatch(cdp, message)
+        # The page may close under this input, and the next poll moves to the agent's next page.
+        with suppress(PlaywrightError, TimeoutError):
+            async with asyncio.timeout(_INPUT_SECONDS):
+                await self._dispatch(cdp, message)
 
     async def _dispatch(self, cdp: CDPSession, message: _Mouse | _Wheel | _Key | _Text) -> None:
         if isinstance(message, _Mouse):
@@ -289,7 +290,7 @@ class ScreencastViewer:
         buttons, keys = self._buttons, self._keys
         self._buttons, self._keys = set(), {}
         with suppress(PlaywrightError, TimeoutError):
-            async with asyncio.timeout(_RELEASE_SECONDS):
+            async with asyncio.timeout(_INPUT_SECONDS):
                 for button in buttons:
                     await cdp.send(
                         "Input.dispatchMouseEvent",
