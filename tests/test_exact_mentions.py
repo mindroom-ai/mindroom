@@ -9,9 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.coalescing.batch import build_prepared_turn, requester_coalescing_key
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME
+from mindroom.dispatch_source import HOOK_SOURCE_KIND
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_SCHEDULE_FIRED,
@@ -37,6 +39,7 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    make_pending_event,
     make_visible_message,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -227,7 +230,7 @@ async def test_agent_reading_a_card_that_wakes_no_one_is_not_mentioned_but_sees_
     config: Config,
     wake_mentioned: bool,
 ) -> None:
-    """The agent's own reading of the card leaves it unmentioned and still sees the person the card mentions."""
+    """The agent dispatching the card is not mentioned by it and still sees the person the card mentions."""
     content = await _sent_card(config, "bot", [ALICE, ALPHA], wake_mentioned=wake_mentioned)
     runtime_paths = runtime_paths_for(config)
     bot = make_test_agent_bot(
@@ -238,6 +241,7 @@ async def test_agent_reading_a_card_that_wakes_no_one_is_not_mentioned_but_sees_
     bot.client = AsyncMock()
     bot.client.user_id = ALPHA
     sync_bot_runtime_state(bot)
+    room = _room_with(ALICE, ALPHA, BETA, ROUTER)
     event = nio.RoomMessageText.from_dict(
         {
             "content": content,
@@ -247,11 +251,18 @@ async def test_agent_reading_a_card_that_wakes_no_one_is_not_mentioned_but_sees_
             "origin_server_ts": 1,
         },
     )
+    # The turn the gate builds for the card, whose payload is what dispatch reads the card's mentions from.
+    turn = build_prepared_turn(
+        requester_coalescing_key(room.room_id, None, ROUTER),
+        [make_pending_event(event, room, source_kind=HOOK_SOURCE_KIND, payload_trusted=True)],
+        queues_other_run=lambda _run_identity: False,
+    )
 
-    context = await bot._conversation_resolver.extract_message_context(
-        _room_with(ALICE, ALPHA, BETA, ROUTER),
-        event,
+    context = await bot._conversation_resolver.extract_dispatch_context(
+        room,
+        turn.event,
         thread_id=None,
+        payload_metadata=turn.payload,
     )
 
     assert context.am_i_mentioned is wake_mentioned

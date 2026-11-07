@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
-from mindroom.constants import EXACT_MENTIONS_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
@@ -73,16 +73,6 @@ def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
 
     new_content = content.get("m.new_content")
     return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY, False))
-
-
-def _mentions_are_exact(event_source: dict[str, Any]) -> bool:
-    """Return whether a message lists every mention it makes, so the mention parser decides which ones count."""
-    content = event_source.get("content")
-    if not isinstance(content, dict):
-        return False
-    new_content = content.get("m.new_content")
-    visible_content = new_content if isinstance(new_content, dict) else content
-    return visible_content.get(EXACT_MENTIONS_KEY) is True
 
 
 def _with_skip_mentions_metadata(content: dict[str, Any], skip_mentions: bool) -> dict[str, Any]:
@@ -202,7 +192,7 @@ class ConversationResolver:
         room: nio.MatrixRoom,
     ) -> tuple[list[MatrixID], bool, bool]:
         """Return mention facts from one already-normalized event source."""
-        if _should_skip_mentions(event_source) and not _mentions_are_exact(event_source):
+        if _should_skip_mentions(event_source):
             return [], False, False
         return check_agent_mentioned(
             event_source,
