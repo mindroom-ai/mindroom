@@ -27,6 +27,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
+from mindroom.scheduling.executor import _build_scheduled_failure_content
 from mindroom.teams.formation import TeamIntent, TeamOutcome
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_origin import TurnIntent
@@ -37,6 +38,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    make_conversation_reader_mock,
     make_matrix_client_mock,
     make_visible_message,
     request_envelope,
@@ -382,6 +384,33 @@ async def test_thread_with_two_participating_agents_forms_implicit_team_for_owne
     # Formation is pure: thread-history teams carry the COLLABORATE provisional mode.
     assert owner_plan.response_action.form_team.mode is TeamMode.COLLABORATE
     assert other_plan.kind == "ignore"
+
+
+@pytest.mark.asyncio
+async def test_untagged_follow_up_after_a_skip_marked_notice_stays_with_the_thread_agent(config: Config) -> None:
+    """Agents only a skip-marked notice names, here a failed scheduled task's, form no team on an untagged follow-up."""
+    general_id = _entity_id(config, "general").full_id
+    room = _room_with_members(_SENDER, general_id, _entity_id(config, "research").full_id)
+    reader = make_conversation_reader_mock()
+    reader.latest_thread_event_id = AsyncMock(return_value="$reply:localhost")
+    notice = await _build_scheduled_failure_content(
+        MessageTarget.resolve(_ROOM_ID, "$thread:localhost", _EVENT_ID),
+        "❌ Scheduled task failed: @general and @research compare notes\nError: timed out",
+        reader,
+    )
+    history = [
+        make_visible_message(sender=_SENDER, body="please help", event_id="$thread:localhost"),
+        make_visible_message(sender=general_id, body="sure thing", event_id="$reply:localhost"),
+        make_visible_message(sender=_entity_id(config, ROUTER_AGENT_NAME).full_id, content=notice),
+    ]
+    context = _context(thread_id="$thread:localhost", thread_history=history)
+
+    general_plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))
+    research_plan = await _plan(_policy_for(config, "research"), room, _dispatch(context, agent_name="research"))
+
+    assert general_plan.kind == "respond"
+    assert general_plan.response_action.kind == "individual"
+    assert research_plan.kind == "ignore"
 
 
 @pytest.mark.asyncio

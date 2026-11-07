@@ -42,7 +42,7 @@ from mindroom.matrix.thread_membership import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.thread_utils import check_agent_mentioned
+from mindroom.thread_utils import check_agent_mentioned, should_skip_mentions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -61,18 +61,6 @@ if TYPE_CHECKING:
 
 # nio retries a stalled or rate-limited homeserver read without limit.
 _RELATED_THREAD_LOOKUP_TIMEOUT_SECONDS = 10.0
-
-
-def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
-    """Return whether mentions in this message should be ignored."""
-    content = event_source.get("content", {})
-    if not isinstance(content, dict):
-        return False
-    if bool(content.get(SKIP_MENTIONS_KEY, False)):
-        return True
-
-    new_content = content.get("m.new_content")
-    return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY, False))
 
 
 def _with_skip_mentions_metadata(content: dict[str, Any], skip_mentions: bool) -> dict[str, Any]:
@@ -192,7 +180,7 @@ class ConversationResolver:
         room: nio.MatrixRoom,
     ) -> tuple[list[MatrixID], bool, bool]:
         """Return mention facts from one already-normalized event source."""
-        if _should_skip_mentions(event_source):
+        if should_skip_mentions(event_source):
             return [], False, False
         return check_agent_mentioned(
             event_source,

@@ -15,6 +15,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
+    EXACT_MENTIONS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
@@ -24,13 +25,16 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     TOOL_TRACE_CONTENT_KEY,
+    WAKE_MENTIONED_KEY,
 )
 from mindroom.custom_tools.thread_move import ThreadMoveTools, _plan_thread_copy, _PlannedCopy
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
+from mindroom.thread_utils import get_all_mentioned_agents_in_thread
 from mindroom.tool_system.events import ToolTraceEntry, body_without_tool_markers, build_tool_trace_content
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -622,6 +626,32 @@ async def test_move_thread_copies_messages_in_order(tmp_path: Path) -> None:
     assert payload["link"] == "https://matrix.to/#/%21target%3Alocalhost/%24copy0%3Alocalhost?via=localhost"
     assert payload["copied"] == 3
     assert payload["skipped"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "markers",
+    [{"m.mentions": {"user_ids": []}, EXACT_MENTIONS_KEY: True}, {WAKE_MENTIONED_KEY: False}],
+    ids=["exact_mentions", "wake_mentioned_false"],
+)
+async def test_moved_card_does_not_mention_the_agents_it_quotes(tmp_path: Path, markers: dict[str, Any]) -> None:
+    """Agents a card only quotes count as mentioned earlier neither in its thread nor in the thread it moves to."""
+    move = _move(tmp_path)
+    config, runtime_paths = move.context.config, move.context.runtime_paths
+    card = format_message_with_mentions(config, runtime_paths, "Review card: @code and @research signed off")
+    thread = [
+        _message(REQUESTER_ID, {"msgtype": "m.text", "body": "status?"}, ROOT_ID),
+        _message(move.ids[ROUTER_AGENT_NAME], {**card, **markers}, "$card:localhost"),
+    ]
+    assert get_all_mentioned_agents_in_thread(thread, config, runtime_paths) == []
+
+    with _matrix(move, thread) as mocks:
+        payload = await _run()
+
+    assert payload["copied"] == 2
+    moved = [_message(move.ids[ROUTER_AGENT_NAME], call.args[2]) for call in mocks.send.await_args_list[:2]]
+    assert move.ids["code"] in moved[1].content["body"]
+    assert get_all_mentioned_agents_in_thread(moved, config, runtime_paths) == []
 
 
 @pytest.mark.asyncio
