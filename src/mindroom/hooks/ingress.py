@@ -163,9 +163,9 @@ class IngressHookRunner:
 
     async def apply_system_enrichment(
         self,
-        dispatch: PreparedDispatch,
         envelope: MessageEnvelope,
         *,
+        correlation_id: str,
         target_entity_name: str,
         target_member_names: tuple[str, ...] | None,
         turn_id: str,
@@ -173,29 +173,24 @@ class IngressHookRunner:
         """Run system:enrich for turn ``turn_id`` and return system-prompt enrichment items."""
         started = time.monotonic()
         hook_registered = self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH)
-
-        def finish(items: list[EnrichmentItem]) -> list[EnrichmentItem]:
-            emit_elapsed_timing(
-                "response_payload.apply_system_enrichment",
-                started,
-                room_id=dispatch.envelope.room_id,
+        items: list[EnrichmentItem] = []
+        if hook_registered:
+            context = SystemEnrichContext(
+                **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, correlation_id),
+                turn_id=turn_id,
+                envelope=envelope,
                 target_entity_name=target_entity_name,
-                hook_registered=hook_registered,
-                enrichment_item_count=len(items),
+                target_member_names=target_member_names,
             )
-            return items
-
-        if not hook_registered:
-            return finish([])
-        context = SystemEnrichContext(
-            **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, dispatch.correlation_id),
-            turn_id=turn_id,
-            envelope=envelope,
-            target_entity_name=target_entity_name,
-            target_member_names=target_member_names,
-        )
-        return finish(
-            _without_runtime_owned_enrichment(
+            items = _without_runtime_owned_enrichment(
                 await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context),
-            ),
+            )
+        emit_elapsed_timing(
+            "response_payload.apply_system_enrichment",
+            started,
+            room_id=envelope.room_id,
+            target_entity_name=target_entity_name,
+            hook_registered=hook_registered,
+            enrichment_item_count=len(items),
         )
+        return items

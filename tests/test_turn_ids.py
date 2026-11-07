@@ -298,7 +298,7 @@ async def test_contact_before_send_carries_the_turn_ids_of_the_call_that_sends(t
 
 @pytest.mark.asyncio
 async def test_enrich_hooks_carry_the_turn_id_of_the_reply_they_prepare(tmp_path: Path) -> None:
-    """Message and system enrichment run under the lock with the turn ID of the reply they prepare."""
+    """Message and system enrichment run with the turn ID of the reply they prepare."""
     seen: list[tuple[str, str | None, str | None]] = []
     bot = _bot(tmp_path)
     bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
@@ -312,7 +312,8 @@ async def test_enrich_hooks_carry_the_turn_id_of_the_reply_they_prepare(tmp_path
         "build_dispatch_payload_with_attachments",
         new=AsyncMock(return_value=DispatchPayload(prompt="hello")),
     ):
-        await bot._request_payload_preparer.prepare(request)
+        prepared = await bot._request_payload_preparer.prepare(request)
+    await bot._request_payload_preparer.with_system_enrichment(prepared, target_member_names=None)
 
     assert seen == [(EVENT_MESSAGE_ENRICH, request.turn_id, None), (EVENT_SYSTEM_ENRICH, request.turn_id, None)]
 

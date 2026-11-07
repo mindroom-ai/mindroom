@@ -32,6 +32,7 @@ from mindroom.hooks import (
     HookContextSupport,
     HookRegistry,
 )
+from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.logging_config import get_logger
@@ -369,7 +370,7 @@ def _build_response_runner(
             state_writer=bot._conversation_state_writer,
             request_preparer=ResponsePayloadPreparer(
                 normalizer=MagicMock(),
-                ingress_hook_runner=MagicMock(),
+                ingress_hook_runner=IngressHookRunner(hook_context=hook_context),
                 agent_name=bot.agent_name,
                 logger=bot.logger,
             ),
