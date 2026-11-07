@@ -518,6 +518,7 @@ They work the same when the tool runs in a worker, where the workspace is the ag
 
 ```python
 from pathlib import Path
+from typing import Literal
 
 from mindroom.plugin_api import (
     ToolCategory,
@@ -534,7 +535,12 @@ from mindroom.plugin_api import (
 class NotesTools(Toolkit):
     name = "notes"
 
-    def __init__(self, *, tool_output_workspace_root: Path | None, file_access: str) -> None:
+    def __init__(
+        self,
+        *,
+        tool_output_workspace_root: Path | None,
+        file_access: Literal["workspace", "unrestricted"],
+    ) -> None:
         super().__init__()
         self.workspace_root = tool_output_workspace_root
         self.file_access = file_access

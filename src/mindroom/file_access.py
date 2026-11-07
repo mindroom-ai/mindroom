@@ -1,7 +1,8 @@
 """Resolve model-supplied file paths under an agent's ``file_access`` setting.
 
 ``workspace`` confines paths to the agent workspace; ``unrestricted`` allows any
-regular file the process can read. Tools that upload such a file check and read it here too.
+regular file the process can read. Tools write such paths here too, and tools that
+upload such a file check and read it here.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from mindroom.config.resolution import file_access as resolved_file_access
 from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
+from mindroom.path_safety import resolve_base_dir_path, resolve_tool_base_dir, write_resolved_file
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -58,6 +60,15 @@ def agent_file_access(config: Config | None, agent_name: str | None) -> FileAcce
     return resolved_file_access(config, agent_name)
 
 
+def _requested_path(raw_path: str, field_name: str) -> Path:
+    """Return one model-supplied path with ``~`` expanded, so reads and writes name the same file."""
+    try:
+        return Path(raw_path).expanduser()
+    except RuntimeError as exc:
+        msg = f"{field_name} '{raw_path}' names a home directory that cannot be determined."
+        raise ValueError(msg) from exc
+
+
 def resolve_agent_file(
     raw_path: str,
     *,
@@ -66,11 +77,7 @@ def resolve_agent_file(
     field_name: str,
 ) -> AuthorizedFile:
     """Return the authorized file for one model-supplied path, or raise ``ValueError``."""
-    try:
-        requested = Path(raw_path).expanduser()
-    except RuntimeError as exc:
-        msg = f"{field_name} '{raw_path}' names a home directory that cannot be determined."
-        raise ValueError(msg) from exc
+    requested = _requested_path(raw_path, field_name)
     if file_access == "unrestricted":
         base = workspace_root if workspace_root is not None else Path.cwd()
         candidate = requested if requested.is_absolute() else base / requested
@@ -97,6 +104,29 @@ def resolve_agent_file(
         msg = f"{field_name} '{raw_path}' is not a regular file."
         raise ValueError(msg)
     return AuthorizedFile(root=root, relative=resolved.relative_to(canonical_root), display_path=str(resolved))
+
+
+def write_agent_file(
+    raw_path: str,
+    payload: bytes | BinaryIO,
+    *,
+    workspace_root: Path | None,
+    file_access: FileAccess,
+) -> Path:
+    """Publish one model-supplied path where the agent's ``file_access`` allows and return the resolved path.
+
+    Paths resolve as for reads; any setting but ``unrestricted`` refuses paths outside the workspace and agents
+    without one.
+    """
+    requested = _requested_path(raw_path, "Path")
+    restrict = file_access != "unrestricted"
+    if restrict and workspace_root is None:
+        msg = f"Path '{raw_path}' requires an agent workspace; file_access is 'workspace'."
+        raise ValueError(msg)
+    base_dir = resolve_tool_base_dir(workspace_root)
+    resolved = resolve_base_dir_path(base_dir, str(requested), restrict)
+    write_resolved_file(base_dir, resolved, payload)
+    return resolved
 
 
 class UploadSourceError(Exception):

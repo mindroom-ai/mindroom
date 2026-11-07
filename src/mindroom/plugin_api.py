@@ -11,7 +11,7 @@ from __future__ import annotations
 from mindroom.agent_loop.helper import HelperResult, complete_prompt
 from mindroom.automations import Ask, AutomationContext, Done, automation, automation_threads
 from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, resolve_config_relative_path
-from mindroom.file_access import resolve_agent_file
+from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.hooks import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EVENT_AGENT_STARTED,
@@ -77,7 +77,6 @@ from mindroom.oauth import OAuthConsentGroup, OAuthDiscoveryConfig, OAuthProvide
 from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
-from mindroom.path_safety import write_agent_file
 from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,

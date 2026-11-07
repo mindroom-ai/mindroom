@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -11,6 +11,7 @@ import mindroom.api.sandbox_runner as sandbox_runner_module
 from mindroom.agents import build_agent_toolkit
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.plugin_api import write_agent_file
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -23,10 +24,12 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
 # The example tool of docs/plugins.md, which imports only the supported plugin surface.
 _NOTES_TOOLS = '''
 from pathlib import Path
+from typing import Literal
 
 from mindroom.plugin_api import (
     ToolCategory,
@@ -43,7 +46,12 @@ from mindroom.plugin_api import (
 class NotesTools(Toolkit):
     name = "notes"
 
-    def __init__(self, *, tool_output_workspace_root: Path | None, file_access: str) -> None:
+    def __init__(
+        self,
+        *,
+        tool_output_workspace_root: Path | None,
+        file_access: Literal["workspace", "unrestricted"],
+    ) -> None:
         super().__init__()
         self.workspace_root = tool_output_workspace_root
         self.file_access = file_access
@@ -105,14 +113,8 @@ def _notes_runtime(tmp_path: Path, file_access: FileAccess) -> tuple[Config, Run
     return config, runtime_paths
 
 
-@pytest.mark.parametrize(("file_access", "outside_written"), _OUTSIDE_WRITE_CASES)
-@pytest.mark.asyncio
-async def test_plugin_tool_writes_and_reads_agent_files_in_the_primary(
-    tmp_path: Path,
-    file_access: FileAccess,
-    outside_written: bool,
-) -> None:
-    """The agent's own build gives the tool its workspace and file_access; a write outside follows file_access."""
+def _primary_notes_tools(tmp_path: Path, file_access: FileAccess) -> tuple[ToolFunction, ToolFunction, Path]:
+    """Return the save and read functions the agent's own build offers, and the agent's workspace."""
     config, runtime_paths = _notes_runtime(tmp_path, file_access)
     tools = publish_test_plugins(config, runtime_paths).tools
     toolkit = build_agent_toolkit(
@@ -123,8 +125,20 @@ async def test_plugin_tool_writes_and_reads_agent_files_in_the_primary(
         execution_identity=None,
     )
     assert toolkit is not None
-    save_note, read_note = toolkit_offers(toolkit, "save_note"), toolkit_offers(toolkit, "read_note")
-    note = agent_workspace_root_path(runtime_paths.storage_root, "general").resolve() / "notes" / "today.md"
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "general").resolve()
+    return toolkit_offers(toolkit, "save_note"), toolkit_offers(toolkit, "read_note"), workspace
+
+
+@pytest.mark.parametrize(("file_access", "outside_written"), _OUTSIDE_WRITE_CASES)
+@pytest.mark.asyncio
+async def test_plugin_tool_writes_and_reads_agent_files_in_the_primary(
+    tmp_path: Path,
+    file_access: FileAccess,
+    outside_written: bool,
+) -> None:
+    """The agent's own build gives the tool its workspace and file_access; a write outside follows file_access."""
+    save_note, read_note, workspace = _primary_notes_tools(tmp_path, file_access)
+    note = workspace / "notes" / "today.md"
 
     assert await call_entrypoint(save_note, path="notes/today.md", text="Buy milk") == f"Saved {note}."
 
@@ -138,6 +152,50 @@ async def test_plugin_tool_writes_and_reads_agent_files_in_the_primary(
         with pytest.raises(ValueError, match="outside base_dir"):
             await call_entrypoint(save_note, path=str(outside), text="Outside")
         assert not outside.exists()
+
+
+@pytest.mark.parametrize(("file_access", "outside_written"), _OUTSIDE_WRITE_CASES)
+@pytest.mark.asyncio
+async def test_plugin_tool_reads_back_a_home_path_it_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_access: FileAccess,
+    outside_written: bool,
+) -> None:
+    """Writing and reading resolve `~` alike, so a note saved under the home directory reads back from there."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    save_note, read_note, workspace = _primary_notes_tools(tmp_path, file_access)
+
+    if outside_written:
+        await call_entrypoint(save_note, path="~/note.md", text="From home")
+        assert (home / "note.md").read_text() == "From home"
+        assert await call_entrypoint(read_note, path="~/note.md") == "From home"
+    else:
+        with pytest.raises(ValueError, match="outside base_dir"):
+            await call_entrypoint(save_note, path="~/note.md", text="From home")
+        with pytest.raises(ValueError, match="inside the agent workspace"):
+            await call_entrypoint(read_note, path="~/note.md")
+        assert not (home / "note.md").exists()
+    assert not (workspace / "~").exists()
+
+
+def test_write_agent_file_confines_an_unknown_file_access_to_the_workspace(tmp_path: Path) -> None:
+    """Only `unrestricted` lets a write leave the workspace, as for reads."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.md"
+
+    with pytest.raises(ValueError, match="outside base_dir"):
+        write_agent_file(
+            str(outside),
+            b"Outside",
+            workspace_root=workspace,
+            file_access=cast("FileAccess", "Unrestricted"),
+        )
+
+    assert not outside.exists()
 
 
 @pytest.mark.parametrize("execution", ["inprocess", "subprocess"])
