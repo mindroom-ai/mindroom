@@ -132,7 +132,7 @@ def imports_outside_plugin_api(plugin_root: Path) -> list[str]:
             try:
                 tree = ast.parse(path.read_bytes(), filename=str(path))
             except (OSError, SyntaxError):
-                # A file Python cannot read or parse imports nothing, and the load check fails on any module it loads.
+                # A file Python cannot read or parse runs no imports, and `check_plugin` fails on any such module the plugin loads.
                 continue
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
