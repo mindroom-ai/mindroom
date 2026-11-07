@@ -95,6 +95,44 @@ async def test_member_subagent_hooks_keep_live_room_capabilities(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_a_delegated_child_s_calls_tell_their_hooks_the_chat_does_not_show_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child's calls read as hidden, as its turn hides them, while its caller's reply shows the delegation call."""
+    seen: list[tuple[str, str, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(context: ToolBeforeCallContext) -> None:
+        seen.append((context.agent_name, context.tool_name, context.shown))
+
+    config = _leader_and_child()
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    parent = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add them")), answer("Parent done")],
+    )
+    child = ScriptedModel([calls(tool_call("add", "add", a=1, b=2)), answer("Child done")])
+    ScriptedAgents({"child": child}, by_session={identity.session_id: parent}).install(monkeypatch)
+    registry = HookRegistry.from_plugins([_plugin("call-mirror", [before])])
+
+    answered = await respond(
+        "leader",
+        "Delegate",
+        config=config,
+        runtime_paths=paths,
+        identity=identity,
+        run_id="parent-run",
+        hook_registry=registry,
+    )
+
+    # The reply shows its own delegation call and none of the child's.
+    assert answered == "\n\n🔧 `run_subagent` [1]\n\nParent done"
+    assert seen == [("leader", "run_subagent", True), ("child", "add", False)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "outcome",
     ["blocked", "approved", "cancel", "recovery_cancel", "live_cancel", "cancelled_output", "revoke"],

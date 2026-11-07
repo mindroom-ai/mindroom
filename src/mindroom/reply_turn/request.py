@@ -213,7 +213,11 @@ class PreparedResponseRuntime:
     media_inputs: MediaInputs
     model_prompt: str
     active_model_name: str
-    show_tool_calls: bool
     tool_context: ToolRuntimeContext
     participation: ParticipationGate | None = None
     skill_review_capture: SkillReviewCapture | None = None
+
+    @property
+    def show_tool_calls(self) -> bool:
+        """Return whether the turn's reply shows its tool calls, as the turn's tool context tells its tool hooks."""
+        return self.tool_context.show_tool_calls

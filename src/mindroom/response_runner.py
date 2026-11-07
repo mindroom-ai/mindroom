@@ -1619,13 +1619,11 @@ class ResponseRunner:
             ),
         )
         orchestrator = self.deps.runtime.orchestrator
-        show_tool_calls = self._turn_show_tool_calls()
         runtime = PreparedResponseRuntime(
             media_inputs=request.media or MediaInputs(),
             model_prompt=prepared_prompt,
             active_model_name=team_models.team_model_name,
-            show_tool_calls=show_tool_calls,
-            tool_context=tool_context,
+            tool_context=replace(tool_context, show_tool_calls=self._turn_show_tool_calls()),
         )
         run_id = str(uuid4())
         mode = TeamMode(team.team_mode)
@@ -2055,8 +2053,7 @@ class ResponseRunner:
             media_inputs=media_inputs,
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
-            show_tool_calls=show_tool_calls,
-            tool_context=tool_context,
+            tool_context=replace(tool_context, show_tool_calls=show_tool_calls),
             participation=participation
             if participation is not None
             else _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),

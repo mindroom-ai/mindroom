@@ -80,7 +80,7 @@ from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
-from tests.agent_tool_helpers import UnansweredCallTools
+from tests.agent_tool_helpers import UnansweredCallTools, tool_policy
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
@@ -96,6 +96,7 @@ from tests.conftest import (
     make_visible_message,
     message_origin,
     patch_response_runner_module,
+    publish_hook_plugin,
     seed_session,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -104,6 +105,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.scripted_agent_helpers import (
     ProcessCrash,
     crash_after_first_terminal_store,
@@ -1999,6 +2001,81 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     assert record.metadata["mindroom_original_status"] == "error"
     assert record.metadata["mindroom_replay_state"] == "interrupted"
     assert not record.requirements
+
+
+def _call_mirror(seen: list[tuple[str, bool, str | None]]) -> list[object]:
+    """Return before-call and after-call hooks that record whether each call's reply shows it, and its preview."""
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append(("before", ctx.shown, ctx.chat_preview()))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append(("after", ctx.shown, ctx.chat_preview()))
+
+    return [before, after]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_tells_a_call_s_hooks_what_its_reply_shows_of_the_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+    show_tool_calls: bool,
+) -> None:
+    """Through ``ResponseRunner``, a call's hooks read whether its reply shows it, and the preview its tool trace shows."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call-1", label="a")), answer("Touched.")])
+    reply.config.defaults.show_tool_calls = show_tool_calls
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+    runner = _runner(reply)
+
+    await _respond_through_runner(runner, _request(), streaming=streaming)
+
+    content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
+    trace = content.get("m.new_content", content).get("io.mindroom.tool_trace")
+    shown_previews = [] if trace is None else [event["args_preview"] for event in trace["events"]]
+    assert shown_previews == (["label=a"] if show_tool_calls else [])
+    preview = "label=a" if show_tool_calls else None
+    assert seen == [("before", show_tool_calls, preview), ("after", show_tool_calls, preview)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_shows_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """A call in a team's reply, a member's as much as the leader's, tells its hooks whether that reply shows it."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [], tools=())
+    reply.config.defaults.show_tool_calls = show_tool_calls
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+    runner = _runner(reply)
+    policy = tool_policy(HookRegistry.empty())
+
+    async def touch(**kwargs: object) -> str:
+        return f"touched {kwargs['label']}"
+
+    async def touch_then_answer(*_args: object, **_kwargs: object) -> str:
+        # The team's own stream runs its calls under the turn's context, as its leader and members do.
+        await policy("touch", touch, {"label": "a"})
+        return "Touched."
+
+    with patch_response_runner_module(
+        team_response_stream=streamed_answer(touch_then_answer),
+        should_use_streaming=AsyncMock(return_value=False),
+        apply_post_response_effects=AsyncMock(),
+    ):
+        await runner.generate_team_response_helper(_request(), member_names=["assistant"], team_mode="coordinate")
+
+    preview = "label=a" if show_tool_calls else None
+    assert seen == [("before", show_tool_calls, preview), ("after", show_tool_calls, preview)]
 
 
 @pytest.mark.asyncio

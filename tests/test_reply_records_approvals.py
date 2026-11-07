@@ -27,6 +27,8 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.approval_signals import PausedReply
 from mindroom.event_journal.replies import ReplyStore
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.llm.events import ReportedCall, ToolStarted
 from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -42,13 +44,15 @@ from mindroom.reply_presentation import (
 from mindroom.response_sources import Unclaimed, UnclaimedReason
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
+from tests.agent_tool_helpers import tool_policy
 from tests.approval_continuation_helpers import dispatch_approval
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     initialize_approval_store_for_test,
     patch_response_runner_module,
+    publish_hook_plugin,
     unwrap_extracted_collaborator,
 )
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -810,6 +814,55 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
         frozen = await bot.journal_principal().load_matrix_delivery(delivery_id="$event", stage=DeliveryStage.FINAL)
         assert frozen is not None
         assert (await runner.approvals._approval_outcome_from_delivery(frozen)).final_visible_body == final
+
+
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_a_resumed_run_s_calls_tell_their_hooks_whether_the_reply_it_continues_shows_them(
+    tmp_path: Path,
+    show_tool_calls: bool,
+) -> None:
+    """The calls an approved run makes once it resumes read whether its paused reply shows tool calls."""
+    seen: list[tuple[bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.shown, ctx.chat_preview()))
+
+    policy = tool_policy(HookRegistry.empty())
+
+    async def read_document(**kwargs: object) -> str:
+        return f"read {kwargs['name']}"
+
+    async def resume(*_args: object, tool_context: ToolRuntimeContext, **_kwargs: object) -> CompletedApprovalRun:
+        with tool_runtime_context(tool_context):
+            await policy("read_document", read_document, {"name": "notes"})
+        return CompletedApprovalRun("Read.", {})
+
+    def pausing_on_its_call(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        async def chunks() -> AsyncIterator[object]:
+            yield "Reading document"
+            # The reply shows the call it asks approval for, where it shows tool calls.
+            yield ToolStarted(ReportedCall(tool_call_id="call-run-1", tool_name="read_document", tool_args={}))
+            raise ResponsePausedForApproval(_paused())
+
+        return chunks()
+
+    async with _approval_bot(tmp_path, requires_human=False) as bot:
+        bot.config.defaults.show_tool_calls = show_tool_calls
+        publish_hook_plugin(bot.config, bot.runtime_paths, "call-mirror", [before])
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with (
+            patch_response_runner_module(
+                stream_agent_response=pausing_on_its_call,
+                should_use_streaming=AsyncMock(return_value=False),
+                typing_indicator=_noop_typing,
+            ),
+            patch.object(type(runner.approvals._approval_execution), "continue_run", AsyncMock(side_effect=resume)),
+        ):
+            await runner.generate_response(_plain_request(_target()))
+
+        assert (await _reply(bot)).state is rl.ReplyState.COMPLETED
+    assert seen == [(show_tool_calls, "name=notes" if show_tool_calls else None)]
 
 
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:
