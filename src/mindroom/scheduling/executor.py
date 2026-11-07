@@ -235,6 +235,7 @@ async def _deliver_scheduled_trigger(
     content: dict[str, typing.Any],
     occurrence: RecurringOccurrence | None,
     owner_stopped: Callable[[], bool],
+    task_id: str,
 ) -> ScheduledWorkflowOutcome:
     """Freeze recurring content before sending and classify the typed Matrix result."""
     if occurrence is not None and occurrence.checkpoint.prepared is None:
@@ -257,13 +258,14 @@ async def _deliver_scheduled_trigger(
         target.room_id,
         content,
         message_type=scheduled_trigger_message_type(workflow),
-        transaction_id=occurrence.transaction_id if occurrence is not None else None,
+        # A one-time task fires once, so a send its stopped owner's replacement repeats stays one event.
+        transaction_id=occurrence.transaction_id if occurrence is not None else f"schedule_{target.room_id}_{task_id}",
         content_is_prepared=occurrence is not None,
     )
     if isinstance(delivered, client_delivery.MatrixDeliveryFailure):
-        # Once frozen, keep the trigger even if a later send rejects its content.
+        # Once frozen, keep the trigger even if a later send rejects its content; a stopped owner's replacement sends.
         return ScheduledWorkflowOutcome(
-            status="retry" if occurrence is not None else "failed",
+            status="retry" if occurrence is not None or owner_stopped() else "failed",
             failure_reason=delivered.detail,
         )
     logger.info(
@@ -317,7 +319,15 @@ async def execute_scheduled_workflow(
                 )
                 if content is None:
                     return ScheduledWorkflowOutcome(status="suppressed", failure_reason="suppressed by hook")
-            outcome = await _deliver_scheduled_trigger(client, workflow, target, content, occurrence, owner_stopped)
+            outcome = await _deliver_scheduled_trigger(
+                client,
+                workflow,
+                target,
+                content,
+                occurrence,
+                owner_stopped,
+                task_id,
+            )
         except _InvalidScheduledTriggerError as error:
             outcome = ScheduledWorkflowOutcome(status="failed", failure_reason=str(error))
         except RecurringDeliveryHeldError as error:
@@ -330,7 +340,7 @@ async def execute_scheduled_workflow(
             )
         if outcome.status in {"retry", "held"}:
             logger.warning(
-                "Recurring delivery remains pending",
+                "Scheduled delivery remains pending",
                 task_id=task_id,
                 status=outcome.status,
                 reason=outcome.failure_reason,

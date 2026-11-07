@@ -786,7 +786,9 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
             assert raised.value.__cause__ is None
 
     finalize_failures = [log for log in logs if log["event"] == "config_reload_finalize_failed_after_room_setup_failed"]
-    assert len(finalize_failures) == (1 if isinstance(finalize_error, RuntimeError) else 0)
+    assert [log["log_level"] for log in finalize_failures] == (
+        ["error"] if isinstance(finalize_error, RuntimeError) else []
+    )
 
     if isinstance(rooms_error, asyncio.CancelledError):
         assert call_order == ["rooms"]
