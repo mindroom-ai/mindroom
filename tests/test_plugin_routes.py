@@ -136,12 +136,12 @@ def _write_plugin(
     *,
     name: str = "demo",
     tools_source: str | None = None,
-    **manifest_fields: object,
+    **manifest_fields: str,
 ) -> Path:
     """Write plugin ``name`` under ``tmp_path/plugins`` with the modules and manifest fields given; return its root."""
     root = tmp_path / "plugins" / name
     root.mkdir(parents=True, exist_ok=True)
-    manifest: dict[str, object] = {"name": name, **manifest_fields}
+    manifest: dict[str, str] = {"name": name, **manifest_fields}
     for kind, source in (("routes", routes_source), ("tools", tools_source)):
         if source is not None:
             manifest[f"{kind}_module"] = f"{kind}.py"
@@ -253,15 +253,14 @@ def _server_plugin_api() -> str:
     return f"{major}.{minor}"
 
 
-def test_plugin_list_names_each_enabled_plugin_that_loaded_with_its_versions(tmp_path: Path) -> None:
-    """A signed-in client gets the enabled plugins that loaded, in config order, with their manifest versions only.
+def test_plugin_list_names_each_enabled_plugin_that_loaded_with_the_api_it_needs(tmp_path: Path) -> None:
+    """A signed-in client gets the enabled plugins that loaded, in config order, with the plugin API each needs only.
 
     A disabled plugin and one that failed to load are left out, and nothing names a path, a setting, or an error.
-    A version that is not a string is left out without refusing its plugin.
     """
-    _write_plugin(tmp_path, ROUTES, version="2.1.0", mindroom_plugin_api="1.0")
-    _write_plugin(tmp_path, None, name="plain", version=2)
-    _write_plugin(tmp_path, None, name="off", version="9.9.9")
+    _write_plugin(tmp_path, ROUTES, mindroom_plugin_api="1.0")
+    _write_plugin(tmp_path, None, name="plain")
+    _write_plugin(tmp_path, None, name="off", mindroom_plugin_api="1.0")
     _write_plugin(tmp_path, None, name="broken", tools_source="raise RuntimeError('broken secret')\n")
     _, runtime_paths = _config(tmp_path)
     entries = [
@@ -282,8 +281,8 @@ def test_plugin_list_names_each_enabled_plugin_that_loaded_with_its_versions(tmp
     assert response.json() == {
         "plugin_api_version": _server_plugin_api(),
         "plugins": [
-            {"name": "demo", "version": "2.1.0", "mindroom_plugin_api": "1.0"},
-            {"name": "plain", "version": None, "mindroom_plugin_api": None},
+            {"name": "demo", "mindroom_plugin_api": "1.0"},
+            {"name": "plain", "mindroom_plugin_api": None},
         ],
     }
 
@@ -321,22 +320,22 @@ def test_plugin_list_is_empty_before_a_config_loads(tmp_path: Path) -> None:
 
 
 def test_plugin_list_follows_a_reload(tmp_path: Path) -> None:
-    """After a reload the list names the plugins published now, with the versions their manifests state now."""
-    _write_plugin(tmp_path, ROUTES, version="1.0.0")
+    """After a reload the list names the plugins published now, with the plugin API their manifests need now."""
+    _write_plugin(tmp_path, ROUTES)
     config, runtime_paths = _config(tmp_path)
     publish_test_plugins(config, runtime_paths)
     app = _app(config, runtime_paths)
     client = TestClient(app)
     headers = _signed_in(app)
     assert client.get("/api/plugins", headers=headers).json()["plugins"] == [
-        {"name": "demo", "version": "1.0.0", "mindroom_plugin_api": None},
+        {"name": "demo", "mindroom_plugin_api": None},
     ]
 
-    _write_plugin(tmp_path, ROUTES, version="1.1.0", mindroom_plugin_api="1.0")
+    _write_plugin(tmp_path, ROUTES, mindroom_plugin_api="1.0")
     publish_test_plugins(config, runtime_paths)
 
     assert client.get("/api/plugins", headers=headers).json()["plugins"] == [
-        {"name": "demo", "version": "1.1.0", "mindroom_plugin_api": "1.0"},
+        {"name": "demo", "mindroom_plugin_api": "1.0"},
     ]
 
 
@@ -425,18 +424,18 @@ def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
     assert "routes module imported" in str(plugin.routes_error)
 
 
-def test_worker_refresh_reads_a_changed_manifest_version(tmp_path: Path) -> None:
-    """A worker's refresh keeps a plugin's unchanged modules but takes the versions its manifest states now."""
-    root = _write_plugin(tmp_path, None, tools_source=TOOLS, version="1.0.0")
+def test_worker_refresh_reads_a_changed_plugin_api_need(tmp_path: Path) -> None:
+    """A worker's refresh keeps a plugin's unchanged modules but takes the plugin API its manifest needs now."""
+    root = _write_plugin(tmp_path, None, tools_source=TOOLS)
     config, runtime_paths = _config(tmp_path)
     [before] = refresh_plugins(config, runtime_paths).loaded_plugins
 
-    manifest = {"name": "demo", "tools_module": "tools.py", "version": "1.1.0", "mindroom_plugin_api": "1.0"}
+    manifest = {"name": "demo", "tools_module": "tools.py", "mindroom_plugin_api": "1.0"}
     (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     [after] = refresh_plugins(config, runtime_paths).loaded_plugins
 
     assert after.modules == before.modules
-    assert (after.version, after.mindroom_plugin_api) == ("1.1.0", "1.0")
+    assert after.mindroom_plugin_api == "1.0"
 
 
 def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path) -> None:
@@ -501,5 +500,5 @@ def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.
     assert (boom.status_code, boom.text) == (500, "Internal Server Error")
     assert (boom.headers["cache-control"], boom.headers["x-content-type-options"]) == ("no-store", "nosniff")
     listed = client.get("/api/plugins", headers=_signed_in(main.app))
-    assert listed.json()["plugins"] == [{"name": "demo", "version": None, "mindroom_plugin_api": None}]
+    assert listed.json()["plugins"] == [{"name": "demo", "mindroom_plugin_api": None}]
     assert (listed.headers["cache-control"], listed.headers["x-content-type-options"]) == ("no-store", "nosniff")

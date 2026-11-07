@@ -76,8 +76,7 @@ class _LoadedPlugin:
     """One plugin a generation loaded: what its modules registered and discovered, and the modules themselves."""
 
     name: str
-    # The plugin's own version and the plugin API version it needs, as its manifest states them.
-    version: str | None
+    # The plugin API version it needs, as its manifest states it.
     mindroom_plugin_api: str | None
     root: Path
     skill_dirs: tuple[Path, ...]
@@ -746,7 +745,7 @@ def _materialize_plugin(
     if (
         previous is not None
         and previous.name == plugin.name
-        and (previous.version, previous.mindroom_plugin_api) == (plugin.version, plugin.mindroom_plugin_api)
+        and previous.mindroom_plugin_api == plugin.mindroom_plugin_api
         and previous.modules == modules
         and previous.skill_dirs == tuple(plugin.skill_dirs)
         and previous.reserved_namespaces == plugin.reserved_namespaces
@@ -755,7 +754,6 @@ def _materialize_plugin(
     hooks_module = hooks_entry.module if hooks_entry is not None else None
     return _LoadedPlugin(
         name=plugin.name,
-        version=plugin.version,
         mindroom_plugin_api=plugin.mindroom_plugin_api,
         root=plugin.root,
         skill_dirs=tuple(plugin.skill_dirs),

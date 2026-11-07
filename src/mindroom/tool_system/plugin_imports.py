@@ -43,8 +43,7 @@ class _PluginManifest:
     """Validated plugin manifest data."""
 
     name: str
-    # The plugin's own version and the plugin API version it needs, as the manifest states them.
-    version: str | None
+    # The plugin API version the plugin needs, as the manifest states it.
     mindroom_plugin_api: str | None
     tools_module: str | None
     hooks_module: str | None
@@ -59,7 +58,6 @@ class _PluginBase:
     """Loaded plugin details that depend only on the manifest."""
 
     name: str
-    version: str | None
     mindroom_plugin_api: str | None
     root: Path
     manifest_path: Path
@@ -293,7 +291,6 @@ def _load_plugin_base(root: Path) -> _PluginBase:
 
     return _PluginBase(
         name=manifest.name,
-        version=manifest.version,
         mindroom_plugin_api=manifest.mindroom_plugin_api,
         root=root,
         manifest_path=manifest_path,
@@ -331,8 +328,6 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         msg = f"{exc} ({path})"
         raise PluginValidationError(msg) from exc
     mindroom_plugin_api = _check_plugin_api(data.get("mindroom_plugin_api"), normalized_name, path)
-    # A version only informs clients, so one that is not a string is left out rather than refusing the plugin.
-    version = data.get("version")
 
     tools_module = _manifest_module(data, "tools_module", path)
     hooks_module = _manifest_module(data, "hooks_module", path)
@@ -358,7 +353,6 @@ def _parse_manifest(path: Path) -> _PluginManifest:
 
     return _PluginManifest(
         name=normalized_name,
-        version=version if isinstance(version, str) else None,
         mindroom_plugin_api=mindroom_plugin_api,
         tools_module=tools_module,
         hooks_module=hooks_module,

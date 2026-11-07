@@ -239,7 +239,6 @@ Other `mindroom` modules can change in any release.
 ```json
 {
   "name": "my-plugin",
-  "version": "1.0.0",
   "mindroom_plugin_api": "1.0",
   "tools_module": "tools.py",
   "oauth_module": "oauth.py",
@@ -253,7 +252,6 @@ Other `mindroom` modules can change in any release.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | string | **yes** | Plugin identifier using only lowercase ASCII letters, digits, `-`, and `_`; must be unique among configured plugins |
-| `version` | string | no | The plugin's own version, in any format, which clients read from [`GET /api/plugins`](#http-routes) |
 | `mindroom_plugin_api` | string | no | Plugin API version the plugin needs, as `"MAJOR.MINOR"`; see [Plugin API versions](#plugin-api-versions) |
 | `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
 | `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
@@ -1066,11 +1064,11 @@ It reads live membership through the Matrix client of the router bot if it is in
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header, and a missing, unknown, or expired session answers 401.
-The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name`, `version`, and `mindroom_plugin_api`, the last two `null` when the manifest leaves them out.
+The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out.
 A disabled plugin, or one that failed to load, is not listed:
 
 ```json
-{"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "version": "1.0.0", "mindroom_plugin_api": "1.0"}]}
+{"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
 ```
 
 ## Plugin skills

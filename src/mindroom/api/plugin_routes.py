@@ -66,9 +66,10 @@ class _PluginRoutesApp:
 
 
 async def _list_plugins(request: Request) -> dict[str, object]:
-    """Answer a signed-in client with this MindRoom's plugin API version and each published plugin's manifest versions.
+    """Answer a signed-in client with this MindRoom's plugin API version and each published plugin's name.
 
-    Nothing else about a plugin is listed: no path, setting, or load error.
+    Each plugin also names the plugin API version its manifest needs; nothing else about it is listed, no path, setting,
+    or load error.
     """
     presented_session(request)
     plugins = _published_plugins(request.app)
@@ -76,7 +77,7 @@ async def _list_plugins(request: Request) -> dict[str, object]:
     return {
         "plugin_api_version": f"{major}.{minor}",
         "plugins": [
-            {"name": plugin.name, "version": plugin.version, "mindroom_plugin_api": plugin.mindroom_plugin_api}
+            {"name": plugin.name, "mindroom_plugin_api": plugin.mindroom_plugin_api}
             for plugin in (plugins.loaded_plugins if plugins is not None else ())
         ],
     }
