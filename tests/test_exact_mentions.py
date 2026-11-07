@@ -11,7 +11,6 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
 from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -62,7 +61,6 @@ def config(tmp_path: Path) -> Config:
                 "alpha": AgentConfig(display_name="Alpha", rooms=["!room:localhost"]),
                 "beta": AgentConfig(display_name="Beta", rooms=["!room:localhost"]),
             },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         test_runtime_paths(tmp_path),
     )
@@ -96,12 +94,12 @@ def _hook_context(config: Config, route: _Route, client: AsyncMock) -> HookConte
     )
 
 
-async def _sent_content(config: Config, route: _Route, text: str, **options: Any) -> dict[str, Any]:  # noqa: ANN401
-    """Send ``text`` from a hook with ``options`` and return the Matrix content it sent."""
+async def _sent_card(config: Config, route: _Route, mentions: list[str] | None) -> dict[str, Any]:
+    """Send the card from a hook with ``mentions`` and return the Matrix content it sent."""
     client = make_matrix_client_mock(user_id=ROUTER)
     transport = AsyncMock(side_effect=delivered_matrix_side_effect("$card"))
     with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
-        event_id = await _hook_context(config, route, client).send_message("!room:localhost", text, **options)
+        event_id = await _hook_context(config, route, client).send_message("!room:localhost", CARD, mentions=mentions)
     assert event_id == "$card"
     sent_client, room_id, content = transport.await_args.args
     assert (sent_client, room_id) == (client, "!room:localhost")
@@ -140,7 +138,7 @@ async def test_hook_card_mentions_only_whom_the_hook_names(
     expected: list[str],
 ) -> None:
     """Agents a card only quotes are mentioned neither in its message nor later in its thread, so no team forms."""
-    content = await _sent_content(config, route, CARD, mentions=mentions)
+    content = await _sent_card(config, route, mentions)
 
     # The quoted names still render as pills.
     assert f"https://matrix.to/#/{ALPHA}" in content["formatted_body"]
