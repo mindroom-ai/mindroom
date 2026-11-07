@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,27 @@ from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit, tool_attributes
 from mindroom.tool_system.catalog import load_toolkit_class
 from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
+
+# The plugin API, as docs/plugins.md documents it: the modules a plugin may import whole, and the names it may import
+# from other modules. Every other `mindroom` module can change in any release.
+_PLUGIN_API = (
+    "mindroom.custom_tools.google_service.GoogleCloudToolkit",
+    "mindroom.memory.refresh_agent_memory_search",
+    "mindroom.memory.write_scope_markdown_file",
+    "mindroom.plugin_api",
+    "mindroom.plugin_http",
+)
+# Each entry with a trailing dot, so an import matches it only on whole name parts: `mindroom.plugin_apix` is outside.
+_PLUGIN_API_PREFIXES = tuple(f"{public}." for public in _PLUGIN_API)
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class OutsideImport:
+    """One import of a ``mindroom`` module or name outside the plugin API, in a file relative to the plugin root."""
+
+    path: Path
+    line: int
+    name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,3 +129,30 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 )
             finally:
                 dispose_plugins(generation)
+
+
+def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
+    """Statically list each import from ``mindroom`` outside the plugin API in the plugin's Python files, by file and line."""
+    found: list[OutsideImport] = []
+    for directory, subdirectories, file_names in plugin_root.walk():
+        # Installed packages, such as a virtual environment's copy of MindRoom, and hidden directories are not plugin code.
+        subdirectories[:] = [name for name in subdirectories if name != "site-packages" and not name.startswith(".")]
+        for path in (directory / name for name in file_names if name.endswith(".py")):
+            try:
+                tree = ast.parse(path.read_bytes(), filename=str(path))
+            except (OSError, SyntaxError, RecursionError, MemoryError):
+                # A file Python cannot read or parse runs no imports, and `check_plugin` fails on any such module the plugin loads.
+                # The parser raises RecursionError or MemoryError for sources nested too deeply or too long to compile.
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    module_prefix = ""
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    module_prefix = f"{node.module}."
+                else:
+                    continue
+                for alias in node.names:
+                    imported = f"{module_prefix}{alias.name}"
+                    if f"{imported}.".startswith("mindroom.") and not f"{imported}.".startswith(_PLUGIN_API_PREFIXES):
+                        found.append(OutsideImport(path.relative_to(plugin_root), alias.lineno, imported))
+    return sorted(found)

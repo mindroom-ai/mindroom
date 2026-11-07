@@ -261,6 +261,7 @@ Write restrictions:
 - `m.room.power_levels`, `m.room.encryption`, `m.room.server_acl`, `m.room.join_rules`, `m.room.history_visibility`, `m.room.guest_access`, `m.room.member`, `m.room.canonical_alias`, `m.room.tombstone`, and `m.room.third_party_invite` are dangerous: `put_state` needs `allow_dangerous=true`, and the requesting user (or one of their bridge aliases) must be joined to the room with power level 100.
 - Redacting a state event follows the same rules as writing that state type.
 - The `com.mindroom.*` and `io.mindroom.*` namespaces are reserved: no event type in them can be written, and `content` cannot contain keys in them at any depth.
+- Namespaces a loaded plugin reserves in its manifest are refused the same way; see [Reserved namespaces](../plugins.md#reserved-namespaces).
 
 `search` is read-only full-text search in one room.
 It uses the top-level `limit` (1-50, default 10), rejects `filter.limit`, and `keys` may include `content.body`, `content.name`, and `content.topic`.
