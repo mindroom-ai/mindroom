@@ -1086,12 +1086,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, WebSocket
 
 from mindroom.plugin_api import PluginContext
-from mindroom.plugin_http import plugin_context
+from mindroom.plugin_http import plugin_context, require_client_user
 
 router = APIRouter()
 
 
-@router.get("/greeting")
+@router.get("/greeting", dependencies=[Depends(require_client_user)])
 async def greeting(ctx: Annotated[PluginContext, Depends(plugin_context)]) -> dict[str, str]:
     return {"greeting": ctx.settings.get("greeting", "hello")}
 
@@ -1105,7 +1105,8 @@ async def greetings(websocket: WebSocket) -> None:
         await websocket.send_json({"greeting": ctx.settings.get("greeting", "hello")})
 ```
 
-A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call of an agent run on the primary; anywhere else it raises `RuntimeError`.
+A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call in a Matrix conversation or an OpenAI-compatible API request made for a user.
+Anywhere else, such as in the MCP gateway or a worker, it raises `RuntimeError`, so a tool that uses it sets [`requires_primary_runtime=True`](#decorator-fields).
 A plugin that uses its context states `"mindroom_plugin_api": "1.3"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 | Member | Value |
