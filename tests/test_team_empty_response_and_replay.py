@@ -562,6 +562,41 @@ async def test_a_quiet_team_member_s_earlier_finding_stays_after_its_later_run_r
 
 
 @pytest.mark.asyncio
+async def test_a_quiet_team_resume_reads_only_its_own_member_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An earlier turn's member finding in the same session does not make a quiet resume that found nothing report."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-1", "general", "Check"),
+            answer("Old answer."),
+            delegate("call-team", "general", "Touch"),
+        ],
+        general=[answer("Old finding."), calls(tool_call("touch", "call-touch", label="dangerous"))],
+    )
+    await team.respond(message="Earlier check.", show_tool_calls=False)
+    team.config.background_tool_jobs.enabled = False
+    team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(ctx=team.ctx(run_id="run-2", allow_no_report_response=True), show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)])
+    team.models["general-model"] = ScriptedModel([answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)])
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous", agent="general"),),
+        quiet=True,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text == SILENT_SCHEDULE_NO_REPLY_TOKEN
+
+
+@pytest.mark.asyncio
 async def test_a_member_reply_split_by_a_hidden_tool_call_keeps_two_paragraphs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

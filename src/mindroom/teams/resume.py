@@ -470,15 +470,8 @@ async def continue_paused_team_run(
             tool_trace_collector.extend(presentation.tool_trace)
         # The document already holds what each run wrote before the pause and handed over since, the leader's included,
         # so one that stays empty, every run's text blank, shows the no-reply note, as a new team turn's does.
-        # The member runs that ended before the pause are stored rows of this team run; the resume ended the rest.
-        member_runs = (
-            *continued.ended_member_runs,
-            *(
-                row
-                for row in storage.session.runs
-                if row.parent_run_id == run_id and row.status is not RunStatus.paused
-            ),
-        )
+        # Each member run of this team run is a stored row of it, the resume's updated in place.
+        member_runs = [row for row in storage.session.runs if row.parent_run_id == run_id]
         silent_answer = settle_quiet_team_answer(presentation, continued, member_runs) if quiet else None
         response_text = (
             silent_answer
