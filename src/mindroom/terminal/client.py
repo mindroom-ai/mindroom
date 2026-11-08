@@ -133,17 +133,17 @@ class TerminalStream:
         self._connect = connect
         self.line = line
         """The terminal's line, which this viewer's typing and the prompts it reads update."""
-        self.prompt: tuple[int, int] | None = None
-        """The number and exit status of the last prompt mark this viewer read."""
+        self.prompt: int | None = None
+        """The number of the last prompt mark this viewer read."""
         self._marks = PromptMarks()
 
     async def receive(self) -> TerminalEvent:
         """Return the next output or the exit; raise ``TerminalDetachedError`` when the viewer must attach again."""
         message = await self._websocket.receive()
         if message.type == aiohttp.WSMsgType.BINARY:
-            for number, status in self._marks.feed(message.data):
+            for number in self._marks.feed(message.data):
                 self.line.prompted(number)
-                self.prompt = (number, status)
+                self.prompt = number
             return TerminalEvent("output", data=message.data)
         if message.type == aiohttp.WSMsgType.TEXT:
             with contextlib.suppress(ValidationError):

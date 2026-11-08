@@ -150,5 +150,5 @@ def test_prompt_marks_count_once_even_split_across_frames() -> None:
     marks = PromptMarks()
     whole = b"out" + _mark(7, 1) + b"bash$ "
     assert marks.feed(whole[:9]) == []
-    assert marks.feed(whole[9:]) == [(7, 1)]
-    assert marks.feed(b"\x1b[?2004h" + _mark(8)) == [(8, 0)]
+    assert marks.feed(whole[9:]) == [7]
+    assert marks.feed(b"\x1b[?2004h" + _mark(8)) == [8]

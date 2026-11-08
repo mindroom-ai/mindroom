@@ -283,7 +283,7 @@ class _Chatty:
 
 async def test_a_call_keeps_only_the_newest_output_however_much_the_terminal_prints() -> None:
     """Output a worker prints for minutes never grows the primary past what one answer can use."""
-    output, cut, ended = await terminal_tools._output(_Chatty(64), 10)  # type: ignore[arg-type]
+    output, cut, ended, _ = await terminal_tools._output(_Chatty(64), 10)  # type: ignore[arg-type]
 
     assert (len(output), cut, ended) == (256 * 1024, True, True)
 
@@ -298,7 +298,7 @@ class _Gone:
 async def test_a_call_whose_terminal_connection_ends_says_so_rather_than_still_running() -> None:
     """A lost connection is no timeout, so a run never answers "still running" for it."""
     with pytest.raises(TerminalDetachedError):
-        await terminal_tools._output(_Gone(), 10, prompt_after=0)  # type: ignore[arg-type]
+        await terminal_tools._output(_Gone(), 10, after=0)  # type: ignore[arg-type]
 
 
 @asynccontextmanager
@@ -395,3 +395,24 @@ async def test_an_agent_is_told_when_a_terminal_s_shell_has_exited(tmp_path: Pat
     for function, arguments in (("terminal_send", {"keys": "<ctrl-c>"}), ("terminal_run", {"command": "ls"})):
         answer = await _call(functions[function], session_id=session_id, **arguments)
         assert answer == "Error: the terminal's shell has exited; open another with terminal_open."
+
+
+class _TwoPrompts:
+    """A viewer to whom a late scrollback's prompt and those after the run and after a queued command come at once."""
+
+    prompt = 3
+
+    async def receive(self) -> TerminalEvent:
+        marks = (
+            b"\x1b]133;D;0;mindroom=1\x07bash$ echo hi; false\r\n",
+            b"hi\r\n\x1b]133;D;1;mindroom=2\x07bash$ true\r\n",
+            b"\x1b]133;D;0;mindroom=3\x07bash$ ",
+        )
+        return TerminalEvent("output", data=b"".join(marks))
+
+
+async def test_a_run_ends_at_its_own_prompt_even_when_a_later_one_arrives_with_it() -> None:
+    """Its output and exit status are the run's, never those of a command someone typed meanwhile."""
+    output = await terminal_tools._output(_TwoPrompts(), 10, after=1)  # type: ignore[arg-type]
+
+    assert output == (b"\x1b]133;D;0;mindroom=1\x07bash$ echo hi; false\r\nhi\r\n", False, True, 1)

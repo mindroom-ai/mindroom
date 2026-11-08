@@ -17,14 +17,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.terminal.client import TerminalDetachedError
-from mindroom.terminal.lines import (
-    PROMPT_MARK_START,
-    LineState,
-    entered_command,
-    keys_to_text,
-    line_state,
-    run_text,
-)
+from mindroom.terminal.lines import LineState, entered_command, keys_to_text, line_state, prompt_after, run_text
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.authoring import Toolkit
@@ -92,12 +85,13 @@ async def _output(
     stream: TerminalStream,
     seconds: float,
     *,
-    prompt_after: int | None = None,
-) -> tuple[bytes, bool, bool]:
-    """Return what ``stream`` prints within ``seconds``, whether older output was dropped, and whether it ended.
+    after: int | None = None,
+) -> tuple[bytes, bool, bool, int | None]:
+    """Return what ``stream`` prints within ``seconds``, whether older output was dropped, whether it ended, and how.
 
-    It keeps the newest ``_MAX_OUTPUT_BYTES``, and ends at the shell's exit or, given ``prompt_after``, at the first
-    prompt mark numbered above it, before which it cuts the output. A lost connection raises ``TerminalDetachedError``.
+    It keeps the newest ``_MAX_OUTPUT_BYTES``, and ends at the shell's exit or, given ``after``, at the first prompt
+    mark numbered above it, before which it cuts the output, with the exit status that mark reports. A lost connection
+    raises ``TerminalDetachedError``.
     """
     kept = bytearray()
     cut = False
@@ -106,15 +100,18 @@ async def _output(
             while True:
                 event = await stream.receive()
                 if event.type == "exit":
-                    return bytes(kept), cut, True
+                    return bytes(kept), cut, True, None
                 kept += event.data
                 if len(kept) > _MAX_OUTPUT_BYTES:
                     del kept[: len(kept) - _MAX_OUTPUT_BYTES]
                     cut = True
-                if prompt_after is not None and stream.prompt is not None and stream.prompt[0] > prompt_after:
-                    return bytes(kept).rsplit(PROMPT_MARK_START, 1)[0], cut, True
+                if after is not None and stream.prompt is not None and stream.prompt > after:
+                    # Several prompts may arrive at once, as after a command someone typed while the run's ran.
+                    found = prompt_after(bytes(kept), after)
+                    if found is not None:
+                        return bytes(kept[: found[0]]), cut, True, found[1]
     except TimeoutError:
-        return bytes(kept), cut, False
+        return bytes(kept), cut, False, None
 
 
 def _refused(error: TerminalError, session_id: str | None = None) -> str:
@@ -219,7 +216,7 @@ class TerminalTools(Toolkit):
                 if await _ended(stream):
                     return _EXITED
                 before = await stream.send_input(text, empty_line=True)
-                output, cut, finished = await _output(stream, timeout, prompt_after=before)
+                output, cut, finished, exit_status = await _output(stream, timeout, after=before)
         except TerminalError as error:
             return _NOT_AT_PROMPT if error.status_code == 409 else _refused(error, session_id)
         except TerminalDetachedError:
@@ -229,8 +226,8 @@ class TerminalTools(Toolkit):
         shown = (shown if cut else shown.partition("\n")[2]).strip("\n")[-_MAX_TEXT_CHARS:]
         if not finished:
             status = f"Still running after {timeout:g} s."
-        elif stream.prompt is not None and stream.prompt[0] > before:
-            status = f"Exit status {stream.prompt[1]}."
+        elif exit_status is not None:
+            status = f"Exit status {exit_status}."
         else:
             status = "The terminal's shell has exited."
         return f"{shown}\n[{status}]" if shown else f"[{status}]"
@@ -259,7 +256,7 @@ class TerminalTools(Toolkit):
                 if await _ended(stream):
                     return _EXITED
                 await stream.send_input(text, judged=line)
-                output, _, ended = await _output(stream, _OUTPUT_SECONDS)
+                output, _, ended, _ = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
             return _LINE_CHANGED if error.status_code == 409 else _refused(error, session_id)
         except TerminalDetachedError:
@@ -280,7 +277,7 @@ class TerminalTools(Toolkit):
         """
         try:
             async with self._workspace_terminals.attach(session_id) as stream:
-                output, _, exited = await _output(stream, _OUTPUT_SECONDS)
+                output, _, exited, _ = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
             return _refused(error, session_id)
         except TerminalDetachedError:
