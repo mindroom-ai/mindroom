@@ -433,6 +433,12 @@ _MEMBERS = {
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
         ),
     },
+    "mindroom.plugin_http.RoomReader": {"power": "(self)", "is_direct": "(self)"},
+    "mindroom.plugin_http.RoomPower": {
+        "level": "(self, user_id)",
+        "is_admin": "(self, user_id)",
+        "may_send": "(self, user_id, event_type)",
+    },
     "mindroom.plugin_api.HookMatrixAdmin": {
         "get_joined_rooms": "(self)",
         "retain_room": "(self, room_id)",
@@ -500,7 +506,16 @@ _MANIFEST = {
 
 # What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
-_HTTP_EXPORTS = ["ClientUser", "plugin_context", "require_client_user", "require_room_member"]
+_HTTP_EXPORTS = [
+    "ClientUser",
+    "RoomPower",
+    "RoomReader",
+    "client_rooms",
+    "plugin_context",
+    "require_client_user",
+    "require_room_member",
+    "require_room_reader",
+]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
         "(*, name, tools, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs)"
@@ -508,13 +523,17 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
+    "mindroom.plugin_http.RoomReader": "(user, members)",
+    "mindroom.plugin_http.client_rooms": "(request, candidates)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
+    "mindroom.plugin_http.require_room_reader": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 4), "05d3c98f2c3f2513f39334844b44fc9e868198287953b1cc977278d8d5cd9837")
+_PINNED_VERSION = ((1, 5), "8962ea331f467098f5ea93673851b1aa3f37bf75349aa64c0814326f3b718b5e")
 
 
 def _is_enum(obj: object) -> bool:
