@@ -34,9 +34,10 @@ async def reconcile_room_accounts(
     The state key is the router's user ID, which Matrix lets only the router write.
     """
     try:
-        # Serialize each read and write so a slower trigger cannot replace a newer list with an older one.
-        async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
-            async with asyncio.timeout(10):
+        # The deadline covers the lock wait too, so a sync frame queued behind other triggers stalls at most 10 s.
+        async with asyncio.timeout(10):
+            # Serialize each read and write so a slower trigger cannot replace a newer list with an older one.
+            async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
                 members = await get_room_members(client, room_id)
                 if members is None:
                     return
