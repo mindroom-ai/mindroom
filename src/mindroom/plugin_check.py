@@ -154,7 +154,7 @@ def _root_tests(plugin_root: Path) -> set[Path]:
     """Return the ``conftest.py`` and ``test_*.py`` files beside the plugin's manifest, except any it names as a module."""
     try:
         base = plugin_imports._load_plugin_base(plugin_root)
-    except plugin_imports.PluginValidationError:
+    except Exception:
         # `check_plugin` fails on this manifest, and the scan still lists the imports of every other file.
         named_modules: set[Path | None] = set()
     else:

@@ -141,6 +141,25 @@ def test_imports_outside_plugin_api_reads_a_root_test_file_the_manifest_names(tm
     assert _outside_imports(plugin_link) == ["test_module.py:1: mindroom.constants"]
 
 
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        pytest.param(b'{"name": "caf\xe9"}', id="not-utf-8"),
+        pytest.param(b"[" * 100_000 + b"]" * 100_000, id="nested-too-deeply"),
+    ],
+)
+def test_imports_outside_plugin_api_lists_imports_of_a_plugin_whose_manifest_does_not_load(
+    tmp_path: Path,
+    manifest: bytes,
+) -> None:
+    """A manifest that fails to load, which `check_plugin` then reports, still gets the other files' imports listed."""
+    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.hooks import hook\n")
+    (plugin_root / "mindroom.plugin.json").write_bytes(manifest)
+    (plugin_root / "test_hooks.py").write_text("import mindroom.constants\n", encoding="utf-8")
+
+    assert _outside_imports(plugin_root) == ["hooks.py:1: mindroom.hooks.hook"]
+
+
 def test_imports_outside_plugin_api_skips_a_directory_it_cannot_enter(tmp_path: Path) -> None:
     """A directory the user cannot enter, such as a container's data volume, is skipped instead of failing the scan."""
     plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.hooks import hook\n")
