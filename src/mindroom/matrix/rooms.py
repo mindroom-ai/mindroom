@@ -835,7 +835,13 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str] | None:
             return room_ids
 
     response = await client.list_direct_rooms()
-    if isinstance(response, nio.DirectRoomsResponse):
+    transport = response.transport_response
+    # nio parses a non-JSON error body, such as a proxy's 502 page, as an empty m.direct list.
+    if (
+        isinstance(response, nio.DirectRoomsResponse)
+        and isinstance(transport, aiohttp.ClientResponse)
+        and transport.status == 200
+    ):
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
         _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
         return direct_room_ids
@@ -915,7 +921,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         return False
 
     is_dm = _has_is_direct_marker(response.events)
-    # An answer that rests on a failed m.direct read is not cached, so the next call reads m.direct again.
+    # After a failed m.direct read the state answer is not cached, so the next call reads m.direct again.
     if direct_room_ids is not None:
         _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
     return is_dm
