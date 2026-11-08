@@ -598,6 +598,18 @@ async def test_requests_refresh_grants_only_when_they_need_it_and_share_one_refr
 
 
 @pytest.mark.asyncio
+async def test_a_room_the_grants_do_not_track_never_refreshes_them(tmp_path: Path) -> None:
+    """Grants hold no view of a room outside the router's rooms, so its callers refresh only when grants need it."""
+    room = _room(tmp_path, _agents())
+    room.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!other:localhost"])
+
+    for _ in range(3):
+        assert len(await room.agents(ALICE)) == 2
+
+    assert room.refreshes() == 1
+
+
+@pytest.mark.asyncio
 async def test_a_refresh_a_request_starts_while_the_router_backs_off_runs_the_runtime_follow_up_once(
     tmp_path: Path,
 ) -> None:
