@@ -195,12 +195,12 @@ class AgentWorkspace:
     and power to post messages in the room."""
     terminal: Literal["none", "watch", "type"]
     """``watch`` with a shell that offers ``run_shell_command`` and runs in a worker, ``type`` where that worker mounts
-    the workspace (``toolkit_host``) and the caller may post messages in the room."""
+    the workspace, as a dedicated worker does, and the caller may post messages in the room."""
     config: Config = field(repr=False)
     """The config this answer was resolved under, the one the API served when the request arrived."""
 
 
-def toolkit_host(
+def _toolkit_host(
     agent_tools: AgentTools,
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -263,7 +263,6 @@ def _workspace(
     # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers; by name, whether
     # one of them writes files or runs code.
     path_toolkits: dict[str, bool] = {}
-    shell_runs_commands = False
     for entry in agent_tools.candidates(matrix_room_tools=True):
         # Until toolkits declare what changes files, this one is skipped by name: it acts only through the shell.
         if entry.name == "terminal":
@@ -286,14 +285,13 @@ def _workspace(
         functions = _offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
-        if entry.name == "shell":
-            shell_runs_commands = functions is None or "run_shell_command" in functions
         writers = _WRITERS.get(entry.name)
         path_toolkits[entry.name] = (
             metadata.executes_code if writers is None else not writers.isdisjoint(functions or ())
         )
-    # A terminal runs only beside a worker's shell commands; people type in it where that worker sees the workspace.
-    shell = toolkit_host(agent_tools, "shell", runtime_paths) if shell_runs_commands else None
+    # A terminal runs only beside a worker's shell commands (its only function); people type in it where that worker
+    # sees the workspace.
+    shell = _toolkit_host(agent_tools, "shell", runtime_paths) if "shell" in path_toolkits else None
     return AgentWorkspace(
         name=name,
         user_id=user_id,

@@ -169,10 +169,10 @@ _lines: OrderedDict[tuple[object, str], TerminalLine] = OrderedDict()
 
 
 def terminal_line(scope: object, session_id: str, *, opened: bool = False) -> TerminalLine:
-    """Return the line of terminal ``session_id`` among the terminals ``scope`` names; ``opened`` starts a fresh one."""
+    """Return the line of terminal ``session_id`` among the terminals ``scope`` names; ``opened`` for one just opened."""
     key = (scope, session_id)
     line = _lines.pop(key, None)
-    if line is None or opened:
+    if line is None:
         line = TerminalLine(opened=opened)
     _lines[key] = line
     while len(_lines) > _MAX_TERMINALS:

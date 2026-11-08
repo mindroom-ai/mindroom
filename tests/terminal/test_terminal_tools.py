@@ -112,6 +112,9 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     )
     assert "42" in await _call(functions["terminal_read"], session_id=session_id)
     assert await _call(functions["terminal_list"]) == f"- {session_id}: running"
+    assert (await _call(functions["terminal_run"], session_id=session_id, command="ls\x01")).startswith(
+        "Error: a command is plain text;",
+    )
     assert await _call(functions["terminal_read"], session_id="nope") == (
         "Error: there is no terminal 'nope'; terminal_list shows yours."
     )
@@ -185,6 +188,9 @@ async def test_keys_judged_before_someone_typed_on_the_line_are_not_typed(tmp_pa
     async with _terminals(config, paths).attach(session_id) as person:
         await person.send_input("rm -rf tmp")
     assert (await send.entrypoint(**judged)).startswith(_LINE_CHANGED)
+    # A run types only at an empty prompt, so the command never joins the person's line.
+    ran = await _call(functions["terminal_run"], session_id=session_id, command="ls")
+    assert ran.startswith("Error: the terminal's shell is not waiting at an empty prompt")
     assert (await _call(functions["terminal_read"], session_id=session_id)).endswith("rm -rf tmp")
     assert kept.is_dir()
 
@@ -224,8 +230,10 @@ async def test_a_judged_line_runs_only_as_written(tmp_path: Path, runner: str) -
     session_id = await _open(functions)
     run, send = functions["terminal_run"], functions["terminal_send"]
 
+    # The shell's first command, so no command of its own is the last one in its history.
+    assert "from-history-16" not in await _call(run, session_id=session_id, command="fc -s")
     assert await _call(run, session_id=session_id, command="echo $HOME") == f"{home.resolve()}\n[Exit status 0.]"
     assert await _call(run, session_id=session_id, command="echo a!!b") == "a!!b\n[Exit status 0.]"
-    assert "from-history-16" not in await _call(run, session_id=session_id, command="fc -s")
-    await _call(send, session_id=session_id, keys="q<ctrl-c>")
+    # Typed alone: Ctrl-C in the same write would make the terminal drop the key before the shell reads it.
+    await _call(send, session_id=session_id, keys="q")
     assert "planted-9" not in await _call(functions["terminal_read"], session_id=session_id)

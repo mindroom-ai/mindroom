@@ -213,6 +213,28 @@ async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
         await bob.close()
 
 
+async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal(
+    tmp_path: Path,
+    runner: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alice may still use the agent, but without its shell it has no terminal for her to watch."""
+    monkeypatch.setattr(agent_terminals, "_RECHECK_SECONDS", 0.05)
+    room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
+    coder = f"agents/{room.ids['coder']}/terminals"
+    async with _served(room) as (client, base):
+        _, opened = await _answer(await client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
+        alice = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
+        assert await alice.receive_json() == {"type": "writable", "writable": True}
+        agents = _agents(ALICE)
+        agents["coder"].tools = []
+        room.serve(Config(agents=agents))
+        async with asyncio.timeout(10):
+            while (message := await alice.receive()).type == aiohttp.WSMsgType.BINARY:
+                pass
+        assert (message.type, alice.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
+
+
 async def test_a_stream_of_a_terminal_the_workspace_does_not_have_closes(tmp_path: Path, runner: str) -> None:
     """An ID that names no terminal of the workspace closes the stream as refused, saying nothing of other terminals."""
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))

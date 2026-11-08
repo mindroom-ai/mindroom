@@ -59,6 +59,20 @@ def test_the_line_follows_typing_from_anyone_until_its_enter_and_the_next_prompt
     assert line.state() == LineState(6, None)
 
 
+def test_a_prompt_counts_once_and_a_lost_send_leaves_the_next_prompt_unknown() -> None:
+    """A mark replayed with another viewer's scrollback ends no command, and a lost send may have typed ahead."""
+    line = TerminalLine(opened=True)
+    line.prompted(1, 0)
+    line.type("sleep 5\r")
+    line.prompted(1, 0)
+    assert line.state() == LineState(1, None)
+    line.prompted(2, 0)
+    assert line.state() == LineState(1, "")
+    line.lost()
+    line.prompted(3, 0)
+    assert line.state() == LineState(2, None)
+
+
 def test_ctrl_c_drops_what_a_running_command_left_unread() -> None:
     """The terminal flushes typing a command has not read when Ctrl-C interrupts it, so the next prompt is empty."""
     line = TerminalLine(opened=True)

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.agents import build_agent_toolkit
-from mindroom.room_agent_access import toolkit_host
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.terminal.client import WorkerTerminals
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -36,7 +35,7 @@ def agent_terminals(
     agent_tools = resolve_agent_tools(config, agent_name, tools)
     placement = tool_placement(runtime_paths, tools)
     entry = next((entry for entry in agent_tools.candidates(matrix_room_tools=True) if entry.name == "shell"), None)
-    if entry is None or toolkit_host(agent_tools, "shell", runtime_paths) == "primary":
+    if entry is None:
         return None
     shell = build_agent_toolkit(
         "shell",
