@@ -1172,7 +1172,7 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 | Field | Value |
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
-| `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and a toolkit's settings leave on a function that edits files or runs code, as in `file`, `coding`, `shell`, `python`, or `script`. Else `read` |
+| `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a writing function of `file` or `coding` or a code-running function of a toolkit such as `shell`, `python`, or `script`. Else `read`, also for other toolkits that save files |
 | `terminal` | `none` without the `shell` toolkit, `type` when the caller may post messages in the room, else `watch` |
 
 A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, only reads, and `include_tools` or `exclude_tools` can take writing functions away.
