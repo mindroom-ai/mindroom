@@ -6,8 +6,9 @@ streamed both ways, or a WebSocket, to ``{path}`` on the app at ``127.0.0.1:{por
 listens only there.
 Only a dedicated worker's runner relays: the shared runner's loopback is every agent's, and in a pod it is the primary's too.
 A dedicated worker's loopback is not only the worker's either: in a Kubernetes pod every container shares it, and
-MindRoom's other servers can listen there. So the relay reaches a port only when the worker's own processes, those of
-its runner's process tree or its cgroup, hold every socket listening on it, and never a port of MindRoom's own servers.
+MindRoom's other servers can listen there.
+So the relay reaches a port only when the worker's own processes, those of its runner's process tree or its cgroup,
+hold every socket listening on it, and never a port of MindRoom's own servers.
 The runner marks each refusal with the ``x-mindroom-relay-refused`` header: 403 for a port the relay never reaches,
 and 502 for one no app answers on.
 The runner's own token never reaches an app.
