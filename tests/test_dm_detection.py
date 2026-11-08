@@ -179,10 +179,35 @@ class TestDMDetection:
 
         first_result = await is_dm_room(client, "!room1:server")
         second_result = await is_dm_room(client, "!room2:server")
+        repeated_result = await is_dm_room(client, "!room1:server")
 
         assert first_result is False
         assert second_result is False
+        assert repeated_result is False
         assert client.list_direct_rooms.call_count == 1
+        assert client.room_get_state.call_count == 2
+
+    async def test_does_not_cache_false_when_m_direct_request_errors(self) -> None:
+        """Test a failed m.direct read leaves the answer uncached so the next call reads m.direct again."""
+        client = AsyncMock()
+        client.user_id = "@agent:server"
+        client.list_direct_rooms.side_effect = [
+            nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN"),
+            nio.DirectRoomsResponse({"@user:server": ["!room:server"]}),
+        ]
+
+        non_dm_state_response = MagicMock(spec=nio.RoomGetStateResponse)
+        non_dm_state_response.events = [
+            {"type": "m.room.member", "content": {"membership": "join"}},
+        ]
+        client.room_get_state.return_value = non_dm_state_response
+
+        first_result = await is_dm_room(client, "!room:server")
+        second_result = await is_dm_room(client, "!room:server")
+
+        assert first_result is False
+        assert second_result is True
+        assert client.list_direct_rooms.call_count == 2
 
     async def test_dm_cache_expires_and_rechecks_m_direct(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test stale DM cache entries are refreshed after TTL."""
