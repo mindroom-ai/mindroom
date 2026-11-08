@@ -217,6 +217,7 @@ def install_server_fetch_guard() -> None:
     # Upstream PR: None identified for a per-crawl store in focused_crawler.
     # Remove when: focused_crawler accepts a caller-supplied store, or starts each crawl with its own; keep crawls
     # that run at once apart.
-    # Coverage: tests/test_trafilatura_tool.py::test_trafilatura_crawl_of_a_site_crawled_before_starts_with_fresh_crawl_state
-    # and ::test_trafilatura_crawls_of_one_site_running_at_once_share_no_crawl_state.
+    # Coverage: tests/test_trafilatura_tool.py::test_trafilatura_crawl_of_a_site_crawled_before_starts_with_fresh_crawl_state,
+    # ::test_trafilatura_crawls_of_one_site_running_at_once_share_no_crawl_state, and
+    # ::test_trafilatura_crawler_called_outside_the_toolkit_keeps_crawling_with_its_own_store.
     trafilatura_spider.URL_STORE = _CallUrlStore()  # ty: ignore[invalid-assignment]

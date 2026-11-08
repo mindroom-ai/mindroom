@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import agno.tools.trafilatura as agno_trafilatura
 import httpx
 import pytest
+from courlan import UrlStore
 from trafilatura import spider
 from trafilatura.downloads import USER_AGENT
 
@@ -335,6 +336,26 @@ def test_trafilatura_crawls_of_one_site_running_at_once_share_no_crawl_state(mon
             f"https://example.com/{section}/",
             f"https://example.com/{section}/docs",
         }
+
+
+def test_trafilatura_crawler_called_outside_the_toolkit_keeps_crawling_with_its_own_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code that calls Trafilatura's crawler directly, not through the toolkit, still crawls with the crawler's store."""
+    trafilatura_tools()
+    monkeypatch.setattr(compat, "_process_url_store", UrlStore(compressed=False, strict=False))
+    serve_routes(
+        monkeypatch,
+        {
+            "https://example.com/": httpx.Response(200, text=_ARTICLE_HTML),
+            "https://example.com/docs": httpx.Response(200, text=_DOCS_HTML),
+        },
+    )
+
+    to_visit, known_links = spider.focused_crawler("https://example.com/")
+
+    assert to_visit == []
+    assert "https://example.com/docs" in known_links
 
 
 def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.MonkeyPatch) -> None:
