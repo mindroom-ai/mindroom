@@ -888,8 +888,8 @@ class ResponseLifecycle:
     async def turn(self) -> AsyncIterator[None]:
         """Run one settlement of the turn, then emit exactly one ``turn:paused`` or ``turn:ended``.
 
-        How the block's finalization settled the turn decides the event; a block that raised before any finalization,
-        such as a turn MindRoom's shutdown cuts short, ends the turn cancelled for a cancellation and failed for an error.
+        How the block's finalization settled the turn decides the event; a block that raised before any finalization
+        ends the turn cancelled for a cancellation and failed for an error.
         """
         cancelled = False
         try:

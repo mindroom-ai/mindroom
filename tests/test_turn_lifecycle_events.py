@@ -196,7 +196,7 @@ async def test_a_cancellation_while_turn_started_hooks_run_settles_the_turn_canc
 
 
 async def test_a_process_shutdown_mid_turn_ends_it_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A turn MindRoom's shutdown cuts short ends cancelled; its replay is a turn of its own."""
+    """A turn a process shutdown cuts short while its agent's hooks still run ends cancelled; its replay is a new turn."""
     running = asyncio.Event()
     turn = await _turn(
         tmp_path,
