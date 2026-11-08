@@ -2991,7 +2991,7 @@ Show or switch how future agent replies are grouped in the current Matrix room.
 Room-mode conversations are not included in [thread exports](https://docs.mindroom.chat/thread-exports/).
 `!thread_mode thread` uses Matrix threads for separate conversations in this room.
 `!thread_mode reset` (also `clear`) removes the room override so agents use their configured `thread_mode` and `room_thread_modes` again.
-When the router cannot update `io.mindroom.thread_mode`, as without permission to send state events, the command still saves the change and adds that clients may keep showing the previous view.
+When the router cannot update `io.mindroom.thread_mode`, as without permission to send state events, the command still saves the change and answers with ⚠️ that clients may still show the old thread mode; running it again retries.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](https://docs.mindroom.chat/plugins/#http-routes) change the override as this command does, for room admins only.
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.

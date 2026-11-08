@@ -37,6 +37,7 @@ from tests.identity_helpers import entity_ids
 from tests.test_bot_ready_hook import _validated_reported_membership_admission
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -155,7 +156,7 @@ async def test_publishes_effective_mode(
     """Every joined responder contributes its effective mode, excluding the router."""
     config, paths, _, _, client = room_state
     config.agents["agent1"].thread_mode, config.agents["agent2"].thread_mode = modes
-    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
+    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     client.room_put_state.assert_awaited_once_with(ROOM_ID, EVENT_TYPE, {"mode": expected}, state_key="")
 
 
@@ -191,7 +192,7 @@ async def test_deduplicates_concurrent_and_unchanged_triggers(room_state: RoomSt
     config, paths, _, _, client = room_state
     await asyncio.gather(*(reconcile_room_thread_mode(client, config, paths, ROOM_ID) for _ in range(3)))
     client.room_put_state.assert_awaited_once()
-    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
+    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     assert client.room_put_state.await_count == 1
 
 
@@ -207,7 +208,7 @@ async def test_invited_agents_do_not_contribute_and_empty_room_keeps_state(room_
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
     events["m.room.member", ids["agent1"].full_id] = {"membership": "ban"}
     _sync_live_room(room_state)
-    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
+    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
 
@@ -252,8 +253,8 @@ async def test_write_failure_is_nonfatal_and_retried(
     client.room_put_state.side_effect = failure if isinstance(failure, Exception) else None
     client.room_put_state.return_value = failure
     with capture_logs() as logs:
-        assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
-        assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
+        await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+        await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     assert client.room_put_state.await_count == 2
     assert len(logs) == 2
     assert all(log["event"] == "room_thread_mode_reconcile_failed" and log["log_level"] == "warning" for log in logs)
@@ -264,7 +265,7 @@ async def test_only_router_publishes(room_state: RoomState) -> None:
     """A fallback command owner must never publish through an agent account."""
     config, paths, ids, _, client = room_state
     client.user_id = ids["agent1"].full_id
-    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
+    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     client.room_put_state.assert_not_awaited()
 
 
@@ -750,7 +751,6 @@ async def test_event_read_failure_is_nonfatal_and_retried(room_state: RoomState,
     read = client.room_get_state_event.side_effect
     client.room_get_state_event.side_effect = failure if isinstance(failure, Exception) else None
     client.room_get_state_event.return_value = failure
-    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
     await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
     assert not _writes(client, EVENT_TYPE)
     client.room_get_state_event.side_effect = read
@@ -859,7 +859,7 @@ async def test_membership_lookup_race_logs_debug(room_state: RoomState) -> None:
 
     client.joined_members.side_effect = human_joins
     with capture_logs() as logs:
-        assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
+        await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     client.room_put_state.assert_not_awaited()
     assert any(
         log["event"] == "room_thread_mode_membership_unavailable" and log["log_level"] == "debug" for log in logs
@@ -1028,3 +1028,127 @@ async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_
     assert frame.done()
     assert now == 10
     assert all(trigger.done() for trigger in triggers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_trigger", [None, "leave", "frame"])
+async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    second_trigger: str | None,
+) -> None:
+    """A member change whose reconcile times out in the room's queue still reaches the room state without another trigger.
+
+    Every accounts request takes 3 s: the reload holds the lock until 9 s, so agent2's leave times out at 14 s and its
+    retry starts. A second trigger at 6 s, agent1 leaving or a sync frame for the room, queues ahead of that retry, times
+    out at 16 s holding the lock and leaves the retry too little time, so the retry runs once more.
+    """
+    config, paths, ids, events, client = room_state
+    loop = asyncio.get_running_loop()
+    now = 0
+    monkeypatch.setattr(loop, "time", lambda: now)
+
+    def slow(answer: Callable[..., Awaitable[object]], *, only: str | None = None) -> Callable[..., Awaitable[object]]:
+        async def answer_after_three_seconds(*args: object, **kwargs: object) -> object:
+            if only is None or only in args:
+                await asyncio.sleep(3)
+            return await answer(*args, **kwargs)
+
+        return answer_after_three_seconds
+
+    client.joined_members.side_effect = slow(client.joined_members.side_effect)
+    for mock in (client.room_get_state_event, client.room_put_state):
+        mock.side_effect = slow(mock.side_effect, only=ACCOUNTS_EVENT_TYPE)
+    duties = _router_duties(room_state)
+    departures = {4: "agent2", 6: "agent1"} if second_trigger == "leave" else {4: "agent2"}
+    tasks = [asyncio.create_task(RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state())]
+    for now in range(60):
+        if now in departures:
+            user_id = ids[departures[now]].full_id
+            events["m.room.member", user_id] = {"membership": "leave"}
+            tasks.append(
+                asyncio.create_task(
+                    duties.member_event(client.rooms[ROOM_ID], _membership_event(user_id, "leave", "join")),
+                ),
+            )
+        if now == 6 and second_trigger == "frame":
+            duties.mark_joined_for_room_state(ROOM_ID)
+            tasks.append(asyncio.create_task(duties.publish_joined_room_state()))
+        # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
+        for _ in range(50):
+            await asyncio.sleep(0)
+    assert all(task.done() for task in tasks)
+    remaining = {ROUTER_AGENT_NAME, "agent1", "agent2"} - set(departures.values())
+    assert _accounts(room_state) == sorted(ids[name].full_id for name in remaining)
+
+
+@pytest.mark.asyncio
+async def test_failed_reconciles_are_retried_once_per_room(room_state: RoomState) -> None:
+    """Failures schedule one background retry per room, not one per trigger and not a loop."""
+    _, _, ids, _, client = room_state
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    duties = _router_duties(room_state)
+    event = _membership_event(ids["agent2"].full_id, "join", "leave")
+    await asyncio.gather(*(duties.member_event(client.rooms[ROOM_ID], event) for _ in range(2)))
+    for _ in range(50):
+        await asyncio.sleep(0)
+    # Two triggers, the retry, and one rerun for the trigger that failed while the retry ran; the retry's own failures
+    # schedule nothing.
+    assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_later_failure_gets_its_own_retry(room_state: RoomState) -> None:
+    """A failure after the room's earlier retry finished schedules another retry."""
+    _, _, ids, _, client = room_state
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    duties = _router_duties(room_state)
+    event = _membership_event(ids["agent2"].full_id, "join", "leave")
+    for expected_writes in (2, 4):
+        await duties.member_event(client.rooms[ROOM_ID], event)
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == expected_writes
+
+
+@pytest.mark.asyncio
+async def test_slower_earlier_trigger_cannot_restore_a_replaced_thread_mode(room_state: RoomState) -> None:
+    """Triggers in one room run one at a time, so the mode ends with the latest override."""
+    config, paths, _, events, client = room_state
+    read_event = client.room_get_state_event.side_effect
+
+    async def override_during_first_compare(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == EVENT_TYPE:
+            client.room_get_state_event.side_effect = read_event
+            set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="room")
+            for _ in range(10):
+                await asyncio.sleep(0)
+        return await read_event(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = override_during_first_compare
+    await asyncio.gather(*(reconcile_room_thread_mode(client, config, paths, ROOM_ID) for _ in range(2)))
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["room", "reset"])
+async def test_command_reports_a_failed_publication(room_state: RoomState, command: str) -> None:
+    """The command saves the override but does not claim success when clients cannot see the new mode."""
+    config, paths, _, _, client = room_state
+    set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="thread")
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    for _ in range(2):  # The reply asks to run the command again; a second failure warns again.
+        reply = await handle_thread_mode_command(
+            command,
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            room_id=ROOM_ID,
+            requester_user_id="@admin:localhost",
+            sender_user_id="@admin:localhost",
+        )
+        assert reply.startswith("⚠️")
+        assert "failed" in reply

@@ -26,21 +26,20 @@ _THREAD_MODE_EVENT_TYPE = "io.mindroom.thread_mode"
 _LOCKS: WeakValueDictionary[tuple[Path, str], asyncio.Lock] = WeakValueDictionary()
 
 
-async def reconcile_room_thread_mode(  # noqa: PLR0911 - each failed Matrix step is a separate exit
+async def reconcile_room_thread_mode(  # noqa: PLR0911 - one outcome per comparison step
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
     room_id: str,
 ) -> bool:
-    """Compare one state event with reply-path responders; return whether the state now shows the effective mode.
+    """Compare one state event with reply-path responders and return whether it is current.
 
-    A room without joined responders keeps its state and counts as shown. Failures return False and leave the next
-    trigger free to retry.
+    Failures leave the next trigger free to retry.
     """
     try:
         identities = prepared_entity_names_by_user_id(config, runtime_paths)
         if identities.get(client.user_id) != ROUTER_AGENT_NAME:
-            return False
+            return True
         # The deadline covers the lock wait too, so a sync frame queued behind other triggers stalls at most 10 s.
         async with asyncio.timeout(10):
             # Serialize the comparison and write so concurrent triggers cannot send duplicate or stale values.

@@ -252,9 +252,10 @@ async def test_a_thread_mode_command_the_router_cannot_publish_says_so(room: _Ro
     room.client.room_put_state.side_effect = None
     room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     assert await room.thread_mode_command("room") == (
-        "✅ This room now uses `room` thread mode for future agent replies.\n\n"
+        "⚠️ This room now uses `room` thread mode for future agent replies.\n\n"
         "Use `!thread_mode reset` to restore configured modes.\n\n"
-        "⚠️ The room's thread mode state is not published yet, so clients may keep showing the previous view."
+        "Clients may still show the old thread mode in this room because publishing the new one failed. "
+        "Run the command again to retry."
     )
     assert room.stored() == ("room", None)
     assert room.published() is None
