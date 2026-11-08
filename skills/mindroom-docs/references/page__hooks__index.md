@@ -237,12 +237,13 @@ Custom events default to 1000 ms.
 - **Turns**: `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` carry the turn's `ctx.turn_id`, so a plugin can keep per-turn state, such as a status message or a timer, from start to end.
   They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
   A plugin that uses them states `"mindroom_plugin_api": "1.5"` in its manifest, so an older MindRoom skips it with a clear reason.
-  Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is `"completed"`, `"cancelled"`, or `"failed"`.
+  Apart from the limit below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
   `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
   A reply that [pauses for a tool approval](https://docs.mindroom.chat/tool-approval/#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
   A call that asks for approval from its [background job](https://docs.mindroom.chat/tools/agent-orchestration/#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
   A request that runs nothing, such as an empty message, starts no turn.
-  A turn paused for approval keeps its `turn_id` across a restart, while a running turn that MindRoom's shutdown cuts short, or a paused one whose agent is removed, fires no `turn:ended`; after the restart its reply continues as a new turn.
+  A running turn that MindRoom's shutdown cuts short ends `cancelled`, and after the restart its reply continues as a new turn; a turn paused for approval keeps its `turn_id` across a restart.
+  A paused turn whose agent is removed from the config fires no `turn:ended`; `config:reloaded` names the removed agent.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -469,7 +470,7 @@ All contexts include these fields:
 | `BeforeResponseContext`, `FinalResponseTransformContext` | `draft` |
 | `AfterResponseContext` | `result` |
 | `CancelledResponseContext` | `info` with `envelope`, `visible_response_event_id`, `response_kind`, `failure_reason` |
-| `TurnLifecycleContext` | `envelope`, `outcome` (`"completed"`, `"cancelled"`, or `"failed"` on `turn:ended`, otherwise `None`) |
+| `TurnLifecycleContext` | `envelope`, `outcome` (a `TurnOutcome` on `turn:ended`, otherwise `None`) |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
 | `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary` |

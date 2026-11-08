@@ -121,6 +121,7 @@ _EXPORTS = [
     "TurnIntent",
     "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
     "atlassian_connection_oauth_provider",
     "automation",
@@ -379,6 +380,7 @@ _ENUM_MEMBERS = {
         "TRUSTED_INTERNAL_RELAY",
         "JOB_FOLLOW_UP",
     ],
+    "TurnOutcome": ["COMPLETED", "CANCELLED", "FAILED"],
     "TurnTrust": ["EXTERNAL", "TRUSTED_INTERNAL", "TRUSTED_USER_RELAY"],
 }
 
@@ -524,7 +526,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 5), "a011cbf9a1f4ee82b95947b7827b1df3627bba6aaf075fe1f5467ecad6bca478")
+_PINNED_VERSION = ((1, 5), "324cb2afcae544b30109d0cd10c9d4412f6024833dbfe69406bd2a181649dace")
 
 
 def _is_enum(obj: object) -> bool:

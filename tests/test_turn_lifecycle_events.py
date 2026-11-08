@@ -28,6 +28,7 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.llm.provider import TextDelta
+from mindroom.plugin_api import TurnOutcome
 from mindroom.post_response_effects import ResponseOutcome
 from mindroom.response_turn import CompletedApprovalRun
 from tests.approval_continuation_helpers import dispatch_approval
@@ -194,8 +195,8 @@ async def test_a_cancellation_while_turn_started_hooks_run_settles_the_turn_canc
     assert _events(seen) == [(EVENT_MESSAGE_CANCELLED, None), (EVENT_TURN_ENDED, "cancelled")]
 
 
-async def test_a_process_shutdown_mid_turn_ends_no_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A turn MindRoom's shutdown cuts short fires no turn:ended; its replay is a turn of its own."""
+async def test_a_process_shutdown_mid_turn_ends_it_cancelled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn MindRoom's shutdown cuts short ends cancelled; its replay is a turn of its own."""
     running = asyncio.Event()
     turn = await _turn(
         tmp_path,
@@ -212,7 +213,7 @@ async def test_a_process_shutdown_mid_turn_ends_no_turn(tmp_path: Path, monkeypa
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(response, timeout=10)
 
-    assert _events(seen) == [(EVENT_TURN_STARTED, None)]
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "cancelled")]
 
 
 async def test_a_team_reply_is_one_turn_that_ends_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -522,10 +523,11 @@ async def test_an_answer_the_outbox_owes_completes_its_turn_whatever_its_run_rep
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending), ResponseOutcome(run_succeeded=False))
 
     assert _events(seen) == [(EVENT_TURN_ENDED, outcome)]
+    assert isinstance(seen[0][2], TurnOutcome)
 
 
-async def test_a_pause_at_process_shutdown_reports_nothing_more(tmp_path: Path) -> None:
-    """Orderly shutdown stops a settling turn's pause and end events, as it stops its other best-effort hooks."""
+async def test_a_turn_settling_as_mindroom_shuts_down_still_reports_how_it_settled(tmp_path: Path) -> None:
+    """Shutdown stops a turn's other best-effort hooks, but not the pause or end that tells plugins where it stands."""
     seen: _Seen = []
     lifecycle = _lifecycle(tmp_path, _recorders(seen), shutdown=True)
 
@@ -533,4 +535,4 @@ async def test_a_pause_at_process_shutdown_reports_nothing_more(tmp_path: Path) 
         await lifecycle.start_turn(resumed=False)
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=AwaitingApproval()))
 
-    assert _events(seen) == [(EVENT_TURN_STARTED, None)]
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None)]

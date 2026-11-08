@@ -42,6 +42,7 @@ from mindroom.hooks import (
     ResponseDraft,
     ResponseResult,
     TurnLifecycleContext,
+    TurnOutcome,
     emit,
     emit_final_response_transform,
     emit_transform,
@@ -64,7 +65,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import ResponseIdentity
     from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
     from mindroom.final_delivery import FinalDeliveryOutcome, TurnEnding
-    from mindroom.hooks import HookContextSupport, MessageEnvelope, TurnOutcome
+    from mindroom.hooks import HookContextSupport, MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
@@ -809,13 +810,13 @@ def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | L
         case AwaitingApproval():
             return "paused"
         case Cancelled():
-            return "cancelled"
+            return TurnOutcome.CANCELLED
         case Failed():
-            return "failed"
+            return TurnOutcome.FAILED
         case Completed() if not run_succeeded:
-            return "failed"
+            return TurnOutcome.FAILED
         case _:
-            return "completed"
+            return TurnOutcome.COMPLETED
 
 
 async def answer_suppression(
@@ -887,8 +888,8 @@ class ResponseLifecycle:
     async def turn(self) -> AsyncIterator[None]:
         """Run one settlement of the turn, then emit exactly one ``turn:paused`` or ``turn:ended``.
 
-        How the block's finalization settled the turn decides the event; a block that raised before any finalization
-        ends the turn cancelled for a cancellation and failed for an error.
+        How the block's finalization settled the turn decides the event; a block that raised before any finalization,
+        such as a turn MindRoom's shutdown cuts short, ends the turn cancelled for a cancellation and failed for an error.
         """
         cancelled = False
         try:
@@ -897,17 +898,15 @@ class ResponseLifecycle:
             cancelled = True
             raise
         finally:
-            end = self._turn_end or ("cancelled" if cancelled else "failed")
+            end = self._turn_end or (TurnOutcome.CANCELLED if cancelled else TurnOutcome.FAILED)
             if end == "paused":
-                if not self.deps.process_shutdown_requested():
-                    await self.deps.response_hooks._emit_turn_event(EVENT_TURN_PAUSED, self.identity)
+                await self.deps.response_hooks._emit_turn_event(EVENT_TURN_PAUSED, self.identity)
             else:
                 await self.end_turn(end)
 
     async def end_turn(self, outcome: TurnOutcome) -> None:
-        """Emit the turn's ``turn:ended``, unless orderly process shutdown is stopping it."""
-        if not self.deps.process_shutdown_requested():
-            await self.deps.response_hooks._emit_turn_event(EVENT_TURN_ENDED, self.identity, outcome)
+        """Emit the turn's ``turn:ended``."""
+        await self.deps.response_hooks._emit_turn_event(EVENT_TURN_ENDED, self.identity, outcome)
 
     def _raise_if_process_shutdown(self) -> None:
         """Stop best-effort lifecycle work once orderly process shutdown owns cancellation."""

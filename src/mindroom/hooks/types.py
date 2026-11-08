@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 EVENT_MESSAGE_RECEIVED = "message:received"
@@ -113,8 +114,14 @@ _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
 _DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 
 EnrichmentCachePolicy = Literal["stable", "volatile"]
-# How a turn ended, as ``turn:ended`` reports it.
-TurnOutcome = Literal["completed", "cancelled", "failed"]
+
+
+class TurnOutcome(StrEnum):
+    """How a turn ended, as ``turn:ended`` reports it."""
+
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 def format_hook_source(plugin_name: str, event_name: str) -> str:

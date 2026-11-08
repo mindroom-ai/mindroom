@@ -81,7 +81,7 @@ from mindroom.final_delivery import (
     TurnProgress,
     approval_failure,
 )
-from mindroom.hooks import MessageEnvelope
+from mindroom.hooks import MessageEnvelope, TurnOutcome
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.presence import should_use_streaming
@@ -1313,7 +1313,8 @@ class ApprovalContinuationRunner:
         if span is not None and span.outcome is rl.SpanOutcome.PAUSED:
             request = self.approval_response_request(paused, target=target)
             lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(paused))
-            await lifecycle.end_turn("failed" if step.failure.kind is ApprovalFailureKind.ERROR else "cancelled")
+            failed = step.failure.kind is ApprovalFailureKind.ERROR
+            await lifecycle.end_turn(TurnOutcome.FAILED if failed else TurnOutcome.CANCELLED)
 
     async def _run_owned_approval_continuation(
         self,

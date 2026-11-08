@@ -7146,6 +7146,7 @@ expose = [
     "TurnIntent",
     "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
     "build_hook_message_sender",
     "build_hook_matrix_admin",

@@ -78,6 +78,7 @@ from mindroom.hooks import (
     TurnIntent,
     TurnLifecycleContext,
     TurnOrigin,
+    TurnOutcome,
     TurnTrust,
     hook,
 )
@@ -224,6 +225,7 @@ __all__ = [
     "TurnIntent",
     "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
     "atlassian_connection_oauth_provider",
     "automation",
