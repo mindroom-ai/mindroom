@@ -6565,6 +6565,75 @@ To use an existing populated directory, create `.mindroom-thread-exports` inside
 Cleanup removes only exported room directories and thread files; unrelated entries such as `.DS_Store`, a `.git` directory, or your own notes are never deleted.
 Output paths ending in `.`, `..`, or an empty name are rejected, as are symlinked output and room directories.
 
+# Workspace Files
+
+A chat client such as MindRoom Chat can browse and edit the files of an agent's workspace, the folder its file, coding, and shell tools work in, and follow changes to them live.
+A person opens a workspace through a room, and sees the workspaces of the agents there that they may use.
+
+## Who may open and change a workspace
+
+A person may open an agent's workspace through a room while they and the agent are both joined to it, the agent's [access rules](https://docs.mindroom.chat/authorization/#responder-access) let them use the agent there, and the room is not one of the agent's [contact rooms](https://docs.mindroom.chat/agent-contacts/).
+A shared agent has one workspace for everyone who uses it, and a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) gives each person their own, the one its turns for them use.
+What a person may do there follows the agent's tools, as its turns build them with their settings:
+
+| Access | When |
+|--------|------|
+| `read` | The agent has a tool that takes local file paths or runs code, such as `file`, `coding`, `shell`, or `python` |
+| `write` | One of those tools can change files, and the person may post messages in the room |
+
+A tool can change files when the agent's settings leave on one of its writing functions, such as `save_file` or `replace_file_chunk` of `file` or `write_file` or `edit_file` of `coding`, or when it runs code, as `shell`, `python`, and `script` do.
+So `file` with `enable_save_file: false` and `enable_replace_file_chunk: false` gives only `read`, and a person whom the room's power levels keep from posting may read but not change anything.
+An agent with none of these tools opens no workspace.
+The agent sees a saved file on its next tool call; nothing needs restarting.
+
+## Paths and hidden files
+
+Paths are relative to the workspace, with `/` between folders, and `""` names the workspace itself.
+Absolute paths, paths starting with `~`, `..`, NUL, and backslashes answer 400.
+Links are followed while they stay inside the workspace; a path through a link that leads outside answers 403.
+Only folders, regular files, and links are listed or read; pipes, sockets, and devices are left out, and reading one answers 400.
+Git's own files, `.git` and anything below it, are never saved, made, moved, or deleted (403), although deleting a folder deletes any repository in it.
+The workspace itself can't be deleted, moved, or replaced (400).
+
+The workspace is the agent's home folder, so credentials kept there are hidden: they are never listed, read, changed, or reported as changed, even through a link, and a path naming one answers 404 as an absent one does.
+Hidden, in any letter case:
+
+- at the top of the workspace: `.ssh/`, `.gnupg/`, `.aws/`, `.azure/`, `.kube/`, `.docker/`, `.password-store/`, `.mindroom/`, `.config/gh/`, `.config/gcloud/`, `.config/hub/`, `.config/git/credentials`, `.claude/.credentials.json`, and `.codex/auth.json`;
+- in any folder: `.netrc`, `.git-credentials`, `.pgpass`, `.pypirc`, `.npmrc`, every name starting with `.env` (such as `.env.local` and `.envrc`), and SSH keys (`id_<type>`, with an optional `_sk`, `.pub`, or `-cert.pub`);
+- below any `.git` folder: `config`, `credentials`, and names ending in `.credentials`.
+
+A folder that keeps one of the top-level credentials, such as `.config`, `.claude`, or `.codex`, can't be moved or deleted, and nothing can be moved in under its name (403), since its credentials would then show.
+
+## Routes
+
+Clients call these routes with a client session, `Authorization: Bearer <session_token>` from `POST /api/client-sessions` (see [Plugin HTTP routes](https://docs.mindroom.chat/plugins/#http-routes)), from an origin `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists.
+Each route below is under `/api/workspaces/v1/rooms/{room_id}`, and `{agent_user_id}` is the agent's Matrix user ID.
+
+| Route | Answer |
+|-------|--------|
+| `GET` (the prefix itself) | `{"workspaces": [{"agent_user_id", "display_name", "private", "files"}]}`, the workspaces the caller may open, in config order; `files` is `read` or `write` |
+| `GET /{agent_user_id}/folder?path=<folder>` | `{"path", "entries", "truncated"}`: the folder's entries, folders and links to folders first, then by name |
+| `GET /{agent_user_id}/file?path=<file>` | `{"path", "encoding", "content", "size", "mtime", "etag"}` |
+| `PUT /{agent_user_id}/file` with `{"path", "content", "encoding", "etag"}` | `{"etag", "size", "mtime"}` of the saved file |
+| `POST /{agent_user_id}/folder` with `{"path"}` | 204; the folder is made with any folders above it |
+| `POST /{agent_user_id}/move` with `{"path", "to"}` | 204; a link moves as a link |
+| `DELETE /{agent_user_id}/entry?path=<path>` | 204; a folder goes with everything in it, and a link without what it leads to |
+
+An entry has `name`, `path`, `kind` (`file`, `folder`, or `link`), `size` (0 for a folder or link), `mtime` in milliseconds since the epoch, and for a link `target`, which is `file` or `folder`, or null when it leads outside, to a hidden credential, or nowhere.
+A folder lists at most 5000 entries, and `truncated` says when there were more.
+Before the agent's first turn for this person its workspace does not exist yet, and the workspace itself lists empty.
+A file's `content` is its text when it is valid UTF-8, with `encoding: "utf-8"`, and base64 otherwise, with `encoding: "base64"`; its `etag` is the SHA-256 of its content, in hex.
+Files over 5 MiB answer 413, to read and to save.
+
+A save sends `content` as text, or as base64 with `encoding: "base64"`.
+Without `etag` it overwrites the file; with the `etag` the client read, it saves only while the file still has that content, and otherwise answers 409 with `{"detail", "etag"}`, where `etag` is the file's current one, or null once it is gone.
+A save is atomic, keeps an existing file's permissions, and makes the folders above a new file; the first save or new folder in a workspace not made yet makes it as the agent's first turn would.
+Making a folder where something already is, or moving onto a taken name, answers 409, and moving a folder into itself answers 400.
+
+A missing, unknown, or expired session answers 401.
+A person who may not use the agent there, or a workspace the agent's tools don't reach, answers 403, as does any change from someone with only `read`.
+While MindRoom can't yet decide whether the person may use the agent, the routes answer 503 as [`RoomReader.agent()`](https://docs.mindroom.chat/plugins/#http-routes) does.
+
 # Bug Reports
 
 When something goes wrong in a conversation, such as an agent stopping halfway, a reply never arriving, or a tool failing, the person who fixes it needs to know exactly what happened.
@@ -17211,7 +17280,7 @@ Kubernetes mounts such knowledge read-only, because kubelet follows links inside
 ### Workspace files the primary reads and writes
 
 The primary treats everything inside a mounted workspace as worker-controlled.
-Files it reads or writes there, such as skills, subagent profiles, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, and the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `dreaming` reads, are reached from the workspace root without following links, never written through a file that has another hard link, opened non-blocking so a FIFO cannot stall the primary, and published by atomic replacement or exclusive creation.
+Files it reads or writes there, such as skills, subagent profiles, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, thread exports, the files `prompt_curation` measures, the memory files, staging copies, reports, verdicts, and thread-export `index.json` files `dreaming` reads, and the files chat clients list, read, and save through the [workspace file routes](https://docs.mindroom.chat/workspace-files/), are reached from the workspace root without following links, never written through a file that has another hard link, opened non-blocking so a FIFO cannot stall the primary, and published by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
 `dreaming` writes each run's agenda, staging copy of `memory/`, and patch under `.mindroom/dreaming/runs/`, and deletes finished staging and old runs without following links.
 It writes an approved proposal into `memory/` from bytes worker code staged, which gives the agent nothing it could not write itself; it writes only Markdown under `memory/` other than today's daily note and context files, and keeps its progress below `tracking/`, outside the workspace.
@@ -17250,6 +17319,7 @@ Reads of worker-controlled files are capped per surface.
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
+| Files a chat client reads or saves over through the workspace file routes | 5 MiB per file; 5,000 entries per folder listing | A read or save answers 413; a listing is cut and says so |
 
 Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](https://docs.mindroom.chat/thread-exports/).
 The exporter's drift check reads at most 8 MiB of a room's `index.json` and rebuilds a larger one from the thread files.
@@ -17376,6 +17446,9 @@ Routes that act on one room use `require_room_member` instead, which authenticat
 `RoomReader.agents()` and `agent()` admit an agent by the check the worker Computer uses, under the config the API serves rather than the one the runtime runs: the user ID names a current agent, it and the caller are both joined, by the lookup that admitted the caller here and by the router's for the Computer, and after an authoritative refresh of room grants the agent's access rules let the caller converse with it there, answering 503 while identities or grants are unresolved; plugin routes never refresh grants under a membership policy the running runtime has not applied.
 Each admitted agent's `root` is the workspace a turn of that agent for that caller in that room resolves, never a path from the request; `files` and `terminal` follow the agent's toolkits as their declarations and settings describe them, and give only `read` and `watch` to a caller whose power level keeps them from posting; a contact room opens none, because its turns run as the agent's owner.
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
+The [workspace file routes](https://docs.mindroom.chat/workspace-files/) under `/api/workspaces/v1/` take the same sessions and admit the caller through `RoomReader.agent()` on every request, so a saved change to an agent's access applies to the next request; they serve only the `root` that check resolves, never a path or folder from the request, refuse paths that leave it by `..` or a link, and change files only for a caller whose `files` is `write`.
+Code the agent runs controls everything in the workspace, so the routes treat it as the primary's other workspace reads and writes do, and the workspace is the agent's `HOME`, so they hide the credentials that page lists, even through a link, and never move or delete a folder that keeps one by its place.
+The change stream watches each folder reached from the root without a link, at most 10,000, and reports only paths that stay inside, so a link planted in the workspace never makes the primary watch or report anything outside it.
 `require_room_messenger` makes the same check, and its `RoomMessenger` posts only as the router, never from a person's account: `notice()` is an `m.notice` naming no requester, and `relay()` names the session's own user, never one a request names, as original sender, so each agent it wakes authorizes that user, after checking again just before sending that the session is live and the user is joined and may send `m.room.message`.
 A relay mentions only agents and teams joined to the room, and both refuse content keys under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or another loaded plugin's reserved namespaces at any depth and Matrix's own top-level keys, such as `body`, `m.relates_to`, and `m.new_content`, so neither a route nor its client can claim a requester, hide whom a relay is for, edit another message, or forge another plugin's card through content.
 `notice()` checks no power level, so a member the power levels keep from posting can still have a route post a router notice; the route chooses who may.
@@ -17385,7 +17458,7 @@ A browser cannot set a websocket's headers, so a plugin websocket route signs it
 Browsers apply no CORS to websockets, so `client_stream` itself refuses an `Origin` missing from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, and given a room it checks membership as `require_room_member` does before accepting and every 60 seconds after, closing the websocket when the user has left or membership is unavailable.
 A plugin websocket route without `client_stream` is public and accepts any origin.
 The call transcript routes under `/api/call-transcripts/v1/` take the same sessions and check rooms themselves through the router: room membership to read a room's live call, permission to post messages to start or join a call, and for a call's own routes the room the call is in, never one the request names, answering 404 to anyone outside it.
-CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, and `/api/call-transcripts/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin and call transcript routes too, and there is no separate list.
+CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-transcripts/`, and `/api/workspaces/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin, call transcript, and workspace file routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
@@ -18035,6 +18108,7 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `requires_room_context` | bool | `False` | The tool needs a live Matrix room, so it is hidden where none exists, such as the MCP gateway, the OpenAI-compatible API, and room-less runs, and it always runs in the primary runtime |
 | `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
+| `workspace_writers` | tuple of strings | `()` | The functions that change files in the agent's workspace, by writing them or by running code there; while the agent offers one, people who may post in its room may change its [workspace files](https://docs.mindroom.chat/workspace-files/), and a tool that names none counts every function when it sets `executes_code`; a plugin that passes it states `"mindroom_plugin_api": "1.14"` |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
 | `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
@@ -18823,7 +18897,7 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 | Field | Value |
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
-| `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a writing function of `file` or `coding` or a code-running function of a toolkit such as `shell`, `python`, or `script`. Else `read`, also for other toolkits that save files |
+| `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a function a toolkit names in its `workspace_writers`, such as `save_file` of `file`, or any function of a code-running toolkit that names none, such as `shell`. Else `read`, also for toolkits that save files without naming the function |
 | `terminal` | `none` without the `shell` toolkit, `type` when the caller may post messages in the room, else `watch` |
 
 A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, only reads, and `include_tools` or `exclude_tools` can take writing functions away.

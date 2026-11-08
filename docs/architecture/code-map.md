@@ -597,6 +597,9 @@ Matrix sync callback
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
 | `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
+| `api/workspace_files.py` | `/api/workspaces/v1` for chat clients with client sessions: the workspaces a room opens to the caller, and listing, reading, saving, making, moving and deleting their files, admitted through `RoomReader.agent()` on every request |
+| `workspace_files/operations.py` | The file operations behind those routes, confined to the workspace without following links out, and the credentials they hide (`is_hidden`) |
+| `workspace_files/watch.py` | One watcher per workspace for its change streams, watching each folder reached without a link and reporting changed paths at most every 150 ms |
 | `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
 | `config/access.py` | Membership access configuration models (responder access, room defaults) |
 | `config/legacy_access.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |

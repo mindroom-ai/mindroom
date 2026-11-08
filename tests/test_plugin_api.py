@@ -330,8 +330,8 @@ _SIGNATURES = {
         "(*, name, display_name, description, category, status, setup_type, default_execution_target, "
         "requires_primary_runtime, consumes_workspace_paths, file_access, executes_code, requires_room_context, "
         "requires_conversation, icon, icon_color, config_fields, agent_override_fields, authored_override_validator, "
-        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, approval_aliases, "
-        "worker_inert_agent_functions, managed_init_args, supports_toolkit_filters)"
+        "dependencies, auth_provider, oauth_fallback_fields, docs_url, helper_text, function_names, workspace_writers, "
+        "approval_aliases, worker_inert_agent_functions, managed_init_args, supports_toolkit_filters)"
     ),
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
     "resolve_config_relative_path": "(raw_path, runtime_paths)",
@@ -584,7 +584,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 13), "357445143dec1abd53318c8633c0fde55cace7b508387fc61c37c17660e08334")
+_PINNED_VERSION = ((1, 14), "a8efbbfefe953b2b3a79db6ac8c79016e631d19b15199cb50b33ac07bec1a671")
 
 
 def _is_enum(obj: object) -> bool:
