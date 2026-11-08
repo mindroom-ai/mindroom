@@ -562,9 +562,12 @@ async def test_a_quiet_team_member_s_earlier_finding_stays_after_its_later_run_r
 
 
 @pytest.mark.asyncio
+# A leader that writes nothing answers nothing, which never falls back to the no-reply document.
+@pytest.mark.parametrize("final", [SILENT_SCHEDULE_NO_REPLY_TOKEN, ""])
 async def test_a_quiet_team_resume_reads_only_its_own_member_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    final: str,
 ) -> None:
     """An earlier turn's member finding in the same session does not make a quiet resume that found nothing report."""
     team = _team(
@@ -582,8 +585,8 @@ async def test_a_quiet_team_resume_reads_only_its_own_member_runs(
     team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(ctx=team.ctx(run_id="run-2", allow_no_report_response=True), show_tool_calls=False)
-    team.models["default"] = ScriptedModel([answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)])
-    team.models["general-model"] = ScriptedModel([answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)])
+    team.models["default"] = ScriptedModel([answer(final)])
+    team.models["general-model"] = ScriptedModel([answer(final)])
 
     result = await team.resume(
         raised.value.paused,
@@ -593,7 +596,7 @@ async def test_a_quiet_team_resume_reads_only_its_own_member_runs(
     )
 
     assert isinstance(result, CompletedApprovalRun)
-    assert result.response_text == SILENT_SCHEDULE_NO_REPLY_TOKEN
+    assert result.response_text == final
 
 
 @pytest.mark.asyncio
