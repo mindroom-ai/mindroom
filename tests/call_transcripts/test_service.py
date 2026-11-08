@@ -2238,6 +2238,40 @@ async def test_stopping_cancels_the_messages_being_posted_and_a_restart_posts_th
 
 
 @pytest.mark.asyncio
+async def test_a_finish_under_way_when_its_writes_are_cancelled_is_completed_and_logged(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switched off while the posted message is being recorded, the record still logs the speech and drops the notes."""
+    recording = threading.Event()
+    recorded = threading.Event()
+    finish_transcript = CallTranscriptStore.finish_transcript
+
+    def slow_finish_transcript(store: CallTranscriptStore, call_id: str, **kwargs: object) -> float | None:
+        recording.set()
+        recorded.wait(5)
+        return finish_transcript(store, call_id, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(CallTranscriptStore, "finish_transcript", slow_finish_transcript)
+    call_id = await world.end_by_leaving(ANN)
+    world.clock.advance(20)
+
+    with capture_logs() as logs:
+        await world.service.tick()
+        [writing] = world.service._settling.values()
+        await asyncio.to_thread(recording.wait, 5)
+        world.service.cancel_writes()
+        recorded.set()
+        await asyncio.wait([writing])
+
+    assert writing.cancelled()
+    assert len(world.room.transcripts) == 1
+    assert world.service._written_notes == {}
+    [finished] = [log for log in logs if log["event"] == "call_transcript_finished"]
+    assert (finished["call_id"], finished["speech_seconds"]) == (call_id, 2.0)
+
+
+@pytest.mark.asyncio
 async def test_writes_cancelled_before_they_began_are_made_at_the_next_check(world: World) -> None:
     """Writes cancelled before their task first ran, as when call transcripts go off at once, start again later."""
     joining = asyncio.create_task(world.service.join(ROOM, ANN))

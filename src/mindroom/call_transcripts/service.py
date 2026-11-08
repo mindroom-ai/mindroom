@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.call_transcripts.wav import WavError, wav_seconds
 from mindroom.logging_config import get_logger
 
@@ -727,22 +727,26 @@ class CallTranscriptService:
         """Finish the ended call's transcript message, deleting its lines, and log it once with how long people spoke.
 
         ``event_id`` is the posted message, None when there was nothing to post or the message was given up, which
-        ``given_up`` says why.
+        ``given_up`` says why. Once begun it is completed, its log included, though its task is cancelled meanwhile.
         """
-        speech_seconds = await asyncio.to_thread(
-            self._store.finish_transcript,
-            call.id,
-            at=self._clock(),
-            event_id=event_id,
-        )
-        self._written_notes.pop(call.id, None)
-        if speech_seconds is None:
-            return
-        fields = {"room_id": call.room_id, "call_id": call.id, "speech_seconds": speech_seconds, **details}
-        if given_up is None:
-            logger.info("call_transcript_finished", event_id=event_id, **fields)
-        else:
-            logger.warning("call_transcript_given_up", reason=given_up, **fields)
+
+        async def finish() -> None:
+            speech_seconds = await asyncio.to_thread(
+                self._store.finish_transcript,
+                call.id,
+                at=self._clock(),
+                event_id=event_id,
+            )
+            self._written_notes.pop(call.id, None)
+            if speech_seconds is None:
+                return
+            fields = {"room_id": call.room_id, "call_id": call.id, "speech_seconds": speech_seconds, **details}
+            if given_up is None:
+                logger.info("call_transcript_finished", event_id=event_id, **fields)
+            else:
+                logger.warning("call_transcript_given_up", reason=given_up, **fields)
+
+        await run_coroutine_until_complete(finish())
 
     async def _call_for(self, call_id: str, user_id: str) -> StoredCall:
         """Return the call, taking its room from the call itself; to anyone outside that room it does not exist."""
