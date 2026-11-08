@@ -74,16 +74,14 @@ def entered_command(typed: str | None, text: str) -> list[dict[str, object]] | N
     """Return the ``run_shell_command`` call that typing ``text`` onto a line holding ``typed`` amounts to.
 
     Its ``args`` is what the Enters in ``text`` run, as one script, the line's earlier text included: an empty list
-    when ``text`` enters nothing, and None when the line or the keys can't tell. Ctrl-C first empties a known line;
-    on an unknown one, such as while a command runs, it may reach a program that keeps the keys after it.
+    when ``text`` enters nothing, and None when the line or the keys can't tell, as for keys after a Ctrl-C: the
+    terminal drops unread typing when it interrupts, so it may drop part of them.
     """
     rest = text.lstrip(_INTERRUPT)
     if not rest:
         return []
-    if typed is None or _EDITING.search(rest):
+    if rest != text or typed is None or _EDITING.search(rest):
         return None
-    if rest != text:
-        typed = ""
     end = max(rest.rfind("\r"), rest.rfind("\n"))
     if end == -1:
         return []
@@ -104,7 +102,8 @@ class TerminalLine:
     def __init__(self, *, opened: bool) -> None:
         self.revision = 0
         self.typed: str | None = "" if opened else None
-        # An Enter went in since the last prompt, so a command or a continuation reads what is typed now.
+        # An Enter or a Ctrl-C went in since the last prompt: a command or a continuation reads what is typed now, or
+        # the interrupt may drop it, and typing that reaches the shell first may keep it from printing that prompt.
         self._busy = not opened
         # Something typed while busy waits for the next prompt, whose line it then holds.
         self._ahead = not opened
@@ -140,10 +139,7 @@ class TerminalLine:
             if self._busy:
                 # Ctrl-C interrupts the command, and the terminal drops the typing it has not read yet.
                 self._ahead = char != _INTERRUPT
-            elif char == _INTERRUPT:
-                self.typed = ""
-                self._owed += 1
-            elif char in "\r\n":
+            elif char in "\r\n\x03":
                 self._busy, self._ahead = True, False
                 self._owed += 1
             elif self.typed is not None:

@@ -1,9 +1,6 @@
 """Chat clients' routes to the persistent terminals of the agents their caller may use in a room.
 
-Each route signs its caller in with a client session, as plugin routes do, and admits them as ``RoomReader.agent()``
-does; an agent is named by its Matrix user ID, and its terminals are those of its workspace as a turn of it for the
-caller resolves it, so no path or worker comes from the client. Opening, closing and typing need ``terminal: type``.
-A terminal's stream rechecks the caller as the Computer's stream does: what it may do, under the config served now.
+``docs/architecture/terminals.md`` describes the routes, the stream, and who may open, close, and type.
 """
 
 from __future__ import annotations
@@ -70,7 +67,8 @@ class _OpenTerminal(BaseModel):
 
 class _Input(BaseModel):
     type: Literal["input"]
-    data: str = Field(max_length=65536)
+    # At most 4 bytes a character, so within what the runner takes at once.
+    data: str = Field(max_length=16384)
 
 
 class _Resize(BaseModel):
@@ -179,12 +177,7 @@ async def close_terminal(
 
 @router.websocket("/agents/{agent_user_id}/terminals/{terminal_id}")
 async def terminal_stream(websocket: WebSocket, room_id: str, agent_user_id: str, terminal_id: str) -> None:
-    """Relay one terminal: its scrollback, then live output, as binary frames, and the viewer's keys and size.
-
-    Text frames tell the viewer ``{"type": "writable", "writable"}``, first and whenever it changes, and
-    ``{"type": "exit", "code"}`` when the shell exits; the viewer sends ``{"type": "input", "data"}`` and
-    ``{"type": "resize", "cols", "rows"}``, which are dropped while it may only watch.
-    """
+    """Relay one terminal's output to the viewer and, while it may type, its keys and size to the terminal."""
     async with client_stream(websocket, room_id) as user:
         try:
             workspace = await (await stream_room_reader(websocket, user, room_id)).agent(agent_user_id)
