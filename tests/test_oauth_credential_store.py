@@ -82,10 +82,10 @@ def _lock_refusals(monkeypatch: pytest.MonkeyPatch) -> asyncio.Queue[None]:
     lock_error = credential_store_module._sqlite_lock_error
 
     def observed(error: sqlite3.OperationalError) -> bool:
-        if lock_error(error):
+        refused = lock_error(error)
+        if refused:
             refusals.put_nowait(None)
-            return True
-        return False
+        return refused
 
     monkeypatch.setattr(credential_store_module, "_sqlite_lock_error", observed)
     return refusals
