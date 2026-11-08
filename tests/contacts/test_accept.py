@@ -159,6 +159,7 @@ def _room_lifecycle(config: Config, paths: RuntimePaths, agent_name: str) -> Bot
             send_response=AsyncMock(return_value=None),
             change_membership=AsyncMock(return_value=True),
             admit_response=MagicMock(),
+            refresh_memberships=AsyncMock(),
             on_configured_room_joined=AsyncMock(),
             on_room_joined=AsyncMock(),
             get_conversation_reader=MagicMock(),
