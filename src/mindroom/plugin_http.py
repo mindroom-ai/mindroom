@@ -393,8 +393,8 @@ class RoomMessenger:
         It checks no power level: the route decides who may have the router post. ``content`` adds namespaced keys of
         the plugin's own, and it answers 400 before anything is sent when ``content`` sets one of Matrix's own keys,
         such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.``, ``chat.mindroom.``
-        or another loaded plugin's reserved namespaces at any depth. It answers 503 when the router is not running or not in the room,
-        or when the send fails.
+        or a namespace another loaded plugin reserves and this one does not, at any depth. It answers 503 when the router
+        is not running or not in the room, or when the send fails.
         """
         router = self._router()
         extra = self._content(router, content)
@@ -454,13 +454,16 @@ class RoomMessenger:
         extra = dict(content or {})
         if matrix_keys := sorted(key for key in extra if "." not in key or key.startswith(_MATRIX_KEY_PREFIXES)):
             raise HTTPException(400, f"content must not set Matrix's own keys ({', '.join(matrix_keys)}).")
-        plugins = config_plugins(router.config, router.runtime_paths).loaded_plugins
-        others = (
+        plugins = config_plugins(router.config, router.runtime_paths)
+        # A namespace this plugin reserves is its own even when another plugin reserves it too, as plugins of one
+        # family sharing a namespace do; a narrower one another plugin reserves inside it stays that plugin's.
+        own = {
             namespace
-            for plugin in plugins
-            if plugin.name != self._plugin_name
+            for plugin in plugins.loaded_plugins
+            if plugin.name == self._plugin_name
             for namespace in plugin.reserved_namespaces
-        )
+        }
+        others = (namespace for namespace in plugins.reserved_namespaces if namespace not in own)
         if reserved := reserved_content_keys(extra, (*MINDROOM_RESERVED_PREFIXES, *others)):
             msg = f"content must not set keys MindRoom or another plugin reserves ({', '.join(reserved)})."
             raise HTTPException(400, msg)

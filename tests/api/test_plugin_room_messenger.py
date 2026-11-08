@@ -55,7 +55,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -72,15 +72,18 @@ MEMBERS = (ALICE, CAROL, BOB, ROUTER, OPEN, ALICES, CREW)
 POWER = {"users": {ALICE: 100, CAROL: 50, ROUTER: 100}, "events": {"m.room.message": 50}}
 
 
-def _config(tmp_path: Path) -> Config:
-    """Return the room's agents and team, an agent outside it, and two loaded plugins that each reserve a namespace.
+def _config(tmp_path: Path, reserved: Mapping[str, list[str]] | None = None) -> Config:
+    """Return the room's agents and team, an agent outside it, and the loaded plugins ``reserved`` names.
 
+    ``reserved`` maps each plugin to its reserved namespaces; by default ``asker`` and ``cards`` each reserve their own.
     Agent ``open`` answers anyone, ``alices`` only Alice, and the team ``crew`` holds both; ``asker`` serves the routes.
     """
-    for name in (PLUGIN, "cards"):
+    if reserved is None:
+        reserved = {name: [f"com.example.{name}."] for name in (PLUGIN, "cards")}
+    for name, namespaces in reserved.items():
         root = tmp_path / "plugins" / name
         root.mkdir(parents=True)
-        manifest = {"name": name, "reserved_namespaces": [f"com.example.{name}."]}
+        manifest = {"name": name, "reserved_namespaces": namespaces}
         (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     config = bind_runtime_paths(
         Config(
@@ -99,7 +102,7 @@ def _config(tmp_path: Path) -> Config:
             },
             teams={"crew": TeamConfig(display_name="Crew", role="Both", agents=["open", "alices"], rooms=[ROOM])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
-            plugins=[f"./plugins/{PLUGIN}", "./plugins/cards"],
+            plugins=[f"./plugins/{name}" for name in reserved],
         ),
         test_runtime_paths(tmp_path),
     )
@@ -148,27 +151,23 @@ class _World:
     bots: dict[str, SimpleNamespace]
     tokens: list[str]
 
-    def request(self, user_id: str) -> Request:
-        """A request to the plugin's route, signed in with a client session of ``user_id``."""
+    async def messenger(self, user_id: str, plugin: str = PLUGIN) -> RoomMessenger:
+        """The messenger a route of ``plugin`` gets, signed in with a client session of ``user_id``."""
         token = client_session_store(self.app).create(user_id).token
         self.tokens.append(token)
-        return Request(
+        request = Request(
             {
                 "type": "http",
                 "app": self.app,
                 "headers": [(b"authorization", f"Bearer {token}".encode())],
-                PLUGIN_NAME_SCOPE_KEY: PLUGIN,
+                PLUGIN_NAME_SCOPE_KEY: plugin,
             },
         )
-
-    async def messenger(self, user_id: str) -> RoomMessenger:
-        return await require_room_messenger(self.request(user_id), ROOM)
+        return await require_room_messenger(request, ROOM)
 
 
-@pytest.fixture
-def world(tmp_path: Path) -> _World:
+def _world(config: Config) -> _World:
     """The room, its router and agents, and the API app whose routes post there."""
-    config = _config(tmp_path)
     client = _reader_client()
     # Agent ``open``'s bot reads the room too, so reads still answer while the router is down.
     bots = {ROUTER_AGENT_NAME: _router(config, client), "open": SimpleNamespace(client=client, running=True)}
@@ -176,6 +175,12 @@ def world(tmp_path: Path) -> _World:
     bind_room_members(app, bots)  # type: ignore[arg-type]
     ensure_app_state(app).embedded = SimpleNamespace(agent_bot=bots.get)  # type: ignore[assignment]
     return _World(config, app, client, bots, [])
+
+
+@pytest.fixture
+def world(tmp_path: Path) -> _World:
+    """The room as ``_world`` serves it, with the default plugins of ``_config``."""
+    return _world(_config(tmp_path))
 
 
 @contextmanager
@@ -489,6 +494,52 @@ async def test_content_holds_only_the_plugins_own_keys(world: _World, kind: str,
         await _post(messenger, kind, content)
 
     assert refused.value.status_code == 400
+    transport.assert_not_awaited()
+
+
+# Plugins ``asker`` and ``twin`` share a namespace, ``twin`` reserves one more, and ``narrow`` a narrower one inside it.
+_SHARED = {
+    PLUGIN: ["com.example.shared."],
+    "twin": ["com.example.shared.", "com.example.twin."],
+    "narrow": ["com.example.shared.narrow."],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["notice", "relay"])
+@pytest.mark.parametrize("plugin", [PLUGIN, "twin"])
+async def test_plugins_sharing_a_namespace_each_post_their_keys_in_it(tmp_path: Path, kind: str, plugin: str) -> None:
+    """A namespace the posting plugin reserves is its own, though another loaded plugin reserves it as well."""
+    world = _world(_config(tmp_path, _SHARED))
+    messenger = await world.messenger(CAROL, plugin)
+
+    with _transport() as transport:
+        await _post(messenger, kind, {"com.example.shared.card": {"plugin": plugin}})
+
+    assert _sent(transport, world.client)["com.example.shared.card"] == {"plugin": plugin}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["notice", "relay"])
+@pytest.mark.parametrize(
+    ("plugin", "key"),
+    [
+        (PLUGIN, "com.example.twin.card"),
+        (PLUGIN, "com.example.shared.narrow.card"),
+        ("narrow", "com.example.shared.narrow.card"),
+    ],
+    ids=["only-another-plugins", "narrower-inside-own", "own-inside-broader"],
+)
+async def test_sharing_a_namespace_leaves_the_others_refused(tmp_path: Path, kind: str, plugin: str, key: str) -> None:
+    """A namespace only another plugin reserves stays refused, whether inside the poster's own or around it."""
+    world = _world(_config(tmp_path, _SHARED))
+    messenger = await world.messenger(CAROL, plugin)
+
+    with _transport() as transport, pytest.raises(HTTPException) as refused:
+        await _post(messenger, kind, {key: {}})
+
+    assert refused.value.status_code == 400
+    assert refused.value.detail == f"content must not set keys MindRoom or another plugin reserves ({key})."
     transport.assert_not_awaited()
 
 
