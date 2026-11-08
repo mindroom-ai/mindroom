@@ -330,6 +330,34 @@ async def test_people_type_in_terminals_only_where_the_agent_s_shell_works_in_it
     assert [workspace.terminal for workspace in await room.agents(BOB)] == [bob]
 
 
+@pytest.mark.parametrize(
+    ("env", "tools", "files"),
+    [
+        ({}, ["file"], "write"),
+        (_PRIMARY, ["file"], "write"),
+        (_STORAGE_RUNNER, ["file"], "write"),
+        (_SCRATCH_RUNNER, ["file"], "read"),
+        (_SCRATCH_RUNNER, ["shell", "terminal"], "read"),
+        (_SCRATCH_RUNNER, ["file", "script"], "write"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_writing_toolkit_writes_only_where_it_works_in_the_workspace(
+    tmp_path: Path,
+    env: dict[str, str],
+    tools: list[str],
+    files: str,
+) -> None:
+    """In the primary or a worker that mounts the workspace a writing toolkit writes; on a scratch runner it only reads.
+
+    ``script`` runs in the primary process wherever ``file`` runs.
+    """
+    helper = AgentConfig(display_name="Helper", tools=tools, access={"users": [ALICE]})
+    room = _room(tmp_path, {"helper": helper}, **env)
+
+    assert [workspace.files for workspace in await room.agents(ALICE)] == [files]
+
+
 @pytest.mark.parametrize("env", [{}, _SCRATCH_RUNNER, _PRIMARY])
 @pytest.mark.asyncio
 async def test_the_terminal_toolkit_adds_nothing_to_what_the_shell_gives(tmp_path: Path, env: dict[str, str]) -> None:

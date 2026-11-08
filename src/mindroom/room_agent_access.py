@@ -321,12 +321,13 @@ def _workspace(
         functions = _offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
-        # The functions it names as writing, any of them while its build alone could tell; else any that runs code.
+        # The functions it names as writing, any of them while its build alone could tell, else any that runs code; but
+        # on a runner that sees only its own storage, it writes there, not in the workspace.
         path_toolkits[entry.name] = (
             functions is None or not functions.isdisjoint(metadata.workspace_writers)
             if metadata.workspace_writers
             else metadata.executes_code
-        )
+        ) and _toolkit_host(agent_tools, entry.name, runtime_paths) != "scratch_worker"
     # A terminal runs only beside a worker's shell commands (its only function); people type in it where that worker
     # sees the workspace.
     shell = _toolkit_host(agent_tools, "shell", runtime_paths) if "shell" in path_toolkits else None
