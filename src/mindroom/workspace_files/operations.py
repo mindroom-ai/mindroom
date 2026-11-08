@@ -72,7 +72,8 @@ _CREDENTIAL_NAME = re.compile(r"\.env.*|id_(?:rsa|dsa|ecdsa|ed25519|xmss)(?:_sk)
 # Below `.git`: its config and a submodule's, whose remotes' URLs can hold a token, and credential files beside them.
 _GIT_CREDENTIAL_NAMES = frozenset({"config", "credentials"})
 
-_KINDS: dict[int, Literal["file", "folder", "link"]] = {
+# The kinds of entry a folder listing shows; pipes, sockets and devices are left out.
+ENTRY_KINDS: dict[int, Literal["file", "folder", "link"]] = {
     stat.S_IFREG: "file",
     stat.S_IFDIR: "folder",
     stat.S_IFLNK: "link",
@@ -264,7 +265,7 @@ def _link_target(root: Path, path: PurePosixPath) -> Literal["file", "folder"] |
             status = os.stat(found.relative.name, dir_fd=directory, follow_symlinks=False)
     except (HTTPException, OSError):
         return None
-    kind = _KINDS.get(stat.S_IFMT(status.st_mode))
+    kind = ENTRY_KINDS.get(stat.S_IFMT(status.st_mode))
     return kind if kind != "link" else None
 
 
@@ -290,7 +291,7 @@ def list_folder(root: Path, raw_path: str) -> Folder:
                 status = item.stat(follow_symlinks=False)
             except OSError:
                 continue
-            kind = _KINDS.get(stat.S_IFMT(status.st_mode))
+            kind = ENTRY_KINDS.get(stat.S_IFMT(status.st_mode))
             if kind is None:
                 continue
             if len(entries) == _MAX_FOLDER_ENTRIES:

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 import watchfiles
 
 from mindroom.path_confinement import open_directory_within_root
-from mindroom.workspace_files.operations import is_hidden
+from mindroom.workspace_files.operations import ENTRY_KINDS, is_hidden
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -42,8 +42,6 @@ _FILTER = watchfiles.DefaultFilter(
     ignore_entity_patterns=(*watchfiles.DefaultFilter.ignore_entity_patterns, r"^\.mindroom-[0-9a-f]{32}\.tmp$"),
 )
 
-# Files and links; like folder listings, a scan leaves out pipes, sockets and devices.
-_LISTED = frozenset({stat.S_IFREG, stat.S_IFLNK})
 # What a scan saw of one entry: its type, and for anything but a folder its size and modification time; and its inode,
 # so a replaced entry counts as changed.
 type _Seen = tuple[int, int, int, int]
@@ -131,7 +129,7 @@ def _scan(root: Path) -> dict[str, _Seen]:
                         seen[str(relative)] = (kind, 0, 0, status.st_ino)
                         if len(folders) < _MAX_FOLDERS:
                             folders.append(relative)
-                    elif kind in _LISTED:
+                    elif kind in ENTRY_KINDS:
                         seen[str(relative)] = (kind, status.st_size, status.st_mtime_ns, status.st_ino)
                     if len(seen) == _MAX_ENTRIES:
                         return seen
