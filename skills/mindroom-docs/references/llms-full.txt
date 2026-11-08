@@ -5652,7 +5652,7 @@ calls:
 ### Cascaded
 
 Each finalized transcript goes through the agent's normal response path, with the same model resolution, system prompt, instructions, knowledge, skills, tools, requester identity, and history.
-`tool:*` hooks run on the agent's tool calls, but `message:*` and `system:enrich` hooks do not run for call transcripts.
+`tool:*` hooks run on the agent's tool calls, but `message:*`, `system:enrich`, and `turn:*` hooks do not run for call transcripts.
 The profile's `model` changes only the LLM; speech services, prompts, history, memory, and tools stay the same.
 Turn ends are detected locally, and the caller can interrupt the agent by speaking.
 
@@ -17372,6 +17372,7 @@ Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.pl
 Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
 `require_room_reader` makes the same check before it reads anything else of the room, whatever the room's history visibility or join rule, and its `RoomReader` reads members' display names from that same lookup and power levels and direct-message status through a bot it picks the same way, each when the route asks, answering 503 rather than a refusal when a power-level read fails or times out; `is_direct()` is the agents' cached direct-message heuristic, which answers 503 when the bot's direct-message list cannot be read and nothing else marks the room as direct, never an authorization.
 `RoomReader.set_modes()` changes the room's thread and reply mode overrides only for a caller a fresh power-level read shows with room admin power, the bar `!thread_mode` and `!reply_mode` set, answering 403 otherwise and 503 when that read fails, before it writes anything.
+`RoomReader.history()` reads the caller's membership again with the room's history visibility, answering 403 once they have left and 503 when the read fails or times out; the start of their view rests on `origin_server_ts`, which the sending homeserver sets, so it counts only events of the caller's own homeserver, the only one whose users get client sessions, and ends at an invite another homeserver sent.
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
 Routes only administrators may use depend on `require_platform_administrator`, which authenticates the caller the same way and answers 403 unless the session's user, or the person it is a bridge alias of, is in `administrators` in the config the API serves when the request arrives.
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
@@ -18719,7 +18720,7 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
-A route that shows a room's people, checks their power, or reads or changes the room's modes depends on `require_room_reader` instead.
+A route that shows a room's people, checks their power, reads or changes the room's modes, or shows what happened in the room depends on `require_room_reader` instead.
 It checks the caller exactly as `require_room_member` does, with the same answers, before it reads anything else of the room, and then returns a `RoomReader`:
 
 ```python
@@ -18744,14 +18745,36 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
 | `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
+| `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 
 `RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
 `may_send(user_id, event_type)` tells whether that level lets the user send message events of the type, which needs the type's level in the power levels' `events`, else their `events_default`, and in an encrypted room also the level of `m.room.encrypted`, the type messages go out as.
 `RoomPower` also carries the `power_levels` content it read, the room's `creators`, and whether it is `encrypted`.
-Each call to `power()` reads again, and `members` is read anew for each request, so a changed name or power level shows on the next one.
-`power()` and `is_direct()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
+
+`RoomHistory.visibility` is the room's `m.room.history_visibility`, `shared` when it has none.
+`since(recorded_under=None)` returns where the caller's view of the room's history begins, in milliseconds since the epoch, or `None` when they may see all of it: `None` under `shared` or `world_readable`, the invite their current membership came from (else their join) under `invited`, and their join under `joined` or any value Matrix does not define.
+A route that shows records it kept of a room, such as notes, keeps with each one the `visibility` the room had then and passes it as `recorded_under`, and the stricter of it and the visibility now applies, so making a room's history stricter also hides the records kept before, unlike its messages:
+
+```python
+@router.get("/rooms/{room_id}/notes")
+async def notes(room_id: str, reader: Annotated[RoomReader, Depends(require_room_reader)]) -> list[dict[str, object]]:
+    history = await reader.history()
+    return [
+        note
+        for note in NOTES.get(room_id, [])
+        if (since := history.since(note["visibility"])) is None or note["at_ms"] > since
+    ]
+```
+
+The start is that of the caller's current membership: a display name or avatar change keeps it, but leaving and joining again starts it anew.
+An invite sent from another homeserver carries that homeserver's clock, so under `invited` it counts no further than the join.
+The start falls later, so the caller sees less, never more, when MindRoom cannot read back to their join or invite: after about 20 profile changes, or past an event from before its bot joined the room.
+
+Each call to `power()` or `history()` reads again, and `members` is read anew for each request, so a changed name, power level, or history visibility shows on the next one.
+`power()`, `is_direct()`, and `history()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
+`history()` reads the caller's membership again and answers 403 like `require_room_member` once they are no longer joined, and 503 with `Room history read failed; try again.` when its read fails or times out.
 `is_direct()` keeps its answer for a few minutes; it answers 503 with `Direct message lookup failed; try again.` when the bot's direct-message list cannot be read and nothing else marks the room as direct, or when the lookup raises or times out.
 
 `set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
@@ -18784,7 +18807,7 @@ async def change_modes(
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, and one that uses `modes()` or `set_modes()` states `"1.9"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, and one that calls `history()` states `"1.11"`.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
@@ -19280,6 +19303,10 @@ async def keep_prices_private(ctx):
 | `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 | `contact:before_send` | Policy | `ContactBeforeSendContext` | Before an agent's message is sent to a contact | `rewrite()`, `revise()`, `deny()` | 10000 |
+| `turn:started` | Observer | `TurnLifecycleContext` | When an agent or team turn starts running, after its enrichment hooks | None | 2000 |
+| `turn:paused` | Observer | `TurnLifecycleContext` | When the turn's reply pauses for a tool approval | None | 3000 |
+| `turn:resumed` | Observer | `TurnLifecycleContext` | When the decided approval resumes the paused turn | None | 2000 |
+| `turn:ended` | Observer | `TurnLifecycleContext` | Once per turn, after its reply's other hooks, with how it ended | None | 3000 |
 
 Custom events default to 1000 ms.
 
@@ -19291,6 +19318,17 @@ Custom events default to 1000 ms.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, `empty_prompt`, or `contact_turn` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
+- **Turns**: `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` carry the turn's `ctx.turn_id`, so a plugin can keep per-turn state, such as a status message or a timer, from start to end.
+  They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
+  A plugin that uses them states `"mindroom_plugin_api": "1.10"` in its manifest, so an older MindRoom skips it with a clear reason.
+  Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
+  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
+  A reply resumed after an approval whose answer a `message:before_response` hook withholds shows that as a failed approval, and its turn ends `failed`.
+  A reply that [pauses for a tool approval](https://docs.mindroom.chat/tool-approval/#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
+  A call that asks for approval from its [background job](https://docs.mindroom.chat/tools/agent-orchestration/#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
+  A request that runs nothing, such as an empty message, starts no turn.
+  An agent's hooks stop with its `agent:stopped`, so a turn still running when its agent stops for a restart or shutdown, or when MindRoom crashes, fires no `turn:ended`.
+  A turn paused for approval keeps its `turn_id` across a restart and ends when its approval does, also when its agent leaves the room (`cancelled`) or is removed from the config (`failed`).
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -19453,7 +19491,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 ```
 
 - Event names must match `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`, so they need at least one colon.
-- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`, and `contact` are reserved.
+- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`, `contact`, and `turn` are reserved.
 - Custom events run as observers.
 - Only code running during a tool call in the primary MindRoom process can emit them, which includes `tool:before_call` and `tool:after_call` hooks and custom-event hooks triggered by that call.
 - Hooks running outside a tool call and tools running in workers cannot emit them.
@@ -19503,7 +19541,7 @@ All contexts include these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
-| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval runs as a new turn with the same `correlation_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
+| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval keeps its turn's `turn_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
 | `parent_turn_id` | `str \| None` | In a delegated subagent's turn, the `turn_id` of the turn that delegated it; otherwise `None` |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
@@ -19517,6 +19555,7 @@ All contexts include these fields:
 | `BeforeResponseContext`, `FinalResponseTransformContext` | `draft` |
 | `AfterResponseContext` | `result` |
 | `CancelledResponseContext` | `info` with `envelope`, `visible_response_event_id`, `response_kind`, `failure_reason` |
+| `TurnLifecycleContext` | `envelope`, `outcome` (a `TurnOutcome` on `turn:ended`, otherwise `None`) |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
 | `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary` |

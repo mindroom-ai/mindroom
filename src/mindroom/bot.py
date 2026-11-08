@@ -136,6 +136,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
+    from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -1610,6 +1611,14 @@ class AgentBot:
             await self._close_owned_matrix_after_start_failure()
             raise
 
+    def end_paused_turn(self, ended: EndedApproval) -> None:
+        """End the turn of a paused reply whose approval ended, as work this bot's stop waits for before plugins stop."""
+        create_background_task(
+            self._approval_runner.end_paused_turn(ended),
+            name="paused_turn_end",
+            owner=self._runtime_view,
+        )
+
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""
         opened_recovery_client = self.client is None
@@ -1861,6 +1870,8 @@ class AgentBot:
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)
             self._sync_shutdown_budget = shutdown_budget
+        if self._router is not None:
+            self._router.stopping()
         await self._personal_room_lifecycle.cancel_reconciliation(timeout_seconds=shutdown_budget.remaining_seconds())
         background_tasks_completed = await wait_for_background_tasks(
             timeout=shutdown_budget.remaining_seconds(),

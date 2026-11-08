@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -14,12 +14,25 @@ from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.final_delivery import AwaitingApproval, Owed, Suppression, hook_failure_reason, outcome_label
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    Cancelled,
+    Completed,
+    Failed,
+    Owed,
+    Suppression,
+    hook_failure_reason,
+    outcome_label,
+)
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
+    EVENT_TURN_ENDED,
+    EVENT_TURN_PAUSED,
+    EVENT_TURN_RESUMED,
+    EVENT_TURN_STARTED,
     AfterResponseContext,
     BeforeResponseContext,
     CancelledResponseContext,
@@ -28,6 +41,8 @@ from mindroom.hooks import (
     FinalResponseTransformContext,
     ResponseDraft,
     ResponseResult,
+    TurnLifecycleContext,
+    TurnOutcome,
     emit,
     emit_final_response_transform,
     emit_transform,
@@ -41,7 +56,7 @@ from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.control import pending_human_messages_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 
     from structlog.stdlib import BoundLogger
 
@@ -49,7 +64,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import ResponseIdentity
     from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
-    from mindroom.final_delivery import FinalDeliveryOutcome
+    from mindroom.final_delivery import FinalDeliveryOutcome, TurnEnding
     from mindroom.hooks import HookContextSupport, MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
@@ -761,6 +776,48 @@ class ResponseHookService:
         )
         await emit(self.hook_context.registry, EVENT_MESSAGE_CANCELLED, context)
 
+    async def _emit_turn_event(
+        self,
+        event_name: str,
+        identity: ResponseIdentity,
+        outcome: TurnOutcome | None = None,
+    ) -> None:
+        """Run one turn lifecycle event's hooks for the turn ``identity`` names."""
+        if not self.hook_context.registry.has_hooks(event_name):
+            return
+        context = TurnLifecycleContext(
+            **self.hook_context.base_kwargs(event_name, identity.correlation_id),
+            turn_id=identity.turn_id,
+            envelope=identity.response_envelope,
+            outcome=outcome,
+        )
+        # How the turn settled is decided: one cancelled observer of its pause or end does not keep the rest from it.
+        await emit(
+            self.hook_context.registry,
+            event_name,
+            context,
+            continue_on_cancelled=event_name in {EVENT_TURN_PAUSED, EVENT_TURN_ENDED},
+        )
+
+
+def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | Literal["paused"]:
+    """Return how a settled turn ends for its hooks: paused for approval, or the outcome ``turn:ended`` reports.
+
+    A run that failed but answered with its error completed its reply, not its turn; an answer withheld on purpose, or
+    one the outbox still owes, completed it.
+    """
+    match ending:
+        case AwaitingApproval():
+            return "paused"
+        case Cancelled():
+            return TurnOutcome.CANCELLED
+        case Failed():
+            return TurnOutcome.FAILED
+        case Completed() if not run_succeeded:
+            return TurnOutcome.FAILED
+        case _:
+            return TurnOutcome.COMPLETED
+
 
 async def answer_suppression(
     draft: ResponseDraft,
@@ -817,6 +874,42 @@ class ResponseLifecycle:
         self.deps = deps
         self.identity = identity
         self.pipeline_timing = pipeline_timing
+        # How the last finalization settled the turn; None until one ran.
+        self._turn_end: TurnOutcome | Literal["paused"] | None = None
+
+    async def start_turn(self, *, resumed: bool) -> None:
+        """Emit ``turn:started``, or ``turn:resumed`` when the turn's approval resumes it."""
+        await self.deps.response_hooks._emit_turn_event(
+            EVENT_TURN_RESUMED if resumed else EVENT_TURN_STARTED,
+            self.identity,
+        )
+
+    @asynccontextmanager
+    async def turn(self, *, approval_owns_end: Callable[[TurnOutcome], Awaitable[bool]]) -> AsyncIterator[None]:
+        """Run one settlement of the turn, then emit its ``turn:paused``, or its ``turn:ended`` unless an approval owns it.
+
+        How the block's finalization settled the turn decides the event; a block that raised before any finalization
+        ends the turn cancelled for a cancellation and failed for an error. A turn with an approval, paused or resumed,
+        ends when that approval ends, whose settlement emits ``turn:ended``.
+        """
+        cancelled = False
+        try:
+            yield
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            end = self._turn_end or (TurnOutcome.CANCELLED if cancelled else TurnOutcome.FAILED)
+            hooks = self.deps.response_hooks
+            if end == "paused":
+                await hooks._emit_turn_event(EVENT_TURN_PAUSED, self.identity)
+            # With no turn:ended hook there is no end to emit, so no journal read decides who owns it.
+            elif hooks.hook_context.registry.has_hooks(EVENT_TURN_ENDED) and not await approval_owns_end(end):
+                await self.end_turn(end)
+
+    async def end_turn(self, outcome: TurnOutcome) -> None:
+        """Emit the turn's ``turn:ended``."""
+        await self.deps.response_hooks._emit_turn_event(EVENT_TURN_ENDED, self.identity, outcome)
 
     def _raise_if_process_shutdown(self) -> None:
         """Stop best-effort lifecycle work once orderly process shutdown owns cancellation."""
@@ -846,10 +939,12 @@ class ResponseLifecycle:
         post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
+        post_response_outcome = build_post_response_outcome(final_delivery_outcome)
+        self._turn_end = _turn_end_for(final_delivery_outcome.ending, run_succeeded=post_response_outcome.run_succeeded)
         if isinstance(final_delivery_outcome.ending, AwaitingApproval | Owed):
             await self._finalize_suspended(
                 final_delivery_outcome,
-                post_response_outcome=build_post_response_outcome(final_delivery_outcome),
+                post_response_outcome=post_response_outcome,
                 post_response_deps=post_response_deps,
             )
             return final_delivery_outcome
@@ -877,7 +972,7 @@ class ResponseLifecycle:
             self._raise_if_process_shutdown()
         await self._apply_effects_safely(
             final_delivery_outcome=final_delivery_outcome,
-            post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
+            post_response_outcome=post_response_outcome,
             post_response_deps=post_response_deps,
         )
         if self.pipeline_timing is not None:
@@ -913,13 +1008,13 @@ class ResponseLifecycle:
         self,
         *,
         final_delivery_outcome: FinalDeliveryOutcome,
-        post_response_outcome: Callable[[], ResponseOutcome],
+        post_response_outcome: ResponseOutcome,
         post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Apply post-response effects without masking failures before visible delivery."""
         self._raise_if_process_shutdown()
         with self._tolerated_after_visible_delivery(final_delivery_outcome.final_visible_event_id):
-            await apply_post_response_effects(final_delivery_outcome, post_response_outcome(), post_response_deps())
+            await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps())
             self._raise_if_process_shutdown()
 
     @contextmanager

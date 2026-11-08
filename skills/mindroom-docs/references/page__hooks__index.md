@@ -219,6 +219,10 @@ async def keep_prices_private(ctx):
 | `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 | `contact:before_send` | Policy | `ContactBeforeSendContext` | Before an agent's message is sent to a contact | `rewrite()`, `revise()`, `deny()` | 10000 |
+| `turn:started` | Observer | `TurnLifecycleContext` | When an agent or team turn starts running, after its enrichment hooks | None | 2000 |
+| `turn:paused` | Observer | `TurnLifecycleContext` | When the turn's reply pauses for a tool approval | None | 3000 |
+| `turn:resumed` | Observer | `TurnLifecycleContext` | When the decided approval resumes the paused turn | None | 2000 |
+| `turn:ended` | Observer | `TurnLifecycleContext` | Once per turn, after its reply's other hooks, with how it ended | None | 3000 |
 
 Custom events default to 1000 ms.
 
@@ -230,6 +234,17 @@ Custom events default to 1000 ms.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, `empty_prompt`, or `contact_turn` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
+- **Turns**: `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` carry the turn's `ctx.turn_id`, so a plugin can keep per-turn state, such as a status message or a timer, from start to end.
+  They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
+  A plugin that uses them states `"mindroom_plugin_api": "1.10"` in its manifest, so an older MindRoom skips it with a clear reason.
+  Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
+  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
+  A reply resumed after an approval whose answer a `message:before_response` hook withholds shows that as a failed approval, and its turn ends `failed`.
+  A reply that [pauses for a tool approval](https://docs.mindroom.chat/tool-approval/#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
+  A call that asks for approval from its [background job](https://docs.mindroom.chat/tools/agent-orchestration/#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
+  A request that runs nothing, such as an empty message, starts no turn.
+  An agent's hooks stop with its `agent:stopped`, so a turn still running when its agent stops for a restart or shutdown, or when MindRoom crashes, fires no `turn:ended`.
+  A turn paused for approval keeps its `turn_id` across a restart and ends when its approval does, also when its agent leaves the room (`cancelled`) or is removed from the config (`failed`).
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -392,7 +407,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 ```
 
 - Event names must match `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`, so they need at least one colon.
-- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`, and `contact` are reserved.
+- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`, `contact`, and `turn` are reserved.
 - Custom events run as observers.
 - Only code running during a tool call in the primary MindRoom process can emit them, which includes `tool:before_call` and `tool:after_call` hooks and custom-event hooks triggered by that call.
 - Hooks running outside a tool call and tools running in workers cannot emit them.
@@ -442,7 +457,7 @@ All contexts include these fields:
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
 | `correlation_id` | `str` | Unique ID per inbound event |
-| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval runs as a new turn with the same `correlation_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
+| `turn_id` | `str \| None` | ID of the agent or team turn the hook runs in, which all of that turn's hooks and tool calls share and no other turn has; a reply resumed after a tool approval keeps its turn's `turn_id`; `None` outside a turn, including `message:received`, which runs before an entity decides to answer, OpenAI-compatible API requests, and calls on the `realtime` voice call backend |
 | `parent_turn_id` | `str \| None` | In a delegated subagent's turn, the `turn_id` of the turn that delegated it; otherwise `None` |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
@@ -456,6 +471,7 @@ All contexts include these fields:
 | `BeforeResponseContext`, `FinalResponseTransformContext` | `draft` |
 | `AfterResponseContext` | `result` |
 | `CancelledResponseContext` | `info` with `envelope`, `visible_response_event_id`, `response_kind`, `failure_reason` |
+| `TurnLifecycleContext` | `envelope`, `outcome` (a `TurnOutcome` on `turn:ended`, otherwise `None`) |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
 | `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary` |

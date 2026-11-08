@@ -4015,6 +4015,14 @@ depends_on = []
 visibility = ["mindroom.custom_tools.matrix_voice_message"]
 
 [[modules]]
+path = "mindroom.matrix.history_visibility"
+depends_on = []
+visibility = [
+    "mindroom.orchestration.plugin_http_runtime",
+    "mindroom.plugin_http",
+]
+
+[[modules]]
 path = "mindroom.matrix.room_reconciliation"
 depends_on = ["mindroom.matrix.room_power"]
 visibility = [
@@ -7111,6 +7119,10 @@ expose = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TURN_ENDED",
+    "EVENT_TURN_PAUSED",
+    "EVENT_TURN_RESUMED",
+    "EVENT_TURN_STARTED",
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
     "AfterResponseContext",
     "AgentLifecycleContext",
@@ -7157,7 +7169,9 @@ expose = [
     "TranscriptLine",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "TurnIntent",
+    "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
     "build_hook_message_sender",
     "build_hook_matrix_admin",
@@ -8279,6 +8293,7 @@ depends_on = [
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
+    "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_power",
     "mindroom.plugin_context",
     "mindroom.room_modes",
@@ -8316,6 +8331,7 @@ path = "mindroom.orchestration.plugin_http_runtime"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.constants",
+    "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
 ]
