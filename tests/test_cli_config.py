@@ -239,6 +239,43 @@ def test_config_inspect_commands_print_the_config_path_whole_on_one_line(narrow_
     assert "Editor '[missing]-editor' not found." in edit
 
 
+def test_config_validate_prints_configured_names_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validate summary, missing-key warning, and automation issue keep long names and emoji codes as written."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+    agent = "an_agent_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    team = "a_team_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    model = "a:fire:model_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    target = narrow_markup_dir / "config.yaml"
+    config_text = (
+        f'models:\n  "{model}":\n    provider: anthropic\n    id: claude-sonnet-5\n'
+        f'agents:\n  {agent}:\n    display_name: Assistant\n    model: "{model}"\n'
+        f"teams:\n  {team}:\n    display_name: Team\n    role: Helps\n    agents: [{agent}]\n"
+        f'    model: "{model}"\n'
+        f'router:\n  model: "{model}"\n'
+    )
+    target.write_text(config_text, encoding="utf-8")
+
+    valid = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+    target.write_text(
+        config_text.replace(
+            "    display_name: Assistant\n",
+            "    display_name: Assistant\n    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n",
+        ),
+        encoding="utf-8",
+    )
+    rejected = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+
+    assert f"  Agents: 1 ({agent})" in valid
+    assert f"  Teams:  1 ({team})" in valid
+    assert f"  Models: 1 ({model})" in valid
+    assert f"  * anthropic: Set ANTHROPIC_API_KEY (models: {model})" in valid
+    assert f"  agents.{agent}.automations: 'weekly_digest' is not provided by any loaded plugin" in rejected
+
+
 def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
     narrow_markup_dir: Path,
     capsys: pytest.CaptureFixture[str],
