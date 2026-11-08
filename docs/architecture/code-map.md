@@ -600,7 +600,7 @@ Matrix sync callback
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
-| `room_agent_access.py` | The room access check the worker Computer and plugin routes share, each admitted agent's workspace root and file and terminal access for one caller in one room, and where an agent's toolkit runs |
+| `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
 | `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
 | `config/access.py` | Membership access configuration models (responder access, room defaults) |
 | `config/legacy_access.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |

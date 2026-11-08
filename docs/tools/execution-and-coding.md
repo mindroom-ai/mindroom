@@ -190,11 +190,11 @@ EOF
 
 ## [`terminal`]
 
-`terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client.
+`terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client that shows terminals.
 Use it for work people should see or that keeps state between commands, such as a dev server, a REPL, an interactive program, or a long build.
 
 - `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
-- `terminal_run(session_id, command, timeout_s)` types one command line, waits up to `timeout_s` seconds (default 30) for the shell's next prompt, and returns the output and exit status; a command still running then keeps running. It types only while the shell waits at an empty prompt.
+- `terminal_run(session_id, command, timeout_s)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30) for its next prompt, and returns the output and exit status; a command still running then keeps running.
 - `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command.
 - `terminal_read(session_id)` returns the terminal's recent output as text.
 - `terminal_list()` lists the workspace's terminals, including the ones people opened.
@@ -202,6 +202,8 @@ Use it for work people should see or that keeps state between commands, such as 
 An agent has terminals only when it also has [`shell`] with `run_shell_command` and that shell runs in a worker; otherwise it is offered none of these functions.
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
+People who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](../deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
+The shell expands no `!` history and reads no history file or key bindings, so `!!` is typed as written.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
 The [approval rules](../tool-approval.md) for `run_shell_command` also judge what the agent types.

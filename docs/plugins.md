@@ -1289,12 +1289,12 @@ async def feed(websocket: WebSocket) -> None:
 ```
 
 A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest, and one that passes `admit` states `"1.14"`.
+Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 Inside the block, `await stream_room_reader(websocket, user, room_id)` returns the `RoomReader` a route gets from `require_room_reader`, for the user `client_stream` yields.
-It reads the room's members again, answering 403 once the user left and 503 when membership is unavailable, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment, or 409 when MindRoom serves another runtime.
+It answers 409 when MindRoom now serves another runtime, then checks membership again as `require_room_member` does, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment.
 A stream that keeps checking what its caller may do, such as whether they may still type, calls it again for each check.
 A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.16"` in its manifest.
-Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 ## Plugin context
 
