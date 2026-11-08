@@ -182,12 +182,19 @@ async def test_a_judge_that_fails_cannot_refuse_a_call_no_judged_rule_can_ask_ab
 ) -> None:
     """When no shell call could ever ask, the judge is not consulted, so its failure leaves the call approved."""
     config, runtime_paths = _config(tmp_path, *rules)
-    alias = ApprovalAlias(judged_as=_SHELL, judge=timed_out_judge)
+    consulted: list[Mapping[str, object]] = []
+
+    def failing_judge(arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]] | None:
+        consulted.append(arguments)
+        return timed_out_judge(arguments)
+
+    alias = ApprovalAlias(judged_as=_SHELL, judge=failing_judge)
 
     assert await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias) == (
         False,
         config.tool_approval.timeout_days * 24 * 60 * 60,
     )
+    assert consulted == []
 
 
 @pytest.mark.asyncio
