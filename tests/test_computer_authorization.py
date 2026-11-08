@@ -125,7 +125,7 @@ async def test_live_membership_policy_and_canonical_browser_scope(
         runtime_paths=paths,
         client=client,
         memberships=memberships,
-        refresh_memberships=lambda _stale: memberships.refresh(config, paths, client),
+        refresh_memberships=lambda: memberships.refresh(config, paths, client),
     )
     if denial:
         with pytest.raises(ComputerError) as error:
@@ -180,7 +180,7 @@ async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: P
             runtime_paths=paths,
             client=client,
             memberships=memberships,
-            refresh_memberships=lambda _stale: memberships.refresh(config, paths, client),
+            refresh_memberships=lambda: memberships.refresh(config, paths, client),
         )
     assert error.value.status_code == 503
     assert "refresh-secret" not in str(logs)

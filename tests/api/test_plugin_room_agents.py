@@ -381,17 +381,23 @@ async def test_pending_membership_policy_answers_503_until_matrix_confirms_it(tm
 
 @pytest.mark.asyncio
 async def test_a_member_who_joined_after_the_last_refresh_is_admitted_after_one_refresh(tmp_path: Path) -> None:
-    """The router applies joins from its own sync, which can trail the room's live roster, so one refresh catches up."""
+    """The router applies joins from its own sync, which can trail the room's live roster, so one refresh catches up.
+
+    That refresh reads only the caller's room again, however many rooms the router is in.
+    """
     room = _room(
         tmp_path,
         {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"current_room_members": True})},
     )
+    others = [f"!other{index}:localhost" for index in range(20)]
+    room.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM, *others])
     assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
     assert room.refreshes() == 1
 
     room.client.joined_members.return_value = joined_members_response(ROOM, ALICE, BOB, CAROL, DAVE, *room.ids.values())
+    reads = room.client.joined_members.await_count
     assert [workspace.name for workspace in await room.agents(DAVE)] == ["helper"]
-    assert room.refreshes() == 2
+    assert (room.refreshes(), room.client.joined_members.await_count - reads) == (2, 2)
 
     for _ in range(2):
         assert (await room.agent(DAVE, room.ids["helper"])).name == "helper"
@@ -570,6 +576,24 @@ async def test_requests_refresh_grants_only_when_they_need_it_and_share_one_refr
 
 
 @pytest.mark.asyncio
+async def test_a_member_who_joined_is_admitted_while_another_grant_room_is_unresolved(tmp_path: Path) -> None:
+    """A refresh that keeps the ready rooms while another stays unresolved still reads the joined caller's room again."""
+    agents = {
+        "helper": AgentConfig(display_name="Helper", tools=["file"], access={"current_room_members": True}),
+        "lobbyist": AgentConfig(display_name="Lobbyist", tools=["file"], access={"members_of_rooms": ["lobby"]}),
+    }
+    room = _Room(Config(agents=agents, rooms={"lobby": {}}), test_runtime_paths(tmp_path), ("helper",))
+    assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
+
+    room.client.joined_members.return_value = joined_members_response(ROOM, ALICE, BOB, CAROL, DAVE, *room.ids.values())
+    reads = room.client.joined_members.await_count
+    assert [workspace.name for workspace in await room.agents(DAVE)] == ["helper"]
+
+    # Dave's own roster read, and one read of the room for the grants; the unresolved room has nothing to read.
+    assert room.client.joined_members.await_count - reads == 2
+
+
+@pytest.mark.asyncio
 async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp_path: Path) -> None:
     """A refresh already reading the room may predate a join, so grants that still lack the joined caller refresh again."""
     room = _room(
@@ -590,13 +614,14 @@ async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp
             return before
         return after
 
-    checks: list[bool] = []
+    checks = 0
     joining = asyncio.Event()
 
-    async def refresh_for_check(stale: bool) -> None:
-        checks.append(stale)
+    async def refresh_for_check() -> None:
+        nonlocal checks
+        checks += 1
         joining.set()
-        await room.runtime.refresh_agent_reply_memberships_when_needed(stale)
+        await room.runtime.refresh_agent_reply_memberships_when_needed()
 
     bind_embedded_runtime(
         room.app,
@@ -618,7 +643,8 @@ async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp
 
     assert [workspace.name for workspace in await listing] == ["helper"]
     await frame
-    assert checks == [False, True]
+    # Dave's check joined the refresh in flight, then read the room again.
+    assert checks == 2
     assert room.refreshes() == 3
 
 

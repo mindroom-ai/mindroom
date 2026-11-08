@@ -123,16 +123,19 @@ async def _bring_memberships_current(
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
-    refresh_memberships: Callable[[bool], Awaitable[None]],
+    refresh_memberships: Callable[[], Awaitable[None]],
 ) -> None:
-    """Refresh ``memberships`` when they need it or lack ``requester_id``, whom the room's live roster showed joined.
+    """Refresh ``memberships`` when they need it, and read the room again while they lack ``requester_id``.
 
-    A refresh already in flight may have read the room before the requester joined, so grants that still lack them
-    after it get one more.
+    The room's live roster just showed the requester joined, and the router applies a join from its own sync, which can
+    trail that roster. A refresh already in flight may have read the room before the join, so one more follows it.
     """
-    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
-    if memberships.misses_member(requester_id, room_id, config, runtime_paths):
-        await refresh_memberships(True)
+    for _ in range(2):
+        if memberships.misses_member(requester_id, room_id, config, runtime_paths):
+            memberships.reread_room(room_id)
+        await refresh_memberships()
+        if not memberships.misses_member(requester_id, room_id, config, runtime_paths):
+            return
 
 
 async def admit_room_agent(
@@ -144,13 +147,12 @@ async def admit_room_agent(
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
-    refresh_memberships: Callable[[bool], Awaitable[None]],
+    refresh_memberships: Callable[[], Awaitable[None]],
 ) -> str:
     """Return the name of the agent ``agent_user_id`` names once ``requester_id`` may use it in ``room_id``.
 
     ``joined_members`` returns the room's joined users; the check awaits it only once the agent is found.
-    ``refresh_memberships`` refreshes ``memberships`` when they need it, or when its argument says they are stale, as
-    they are while they lack a requester the room's live roster shows joined.
+    ``refresh_memberships`` refreshes ``memberships`` through the runtime's one refresh when they need it.
     """
     try:
         identities = entity_identity_registry(config, runtime_paths)
@@ -176,7 +178,7 @@ async def _admitted_agents(
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
-    refresh_memberships: Callable[[bool], Awaitable[None]],
+    refresh_memberships: Callable[[], Awaitable[None]],
 ) -> list[tuple[str, str]]:
     """Return each agent joined to the room that ``requester_id`` may use there, by name and user ID, in config order.
 

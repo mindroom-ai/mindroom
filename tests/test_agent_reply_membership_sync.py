@@ -441,11 +441,11 @@ async def test_the_routers_stop_cancels_its_slow_refresh() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_sync_frame_never_waits_on_a_refresh_only_an_access_check_needed() -> None:
-    """An access check may refresh grants the index holds current; a frame that needs no refresh goes on at once."""
+async def test_a_sync_frame_never_waits_on_a_refresh_it_does_not_need() -> None:
+    """A refresh an access check started to read one room again is no reason for the router's frame to wait."""
     config = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.return_value = False
+    memberships.needs_refresh.return_value = True
     membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
     started = asyncio.Event()
     release = asyncio.Event()
@@ -454,10 +454,12 @@ async def test_a_sync_frame_never_waits_on_a_refresh_only_an_access_check_needed
     async def held_refresh() -> None:
         nonlocal refreshes
         refreshes += 1
+        # The refresh took the room to read again, so grants need nothing more while it queries Matrix.
+        memberships.needs_refresh.return_value = False
         started.set()
         await release.wait()
 
-    check = asyncio.create_task(membership_sync.refresh_for_access_check(config, held_refresh, True))
+    check = asyncio.create_task(membership_sync.refresh_for_access_check(config, held_refresh))
     await started.wait()
     async with asyncio.timeout(1):
         await membership_sync.refresh_if_needed(config, held_refresh)
@@ -481,6 +483,6 @@ async def test_backoff_stays_bounded_however_many_refreshes_fail() -> None:
 
     with capture_logs() as logs:
         for _ in range(1100):
-            await membership_sync.refresh_for_access_check(config, unresolved, False)
+            await membership_sync.refresh_for_access_check(config, unresolved)
 
     assert [log for log in logs if log["log_level"] == "error"] == []

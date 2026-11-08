@@ -108,6 +108,8 @@ class AgentReplyMembershipIndex:
         self._refresh_transitions: list[_LiveTransition] | None = None
         # (room ID, requester) to when a denial first waited for the router's view of that join.
         self._join_lag_started: dict[tuple[str, str], float] = {}
+        # Rooms whose ready rows trail a live roster an access check read, which the next refresh reads again.
+        self._reread_room_ids: set[str] = set()
         self._clock = clock
 
     @property
@@ -126,12 +128,13 @@ class AgentReplyMembershipIndex:
         await self._published.wait()
 
     def needs_refresh(self, config: Config) -> bool:
-        """Return whether room-backed grants need an authoritative rebuild."""
+        """Return whether room-backed grants need an authoritative rebuild, or a room needs reading again."""
         if not _referenced_room_keys(config) and not _requires_current_room_memberships(config):
             return False
         return (
             self._snapshot.policy_signature != _agent_reply_membership_policy_signature(config)
             or self._snapshot.refresh_required
+            or bool(self._reread_room_ids)
         )
 
     def is_allowed(
@@ -186,6 +189,10 @@ class AgentReplyMembershipIndex:
             and any(room.ready and room.room_id == room_id for room in snapshot.rooms)
             and not self.is_current_room_member(sender_id, room_id, config, runtime_paths)
         )
+
+    def reread_room(self, room_id: str) -> None:
+        """Have the next refresh read one room again, keeping the other ready rooms."""
+        self._reread_room_ids.add(room_id)
 
     def awaits_router_join(
         self,
@@ -370,11 +377,13 @@ class AgentReplyMembershipIndex:
             self.invalidate(config, reason="policy_changed_before_refresh")
         async with self._refresh_lock:
             expected_epoch = self._epoch
+            reread, self._reread_room_ids = self._reread_room_ids, set()
             previous_rooms = (
-                self._snapshot.rooms
+                tuple(room for room in self._snapshot.rooms if room.room_id not in reread)
                 if self._snapshot.policy_signature == signature
-                and self._snapshot.refresh_required
-                and any(not room.ready for room in self._snapshot.rooms)
+                and (
+                    reread or (self._snapshot.refresh_required and any(not room.ready for room in self._snapshot.rooms))
+                )
                 else ()
             )
             self._refresh_transitions = transitions = []

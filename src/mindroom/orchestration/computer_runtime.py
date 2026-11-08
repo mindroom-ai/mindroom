@@ -40,7 +40,7 @@ async def _authorize_computer(
     runtime_paths: RuntimePaths,
     client: nio.AsyncClient,
     memberships: AgentReplyMembershipIndex,
-    refresh_memberships: Callable[[bool], Awaitable[None]],
+    refresh_memberships: Callable[[], Awaitable[None]],
 ) -> ComputerTarget:
     """Require exact live room membership, responder access, and ordinary browser routing."""
 
@@ -135,7 +135,7 @@ class ComputerRuntimeCoordinator:
 
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
-    refresh_agent_reply_memberships_when_needed: Callable[[bool], Awaitable[None]]
+    refresh_agent_reply_memberships_when_needed: Callable[[], Awaitable[None]]
     api_enabled: bool = True
 
     def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:

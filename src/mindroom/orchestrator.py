@@ -1071,13 +1071,13 @@ class _MultiAgentOrchestrator:
         self.turn_recovery.schedule()
         await self.agent_reply_membership_sync.apply_grant_change()
 
-    async def refresh_agent_reply_memberships_when_needed(self, stale: bool) -> None:
-        """Refresh room-backed reply grants as above when they need it or are ``stale``, for an access check.
+    async def refresh_agent_reply_memberships_when_needed(self) -> None:
+        """Refresh room-backed reply grants as above when they need it, for an access check.
 
         A refresh in flight serves instead of another, so every refresh runs once and with the runtime's follow-up.
         """
         membership_sync = self.agent_reply_membership_sync
-        await membership_sync.refresh_for_access_check(self.config, self.refresh_agent_reply_memberships, stale)
+        await membership_sync.refresh_for_access_check(self.config, self.refresh_agent_reply_memberships)
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""

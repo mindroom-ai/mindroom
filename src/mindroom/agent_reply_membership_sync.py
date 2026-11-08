@@ -124,24 +124,19 @@ class AgentReplyMembershipSync:
         homeserver and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
         A stopping router cancels it at once, and its owner's shutdown drain, the router's, covers one started later.
         """
-        task = self._refresh_task_when_needed(config, refresh, owner=owner, stale=False, after_backoff=True)
+        task = self._refresh_task_when_needed(config, refresh, owner=owner, after_backoff=True)
         if task is not None:
             with suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(task), 10)
 
-    async def refresh_for_access_check(
-        self,
-        config: Config,
-        refresh: Callable[[], Awaitable[None]],
-        stale: bool,
-    ) -> None:
-        """Refresh at once when grants need it or are ``stale``, even during backoff, and wait until the refresh ends.
+    async def refresh_for_access_check(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
+        """Refresh at once when grants need it, even during backoff, and wait until the refresh ends.
 
         Access checks outside the router's sync call this, so they refresh only then, share a refresh in flight with
         the router's sync, and update its backoff. Waiting never cancels the refresh, and one that raises or is
         cancelled leaves the grants as they were.
         """
-        task = self._refresh_task_when_needed(config, refresh, owner=None, stale=stale, after_backoff=False)
+        task = self._refresh_task_when_needed(config, refresh, owner=None, after_backoff=False)
         if task is not None:
             await asyncio.wait([task])
 
@@ -151,13 +146,12 @@ class AgentReplyMembershipSync:
         refresh: Callable[[], Awaitable[None]],
         *,
         owner: object | None,
-        stale: bool,
         after_backoff: bool,
     ) -> asyncio.Task[None] | None:
-        """When grants are ``stale`` or need it, return the refresh in flight, else start one if ``after_backoff`` allows."""
+        """When grants need it, return the refresh in flight, else start one if ``after_backoff`` allows."""
         # A sync gap cannot invalidate explicit-user grants. Do not turn a
         # no-op rebuild into downstream room and call reconciliation scans.
-        if not (stale or self._memberships.needs_refresh(config)):
+        if not self._memberships.needs_refresh(config):
             return None
         if self._refresh_task is None or self._refresh_task.done():
             if after_backoff and time.monotonic() < self._refresh_retry_at:
