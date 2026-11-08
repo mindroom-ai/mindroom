@@ -36,7 +36,7 @@ from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
     from pathlib import Path
 
     from fastapi.requests import HTTPConnection
@@ -259,25 +259,33 @@ def _toolkit_host(
     return "scratch_worker"
 
 
-def _offered_functions(metadata: ToolMetadata, settings: Mapping[str, object]) -> frozenset[str] | None:
-    """Return the toolkit's functions its settings leave on: Agno's ``all`` or ``enable_<function>``, then filters.
+def _offered_functions(
+    metadata: ToolMetadata,
+    settings: Mapping[str, object],
+) -> tuple[frozenset[str] | None, frozenset[str]]:
+    """Return the toolkit's functions its settings leave on, and its writing functions they leave on.
 
-    None when the toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them.
+    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The first is None when the toolkit
+    declares no function names, as a plugin or MCP server may, and no allowlist names them.
     """
     values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
     include, exclude = (
         normalize_string_array_override(values.get(name), preserve_empty_list=True)
         for name in ("include_tools", "exclude_tools")
     )
+
+    def offered(names: Iterable[str]) -> frozenset[str]:
+        return frozenset(
+            function
+            for function in names
+            if (values.get("all") or values.get(f"enable_{function}", True))
+            and tool_name_allowed(function, include=include, exclude=exclude)
+        )
+
     available = metadata.function_names or include
-    if available is None:
-        return None
-    return frozenset(
-        function
-        for function in available
-        if (values.get("all") or values.get(f"enable_{function}", True))
-        and tool_name_allowed(function, include=include, exclude=exclude)
-    )
+    functions = None if available is None else offered(available)
+    writers = offered(metadata.workspace_writers)
+    return functions, writers if functions is None else writers & functions
 
 
 def _workspace(
@@ -323,15 +331,13 @@ def _workspace(
             tool_config_overrides=entry.tool_config_overrides,
         )
         # A toolkit whose functions only its build could tell offers what it builds.
-        functions = _offered_functions(metadata, settings.values)
+        functions, writers = _offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
-        # The functions it names as writing, any of them while its build alone could tell, else any that runs code; but
-        # on a runner that sees only its own storage, it writes there, not in the workspace.
+        # One of the functions it names as writing, else any that runs code; but on a runner that sees only its own
+        # storage, it writes there, not in the workspace.
         path_toolkits[entry.name] = (
-            functions is None or not functions.isdisjoint(metadata.workspace_writers)
-            if metadata.workspace_writers
-            else metadata.executes_code
+            bool(writers) if metadata.workspace_writers else metadata.executes_code
         ) and _toolkit_host(agent_tools, entry.name, runtime_paths) != "scratch_worker"
     # A terminal runs only beside a worker's shell commands (its only function); people type in it where that worker
     # sees the workspace.

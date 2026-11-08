@@ -427,6 +427,8 @@ def notes_tools() -> type[NotesTools]:
         ("AGENT", False, ("save_note",), {"notes": {"include_tools": ["save_note"]}}, "write"),
         ("AGENT", False, ("save_note",), {"notes": {"include_tools": ["read_note"]}}, "read"),
         ("NONE", True, ("save_note",), {"notes": {"include_tools": ["read_note"]}}, "read"),
+        ("AGENT", False, ("save_note",), {"notes": {"exclude_tools": ["save_note"]}}, "read"),
+        ("NONE", True, ("save_note",), {"notes": {"exclude_tools": ["save_note"]}}, "read"),
     ],
 )
 @pytest.mark.asyncio
