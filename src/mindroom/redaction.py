@@ -81,6 +81,7 @@ _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(rf"[{_VALUE_TERMINATORS}]")
 # A value assigned in a command's arguments, such as `export API_KEY=value && make` or `--token=value`, is one shell
 # word: it ends at whitespace, a shell operator, or where other values end, and a backslash escapes the next character,
 # a line break included.
+_ASSIGNING_COMMAND_PATTERN = re.compile(r"(?<![\w-])(?:export|env)\Z")
 _SHELL_WORD_PATTERN = re.compile(rf"(?:[^\s\\;|<>({_VALUE_TERMINATORS}]|\\(?:\r\n|[\s\S]))*+")
 # A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
 _QUOTED_VALUE_PATTERNS = {
@@ -485,18 +486,21 @@ def _assignment_value_span(
 
 
 def _is_shell_argument_assignment(value: str, prefix_match: re.Match[str]) -> bool:
-    """Return whether an assignment is a command's argument, such as ``export API_KEY=…`` or ``--token=…``.
+    """Return whether an unquoted ``=`` assignment is a command's argument: an option, or a variable after a command word.
 
-    It is assigned with ``=``, to an upper-case environment variable or an option, unquoted, after another word on
-    its line. An assignment that starts its line, as in ``.env`` files or ``env`` output, can hold spaces.
+    An option such as ``--token=…`` follows another word on its line, and a variable follows ``export`` or ``env``.
+    Elsewhere, as in ``.env`` files, ``env`` output, and numbered listings such as ``grep -n``, a value can hold spaces.
     """
-    key = prefix_match.group("key")
-    if value[prefix_match.end() - 1] != "=" or prefix_match.group("open") or not (key.startswith("-") or key.isupper()):
+    if value[prefix_match.end() - 1] != "=" or prefix_match.group("open"):
         return False
     before = prefix_match.start()
     while before > 0 and value[before - 1] in " \t":
         before -= 1
-    return before > 0 and value[before - 1] not in "\r\n"
+    if before == prefix_match.start() or before == 0 or value[before - 1] in "\r\n":
+        return False
+    if prefix_match.group("key").startswith("-"):
+        return True
+    return _ASSIGNING_COMMAND_PATTERN.search(value, max(before - len("export"), 0), before) is not None
 
 
 def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> str:

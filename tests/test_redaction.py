@@ -912,6 +912,9 @@ def test_a_value_assigned_in_a_shell_command_ends_with_its_shell_word(command: s
         ("AUTHORIZATION=Basic dXNlcjpwdw==", f"AUTHORIZATION={REDACTED}"),
         ('"Env": ["DB_PASSWORD=correct horse battery"]', f'"Env": ["DB_PASSWORD={REDACTED}"]'),
         ('psql "host=db password=correct horse"', f'psql "host=db password={REDACTED}"'),
+        ("12:AUTHORIZATION=Basic dXNlcjpwdw==", f"12:AUTHORIZATION={REDACTED}"),
+        ("     1\tDB_PASSWORD=correct horse battery", f"     1\tDB_PASSWORD={REDACTED}"),
+        ("2026-11-08T12:00:00Z PASSWORD=correct horse battery", f"2026-11-08T12:00:00Z PASSWORD={REDACTED}"),
     ],
 )
 def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected: str) -> None:
@@ -992,7 +995,7 @@ def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote
 
 @pytest.mark.parametrize(
     "unit",
-    ['grep "token=" .\n', "token:\n", "x TOKEN=a ", "mysql -p", "curl -u a:b;", 'password="\n', "echo sk-a\\\n"],
+    ['grep "token=" .\n', "token:\n", "export TOKEN=a ", "mysql -p", "curl -u a:b;", 'password="\n', "echo sk-a\\\n"],
     ids=["closing-quotes", "line-ends", "shell-words", "mysql", "curl", "unclosed-quotes", "continuations"],
 )
 def test_redaction_stays_linear_over_many_command_patterns(unit: str) -> None:
