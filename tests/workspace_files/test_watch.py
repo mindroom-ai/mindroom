@@ -356,3 +356,14 @@ async def test_a_file_rewritten_in_place_with_the_same_size_is_reported(tmp_path
             file.write("draft-2")
 
         assert "notes.md" in await _until(next_changes, "notes.md")
+
+
+def test_a_scan_takes_in_at_most_the_cap_s_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past the entry cap a scan stops, so one huge folder can't hold the scanner forever."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(10):
+        (root / f"f{index}.txt").write_text("x")
+    monkeypatch.setattr(watch, "_MAX_ENTRIES", 4)
+
+    assert len(watch._scan(root)) == 4

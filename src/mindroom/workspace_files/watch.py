@@ -13,7 +13,6 @@ outside the workspace is ever watched or reported, and a change between two scan
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import stat
 from contextlib import asynccontextmanager, suppress
@@ -50,24 +49,20 @@ type _Seen = tuple[int, int, int, int]
 
 @dataclass(eq=False)
 class _Follower:
-    """One stream's changes not sent yet."""
+    """One stream's changes not sent yet; scans, at least ``_INTERVAL_SECONDS`` apart, add them."""
 
     pending: set[str] = field(default_factory=set)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
-    sent_at: float = -math.inf
 
     def add(self, paths: set[str]) -> None:
         self.pending |= paths
         self.ready.set()
 
     async def next(self) -> list[str]:
-        """Wait for changes, at least ``_INTERVAL_SECONDS`` after the last batch, and return them sorted."""
-        loop = asyncio.get_running_loop()
+        """Wait for changes and return them sorted."""
         await self.ready.wait()
-        await asyncio.sleep(max(0.0, self.sent_at + _INTERVAL_SECONDS - loop.time()))
         self.ready.clear()
         paths, self.pending = sorted(self.pending), set()
-        self.sent_at = loop.time()
         return paths
 
 
