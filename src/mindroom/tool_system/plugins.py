@@ -648,29 +648,30 @@ def _execute_candidate_plugin(
 
     Afterwards the namespace is removed, with any module from the plugin's root they imported by absolute name, so
     the plugin's next load imports and registers those again. Modules under the canonical prefix that another thread
-    imports meanwhile stay.
+    imports meanwhile stay. The check holds the plugin lock, so no live load imports from the plugin's root meanwhile.
     """
     prefix = f"{CANDIDATE_PLUGIN_MODULE_PREFIX}{next(_CANDIDATE_NAMESPACES)}_"
-    loaded_before = set(sys.modules)
-    try:
-        # A file that serves several kinds executes once, and each kind it serves is checked on that module.
-        for kind, module_path in (
-            ("tools", plugin.tools_module_path),
-            ("hooks", plugin.hooks_module_path),
-            ("oauth", plugin.oauth_module_path),
-        ):
-            entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
-            if entry is None:
-                continue
-            if kind == "tools":
-                registrations.update(entry.registrations)
-            elif kind == "oauth":
-                _oauth_provider_callback(entry.module)
-            completed.append(kind)
-    finally:
-        candidate_modules = {**_modules_named((), prefix), **_imported_from_root(plugin.root, loaded_before)}
-        _remove_modules(candidate_modules)
-        _cancel_module_tasks(candidate_modules.values())
+    with _PLUGIN_LOCK:
+        loaded_before = set(sys.modules)
+        try:
+            # A file that serves several kinds executes once, and each kind it serves is checked on that module.
+            for kind, module_path in (
+                ("tools", plugin.tools_module_path),
+                ("hooks", plugin.hooks_module_path),
+                ("oauth", plugin.oauth_module_path),
+            ):
+                entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
+                if entry is None:
+                    continue
+                if kind == "tools":
+                    registrations.update(entry.registrations)
+                elif kind == "oauth":
+                    _oauth_provider_callback(entry.module)
+                completed.append(kind)
+        finally:
+            candidate_modules = {**_modules_named((), prefix), **_imported_from_root(plugin.root, loaded_before)}
+            _remove_modules(candidate_modules)
+            _cancel_module_tasks(candidate_modules.values())
 
 
 def _module_within(module: ModuleType, root: Path) -> bool:

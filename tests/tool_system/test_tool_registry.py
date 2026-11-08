@@ -16,21 +16,26 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.plugins import candidate_tool_registry, config_plugins
+from mindroom.tool_system.plugins import candidate_tool_registry, config_plugins, refresh_plugins
 from tests.conftest import runtime_paths_for
 from tests.test_plugins import (
     _bind_runtime_paths,
     _bump_mtime,
+    _forgetting_modules,
     _publish,
     _tool_plugin_source,
     _write_broken_tool_plugin,
+    _write_package_helper_plugin,
     _write_working_tool_plugin,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.tool_system.plugin_imports import SkippedPlugin
     from mindroom.tool_system.plugins import ConfigPlugins
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 def test_a_config_without_a_plugin_leaves_another_config_s_plugin_tools_buildable(tmp_path: Path) -> None:
@@ -256,3 +261,83 @@ def test_validating_a_candidate_never_disturbs_live_modules_another_thread_impor
     assert sys.modules[helpers_name] is live_helpers
     assert not skipped
     assert "p_tool" in tools
+
+
+class _SignalingLock:
+    """Wrap the plugin lock, setting ``waiting`` whenever a thread must wait for another thread to release it."""
+
+    def __init__(self, lock: threading.RLock, waiting: threading.Event) -> None:
+        self._lock = lock
+        self._waiting = waiting
+
+    def __enter__(self) -> None:
+        if not self._lock.acquire(blocking=False):
+            self._waiting.set()
+            self._lock.acquire()
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self._lock.release()
+
+
+@pytest.mark.parametrize("first", ["check", "load"])
+def test_a_candidate_check_and_a_live_load_of_a_package_plugin_never_interleave(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+) -> None:
+    """Whichever starts first, the live load keeps the helper module the plugin's tools module imports by absolute name.
+
+    A check that runs first also reports the tools that helper module registers.
+    """
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        "import sys\nsys.modules['mindroom_test_candidate_probe'].entered()\n" + tools_path.read_text(),
+        encoding="utf-8",
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    # Set once the second operation either finished or waits for the first one to finish.
+    settled = threading.Event()
+
+    def block_the_first_execution() -> None:
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+
+    probe = ModuleType("mindroom_test_candidate_probe")
+    probe.entered = lambda: None
+    monkeypatch.setitem(sys.modules, probe.__name__, probe)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+    probe.entered = block_the_first_execution
+    monkeypatch.setattr(plugins_module, "_PLUGIN_LOCK", _SignalingLock(plugins_module._PLUGIN_LOCK, settled))
+    checks: list[tuple[ToolRegistry, tuple[SkippedPlugin, ...]]] = []
+    operations: dict[str, Callable[[], object]] = {
+        "check": lambda: checks.append(candidate_tool_registry(config, runtime_paths)),
+        "load": lambda: refresh_plugins(config, runtime_paths),
+    }
+    [second] = set(operations) - {first}
+
+    def run_second() -> None:
+        operations[second]()
+        settled.set()
+
+    with _forgetting_modules("demo_pkg"), ThreadPoolExecutor(max_workers=2) as pool:
+        running = {first: pool.submit(operations[first])}
+        assert entered.wait(10)
+        running[second] = pool.submit(run_second)
+        assert settled.wait(10)
+        release.set()
+        for future in running.values():
+            future.result(timeout=10)
+        installed_helpers = sys.modules.get("demo_pkg.helpers")
+
+    [(tools, skipped)] = checks
+    assert installed_helpers is plugins_module._PUBLISHED.modules["demo_pkg.helpers"]
+    assert not skipped
+    if first == "check":
+        # A check that runs second executes the plugin against the helper module the load installed, registering nothing.
+        assert "helper_tool" in tools
