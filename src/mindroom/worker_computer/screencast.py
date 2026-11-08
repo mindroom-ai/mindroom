@@ -33,6 +33,9 @@ _POLL_SECONDS = 1.0
 # A page its script froze never answers input, so input, and releasing what a leaving viewer holds, give up after this.
 # So does a navigation whose server has not answered yet, which keeps loading after that.
 _INPUT_SECONDS = 2.0
+# Checking a navigate address can wait out a host name lookup's retry, so it gives up later than input, but it still
+# gives up: the viewer's later messages, and the stream noticing that the viewer left, wait for it.
+_LOOKUP_SECONDS = 10.0
 _JPEG_QUALITY = 80
 # Chromium scales frames down to fit, which keeps them well below MAX_WORKER_STREAM_MESSAGE_BYTES.
 _MAX_FRAME_WIDTH = 1920
@@ -294,8 +297,6 @@ class ScreencastViewer:
         cdp = self._cdp
         if cdp is None or not self._controls():
             return
-        # Checking an address can take a host name lookup, which is not the page's to answer, so it waits as the
-        # agent's own navigate does instead of giving up like input.
         if isinstance(message, _Navigate) and not await self._allows_address(message.url):
             return
         # The page may close under this input, and the next poll moves to the agent's next page.
@@ -367,15 +368,16 @@ class ScreencastViewer:
         if url == "about:blank":
             return True
         try:
-            # The agent's browser in a Computer reaches the worker's own loopback; its page's request guard and
-            # destination relay still check every request and redirect.
-            await run_browser_tool_url_check(
-                validate_server_fetch_url,
-                url,
-                allow_private_networks=self._allows_private_networks(),
-                allow_loopback=True,
-            )
-        except ServerFetchUrlError:
+            async with asyncio.timeout(_LOOKUP_SECONDS):
+                # The agent's browser in a Computer reaches the worker's own loopback; its page's request guard and
+                # destination relay still check every request and redirect.
+                await run_browser_tool_url_check(
+                    validate_server_fetch_url,
+                    url,
+                    allow_private_networks=self._allows_private_networks(),
+                    allow_loopback=True,
+                )
+        except (ServerFetchUrlError, TimeoutError):
             self._report("This address cannot be opened.")
             return False
         return True

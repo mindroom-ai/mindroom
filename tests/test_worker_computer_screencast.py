@@ -544,12 +544,16 @@ async def test_viewer_is_told_the_loading_state_of_the_page_it_shows_only(monkey
 
 
 @pytest.mark.asyncio
-async def test_navigate_waits_for_a_slow_address_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Looking up an address is not the page's to answer, so a lookup slower than the input bound still navigates."""
+async def test_navigate_waits_longer_for_an_address_lookup_than_for_input_but_not_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup slower than the input bound still navigates; one slower than its own bound answers an error."""
     monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
+    monkeypatch.setattr("mindroom.worker_computer.screencast._LOOKUP_SECONDS", 1.0)
+    lookup_seconds = {"https://slow.example/": 0.3, "https://stalled.example/": 3.0}
 
     def slow_lookup(url: str, **_policy: bool) -> str:
-        time.sleep(0.3)
+        time.sleep(lookup_seconds[url])
         return url
 
     monkeypatch.setattr("mindroom.worker_computer.screencast.validate_server_fetch_url", slow_lookup)
@@ -559,7 +563,10 @@ async def test_navigate_waits_for_a_slow_address_lookup(monkeypatch: pytest.Monk
     async with _watching(viewer):
         await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
         await viewer.receive(json.dumps({"type": "navigate", "url": "https://slow.example/"}))
-    assert ("Page.navigate", {"url": "https://slow.example/"}) in fake.session.sent
+        await asyncio.wait_for(viewer.receive(json.dumps({"type": "navigate", "url": "https://stalled.example/"})), 2)
+        assert await sent.message("error") == _REFUSED
+    navigated = [params for name, params in fake.session.sent if name == "Page.navigate"]
+    assert navigated == [{"url": "https://slow.example/"}]
 
 
 @pytest.mark.asyncio
