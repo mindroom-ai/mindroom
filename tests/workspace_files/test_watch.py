@@ -159,3 +159,72 @@ async def test_batches_come_at_most_every_150_ms(tmp_path: Path) -> None:
             times.append(loop.time())
 
     assert all(later - earlier >= 0.149 for earlier, later in itertools.pairwise(times))
+
+
+async def _silent(next_changes: Callable[[], Awaitable[list[str]]], seconds: float = 1.0) -> list[str]:
+    """Return what arrives within ``seconds``, an empty list when nothing does."""
+    try:
+        async with asyncio.timeout(seconds):
+            return await next_changes()
+    except TimeoutError:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_replaced_by_a_link_is_not_followed(tmp_path: Path) -> None:
+    """Code the agent runs could swap its workspace for a link elsewhere; the watcher never watches through it."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "workspace"
+    root.symlink_to(elsewhere)
+    async with workspace_changes(root) as next_changes:
+        await asyncio.sleep(0.5)
+        (elsewhere / "secret.txt").write_text("x")
+
+        assert await _silent(next_changes) == []
+
+
+@pytest.mark.asyncio
+async def test_a_folder_moved_out_of_the_workspace_is_no_longer_followed(tmp_path: Path) -> None:
+    """Once a folder leaves the workspace, what changes in it is not reported under its old name."""
+    root = tmp_path / "workspace"
+    (root / "box").mkdir(parents=True)
+    async with workspace_changes(root) as next_changes:
+        await _settled(root)
+        (root / "box").rename(tmp_path / "box")
+        await _until(next_changes, "box")
+        await asyncio.sleep(0.5)
+        (tmp_path / "box" / "later.txt").write_text("x")
+        (root / "marker.txt").write_text("x")
+
+        seen = await _until(next_changes, "marker.txt")
+
+    assert "box/later.txt" not in seen
+
+
+@pytest.mark.asyncio
+async def test_folders_past_the_cap_are_not_followed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each folder costs one of the system's file watches, so at most the cap's folders are watched."""
+    monkeypatch.setattr(watch, "_MAX_FOLDERS", 1)
+    root = tmp_path / "workspace"
+    (root / "deep").mkdir(parents=True)
+    async with workspace_changes(root) as next_changes:
+        await _settled(root)
+        (root / "deep" / "inner.txt").write_text("x")
+        (root / "top.txt").write_text("x")
+
+        seen = await _until(next_changes, "top.txt")
+        seen |= set(await _silent(next_changes, 0.5))
+
+    assert "deep/inner.txt" not in seen
+
+
+def test_a_path_reached_through_a_link_out_is_never_reported(tmp_path: Path) -> None:
+    """A folder swapped for a link while the watcher walked could be watched; its changes still never come through."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    (root / "out").symlink_to(tmp_path / "outside")
+
+    assert watch._reported(root, str(root / "out" / "secret.txt")) is None
+    assert watch._reported(root, str(root / "inside.txt")) == "inside.txt"

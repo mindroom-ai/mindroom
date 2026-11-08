@@ -94,7 +94,7 @@ async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[
 
 
 def _folders(root: Path) -> list[str]:
-    """Return the root and the folders below it reached without a link, leaving out ignored and hidden ones."""
+    """Return the root and the folders below it reached without a link, leaving out those the filter ignores."""
     with suppress(OSError):
         if not stat.S_ISDIR(os.lstat(root).st_mode):
             return []
@@ -104,8 +104,7 @@ def _folders(root: Path) -> list[str]:
             logger.warning("Workspace has too many folders to follow them all", root=str(root), limit=_MAX_FOLDERS)
             break
         folders.append(current)
-        relative = Path(current).relative_to(root)
-        names[:] = [name for name in names if name not in _FILTER.ignore_dirs and not is_hidden(relative / name)]
+        names[:] = [name for name in names if name not in _FILTER.ignore_dirs]
     return folders
 
 

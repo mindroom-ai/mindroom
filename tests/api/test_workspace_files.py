@@ -9,6 +9,7 @@ import base64
 import hashlib
 from typing import TYPE_CHECKING
 
+import nio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -16,9 +17,12 @@ from mindroom.api import main
 from mindroom.api.client_sessions import client_session_store
 from mindroom.api.workspace_files import router
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.workspace_files import operations
+from tests.access_schema_support import joined_members_response
 from tests.api.test_plugin_room_agents import ALICE, BOB, CAROL, ROOM, _agents, _Room, _room, _turn_root
+from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -233,3 +237,25 @@ def test_text_that_is_not_unicode_answers_400(client: _Client) -> None:
     )
 
     assert response.status_code == 400
+
+
+def test_a_bridge_alias_saves_into_the_workspace_its_person_s_turns_use(tmp_path: Path) -> None:
+    """A caller signed in as Alice's bridge alias makes and writes Alice's private workspace, not one of its own."""
+    alias = "@telegram_alice:localhost"
+    diary = AgentConfig(
+        display_name="Diary",
+        tools=["file"],
+        private=AgentPrivateConfig(per="user"),
+        access={"users": [ALICE]},
+    )
+    config = Config(agents={"diary": diary}, authorization={"aliases": {ALICE: [alias]}})
+    room = _Room(config, test_runtime_paths(tmp_path), ("diary",))
+    room.client.joined_members.return_value = joined_members_response(ROOM, alias, *room.ids.values())
+    power_levels = {"type": "m.room.power_levels", "state_key": "", "sender": ALICE, "content": {"users": {alias: 50}}}
+    room.client.room_get_state.return_value = nio.RoomGetStateResponse([power_levels], ROOM)
+    client = _Client(room)
+
+    saved = client.put(alias, f"/{room.ids['diary']}/file", {"path": "entry.md", "content": "Dear diary\n"})
+
+    assert saved.status_code == 200
+    assert (_turn_root(room, "diary", ALICE) / "entry.md").read_text() == "Dear diary\n"

@@ -123,6 +123,11 @@ def test_nothing_below_git_is_changed(root: Path) -> None:
     assert _status(lambda: move(root, "notes.md", "repo/.git/notes.md")) == 403
     assert _status(lambda: delete(root, "repo/.git")) == 403
     assert _status(lambda: delete(root, "repo/.git/HEAD")) == 403
+    (root / "g").symlink_to("repo/.git")
+    assert _status(lambda: save_file(root, "g/hooks/pre-commit", b"x", None)) == 403
+    assert _status(lambda: make_folder(root, "g/hooks")) == 403
+    assert _status(lambda: move(root, "notes.md", "g/notes.md")) == 403
+    assert _status(lambda: delete(root, "g/HEAD")) == 403
     assert (root / "repo" / ".git" / "config").read_text().startswith("[remote]")
     assert read_file(root, "repo/.git/HEAD").content == "ref: refs/heads/main\n"
 
@@ -256,6 +261,7 @@ def test_listing_a_file_or_reading_a_folder_answers_400(root: Path) -> None:
     assert _status(lambda: list_folder(root, "notes.md")) == 400
     assert _status(lambda: read_file(root, "src")) == 400
     assert _status(lambda: read_file(root, "")) == 400
+    assert _status(lambda: save_file(root, "src", b"x", None)) == 400
 
 
 def test_text_reads_as_it_is_and_anything_else_as_base64_with_an_etag(root: Path) -> None:
@@ -408,3 +414,23 @@ def test_reading_below_a_file_answers_400(root: Path) -> None:
 def test_dot_parts_name_the_same_entry(root: Path) -> None:
     """``.`` parts drop out of the path a read answers with."""
     assert read_file(root, "./src/./main.py").path == "src/main.py"
+
+
+def test_a_path_that_names_a_credential_answers_404_whatever_it_leads_to(root: Path) -> None:
+    """A link named like a credential, or a credential's place reached through a linked folder, is hidden by its name."""
+    (root / ".env").unlink()
+    (root / ".env").symlink_to("notes.md")
+    (root / "settings").symlink_to(".config")
+    assert "gh" not in _names(root, "settings")
+    assert _status(lambda: delete(root, "settings/gh")) == 404
+    (root / "settings").unlink()
+    (root / ".config").rename(root / "cfg")
+    (root / ".config").symlink_to("cfg")
+
+    assert "gh" not in _names(root, ".config")
+    assert ".env" not in _names(root)
+    assert _status(lambda: read_file(root, ".env")) == 404
+    assert _status(lambda: delete(root, ".env")) == 404
+    assert _status(lambda: read_file(root, ".config/gh/hosts.yml")) == 404
+    assert _status(lambda: delete(root, ".config/gh")) == 404
+    assert (root / "cfg" / "gh" / "hosts.yml").is_file()
