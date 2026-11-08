@@ -38,10 +38,12 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.plugin_api import TurnOutcome
 from mindroom.post_response_effects import ResponseOutcome
 from mindroom.response_turn import CompletedApprovalRun
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation, dispatch_approval
 from tests.bot_helpers import _hook_plugin
 from tests.conftest import (
     bind_runtime_paths,
+    patch_response_runner_module,
     publish_hook_plugin,
     runtime_paths_for,
     test_runtime_paths,
@@ -49,7 +51,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, answer, calls, tool_call
 from tests.journal_membership_helpers import admit_room_membership
-from tests.response_runner_helpers import _plain_request, _target
+from tests.response_runner_helpers import _noop_typing, _plain_request, _target
 from tests.test_cancelled_response_hook import _lifecycle_with, _no_effects, _response_hook_service
 from tests.test_reply_endings_characterization import (  # noqa: F401 - echo_tool is a pytest fixture
     _ECHO_TOOL,
@@ -72,7 +74,7 @@ from tests.test_reply_records_approvals import (
     _resume_until_cancelled,
     _run_approval_wakes,
 )
-from tests.test_reply_records_turns import _stop
+from tests.test_reply_records_turns import _model_stream, _stop
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -133,8 +135,8 @@ async def _approval_turns(tmp_path: Path, seen: _Seen, *, requires_human: bool) 
         try:
             yield bot
             assert await wait_for_background_tasks(timeout=5, owner=bot)
-            # No turn's end stays open once its run left its bracket.
-            assert unwrap_extracted_collaborator(bot._response_runner).locked._live_turn_ends == {}
+            # Every turn whose approval ended took its end: none stays open.
+            assert unwrap_extracted_collaborator(bot._response_runner).locked._turn_ends == {}
         finally:
             stop()
 
@@ -165,6 +167,8 @@ async def test_a_reply_starts_its_turn_and_ends_it_completed_after_its_answer(
         (EVENT_MESSAGE_AFTER_RESPONSE, request.turn_id, None),
         (EVENT_TURN_ENDED, request.turn_id, "completed"),
     ]
+    # A turn no approval owns keeps nothing for one to take.
+    assert turn.runner.locked._turn_ends == {}
 
 
 @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
@@ -332,7 +336,7 @@ async def test_each_pause_of_a_chained_approval_resumes_the_same_turn(tmp_path: 
 
 
 async def test_a_resume_that_fails_ends_the_turn_failed_once(tmp_path: Path) -> None:
-    """The failed resume ends the turn; the approval's settlement afterwards does not end it again."""
+    """The failed resume leaves its turn's end to its approval, whose settlement ends the turn failed once."""
     seen: _Seen = []
     async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         await _respond(bot, resume=AsyncMock(side_effect=RuntimeError("tool exploded")))
@@ -346,7 +350,7 @@ async def test_a_resume_that_fails_ends_the_turn_failed_once(tmp_path: Path) -> 
 
 
 async def test_a_stop_during_a_resume_ends_the_turn_cancelled_once(tmp_path: Path) -> None:
-    """The stopped resume ends the turn; the settlement its Stop wakes does not end it again."""
+    """The stopped resume leaves its turn's end to its approval, whose settlement its Stop wakes ends it cancelled once."""
     seen: _Seen = []
     async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         resuming = asyncio.Event()
@@ -383,8 +387,32 @@ async def test_a_stop_on_a_paused_reply_ends_its_turn_cancelled(tmp_path: Path) 
     ]
 
 
+async def test_a_run_approved_in_place_whose_error_became_its_reply_ends_the_turn_failed(tmp_path: Path) -> None:
+    """The run's own failure, not its reply's completed state, says how a turn its approval ends ended."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
+
+        async def approve_in_place_then_fail(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.cli_approval_handler is not None
+            cli_call = {"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"}
+            await context.cli_approval_handler(replace(_paused(), cli_call=cli_call))
+            # The run records no completion, as a run whose error became its reply's text.
+            return "Error: the model failed."
+
+        with patch_response_runner_module(
+            stream_agent_response=_model_stream(AsyncMock(side_effect=approve_in_place_then_fail)),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(bot._response_runner).generate_response(_plain_request(_target()))
+
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "failed")]
+
+
 async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(tmp_path: Path) -> None:
-    """A run that waits in place for an approval keeps its turn running; the settlement after it ends the turn no more."""
+    """A run cut short while it waits in place ends its turn as a cut-short run does, once its approval settles."""
     seen: _Seen = []
     async with _approval_turns(tmp_path, seen, requires_human=True) as bot:
         runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -399,7 +427,7 @@ async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(t
         await dispatch_approval(runner.approvals, failing, target=_target())
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
 
-    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "failed")]
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "cancelled")]
 
 
 @pytest.mark.parametrize(("cancel_source", "outcome"), [("user_stop", "cancelled"), ("sync_restart", "failed")])
@@ -573,11 +601,11 @@ async def test_a_hook_scoped_to_agents_or_rooms_sees_only_their_turns(tmp_path: 
     assert seen == ["this_agent", "this_room"]
 
 
-async def _no_approval() -> bool:
+async def _no_approval(_end: TurnOutcome) -> bool:
     return False
 
 
-async def _an_approval() -> bool:
+async def _an_approval(_end: TurnOutcome) -> bool:
     return True
 
 

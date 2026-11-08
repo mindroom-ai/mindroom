@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.history.types import HistoryScope
+    from mindroom.hooks import TurnOutcome
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -135,20 +136,17 @@ class LockedTurns:
     """Settle one locked reply turn and build what its settlement runs, for every owner of a reply turn."""
 
     deps: ReplyTurnDeps
-    # The turn of each run inside its bracket here, and whether an ender already took that turn's one end.
-    _live_turn_ends: dict[str, bool] = field(default_factory=dict, init=False, repr=False)
+    # Each turn whose run is inside its bracket here (None), or settled here leaving its end to its approval (how the
+    # run ended). The approval's end takes the entry, so a run whose entry was taken while live ends nothing.
+    _turn_ends: dict[str, TurnOutcome | None] = field(default_factory=dict, init=False, repr=False)
 
-    def take_turn_end(self, turn_id: str) -> bool:
-        """Take a turn's one end; false when another ender took it while the turn's run was live here.
+    def take_turn_end(self, turn_id: str) -> TurnOutcome | None:
+        """Take a turn's end for its ended approval; return how the turn's run ended if it settled here.
 
-        A departure can end an approval while its run is live, so the approval's end and the run's bracket both reach
-        for the end; whichever comes first takes it.
+        Leaving a room ends an approval while its run may still be live; taking the end keeps that run from ending the
+        turn again.
         """
-        if self._live_turn_ends.get(turn_id):
-            return False
-        if turn_id in self._live_turn_ends:
-            self._live_turn_ends[turn_id] = True
-        return True
+        return self._turn_ends.pop(turn_id, None)
 
     def client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -530,23 +528,29 @@ class LockedTurns:
 
     @asynccontextmanager
     async def _live_turn(self, turn_id: str) -> AsyncIterator[None]:
-        """Keep the turn's end open for one ender to take while its run is live here."""
-        self._live_turn_ends[turn_id] = False
+        """Keep the turn's end open for its approval to take while its run is live here."""
+        self._turn_ends[turn_id] = None
         try:
             yield
         finally:
-            del self._live_turn_ends[turn_id]
+            if turn_id in self._turn_ends and self._turn_ends[turn_id] is None:
+                del self._turn_ends[turn_id]
 
-    async def _approval_owns_turn(self, request: ResponseRequest) -> bool:
+    async def _approval_owns_turn(self, request: ResponseRequest, end: TurnOutcome) -> bool:
         """Return whether an approval of this turn, paused, resumed, or waited for in place, owns the turn's end.
 
         A run starts only once no approval owns its source, or resumes the approval that does, so any approval of its
-        source is its turn's. An approval that ended while the run was live may already have taken the end.
+        source is its turn's. The run leaves that approval how it ended, which an error that completed its reply hides
+        from the reply's state; an approval that ended while the run was live already took the end.
         """
         continuation = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )
-        return continuation is not None or not self.take_turn_end(request.turn_id)
+        if request.turn_id not in self._turn_ends:
+            return True
+        if continuation is not None:
+            self._turn_ends[request.turn_id] = end
+        return continuation is not None
 
     async def _end_span_after_outcome(
         self,
