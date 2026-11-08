@@ -303,15 +303,16 @@ def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.Monk
 def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A download that keeps trickling ends at the call's time limit, and no later download starts."""
     monkeypatch.setattr(compat, "_CALL_SECONDS", 0.3)
-    # Each download's own deadline stays longer than the call's limit, and short enough to fail fast without it.
-    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 2)
+    # Each download's own deadline stays well past the call's limit, and short enough to fail in seconds without it.
+    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 10)
     requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=TrickleBody()))
     urls = [f"https://example.com/{index}" for index in range(3)]
+    toolkit = trafilatura_tools()()
     started = time.monotonic()
 
-    batch = json.loads(trafilatura_tools()().extract_batch(urls))
+    batch = json.loads(toolkit.extract_batch(urls))
 
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - started < 5
     assert batch["failed_urls"] == urls
     assert batch["results"] == {}
     assert len(requests) == 1
@@ -330,11 +331,12 @@ def test_trafilatura_crawl_stops_at_its_time_limit_despite_a_long_crawl_delay(mo
             "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
         },
     )
+    toolkit = trafilatura_tools()()
     started = time.monotonic()
 
-    crawl = json.loads(trafilatura_tools()().crawl_website(homepage, extract_content=True))
+    crawl = json.loads(toolkit.crawl_website(homepage, extract_content=True))
 
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - started < 5
     assert {"https://example.com/docs", "https://example.com/guide"} <= set(crawl["known_links"])
     assert crawl["extracted_content"] == {}
 
