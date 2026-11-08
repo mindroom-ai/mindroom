@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import os
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,7 +16,7 @@ from mindroom.workspace_files import watch
 from mindroom.workspace_files.watch import workspace_changes
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
 
 
 async def _until(next_changes: Callable[[], Awaitable[list[str]]], *paths: str) -> set[str]:
@@ -367,3 +369,47 @@ def test_a_scan_takes_in_at_most_the_cap_s_entries(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(watch, "_MAX_ENTRIES", 4)
 
     assert len(watch._scan(root)) == 4
+
+
+def test_an_entry_that_vanishes_mid_scan_leaves_its_neighbours_in_the_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A temporary file gone between listing and reading its details drops only itself, so nothing else looks changed."""
+    root = tmp_path / "workspace"
+    (root / "proj" / "pkg").mkdir(parents=True)
+    for name in ("a.py", "b.py", "pkg/c.py"):
+        (root / "proj" / name).write_text("x")
+    (root / "proj" / "tmp.swap").write_text("x")
+    before = watch._scan(root)
+    real_scandir = os.scandir
+
+    class _Vanishing:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self._entry = entry
+            self.name = entry.name
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            if self.name == "tmp.swap":
+                raise FileNotFoundError(self.name)
+            return self._entry.stat(follow_symlinks=follow_symlinks)
+
+    @contextmanager
+    def scandir_with_a_vanishing_entry(directory: int) -> Iterator[list[_Vanishing]]:
+        with real_scandir(directory) as entries:
+            yield [_Vanishing(entry) for entry in sorted(entries, key=lambda entry: entry.name != "tmp.swap")]
+
+    monkeypatch.setattr(watch.os, "scandir", scandir_with_a_vanishing_entry)
+    during = watch._scan(root)
+
+    assert watch._changed(before, during) == {"proj/tmp.swap"}
+
+
+def test_a_scan_leaves_out_pipes_and_sockets(tmp_path: Path) -> None:
+    """Only what a folder listing shows can be reported as changed."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "notes.md").write_text("x")
+    os.mkfifo(root / "pipe")
+
+    assert set(watch._scan(root)) == {"notes.md"}

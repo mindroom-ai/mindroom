@@ -42,6 +42,8 @@ _FILTER = watchfiles.DefaultFilter(
     ignore_entity_patterns=(*watchfiles.DefaultFilter.ignore_entity_patterns, r"^\.mindroom-[0-9a-f]{32}\.tmp$"),
 )
 
+# Files and links; like folder listings, a scan leaves out pipes, sockets and devices.
+_LISTED = frozenset({stat.S_IFREG, stat.S_IFLNK})
 # What a scan saw of one entry: its type, and for anything but a folder its size and change time; and its inode, so a
 # replaced entry counts as changed.
 type _Seen = tuple[int, int, int, int]
@@ -119,14 +121,20 @@ def _scan(root: Path) -> dict[str, _Seen]:
                     # The folders above passed both checks, so the filter needs only the name.
                     if not _FILTER(watchfiles.Change.added, item.name) or is_hidden(relative):
                         continue
-                    status = item.stat(follow_symlinks=False)
+                    try:
+                        status = item.stat(follow_symlinks=False)
+                    except OSError:
+                        # Gone since the folder was listed, as a temporary file often is.
+                        continue
                     kind = stat.S_IFMT(status.st_mode)
                     if kind == stat.S_IFDIR:
                         seen[str(relative)] = (kind, 0, 0, status.st_ino)
                         if len(folders) < _MAX_FOLDERS:
                             folders.append(relative)
-                    else:
+                    elif kind in _LISTED:
                         seen[str(relative)] = (kind, status.st_size, status.st_mtime_ns, status.st_ino)
+                    else:
+                        continue
                     if len(seen) == _MAX_ENTRIES:
                         return seen
     return seen
