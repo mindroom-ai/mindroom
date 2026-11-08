@@ -156,12 +156,6 @@ def is_hidden(path: PurePath) -> bool:
     return ".git" in parts[:-1] and (parts[-1] in _GIT_CREDENTIAL_NAMES or parts[-1].endswith(".credentials"))
 
 
-def _keeps_credential(path: PurePath) -> bool:
-    """Return whether a path is a folder above a credential known by its place, which moving it would show."""
-    parts = tuple(part.casefold() for part in path.parts)
-    return any(place[: len(parts)] == parts for place in _HOME_CREDENTIALS)
-
-
 def _relative(raw: str) -> PurePosixPath:
     """Return the workspace-relative path a client named; ``""`` and ``"."`` name the root."""
     if "\0" in raw or "\\" in raw:
@@ -228,8 +222,11 @@ def _refuse_git(*paths: PurePath) -> None:
 
 
 def _refuse_credential_place(*paths: PurePath) -> None:
-    if any(_keeps_credential(path) for path in paths):
-        raise HTTPException(403, "That folder keeps credentials, so it can't be moved or deleted here.")
+    """Refuse a path that is a folder above a credential known by its place, which moving it would show."""
+    for path in paths:
+        parts = tuple(part.casefold() for part in path.parts)
+        if any(place[: len(parts)] == parts for place in _HOME_CREDENTIALS):
+            raise HTTPException(403, "That folder keeps credentials, so it can't be moved or deleted here.")
 
 
 @contextmanager

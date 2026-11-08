@@ -93,16 +93,14 @@ def test_a_link_is_followed_only_while_it_stays_inside(root: Path) -> None:
     assert not (root.parent / "planted.txt").exists()
     assert read_file(root, "main").content == "print('hi')\n"
     assert read_file(root, "code/main.py").content == "print('hi')\n"
-    targets = {
-        entry.name: (entry.kind, entry.target) for entry in list_folder(root, "").entries if entry.kind == "link"
-    }
+    targets = {entry.name: entry.target for entry in list_folder(root, "").entries if entry.kind == "link"}
     assert targets == {
-        "out": ("link", None),
-        "out-dir": ("link", None),
-        "main": ("link", "file"),
-        "code": ("link", "folder"),
-        "nowhere": ("link", None),
-        "here": ("link", "folder"),
+        "out": None,
+        "out-dir": None,
+        "main": "file",
+        "code": "folder",
+        "nowhere": None,
+        "here": "folder",
     }
 
 
