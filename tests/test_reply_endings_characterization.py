@@ -62,6 +62,7 @@ from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_presentation, render_body
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, _flush_phase_boundary_if_needed
@@ -202,14 +203,12 @@ class _Homeserver:
 
 def _body(content: Mapping[str, Any]) -> str:
     """Return the body a reader would see, following an edit into its replacement."""
-    replacement = content.get("m.new_content")
-    return str((replacement if isinstance(replacement, dict) else content).get("body", ""))
+    return str(visible_content_from_content(content).get("body", ""))
 
 
 def _trace_events(content: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Return the tool calls a write shows, following an edit into its replacement."""
-    replacement = content.get("m.new_content")
-    shown = replacement if isinstance(replacement, dict) else content
+    shown: dict[str, Any] = visible_content_from_content(content)
     return list((shown.get(TOOL_TRACE_CONTENT_KEY) or {}).get("events", []))
 
 
@@ -496,14 +495,19 @@ async def _past_edit_interval() -> None:
     await asyncio.sleep(0)
 
 
-def _streams_then_blocks(text: str, running: asyncio.Event) -> list[ScriptStep]:
-    """Return a model turn that streams ``text`` as its own edit, then waits until it is cancelled."""
+def _blocks(running: asyncio.Event) -> Await:
+    """Return a model step that sets ``running``, then waits until it is cancelled."""
 
     async def block() -> None:
         running.set()
         await asyncio.Event().wait()
 
-    return [Await(_past_edit_interval), TextDelta(text), Await(block)]
+    return Await(block)
+
+
+def _streams_then_blocks(text: str, running: asyncio.Event) -> list[ScriptStep]:
+    """Return a model turn that streams ``text`` as its own edit, then waits until it is cancelled."""
+    return [Await(_past_edit_interval), TextDelta(text), _blocks(running)]
 
 
 async def _explode() -> None:
@@ -1085,11 +1089,6 @@ async def test_a_silent_schedule_replayed_after_a_restart_stopped_its_approved_r
     attempt showed and the restart note.
     """
     running = asyncio.Event()
-
-    async def block() -> None:
-        running.set()
-        await asyncio.Event().wait()
-
     turn = await _turn(
         tmp_path,
         monkeypatch,
@@ -1099,7 +1098,7 @@ async def test_a_silent_schedule_replayed_after_a_restart_stopped_its_approved_r
         scripts={
             "default": [
                 calls(tool_call("echo", "call-1", text="hi"), content="Let me check."),
-                [Await(block)],
+                [_blocks(running)],
                 *replayed,
             ],
         },

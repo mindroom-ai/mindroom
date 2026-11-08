@@ -136,6 +136,14 @@ def _sent_bodies(bot: AgentBot) -> list[str]:
     return bodies
 
 
+def _sent_statuses(bot: AgentBot) -> list[str | None]:
+    """Return each message write's ``io.mindroom.stream_status``, following an edit into its replacement."""
+    return [
+        call.kwargs["content"].get("m.new_content", call.kwargs["content"]).get(STREAM_STATUS_KEY)
+        for call in bot.client.room_send.await_args_list
+    ]
+
+
 async def _wait_until_sent(bot: AgentBot, body: str) -> None:
     """Return once Matrix shows ``body`` in one of the bot's messages."""
     while body not in _sent_bodies(bot):  # noqa: ASYNC110
@@ -885,10 +893,7 @@ async def test_a_team_regeneration_streams_into_the_answer_it_replaces(tmp_path:
         )
 
     assert (await _reply(bot)).event_id == "$sent1"
-    statuses = [
-        call.kwargs["content"].get("m.new_content", call.kwargs["content"]).get(STREAM_STATUS_KEY)
-        for call in bot.client.room_send.await_args_list[sends:]
-    ]
+    statuses = _sent_statuses(bot)[sends:]
     assert "streaming" in statuses
     assert statuses[-1] == "completed"
     assert _sent_bodies(bot)[-1] == "Second answer."
@@ -1735,10 +1740,7 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         assert "tool calls below" not in account
         assert _sent_bodies(restarted)[-1] == f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
         # The replay streams below what the restart stopped, though its requester is away.
-        statuses = [
-            call.kwargs["content"].get(STREAM_STATUS_KEY) for call in restarted.client.room_send.await_args_list
-        ]
-        assert statuses == ["streaming", "completed"]
+        assert _sent_statuses(restarted) == ["streaming", "completed"]
         assert not await restarted._reply_runtime.store.is_pending("$event")
     finally:
         response.cancel()

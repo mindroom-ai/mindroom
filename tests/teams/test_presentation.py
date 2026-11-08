@@ -345,18 +345,22 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
     assert "🔧 `inspect_second` [2]\n\n" in presentation.per_member["second"]
 
 
-def test_a_pause_on_a_call_of_a_member_the_document_has_no_slot_for_is_refused() -> None:
-    presentation = TeamStreamPresentation.new(["first"], ["First"], show_tool_calls=True)
+def _paused_on_inspect(member_id: str, display_name: str) -> PausedAttempt:
+    """Return a pause on one ``inspect`` call of the member ``member_id``."""
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
-    paused = PausedAttempt(
+    return PausedAttempt(
         session_id="session-1",
         run_id="run-1",
-        requirements=(RunRequirement(tool, member_agent_id="stranger", member_display_name="Stranger"),),
+        requirements=(RunRequirement(tool, member_agent_id=member_id, member_display_name=display_name),),
         toolkit_owners={},
     )
 
+
+def test_a_pause_on_a_call_of_a_member_the_document_has_no_slot_for_is_refused() -> None:
+    presentation = TeamStreamPresentation.new(["first"], ["First"], show_tool_calls=True)
+
     with pytest.raises(RuntimeError, match="no frozen member slot for 'Stranger'"):
-        continued_team_pause(presentation, paused, quiet=False)
+        continued_team_pause(presentation, _paused_on_inspect("stranger", "Stranger"), quiet=False)
 
 
 @pytest.mark.parametrize(
@@ -380,15 +384,8 @@ def test_only_a_quiet_turn_s_waiting_document_drops_the_no_report_line_its_froze
     """
     presentation = TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=show_tool_calls)
     presentation.append_member("checker", "NO_REPLY")
-    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
-    paused = PausedAttempt(
-        session_id="session-1",
-        run_id="run-1",
-        requirements=(RunRequirement(tool, member_agent_id="checker", member_display_name="Checker"),),
-        toolkit_owners={},
-    )
 
-    shown = continued_team_pause(presentation, paused, quiet=quiet)
+    shown = continued_team_pause(presentation, _paused_on_inspect("checker", "Checker"), quiet=quiet)
 
     assert shown.response_text == ("" if waiting is None else f"{format_team_header(['Checker'])}{waiting}")
     assert presentation.per_member["checker"].startswith("NO_REPLY")
