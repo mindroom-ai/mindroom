@@ -335,14 +335,6 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
         await viewer.receive(json.dumps({"type": "reload"}))
         await page.wait_for_function("window.before === undefined", timeout=_TIMEOUT * 1000)
         assert site.hits["/page/Two"] == 2
-
-        # A server that has not answered holds the navigation only up to the input bound, and stop abandons it.
-        await asyncio.wait_for(viewer.receive(json.dumps({"type": "navigate", "url": site.url("/held")})), _TIMEOUT)
-        await sent.reaches(_LOADING)
-        await viewer.receive(json.dumps({"type": "stop"}))
-        await sent.reaches(_LOADED)
-        assert page.url == two
-        assert await page.evaluate("history.length") == 3
         # An in-page navigation reaches the viewer at once as well.
         pushed = two + "#pushed"
         await page.evaluate("history.pushState(null, '', '#pushed')")
@@ -364,6 +356,21 @@ async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(pag
         assert await page.title() == "Two"
         await viewer.receive(json.dumps({"type": "navigate", "url": "about:blank"}))
         await page.wait_for_url("about:blank", timeout=_TIMEOUT * 1000)
+
+
+@pytest.mark.asyncio
+async def test_stop_ends_a_navigation_whose_server_has_not_answered(page: Page, site: _Site) -> None:
+    """Such a navigation holds the viewer's messages only up to the input bound and keeps loading until stop ends it."""
+    sent = _Viewer()
+    viewer = sent.screencast(lambda: page, lambda: True)
+    async with _watching(viewer):
+        assert await sent.message("loading") == _LOADED
+        await asyncio.wait_for(viewer.receive(json.dumps({"type": "navigate", "url": site.url("/held")})), _TIMEOUT)
+        assert await sent.message("loading") == _LOADING
+        await viewer.receive(json.dumps({"type": "stop"}))
+        assert await sent.message("loading") == _LOADED
+        assert page.url == "about:blank"
+        assert await page.title() == "Form"
 
 
 @pytest.mark.asyncio
