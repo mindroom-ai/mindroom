@@ -254,12 +254,12 @@ async def evaluate_tool_approval(
     requires_approval, timeout_seconds = await _evaluate_rules(config, runtime_paths, tool_name, arguments, agent_name)
     if requires_approval or alias is None:
         return requires_approval, timeout_seconds
-    judged = _rules_may_ask(config, alias.judged_as)
-    if not judged[0]:
+    judged_may_ask, judged_timeout_seconds = _rules_may_ask(config, alias.judged_as)
+    if not judged_may_ask:
         return False, timeout_seconds
     judged_calls = await _judged_calls(alias, tool_name, arguments)
     if judged_calls is None:
-        return judged
+        return True, judged_timeout_seconds
     for judged_arguments in judged_calls:
         judged = await _evaluate_rules(config, runtime_paths, alias.judged_as, dict(judged_arguments), agent_name)
         if judged[0]:
