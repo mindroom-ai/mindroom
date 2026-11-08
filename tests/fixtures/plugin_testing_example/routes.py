@@ -1,10 +1,18 @@
-"""The example plugin's routes, which greet a member of the room they name and tell whether it is direct."""
+"""The example plugin's routes, which serve members of the room they name."""
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, WebSocket
 
-from mindroom.plugin_http import ClientUser, RoomReader, require_room_member, require_room_reader
+from mindroom.plugin_http import (
+    ClientUser,
+    RoomMessenger,
+    RoomReader,
+    client_stream,
+    require_room_member,
+    require_room_messenger,
+    require_room_reader,
+)
 
 router = APIRouter()
 
@@ -15,7 +23,22 @@ async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> di
     return {"hello": user.user_id}
 
 
-@router.get("/rooms/{room_id}/direct")
-async def direct(room: Annotated[RoomReader, Depends(require_room_reader)]) -> dict[str, bool]:
-    """Tell the signed-in member whether MindRoom's agents treat the room as a direct message."""
-    return {"direct": await room.is_direct()}
+@router.get("/rooms/{room_id}/about")
+async def about(room: Annotated[RoomReader, Depends(require_room_reader)]) -> dict[str, object]:
+    """Tell the member whether the room is direct, whether they are its admin, and its history visibility."""
+    power = await room.power()
+    history = await room.history()
+    return {"direct": await room.is_direct(), "admin": power.is_admin(room.user.user_id), "history": history.visibility}
+
+
+@router.post("/rooms/{room_id}/notice")
+async def notice(messenger: Annotated[RoomMessenger, Depends(require_room_messenger)]) -> dict[str, str]:
+    """Post a notice to the room as the router."""
+    return {"event_id": await messenger.notice(f"{messenger.user.user_id} says hello")}
+
+
+@router.websocket("/rooms/{room_id}/stream")
+async def stream(websocket: WebSocket, room_id: str) -> None:
+    """Greet the signed-in member over a websocket."""
+    async with client_stream(websocket, room_id) as user:
+        await websocket.send_text(f"hello {user.user_id}")

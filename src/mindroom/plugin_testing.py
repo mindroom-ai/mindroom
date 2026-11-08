@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 __all__ = ["LoadedPlugin", "Room", "SentMessage", "TurnRefused", "load_plugin"]
 
 # The origin a plugin's websocket clients connect from; `load_plugin` allows it.
-_CLIENT_ORIGIN = "http://testserver"
+_CLIENT_ORIGIN = "http://localhost"
 
 # Each message event a turn emits: its context, and for a response event the context field and type that hold the envelope.
 _TURN_EVENTS: dict[str, tuple[Callable[..., HookContext], tuple[str, Callable[..., object]] | None]] = {

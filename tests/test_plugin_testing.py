@@ -23,9 +23,10 @@ EXAMPLE = Path(__file__).parent / "fixtures" / "plugin_testing_example"
 ROOM = "!lobby:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
+CAROL = "@carol:example.org"
 CONFIG = {"agents": {"helper": {"display_name": "Helper", "tools": ["greeter"], "access": {"users": [ALICE]}}}}
 SETTINGS = {"greeting": "Howdy"}
-HELLO = f"/api/plugins/greeter/rooms/{ROOM}/hello"
+ROUTES = f"/api/plugins/greeter/rooms/{ROOM}"
 
 
 @pytest.fixture
@@ -37,29 +38,62 @@ def plugin(tmp_path: Path) -> Iterator[LoadedPlugin]:
 
 
 def test_route_answers_a_signed_in_member_only(plugin: LoadedPlugin) -> None:
-    """A member gets 200, a client without a session 401, a non-member 403, and a signed-out session 401."""
+    """A member gets 200, no session 401, a non-member 403, a signed-out session 401, and a room no bot is in 503."""
     alice = plugin.client(ALICE)
 
-    assert alice.get(HELLO).json() == {"hello": ALICE}
-    assert plugin.client().get(HELLO).status_code == 401
-    assert plugin.client("@carol:example.org").get(HELLO).status_code == 403
+    assert alice.get(f"{ROUTES}/hello").json() == {"hello": ALICE}
+    assert plugin.client().get(f"{ROUTES}/hello").status_code == 401
+    assert plugin.client(CAROL).get(f"{ROUTES}/hello").status_code == 403
+    assert alice.get("/api/plugins/greeter/rooms/!unknown:example.org/hello").status_code == 503
     plugin.sign_out(ALICE)
-    assert alice.get(HELLO).status_code == 401
+    assert alice.get(f"{ROUTES}/hello").status_code == 401
+
+
+def test_a_route_posts_as_the_router_and_streams_to_a_member(tmp_path: Path) -> None:
+    """A `RoomMessenger` notice lands in the room's `sent`, and a member's websocket is signed in from an allowed origin."""
+    with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:
+        room = plugin.add_room(ROOM, members={ALICE: "Alice"})
+        alice = plugin.client(ALICE)
+
+        posted = alice.post(f"{ROUTES}/notice")
+        with alice.websocket_connect(f"{ROUTES}/stream") as stream:
+            greeting = stream.receive_text()
+
+    assert posted.status_code == 200
+    assert [(sent.text, sent.source, sent.content["msgtype"]) for sent in room.sent] == [
+        (f"{ALICE} says hello", "greeter:http", "m.notice"),
+    ]
+    assert greeting == f"hello {ALICE}"
+
+
+def test_a_route_reads_the_room_as_set_up(tmp_path: Path) -> None:
+    """A route reads the room's power levels and history visibility as the test set them."""
+    with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:
+        plugin.add_room(
+            ROOM,
+            members={ALICE: "Alice", BOB: "Bob", CAROL: None},
+            power_levels={"users": {ALICE: 100}},
+            history_visibility="joined",
+        )
+
+        about = {user: plugin.client(user).get(f"{ROUTES}/about").json() for user in (ALICE, BOB)}
+
+    assert about[ALICE] == {"direct": False, "admin": True, "history": "joined"}
+    assert about[BOB]["admin"] is False
 
 
 def test_a_room_is_direct_as_running_agents_tell_and_no_load_sees_another_ones_answer(tmp_path: Path) -> None:
     """A room its members joined as a direct message is one, and so is any room of two; each load asks afresh."""
-    carol = "@carol:example.org"
     cases = [
-        ({ALICE: "Alice", BOB: "Bob", carol: None}, True, True),
-        ({ALICE: "Alice", BOB: "Bob", carol: None}, False, False),
+        ({ALICE: "Alice", BOB: "Bob", CAROL: None}, True, True),
+        ({ALICE: "Alice", BOB: "Bob", CAROL: None}, False, False),
         ({ALICE: "Alice", BOB: "Bob"}, False, True),
     ]
     for index, (members, direct, expected) in enumerate(cases):
         with load_plugin(EXAMPLE, tmp_path / str(index), config=CONFIG, settings=SETTINGS) as plugin:
             plugin.add_room(ROOM, members=members, direct=direct)
 
-            assert plugin.client(ALICE).get(f"/api/plugins/greeter/rooms/{ROOM}/direct").json() == {"direct": expected}
+            assert plugin.client(ALICE).get(f"{ROUTES}/about").json()["direct"] is expected
 
 
 @pytest.mark.asyncio
@@ -74,14 +108,70 @@ async def test_tool_call_answers_with_the_plugin_settings_and_the_gate_declines(
 
 
 @pytest.mark.asyncio
+async def test_a_tool_the_agent_lacks_or_one_that_needs_approval_is_refused(tmp_path: Path) -> None:
+    """A tool or function the agent lacks raises `LookupError`, and a function that may need approval never runs."""
+    config = {
+        "agents": {
+            **CONFIG["agents"],
+            "quiet": {"display_name": "Quiet", "access": {"users": [ALICE]}},
+        },
+        "tool_approval": {"rules": [{"match": "greet", "action": "require_approval"}]},
+    }
+    with load_plugin(EXAMPLE, tmp_path, config=config, settings=SETTINGS) as plugin:
+        plugin.add_room(ROOM, members={ALICE: "Alice"})
+
+        with pytest.raises(LookupError, match="has no tool 'greeter'"):
+            await plugin.call_tool("greeter", "greet", {"name": "Ann"}, agent="quiet", sender=ALICE, room=ROOM)
+        with pytest.raises(LookupError, match="has no function 'wave'"):
+            await plugin.call_tool("greeter", "wave", {}, agent="helper", sender=ALICE, room=ROOM)
+        with pytest.raises(PermissionError, match="may need approval"):
+            await plugin.call_tool("greeter", "greet", {"name": "Ann"}, agent="helper", sender=ALICE, room=ROOM)
+
+
+@pytest.mark.asyncio
+async def test_a_member_of_a_room_the_agent_serves_is_admitted_by_its_room_key(tmp_path: Path) -> None:
+    """An agent admits the members of the rooms its config names, found by the key the test gives a room."""
+    config = {"agents": {"host": {"display_name": "Host", "tools": ["greeter"], "rooms": ["lobby"]}}}
+    with load_plugin(EXAMPLE, tmp_path, config=config, settings=SETTINGS) as plugin:
+        plugin.add_room(ROOM, members={BOB: "Bob"}, key="lobby")
+
+        greeted = await plugin.call_tool("greeter", "greet", {"name": "Ann"}, agent="host", sender=BOB, room=ROOM)
+
+    assert greeted.status == "ok"
+
+
+@pytest.mark.asyncio
 async def test_message_fires_the_hook_whose_send_lands_in_the_room(tmp_path: Path) -> None:
-    """An admitted sender's message runs the `message:received` hook, and what it sends lands in the room's `sent`."""
+    """An admitted sender's message runs the `message:received` hook, which reads the room's state and sends to it."""
     with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:
         room = plugin.add_room(ROOM, members={ALICE: "Alice"})
 
         await plugin.fire("message:received", agent="helper", sender=ALICE, room=ROOM, body="hi")
 
-    assert [(sent.text, sent.source) for sent in room.sent] == [("Got: hi", "greeter:message:received")]
+    assert [(sent.text, sent.source) for sent in room.sent] == [("Got: hi (shared)", "greeter:message:received")]
+
+
+@pytest.mark.asyncio
+async def test_each_event_returns_what_its_hooks_give_mindroom(plugin: LoadedPlugin) -> None:
+    """Enrichment returns its items, a transform the changed draft, and a custom event runs its hooks."""
+    fire = {"agent": "helper", "sender": ALICE, "room": ROOM, "body": "hi"}
+    items = await plugin.fire("message:enrich", **fire, target_entity_name="helper", target_member_names=None)
+    draft = await plugin.fire(
+        "message:before_response",
+        **fire,
+        response_text="Hello",
+        response_kind="ai",
+        tool_trace=None,
+        extra_content=None,
+    )
+    final = await plugin.fire("message:final_response_transform", **fire, response_text="Hello", response_kind="ai")
+    waved = await plugin.fire("greeter:waved", **fire, payload={"times": 2}, source_plugin="greeter")
+
+    assert [(item.key, item.text) for item in items] == [("greeting", f"Greet {ALICE} with Howdy.")]
+    assert draft.response_text == final.response_text == "Hello -- the greeter"
+    assert waved.payload == {"times": 2}
+    with pytest.raises(ValueError, match=r"not reaction:received"):
+        await plugin.fire("reaction:received", **fire)
 
 
 @pytest.mark.asyncio
@@ -91,7 +181,7 @@ async def test_a_sender_the_agent_does_not_admit_is_refused_and_nothing_runs(tmp
         room = plugin.add_room(ROOM, members={ALICE: "Alice", BOB: "Bob"})
         plugin.add_room("!elsewhere:example.org", members={BOB: "Bob"})
 
-        for sender, room_id in ((BOB, ROOM), (ALICE, "!elsewhere:example.org")):
+        for sender, room_id in ((BOB, ROOM), (ALICE, "!elsewhere:example.org"), (ALICE, "!unknown:example.org")):
             with pytest.raises(TurnRefused):
                 await plugin.call_tool("greeter", "greet", {"name": "Ann"}, agent="helper", sender=sender, room=room_id)
             with pytest.raises(TurnRefused):
@@ -112,11 +202,11 @@ def test_the_block_restores_the_published_plugins_and_their_modules(tmp_path: Pa
     with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:
         plugin.add_room(ROOM, members={ALICE: "Alice"})
         alice = plugin.client(ALICE)
-        assert alice.get(HELLO).status_code == 200
+        assert alice.get(f"{ROUTES}/hello").status_code == 200
         assert plugin_modules() != before
 
     assert plugin_modules() == before
-    assert alice.get(HELLO).status_code == 404
+    assert alice.get(f"{ROUTES}/hello").status_code == 404
 
 
 def test_a_plugin_that_fails_to_load_raises_its_error(tmp_path: Path) -> None:
