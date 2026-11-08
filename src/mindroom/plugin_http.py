@@ -335,8 +335,8 @@ class RoomMessenger:
 
         It checks no power level: the route decides who may have the router post. ``content`` adds namespaced keys of
         the plugin's own, and it answers 400 before anything is sent when ``content`` sets one of Matrix's own keys,
-        such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.`` or another loaded
-        plugin's reserved namespaces at any depth. It answers 503 when the router is not running or not in the room,
+        such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.``, ``chat.mindroom.``
+        or another loaded plugin's reserved namespaces at any depth. It answers 503 when the router is not running or not in the room,
         or when the send fails.
         """
         router = self._router()

@@ -1303,8 +1303,8 @@ class MatrixApiTools(Toolkit):
         `room_id` defaults to the current Matrix tool runtime context room.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
-        `com.mindroom.*` and `io.mindroom.*` are reserved for runtime metadata: `content` may not set keys in
-        those namespaces, and `send_event`/`put_state` may not write event types in them.
+        `com.mindroom.*`, `io.mindroom.*`, and the chat client's `chat.mindroom.*` are reserved for runtime metadata:
+        `content` may not set keys in those namespaces, and `send_event`/`put_state` may not write event types in them.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state and redact for a small set of high-risk room-state event types,
         which also require the requester to be a joined room admin in the target room.

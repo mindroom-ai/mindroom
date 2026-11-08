@@ -315,7 +315,12 @@ async def test_matrix_api_rejects_model_authored_reserved_metadata(
 @pytest.mark.parametrize("action", ["send_event", "put_state"])
 @pytest.mark.parametrize(
     "event_type",
-    ["com.mindroom.scheduled.task", "com.mindroom.pending.config", "io.mindroom.scheduled.trigger"],
+    [
+        "com.mindroom.scheduled.task",
+        "com.mindroom.pending.config",
+        "io.mindroom.scheduled.trigger",
+        "chat.mindroom.call_failure",
+    ],
 )
 async def test_matrix_api_rejects_runtime_owned_event_types(action: str, event_type: str) -> None:
     """A runtime-owned event is an instruction the runtime reads back; a tool may not author one.
