@@ -11,6 +11,7 @@ from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
 
 from mindroom.api.app_state import ensure_app_state
+from mindroom.api.auth import is_administrator
 from mindroom.api.client_sessions import (
     SESSION_PROTOCOL,
     allowed_client_origin,
@@ -18,7 +19,7 @@ from mindroom.api.client_sessions import (
     offered_session,
     presented_session,
 )
-from mindroom.api.config_lifecycle import require_api_state
+from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 
@@ -29,7 +30,14 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
-__all__ = ["ClientUser", "client_stream", "plugin_context", "require_client_user", "require_room_member"]
+__all__ = [
+    "ClientUser",
+    "client_stream",
+    "plugin_context",
+    "require_client_user",
+    "require_platform_administrator",
+    "require_room_member",
+]
 
 # A stream in a room rechecks its user's membership this long after each check.
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
@@ -141,6 +149,14 @@ async def _membership_end(websocket: WebSocket, user_id: str, room_id: str) -> t
         except HTTPException as error:
             gone = error.status_code == status.HTTP_403_FORBIDDEN
             return status.WS_1008_POLICY_VIOLATION if gone else status.WS_1013_TRY_AGAIN_LATER, error.detail
+
+
+async def require_platform_administrator(request: Request) -> ClientUser:
+    """Return the client session's user once they administer the config the API serves now, else answer 401 or 403."""
+    user = await require_client_user(request)
+    if not is_administrator(user.user_id, bind_current_request_snapshot(request)):
+        raise HTTPException(403, "Not a platform administrator.")
+    return user
 
 
 def plugin_context(connection: HTTPConnection) -> PluginContext:

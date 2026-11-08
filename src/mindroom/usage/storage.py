@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
 
 type IndependentUsageKind = Literal[
+    "call_transcript",
     "claude_agent",
     "compaction_summary",
     "memory_auto_flush",

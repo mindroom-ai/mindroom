@@ -50,7 +50,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `knowledge_graph` | Fact extraction for the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `listening` | Silent turns of a [listening agent](https://docs.mindroom.chat/configuration/agents/#listening), which no requester asked for |
 | `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
-| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
+| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `call_transcript` is the speech-to-text and notes of transcribed calls between people |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
 `system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.

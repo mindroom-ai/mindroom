@@ -203,7 +203,7 @@ The argument takes every form a `plugins:` entry takes, as listed in [Path resol
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
-It leaves out the plugin's top-level `tests/` directory and any directory inside the plugin with its own manifest, which is a separate plugin.
+It leaves out the plugin's top-level `tests/` directory, the `conftest.py` and `test_*.py` files beside its manifest unless the manifest names one as a module, and any directory inside the plugin with its own manifest, which is a separate plugin.
 It also accepts `mindroom.script_sdk`, the client that [background scripts](tools/background-scripts.md#calling-agent-tools-from-a-script), such as a skill's scripts, call tools with.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
@@ -1049,7 +1049,7 @@ A request for a plugin that is not loaded or has no routes, or for a path its ro
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
-MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` or `require_room_member` is public.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
 
 Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
@@ -1108,7 +1108,7 @@ It refuses any other handshake with an HTTP answer before accepting, as `require
 Once accepted, the websocket closes with code 4401 as soon as its session ends: it expires, the client revokes it, or the same user's ninth session replaces it, since MindRoom keeps eight per user; the client then signs in again.
 Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when membership is unavailable, with the same reason `require_room_member` gives for its 503, which the client may retry.
 Closing cancels the `async with` block where it waits, and the route runs on after the block.
-A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.5"` in its manifest.
+A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest.
 Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 ## Plugin context
@@ -1151,6 +1151,26 @@ A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its mani
 A context keeps the settings of the config it was made under, and a tool's context has its turn's or request's config.
 Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error.
 A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket closes with code 1013 and that reason.
+
+## People, agents, and administrators
+
+These functions in `mindroom.plugin_api` tell people from MindRoom's own accounts and check administrators.
+Each takes a `config` and `runtime_paths`, such as a hook's `ctx.config` and `ctx.runtime_paths` or a `PluginContext`'s.
+They read the Matrix accounts MindRoom keeps in the primary's storage, so a tool that uses them sets [`requires_primary_runtime=True`](#decorator-fields).
+
+| Function | Returns |
+|----------|---------|
+| `entity_directory(config, runtime_paths)` | A mapping from the current Matrix user ID of the router and each configured agent and team to its `ManagedEntity` |
+| `is_human_user(user_id, config, runtime_paths)` | `False` for the router, an agent, a team, the [internal user](matrix.md#internal-user), and the [`bot_accounts`](authorization.md#bot-accounts), and `True` for anyone else |
+| `is_platform_administrator(user_id, config, runtime_paths)` | Whether the user is in `administrators` or is a person's [bridge alias](authorization.md#bridge-aliases) for one |
+
+A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"`, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, a preset replaced by its toolkits, with the toolkits those imply, less those its settings turn off, such as `memory` when its memory backend is `none`, and with those its settings add, such as `delegate` for `delegate_to`.
+The directory leaves out an entity whose Matrix account MindRoom has not created yet, such as one a config reload just added.
+A tool name grants nothing, so never decide what a caller may do from one.
+
+A route only administrators may use depends on `require_platform_administrator` from `mindroom.plugin_http`, which returns the same `ClientUser` as `require_client_user`.
+It answers 401 as `require_client_user` does, and 403 unless the caller is an administrator in the config MindRoom serves at that moment, so a config change that removes someone from `administrators` refuses their next request.
+A plugin that uses anything in this section states `"mindroom_plugin_api": "1.5"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 ## Plugin skills
 

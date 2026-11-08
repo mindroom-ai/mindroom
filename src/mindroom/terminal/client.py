@@ -24,6 +24,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.http_error_detail import validation_error_detail
+from mindroom.logging_config import get_logger
 from mindroom.terminal.session import TerminalError, TerminalEvent, TerminalInfo
 from mindroom.tool_system.sandbox_proxy import worker_call
 
@@ -33,9 +34,14 @@ if TYPE_CHECKING:
     from mindroom.tool_system.sandbox_proxy import WorkerCall, WorkerStandIns
     from mindroom.workers.protocol import ExecuteRequest
 
+logger = get_logger(__name__)
+
 _SESSIONS_PATH = "/terminal/sessions"
 # How often an attached viewer marks a dedicated worker used, so it is not stopped as idle while someone watches.
 _KEEPALIVE_SECONDS = 60.0
+# How long a viewer's connection may stay silent before a ping; one unanswered for half as long ends the stream, so a
+# viewer whose runner vanished without closing it is told to attach again instead of waiting for output forever.
+_HEARTBEAT_SECONDS = 30.0
 _HTTP_TIMEOUT_SECONDS = 60.0
 _MAX_RESPONSE_BYTES = 1024 * 1024
 # Above the runner's scrollback and its largest output chunk.
@@ -197,6 +203,7 @@ class WorkerTerminals:
                     headers=worker.headers,
                     params={"owner": _owner(worker.request)},
                     max_msg_size=_MAX_FRAME_BYTES,
+                    heartbeat=_HEARTBEAT_SECONDS,
                 )
             except aiohttp.WSServerHandshakeError as error:
                 if error.status == 403:
@@ -215,8 +222,11 @@ class WorkerTerminals:
     async def _keep_worker(self) -> None:
         while True:
             await asyncio.sleep(_KEEPALIVE_SECONDS)
-            with contextlib.suppress(TerminalError):
+            # A failed lookup, however the worker backend fails, must not stop the next: the viewer still watches.
+            try:
                 await self._worker(start=False)
+            except Exception:
+                logger.warning("Terminal keepalive failed to look up the agent's worker", exc_info=True)
 
 
 __all__ = ["TerminalDetachedError", "TerminalStream", "WorkerTerminals"]

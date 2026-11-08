@@ -12,7 +12,6 @@ from mindroom.authorization import (
     ReplyMembershipPendingError,
     _ReplyAuthorizationDecision,
     _responder_reply_authorization,
-    is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_entity_replies_in_room,
@@ -20,6 +19,7 @@ from mindroom.authorization import (
 )
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
+from mindroom.requester_identity import is_platform_administrator
 from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids

@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import secrets
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
-from mindroom.api.sandbox_runner import app_runner_token, prepare_terminal_launch, validate_runner_token
+from mindroom.api.sandbox_runner import prepare_terminal_launch, validate_runner_token
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.terminal.session import (
     TerminalError,
@@ -132,14 +131,10 @@ async def _viewer_output(websocket: WebSocket, scrollback: bytes, viewer: Termin
 @router.websocket("/sessions/{session_id}/io")
 async def terminal_io(websocket: WebSocket, session_id: str, owner: str) -> None:
     """Bridge one viewer to a terminal: its scrollback, then live output and its exit; and its keys and size."""
-    token = app_runner_token(websocket.app)
-    supplied = websocket.headers.get("x-mindroom-sandbox-token", "")
-    if not token or not secrets.compare_digest(supplied, token):
-        await websocket.close(code=1008)
-        return
     try:
+        await validate_runner_token(websocket, websocket.headers.get("x-mindroom-sandbox-token"))
         session = _terminals(websocket.app).get(owner, session_id)
-    except TerminalError:
+    except (HTTPException, TerminalError):
         await websocket.close(code=1008)
         return
     await websocket.accept()
