@@ -1053,7 +1053,7 @@ A request for a plugin that is not loaded or has no routes, or for a path its ro
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
-MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, `require_room_reader`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
 
 Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
@@ -1078,6 +1078,43 @@ A route that finds its room some other way awaits `require_room_member(request, 
 Either way the user is always the session's own: no parameter of the request can name another.
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
+
+A route that shows a room's people or checks their power depends on `require_room_reader` instead.
+It checks the caller exactly as `require_room_member` does, with the same answers, before it reads anything else of the room, and then returns a `RoomReader`:
+
+```python
+from fastapi import HTTPException
+
+from mindroom.plugin_http import RoomReader, require_room_reader
+
+
+@router.get("/rooms/{room_id}/roster")
+async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) -> dict[str, str]:
+    power = await reader.power()
+    if not power.is_admin(reader.user.user_id):
+        raise HTTPException(403, "Only room admins see the roster.")
+    return {user_id: name or user_id for user_id, name in reader.members.items()}
+```
+
+| Member | Value |
+|--------|-------|
+| `user` | The caller's `ClientUser` |
+| `members` | A read-only mapping from each joined user's ID to their display name in the room, or `None` when they have none, from the lookup that checked the caller |
+| `await power()` | A `RoomPower` read from the room's power levels at that moment |
+| `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
+
+`RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
+`is_admin(user_id)` is true at level 100 or more and for such a creator.
+`may_send(user_id, event_type)` tells whether that level lets the user send message events of the type, which needs the type's level in the power levels' `events`, else their `events_default`, and in an encrypted room also the level of `m.room.encrypted`, the type messages go out as.
+`RoomPower` also carries the `power_levels` content it read, the room's `creators`, and whether it is `encrypted`.
+Each call to `power()` reads again, and `members` is read anew for each request, so a changed name or power level shows on the next one.
+`power()` and `is_direct()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
+`power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
+`is_direct()` keeps its answer for a few minutes and counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
+
+`await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
+It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
@@ -1207,7 +1244,7 @@ The plugin's new tools, hooks, and routes are live while its new lifespan starts
 A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespan failed to start` or `Plugin lifespan failed to stop` with the plugin's name, and MindRoom cancels one that overran and carries on; a lifespan whose start failed never runs its stop code.
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
 Either failure costs the plugin only its lifespan: its tools, hooks, and routes keep working, unless they import the lifecycle module, which then fails them too.
-A plugin with a lifecycle module states `"mindroom_plugin_api": "1.7"` in its manifest, so an older MindRoom skips it with a clear reason.
+A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 ## People, agents, and administrators
 

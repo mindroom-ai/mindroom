@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
 
     from fastapi import FastAPI
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
@@ -93,8 +94,11 @@ class _MindroomAppState:
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
     client_sessions: ClientSessionStore | None = None
-    # Bound while `mindroom run` serves this app; plugin routes read live room membership through it.
-    room_members: Callable[[str], Awaitable[frozenset[str]]] | None = None
+    # Bound while `mindroom run` serves this app; plugin routes read live room membership through it, each joined
+    # user with their display name in the room, and read a room's state and whether it is a direct message.
+    room_members: Callable[[str], Awaitable[Mapping[str, str | None]]] | None = None
+    room_state: Callable[[str], Awaitable[RoomStateSnapshot]] | None = None
+    room_direct: Callable[[str], Awaitable[bool]] | None = None
     usage_export_runner: UsageExportRunner | None = None
 
     @property

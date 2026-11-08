@@ -444,6 +444,12 @@ _MEMBERS = {
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
         ),
     },
+    "mindroom.plugin_http.RoomReader": {"power": "(self)", "is_direct": "(self)"},
+    "mindroom.plugin_http.RoomPower": {
+        "level": "(self, user_id)",
+        "is_admin": "(self, user_id)",
+        "may_send": "(self, user_id, event_type)",
+    },
     "mindroom.plugin_api.HookMatrixAdmin": {
         "get_joined_rooms": "(self)",
         "retain_room": "(self, room_id)",
@@ -514,11 +520,15 @@ _MANIFEST = {
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "ClientUser",
+    "RoomPower",
+    "RoomReader",
+    "client_rooms",
     "client_stream",
     "plugin_context",
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
+    "require_room_reader",
 ]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
@@ -527,15 +537,19 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
+    "mindroom.plugin_http.RoomReader": "(user, members)",
+    "mindroom.plugin_http.client_rooms": "(request, candidates)",
     "mindroom.plugin_http.client_stream": "(websocket, room_id)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
+    "mindroom.plugin_http.require_room_reader": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 7), "4f69be586e3a877d8660a93f53b11083f6f7a151ad03a4bec817f6e1b650ceff")
+_PINNED_VERSION = ((1, 8), "5fecb1a60894f5f5a8f0491a68f6a3cca9f763923e3421450c8a01a73df10a95")
 
 
 def _is_enum(obj: object) -> bool:
