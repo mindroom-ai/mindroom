@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
 from mindroom.redaction import redact_sensitive_text
-from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
+from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState, SpanOutcome
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
@@ -738,17 +738,29 @@ def fence(
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
 
 
-def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str) -> ApprovalContinuation | None:
+def may_finish(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    reported_nothing: bool = False,
+) -> ApprovalContinuation | None:
     """Lock a paused run that may end: its FINAL was acknowledged or refused for good.
 
     A failed run whose reply went with its deleted message ends without one,
-    since nothing is left to show it. The caller applies the finish to the
-    reply it paused while the run still holds that reply, then deletes the run
-    with ``delete``.
+    since nothing is left to show it, and so does a claimed run whose resume
+    span withheld an answer that reported nothing (``reported_nothing``). The
+    caller applies the finish to the reply it paused while the run still holds
+    that reply, then deletes the run with ``delete``.
     """
     continuation = get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return None
+    if reported_nothing:
+        claim_span_id = continuation.claim_span_id
+        claim = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
+        withheld = continuation.state == "claimed" and claim is not None and claim.outcome is SpanOutcome.SUPPRESSED
+        return continuation if withheld else None
     if (
         continuation.state == "failing"
         and _paused_reply_state(transaction, principal_id, continuation) is ReplyState.GONE

@@ -343,10 +343,15 @@ class ReplyRuntime:
             interrupted.append(span.span_id)
         return await self._span_tool_calls(tuple(reversed(interrupted)))
 
-    async def finish_approval(self, approval_id: str) -> bool:
-        """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
+    async def finish_approval(self, approval_id: str, *, reported_nothing: bool = False) -> bool:
+        """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished.
+
+        ``reported_nothing`` finishes a resume that reported nothing, which writes no FINAL.
+        """
         return await run_coroutine_until_complete(
-            self._ran(self.store.approvals.finish_approval_continuation(approval_id)),
+            self._ran(
+                self.store.approvals.finish_approval_continuation(approval_id, reported_nothing=reported_nothing),
+            ),
         )
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:

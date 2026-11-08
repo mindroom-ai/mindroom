@@ -162,6 +162,7 @@ A silent schedule does not show its trigger in the room.
 A successful run that returns nothing, whitespace, or only `NO_REPLY` (any case) posts no message.
 Findings, failures, and messages that tools send explicitly remain visible.
 Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
+A silent run that pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/) shows its waiting message, and once approved, a run with nothing to report removes that message.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
 Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
 

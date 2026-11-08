@@ -1253,12 +1253,14 @@ def approval_settled(
     failure_kind: ApprovalFailureKind | None,
     answers_turn: bool,
     now_ns: int,
+    reported_nothing: bool = False,
 ) -> Transition:
     """Apply a continuation's finish, which settles the sources its pause held whatever the reply does.
 
     ``failure_kind`` is how a failed continuation failed, or ``None`` for one
-    that finished. The turn stays unanswered when no owner is left to answer
-    it (``answers_turn``); the store also leaves a deleted turn unanswered.
+    that finished; ``reported_nothing`` says its resume ended withholding an
+    answer that reported nothing. The turn stays unanswered when no owner is
+    left to answer it (``answers_turn``); the store also leaves a deleted turn unanswered.
     """
     resumed = last_span is not None and last_span.kind is SpanKind.APPROVAL_RESUME and last_span.ended
     owns = reply.approval_id == approval_id or (
@@ -1269,6 +1271,10 @@ def approval_settled(
     elif reply.terminal:
         # Its terminal row or note already ended the reply; the finish only settles the sources.
         decided = _unchanged(Outcome.DUPLICATE, reply)
+    elif failure_kind is None and reported_nothing and resumed:
+        # A silent schedule's resume that reported nothing completes its reply, removing the message its pause showed.
+        completed = _set_state(_stop_applied(reply), ReplyState.COMPLETED, now_ns)
+        decided = Transition(outcome=Outcome.APPLIED, reply=_with_redactions(completed, reply.event_id))
     elif failure_kind is None:
         # A finished run's acknowledged answer already ended the reply.
         decided = _unchanged(Outcome.STALE, reply)
