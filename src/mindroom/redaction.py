@@ -89,25 +89,16 @@ _QUOTED_VALUE_PATTERNS = {
 }
 # One command and its arguments run to a line break or a shell operator; a backslash continues them on the next line.
 _COMMAND_PATTERN = re.compile(r"(?:[^\\\r\n;&|(`]|\\(?:\r\n|[\s\S]))++")
-_WORD_PATTERN = re.compile(r"\S+")
-# Words after which a later word can still be the program run, as in `sudo mysql` or `docker exec db mysql`.
-_COMMAND_PREFIX_WORDS = frozenset({"command", "env", "exec", "nohup", "sudo", "time", "xargs"})
-# Programs that take a password as an option, and that option: curl takes `user:password` after `-u` or `--user`, and
-# mysql and its tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options
-# for other things, such as `docker run --user 1000:0` or `mkdir -pv`.
-_PASSWORD_OPTIONS = (
-    (
-        re.compile(r"(?:\S*/)?curl"),
-        re.compile(
-            r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
-            r"(?P<token>(?(quote)[^\"'\r\n]++|[^\s\"']++))",
-        ),
-    ),
-    (
-        re.compile(r"(?:\S*/)?(?:mysql|mariadb)[\w-]*+"),
-        re.compile(r"(?<!\S)-p(?P<token>'[^']*+'?|\"[^\"]*+\"?|[^\s'\"]++)"),
-    ),
+# Programs that take a password as an option: curl takes `user:password` after `-u` or `--user`, and mysql and its
+# tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other
+# things, such as `docker run --user 1000:0` or `mkdir -pv`.
+_PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[\w-]*+)(?!\S)")
+_CURL_USER_OPTION_PATTERN = re.compile(
+    r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:(?P<token>(?(quote)[^\"'\r\n]++|[^\s\"']++))",
 )
+_MYSQL_PASSWORD_OPTION_PATTERN = re.compile(r"(?<!\S)-p(?P<token>'[^']*+'?|\"[^\"]*+\"?|[^\s'\"]++)")
+# Words after which a later word can still be the program run, as in `sudo mysql` or `docker exec db mysql`.
+_COMMAND_PREFIX_PATTERN = re.compile(r"(?<!\S)(?:command|env|exec|nohup|sudo|time|xargs)(?!\S)")
 # A PEM private key from its BEGIN line through the matching END line, or to the end of the text without one, so a key
 # cut off by a length bound or a mismatched END line never leaves its body behind. Certificates are public and stay.
 _PRIVATE_KEY_PATTERN = re.compile(
@@ -739,14 +730,13 @@ def redact_private_keys(value: str) -> str:
 def _redact_password_options(command_match: re.Match[str]) -> str:
     """Redact the password options of one command that runs curl or mysql, first or after a word such as ``sudo``."""
     command = command_match.group(0)
-    after_prefix = False
-    for index, word in enumerate(_WORD_PATTERN.finditer(command)):
-        if index == 0 or after_prefix:
-            for program, option in _PASSWORD_OPTIONS:
-                if program.fullmatch(word.group()):
-                    return command[: word.end()] + option.sub(_redact_matched_token, command[word.end() :])
-        after_prefix = after_prefix or word.group() in _COMMAND_PREFIX_WORDS
-    return command
+    program = _PASSWORD_PROGRAM_PATTERN.search(command)
+    if program is None or (
+        command[: program.start()].strip() and not _COMMAND_PREFIX_PATTERN.search(command, 0, program.start())
+    ):
+        return command
+    option = _CURL_USER_OPTION_PATTERN if program.group("curl") else _MYSQL_PASSWORD_OPTION_PATTERN
+    return command[: program.end()] + option.sub(_redact_matched_token, command[program.end() :])
 
 
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
