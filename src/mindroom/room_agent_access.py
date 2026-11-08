@@ -32,7 +32,9 @@ from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.metadata import normalize_string_array_override, resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
@@ -46,9 +48,13 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.plugin_http import RoomPower
+    from mindroom.tool_system.agent_tools import AgentTools
     from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+# Set on the primary when its shared ``static_runner`` mounts the agents' storage, as the Kubernetes chart's does, so a
+# toolkit routed there works in the agent's workspace; a runner that sees only its own scratch storage leaves it off.
+_STATIC_RUNNER_AGENT_STORAGE_ENV = "MINDROOM_STATIC_RUNNER_AGENT_STORAGE"
 # As long as plugin routes wait for a room read, and the Computer for its whole check.
 _ACCESS_TIMEOUT_SECONDS = 20
 _ACCESS_UNAVAILABLE = "Agent access is unavailable; try again."
@@ -188,9 +194,28 @@ class AgentWorkspace:
     """``read`` with a toolkit that takes local paths or runs code, ``write`` with one that edits files or runs code
     and power to post messages in the room."""
     terminal: Literal["none", "watch", "type"]
-    """``watch`` with a shell, ``type`` with a shell and power to post messages in the room."""
+    """``watch`` with a shell that offers ``run_shell_command`` and runs in a worker, ``type`` where that worker mounts
+    the workspace (``toolkit_host``) and the caller may post messages in the room."""
     config: Config = field(repr=False)
     """The config this answer was resolved under, the one the API served when the request arrived."""
+
+
+def toolkit_host(
+    agent_tools: AgentTools,
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+) -> Literal["primary", "workspace_worker", "scratch_worker"]:
+    """Return where the agent's calls of ``tool_name`` run, as its turns place them.
+
+    ``primary`` is the primary process; ``workspace_worker`` a worker that mounts the agent's workspace: a dedicated
+    Docker or Kubernetes worker, or the shared ``static_runner`` where ``_STATIC_RUNNER_AGENT_STORAGE_ENV`` says it
+    mounts the agents' storage; ``scratch_worker`` the shared runner otherwise, which sees only its own storage.
+    """
+    if not agent_tools.runs_in_worker(tool_name, tool_placement(runtime_paths, agent_tools.tools)):
+        return "primary"
+    if worker_backend_kind(runtime_paths).dedicated or runtime_paths.env_flag(_STATIC_RUNNER_AGENT_STORAGE_ENV):
+        return "workspace_worker"
+    return "scratch_worker"
 
 
 def _offered_functions(metadata: ToolMetadata, settings: Mapping[str, object]) -> frozenset[str] | None:
@@ -234,10 +259,15 @@ def _workspace(
         use_state_storage_path=storage.execution.policy.private_workspace_enabled,
     )
     tools = config_plugins(config, runtime_paths).tools
+    agent_tools = resolve_agent_tools(config, name, tools)
     # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers; by name, whether
     # one of them writes files or runs code.
     path_toolkits: dict[str, bool] = {}
-    for entry in resolve_agent_tools(config, name, tools).candidates(matrix_room_tools=True):
+    shell_runs_commands = False
+    for entry in agent_tools.candidates(matrix_room_tools=True):
+        # Until toolkits declare what changes files, this one is skipped by name: it acts only through the shell.
+        if entry.name == "terminal":
+            continue
         metadata = tools.get(entry.name)
         # Code a toolkit runs works in the workspace whatever paths the toolkit takes.
         if metadata is None or (metadata.file_access is ToolFileAccess.NONE and not metadata.executes_code):
@@ -256,10 +286,14 @@ def _workspace(
         functions = _offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
+        if entry.name == "shell":
+            shell_runs_commands = functions is None or "run_shell_command" in functions
         writers = _WRITERS.get(entry.name)
         path_toolkits[entry.name] = (
             metadata.executes_code if writers is None else not writers.isdisjoint(functions or ())
         )
+    # A terminal runs only beside a worker's shell commands; people type in it where that worker sees the workspace.
+    shell = toolkit_host(agent_tools, "shell", runtime_paths) if shell_runs_commands else None
     return AgentWorkspace(
         name=name,
         user_id=user_id,
@@ -267,7 +301,9 @@ def _workspace(
         private=storage.execution.is_private,
         root=workspace.root,
         files="none" if not path_toolkits else "write" if may_send and any(path_toolkits.values()) else "read",
-        terminal="none" if "shell" not in path_toolkits else "type" if may_send else "watch",
+        terminal=(
+            "none" if shell in (None, "primary") else "type" if may_send and shell == "workspace_worker" else "watch"
+        ),
         config=config,
     )
 

@@ -23,7 +23,7 @@ from mindroom.api.client_sessions import client_session_store
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
@@ -129,9 +129,25 @@ class _Room:
         return await require_room_reader(request, ROOM)
 
 
-def _room(tmp_path: Path, agents: dict[str, AgentConfig], *, joined: tuple[str, ...] | None = None) -> _Room:
-    """A room with ``agents``, all of them joined unless ``joined`` names some."""
-    return _Room(Config(agents=agents), test_runtime_paths(tmp_path), joined or tuple(agents))
+def _paths(tmp_path: Path, **env: str) -> RuntimePaths:
+    """A runtime whose agents' shell commands run in a dedicated Docker worker, unless ``env`` places them elsewhere."""
+    paths = test_runtime_paths(tmp_path)
+    return resolve_runtime_paths(
+        config_path=paths.config_path,
+        storage_path=paths.storage_root,
+        process_env={**paths.process_env, "MINDROOM_WORKER_BACKEND": "docker", **env},
+    )
+
+
+def _room(
+    tmp_path: Path,
+    agents: dict[str, AgentConfig],
+    *,
+    joined: tuple[str, ...] | None = None,
+    **env: str,
+) -> _Room:
+    """A room with ``agents``, all of them joined unless ``joined`` names some, under a runtime ``env`` changes."""
+    return _Room(Config(agents=agents), _paths(tmp_path, **env), joined or tuple(agents))
 
 
 async def _status(read: Awaitable[object]) -> tuple[int, object]:
@@ -194,7 +210,7 @@ async def test_a_bridge_alias_opens_the_workspace_its_person_s_turns_use(tmp_pat
     """A caller signed in as a bridge alias of Alice gets the private root Alice's turns resolve, not one of its own."""
     alias = "@telegram_alice:localhost"
     config = Config(agents=_agents(), authorization={"aliases": {ALICE: [alias]}})
-    room = _Room(config, test_runtime_paths(tmp_path), ("coder", "notes"))
+    room = _Room(config, _paths(tmp_path), ("coder", "notes"))
     room.client.joined_members.return_value = joined_members_response(ROOM, alias, *room.ids.values())
 
     (coder, notes) = await room.agents(alias)
@@ -254,6 +270,56 @@ async def test_files_follow_what_each_toolkit_offers_by_its_own_settings(
     room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=tools, access={"users": [ALICE]})})
 
     assert _access(await room.agents(ALICE)) == [("helper", files, "none")]
+
+
+# Where the agent's shell runs: in the primary process, the shared runner seeing only its own storage, the shared runner
+# mounting the agents' storage, or a dedicated worker.
+_PRIMARY = {"MINDROOM_WORKER_BACKEND": "static_runner"}
+_SCRATCH_RUNNER = {"MINDROOM_WORKER_BACKEND": "static_runner", "MINDROOM_SANDBOX_PROXY_URL": "http://runner:8766"}
+_STORAGE_RUNNER = {**_SCRATCH_RUNNER, "MINDROOM_STATIC_RUNNER_AGENT_STORAGE": "true"}
+
+
+@pytest.mark.parametrize(
+    ("env", "alice", "bob"),
+    [
+        ({}, "type", "watch"),
+        (_STORAGE_RUNNER, "type", "watch"),
+        (_SCRATCH_RUNNER, "watch", "watch"),
+        (_PRIMARY, "none", "none"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_people_type_in_terminals_only_where_the_agent_s_shell_works_in_its_workspace(
+    tmp_path: Path,
+    env: dict[str, str],
+    alice: str,
+    bob: str,
+) -> None:
+    """Terminals run beside a worker's shell; Alice, who may post, types where that worker mounts the workspace."""
+    helper = AgentConfig(display_name="Helper", tools=["shell"], access={"users": [ALICE, BOB]})
+    room = _room(tmp_path, {"helper": helper}, **env)
+
+    assert [workspace.terminal for workspace in await room.agents(ALICE)] == [alice]
+    assert [workspace.terminal for workspace in await room.agents(BOB)] == [bob]
+
+
+@pytest.mark.parametrize("env", [{}, _SCRATCH_RUNNER, _PRIMARY])
+@pytest.mark.asyncio
+async def test_the_terminal_toolkit_adds_nothing_to_what_the_shell_gives(tmp_path: Path, env: dict[str, str]) -> None:
+    """It types only into the agent's shell, so an agent with both may do what one with the shell alone may."""
+    access = ResponderAccessConfig(users=[ALICE, BOB])
+    agents = {
+        "both": AgentConfig(display_name="Both", tools=["shell", "terminal"], access=access),
+        "shell": AgentConfig(display_name="Shell", tools=["shell"], access=access),
+        "terminal": AgentConfig(display_name="Terminal", tools=["terminal"], access=access),
+    }
+    room = _room(tmp_path, agents, **env)
+
+    for caller in (ALICE, BOB):
+        both, shell, terminal = _access(await room.agents(caller))
+        assert both[1:] == shell[1:]
+        assert terminal[1:] == ("none", "none")
+    assert _access(await room.agents(BOB))[0][1] == "read"
 
 
 PLUGIN_TOOLS = """
@@ -410,7 +476,7 @@ async def test_a_contact_room_opens_no_workspace(tmp_path: Path) -> None:
     """A contact room runs its agent's turns as the agent's owner, so nobody opens that agent's workspace through it."""
     data = _with_template()
     data["personal_agents"]["mind"]["agent"] |= {"contacts": {}, "tools": ["file"]}
-    room = _Room(_load(tmp_path, data, entries=[_personal(ALICE)]), test_runtime_paths(tmp_path), ("mind_alice",))
+    room = _Room(_load(tmp_path, data, entries=[_personal(ALICE)]), _paths(tmp_path), ("mind_alice",))
     agent_id = room.ids["mind_alice"]
     assert _access(await room.agents(ALICE)) == [("mind_alice", "write", "type")]
 

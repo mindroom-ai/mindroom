@@ -15,6 +15,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
+- [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room watch and type in.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -185,6 +186,35 @@ export NPM_CONFIG_PREFIX="$PWD/.local"
 export NPM_CONFIG_CACHE="$PWD/.cache/npm"
 export PATH="$PWD/.local/bin:$PATH"
 EOF
+```
+
+## [`terminal`]
+
+`terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client.
+Use it for work people should see or that keeps state between commands, such as a dev server, a REPL, an interactive program, or a long build.
+
+- `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
+- `terminal_run(session_id, command, timeout_s)` types one command line, waits up to `timeout_s` seconds (default 30) for the shell's next prompt, and returns the output and exit status; a command still running then keeps running. It types only while the shell waits at an empty prompt.
+- `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command.
+- `terminal_read(session_id)` returns the terminal's recent output as text.
+- `terminal_list()` lists the workspace's terminals, including the ones people opened.
+
+An agent has terminals only when it also has [`shell`] with `run_shell_command` and that shell runs in a worker; otherwise it is offered none of these functions.
+A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
+Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
+A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
+
+The [approval rules](../tool-approval.md) for `run_shell_command` also judge what the agent types.
+`terminal_open` asks whenever those rules may ask, `terminal_run` is judged as its command, and `terminal_send` as the command its Enter runs, including what anyone typed on that line before.
+When the line can't be known, such as after arrow keys, Tab, or keys typed while a command runs, the rules ask whenever they may.
+Keys approved against a line that someone changed before they were typed are not typed, and the agent reads the terminal and tries again.
+
+```yaml
+agents:
+  ops:
+    tools:
+      - shell
+      - terminal
 ```
 
 ## [`python`]

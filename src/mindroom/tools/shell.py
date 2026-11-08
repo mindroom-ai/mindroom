@@ -22,6 +22,7 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.shell.execution import run_command, shell_call_timeout
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.terminal.lines import PROMPT_COMMAND
 from mindroom.terminal.session import TerminalError, TerminalLaunch
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import (
@@ -436,11 +437,14 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             Not a function the agent calls: the sandbox runner starts it in a pty beside the commands it runs. It
             reads no startup files, so it starts with exactly that environment. ``process_environ`` is the
             environment of the process a command runs from there, None for this one's.
+
+            🔒 The primary judges typing as the line it enters (``mindroom.terminal.lines``), so the shell marks each
+            prompt, expands no ``!`` history, and reads neither key bindings nor history that worker code wrote.
             """
             env = self._command_env(process_environ)
-            env["TERM"] = "xterm-256color"
+            env.update(TERM="xterm-256color", PROMPT_COMMAND=PROMPT_COMMAND, INPUTRC="/dev/null", HISTFILE="")
             return TerminalLaunch(
-                argv=("bash", "--noprofile", "--norc", "-i"),
+                argv=("bash", "--noprofile", "--norc", "+H", "-i"),
                 env=env,
                 cwd=_terminal_cwd(self.base_dir, cwd),
             )
