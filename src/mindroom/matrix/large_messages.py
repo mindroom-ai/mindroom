@@ -733,8 +733,13 @@ def _build_text_fallback_content(
     source_content: dict[str, Any],
     preview_text: str,
     size_limit: int,
+    *,
+    sidecar_required: bool,
 ) -> dict[str, Any]:
-    """Build a text preview when the full-content sidecar is unavailable."""
+    """Build a text preview when the full-content sidecar is unavailable, unless the message must keep its sidecar."""
+    if sidecar_required:
+        msg = "Large message needs a sidecar, which could not be used"
+        raise MatrixEventTooLargeError(msg)
     preview_limit = max(0, size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES)
     preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
     while True:
@@ -823,6 +828,7 @@ async def prepare_large_message(
     *,
     room_encrypted: bool,
     prepare_for_encrypted_delivery: bool = False,
+    sidecar_required: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -839,6 +845,8 @@ async def prepare_large_message(
         room_encrypted: Authoritative room encryption state from the delivery boundary
         prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery,
             waiting out a homeserver outage for the sidecar rather than freezing a truncated text
+        sidecar_required: Raise ``MatrixEventTooLargeError`` instead of falling back to a truncated text without
+            the content's sidecar-only keys, for a message that must arrive whole or not at all
 
     Returns:
         The original content object when no preparation is needed, otherwise
@@ -941,6 +949,9 @@ async def prepare_large_message(
         room_encrypted=encrypted_delivery_safe,
     )
     if sidecar_usable:
+        if source_content.get("msgtype") == "m.notice":
+            # A notice's preview stays a notice, so the push rule that keeps notices quiet still matches it.
+            modified_content["msgtype"] = "m.notice"
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
@@ -955,6 +966,12 @@ async def prepare_large_message(
             modified_content["format"] = "org.matrix.custom.html"
             modified_content["formatted_body"] = source_content["formatted_body"]
     else:
+        modified_content = _build_text_fallback_content(
+            source_content,
+            preview_text,
+            size_limit,
+            sidecar_required=sidecar_required,
+        )
         logger.warning(
             "large_message_sidecar_unavailable_using_text_fallback",
             room_id=room_id,
@@ -963,7 +980,6 @@ async def prepare_large_message(
             has_mxc_uri=bool(mxc_uri),
             has_file_info=bool(file_info),
         )
-        modified_content = _build_text_fallback_content(source_content, preview_text, size_limit)
 
     try:
         modified_content = _fit_large_message_preview(
@@ -982,6 +998,12 @@ async def prepare_large_message(
         # cannot be proven before upload. The empty text envelope was proven
         # above; fall back to it instead of failing and uploading again on the
         # next delivery attempt.
+        text_fallback = _build_text_fallback_content(
+            source_content,
+            preview_text,
+            size_limit,
+            sidecar_required=sidecar_required,
+        )
         logger.warning(
             "large_message_sidecar_envelope_too_large_using_text_fallback",
             room_id=room_id,
@@ -991,7 +1013,7 @@ async def prepare_large_message(
         modified_content = _fit_large_message_preview(
             content,
             source_content,
-            _build_text_fallback_content(source_content, preview_text, size_limit),
+            text_fallback,
             preview_text,
             is_edit=is_edit,
             continuation_indicator=_SIDECAR_UPLOAD_FALLBACK_INDICATOR,

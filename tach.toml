@@ -985,6 +985,7 @@ depends_on = [
     "mindroom.session_storage.lanes",
 ]
 visibility = [
+    "mindroom.call_transcripts",
     "mindroom.response_turn",
     "mindroom.api.openai_compat",
     "mindroom.memory.auto_flush",
@@ -2072,6 +2073,7 @@ depends_on = [
     "mindroom.api.usage_export",
     "mindroom.api.validation_errors",
     "mindroom.api.workers",
+    "mindroom.call_transcripts",
     "mindroom.constants",
     "mindroom.embeddings.embedder_health",
     "mindroom.matrix.decrypt_failure",
@@ -3203,6 +3205,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.orchestration.accounts",
+    "mindroom.orchestration.call_transcripts_runtime",
     "mindroom.orchestration.computer_runtime",
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.agent_reply_membership_sync",
@@ -3978,6 +3981,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = ["mindroom.llm", "mindroom.matrix.guarded_rooms"]
 visibility = [
+    "mindroom.call_transcripts.router_room",
     "mindroom.custom_tools.thread_move",
     "mindroom.matrix.personal_rooms",
     "mindroom.custom_tools.matrix_message_idempotency",
@@ -4025,6 +4029,7 @@ visibility = [
 path = "mindroom.matrix.room_power"
 depends_on = []
 visibility = [
+    "mindroom.call_transcripts.router_room",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_reconciliation",
@@ -9832,4 +9837,33 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.room_thread_modes",
+]
+
+[[modules]]
+path = "mindroom.call_transcripts"
+depends_on = [
+    "mindroom.agent_loop.helper",
+    "mindroom.api.app_state",
+    "mindroom.bounded_bytes",
+    "mindroom.helper_usage",
+    "mindroom.plugin_http",
+    "mindroom.providers.registry",
+    "mindroom.voice.handler",
+]
+
+[[modules]]
+path = "mindroom.call_transcripts.router_room"
+depends_on = [
+    "mindroom.call_transcripts",
+    "mindroom.constants",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.room_power",
+]
+
+[[modules]]
+path = "mindroom.orchestration.call_transcripts_runtime"
+depends_on = [
+    "mindroom.call_transcripts",
+    "mindroom.call_transcripts.router_room",
+    "mindroom.constants",
 ]

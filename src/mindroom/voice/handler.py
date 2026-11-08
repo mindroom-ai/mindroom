@@ -1,4 +1,4 @@
-"""Voice message handler with speech-to-text and light transcript normalization."""
+"""Voice message handling with light transcript normalization, and the speech-to-text call transcripts share."""
 
 from __future__ import annotations
 
@@ -546,6 +546,14 @@ def _transcription_usage(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SpeechTranscript:
+    """What speech-to-text heard in one recording, and the provider's token usage for it, if it reported any."""
+
+    text: str
+    usage: HelperUsage | None
+
+
 async def _transcribe_audio(
     audio_data: bytes,
     config: Config,
@@ -553,16 +561,41 @@ async def _transcribe_audio(
     *,
     mime_type: str | None = None,
 ) -> str | None:
-    """Transcribe audio using OpenAI-compatible API.
-
-    Args:
-        audio_data: Audio file bytes
-        config: Application configuration
-        runtime_paths: Explicit runtime context for STT credential lookup
-        mime_type: Matrix-declared MIME type for the audio payload
+    """Transcribe a voice message, recording the provider's usage as voice transcription.
 
     Returns:
         Transcription text or None if failed
+
+    """
+    transcript = await transcribe_speech(audio_data, config, runtime_paths, mime_type=mime_type)
+    if transcript is None:
+        return None
+    if transcript.usage is not None:
+        await record_system_usage(transcript.usage, runtime_paths=runtime_paths, kind="voice_transcription")
+    return transcript.text
+
+
+async def transcribe_speech(
+    audio: bytes,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    mime_type: str | None = "audio/wav",
+    language: str | None = None,
+) -> SpeechTranscript | None:
+    """Transcribe audio with the ``voice.stt`` speech service, through its OpenAI-compatible API.
+
+    Records no usage: the caller records ``usage`` under its own kind.
+
+    Args:
+        audio: Audio file bytes, never written to disk
+        config: Application configuration, read for this request
+        runtime_paths: Explicit runtime context for STT credential lookup
+        mime_type: Declared MIME type of the audio
+        language: Language code hinted to the speech service, over one in its ``extra_kwargs``
+
+    Returns:
+        The transcript, or None if transcription failed
 
     """
     try:
@@ -577,14 +610,16 @@ async def _transcribe_audio(
             elif config.voice.stt.provider == "openai_compatible":
                 api_key = LOCAL_OPENAI_API_KEY_DEFAULT
         if not api_key:
-            logger.error("No OpenAI-compatible STT API key configured for voice transcription")
+            logger.error("No OpenAI-compatible STT API key configured for speech-to-text")
             return None
         headers = {"Authorization": f"Bearer {api_key}"}
 
         filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
-        files = {"file": (filename, audio_data, upload_mime_type)}
+        files = {"file": (filename, audio, upload_mime_type)}
         form_data: dict[str, object] = {"model": config.voice.stt.model}
         form_data.update(config.voice.stt.extra_kwargs)
+        if language is not None:
+            form_data["language"] = language
 
         async with (
             asyncio.timeout(_STT_TOTAL_TIMEOUT_SECONDS),
@@ -602,21 +637,17 @@ async def _transcribe_audio(
 
             result = response.json()
 
-        usage = _transcription_token_usage(result)
-        if usage is not None:
+        tokens = _transcription_token_usage(result)
+        usage = None
+        if tokens is not None:
             model = form_data.get("model")
-            provider = "openai" if config.voice.stt.provider == "openai" and stt_base_url is None else None
-            await record_system_usage(
-                _transcription_usage(
-                    usage,
-                    model=model if isinstance(model, str) else None,
-                    provider=provider,
-                    created_at=request_started_at,
-                ),
-                runtime_paths=runtime_paths,
-                kind="voice_transcription",
+            usage = _transcription_usage(
+                tokens,
+                model=model if isinstance(model, str) else None,
+                provider="openai" if config.voice.stt.provider == "openai" and stt_base_url is None else None,
+                created_at=request_started_at,
             )
-        return result.get("text", "").strip()
+        return SpeechTranscript(text=result.get("text", "").strip(), usage=usage)
 
     except TimeoutError:
         logger.warning("stt_transcription_timeout", timeout_seconds=_STT_TOTAL_TIMEOUT_SECONDS)

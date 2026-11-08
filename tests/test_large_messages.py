@@ -891,6 +891,24 @@ async def test_prepare_large_message_valid_sidecar_keeps_file_preview() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("msgtype", "preview_msgtype"), [("m.notice", "m.notice"), ("m.text", "m.file")])
+async def test_a_notices_sidecar_preview_stays_a_quiet_notice(msgtype: str, preview_msgtype: str) -> None:
+    """A notice's preview keeps ``m.notice``, its pointer and its mentions metadata; other messages stay ``m.file``."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    content = {"body": "n" * 100000, "msgtype": msgtype, "m.mentions": {}, SKIP_MENTIONS_KEY: True}
+
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
+
+    assert result["msgtype"] == preview_msgtype
+    assert result["url"] == "mxc://server/sidecar"
+    assert result["io.mindroom.long_text"]["is_complete_content"] is True
+    assert result["m.mentions"] == {}
+    assert result[SKIP_MENTIONS_KEY] is True
+    assert client.uploaded_data is not None
+    assert json.loads(client.uploaded_data.decode("utf-8")) == content
+
+
+@pytest.mark.asyncio
 async def test_prepare_edit_message() -> None:
     """Test that edit messages use lower size threshold."""
     client = _UploadClient(nio.UploadResponse("mxc://server/file456"))
