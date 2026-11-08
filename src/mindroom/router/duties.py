@@ -89,7 +89,7 @@ class RouterDuties:
             )
         await self.deps.room_lifecycle.send_welcome_message_if_empty(room_id)
 
-    def joined(self, room_id: str) -> None:
+    def mark_joined_for_room_state(self, room_id: str) -> None:
         """Publish the room state of a room the router joined by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
 
