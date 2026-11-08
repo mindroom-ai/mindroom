@@ -884,11 +884,12 @@ def test_an_unclosed_quoted_secret_hides_the_rest_of_the_text(text: str, expecte
     ("command", "expected"),
     [
         ("API_KEY=abc && run", f"API_KEY={REDACTED} && run"),
+        ("export api_key=abc && run", f"export api_key={REDACTED} && run"),
         ("export TOKEN=abc; make", f"export TOKEN={REDACTED}; make"),
-        ("API_TOKEN=abc gh pr list", f"API_TOKEN={REDACTED} gh pr list"),
-        ("TOKEN=abc|grep x", f"TOKEN={REDACTED}|grep x"),
-        ("PASSWORD=abc>out.txt", f"PASSWORD={REDACTED}>out.txt"),
-        ("PASSWORD=my\\ pass make", f"PASSWORD={REDACTED} make"),
+        ("env API_TOKEN=abc gh pr list", f"env API_TOKEN={REDACTED} gh pr list"),
+        ("export TOKEN=abc|grep x", f"export TOKEN={REDACTED}|grep x"),
+        ("env PASSWORD=abc>out.txt", f"env PASSWORD={REDACTED}>out.txt"),
+        ("env PASSWORD=my\\ pass make", f"env PASSWORD={REDACTED} make"),
         ("deploy --api-key=abc --verbose", f"deploy --api-key={REDACTED} --verbose"),
     ],
 )
@@ -904,10 +905,13 @@ def test_a_value_assigned_in_a_shell_command_ends_with_its_shell_word(command: s
         ("password = correct horse battery staple", f"password = {REDACTED}"),
         ("Proxy-Authorization: Basic dXNlcjpwdw==", f"Proxy-Authorization: {REDACTED}"),
         ("AUTHORIZATION: Basic dXNlcjpwdw==", f"AUTHORIZATION: {REDACTED}"),
+        ("HOME=/root\nPASSWORD=correct horse battery staple", f"HOME=/root\nPASSWORD={REDACTED}"),
+        ("AUTHORIZATION=Basic dXNlcjpwdw==", f"AUTHORIZATION={REDACTED}"),
+        ('"Env": ["DB_PASSWORD=correct horse battery"]', f'"Env": ["DB_PASSWORD={REDACTED}"]'),
     ],
 )
 def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected: str) -> None:
-    """Config files, headers, and prose put spaces inside values, so their values still run to the end."""
+    """Config files, headers, `env` output, and prose put spaces inside values, so their values still run to the end."""
     assert redact_sensitive_text(text) == expected
 
 
@@ -936,6 +940,7 @@ def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: 
         "docker run -p8080:80 -u 1000 app",
         "ssh -p2222 host",
         "git push -u origin main",
+        "docker run --user 1000:0 alpine id",
         "mysql -u root -p app && mkdir -pv backup",
     ],
 )

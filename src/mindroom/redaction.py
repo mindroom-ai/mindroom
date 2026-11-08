@@ -77,25 +77,26 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
-# A value assigned in a shell command, such as `API_KEY=value make` or `--token=value`, is one shell word: it ends at
-# whitespace, a shell operator, or where other values end, and a backslash escapes the next character, a line break
-# included.
+# A value assigned in a command's arguments, such as `export API_KEY=value && make` or `--token=value`, is one shell
+# word: it ends at whitespace, a shell operator, or where other values end, and a backslash escapes the next character,
+# a line break included.
 _SHELL_WORD_PATTERN = re.compile(r"(?:[^\s\\,&)\]}\"';|<>(]|\\(?:\r\n|[\s\S]))*+")
 # A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
 _QUOTED_VALUE_PATTERNS = {
     quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
     for quote in ("'", '"')
 }
-# `curl -u user:password` and `--user user:password` give a password after the user name.
-_USER_OPTION_PATTERN = re.compile(
+# A command's arguments run to a line break or a shell operator; a backslash continues them on the next line.
+_COMMAND_ARGUMENTS = r"(?P<arguments>(?:[^\\\r\n;&|]|\\(?:\r\n|[\s\S]))*+)"
+# curl takes `user:password` after `-u` or `--user`; other commands, such as `docker run --user 1000:0`, take ids there.
+_CURL_COMMAND_PATTERN = re.compile(rf"(?<![\w.-])curl{_COMMAND_ARGUMENTS}")
+_CURL_USER_OPTION_PATTERN = re.compile(
     r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
     r"(?P<token>(?(quote)[^\"'\r\n]++|[^\s\"']++))",
 )
 # mysql and its tools take a password attached to `-p`, as in `-p'password'` or `-ppassword`; in other commands an
 # attached `-p` starts unrelated options, such as `mkdir -pv`.
-_MYSQL_COMMAND_PATTERN = re.compile(
-    r"(?<![\w.-])(?:mysql|mariadb)[\w-]*+(?P<arguments>(?:[^\\\r\n;&|]|\\(?:\r\n|[\s\S]))*+)",
-)
+_MYSQL_COMMAND_PATTERN = re.compile(rf"(?<![\w.-])(?:mysql|mariadb)[\w-]*+{_COMMAND_ARGUMENTS}")
 _MYSQL_PASSWORD_OPTION_PATTERN = re.compile(r"(?<!\S)-p(?P<token>'[^']*+'?|\"[^\"]*+\"?|[^\s'\"]++)")
 # A PEM private key from its BEGIN line through the matching END line, or to the end of the text without one, so a key
 # cut off by a length bound or a mismatched END line never leaves its body behind. Certificates are public and stay.
@@ -471,7 +472,25 @@ def _assignment_value_span(
         value_end = word.end()
     else:
         value_end = unquoted_value_end(value_start)
+        # Whitespace before where the value ends, as before `&& run`, is not part of it.
+        while value_end > value_start and value[value_end - 1] in " \t":
+            value_end -= 1
     return (value_start, value_end, value_end) if value_end > value_start else None
+
+
+def _is_shell_argument_assignment(value: str, prefix_match: re.Match[str]) -> bool:
+    """Return whether an assignment is a command's argument, such as ``export API_KEY=…`` or ``--token=…``.
+
+    It is assigned with ``=``, to an upper-case environment variable or an option, unquoted, after another word on
+    its line. An assignment that starts its line, as in ``.env`` files or ``env`` output, can hold spaces.
+    """
+    key = prefix_match.group("key")
+    if value[prefix_match.end() - 1] != "=" or prefix_match.group("open") or not (key.startswith("-") or key.isupper()):
+        return False
+    before = prefix_match.start()
+    while before > 0 and value[before - 1] in " \t":
+        before -= 1
+    return before > 0 and value[before - 1] not in "\r\n"
 
 
 def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> str:
@@ -503,8 +522,7 @@ def _redact_secret_assignments(value: str) -> str:
         if not classification.is_secret:
             continue
 
-        # An upper-case environment variable or an option assigned with `=` is a shell assignment.
-        shell_word = value[search_start - 1] == "=" and (key.startswith("-") or key.isupper())
+        shell_word = _is_shell_argument_assignment(value, prefix_match)
         value_span = _assignment_value_span(
             value,
             search_start,
@@ -708,12 +726,14 @@ def redact_private_keys(value: str) -> str:
     return _PRIVATE_KEY_PATTERN.sub(REDACTED, value)
 
 
-def _redact_mysql_passwords(match: re.Match[str]) -> str:
-    arguments_start = match.start("arguments") - match.start()
-    return match.group(0)[:arguments_start] + _MYSQL_PASSWORD_OPTION_PATTERN.sub(
-        _redact_matched_token,
-        match.group("arguments"),
-    )
+def _redact_command_options(command_pattern: re.Pattern[str], option_pattern: re.Pattern[str], value: str) -> str:
+    """Redact the tokens ``option_pattern`` finds in the arguments of each command ``command_pattern`` finds."""
+
+    def redact_arguments(match: re.Match[str]) -> str:
+        arguments_start = match.start("arguments") - match.start()
+        return match.group(0)[:arguments_start] + option_pattern.sub(_redact_matched_token, match.group("arguments"))
+
+    return command_pattern.sub(redact_arguments, value)
 
 
 def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
@@ -727,7 +747,7 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
     has_private_key = "private key" in lowered_value
     has_mysql = "mysql" in bounded_value or "mariadb" in bounded_value
-    has_user_option = "-u" in bounded_value
+    has_curl = "curl" in bounded_value
     if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key, has_mysql)):
         return _truncate_text(bounded_value, max_length, cut=cut)
     # Keys go first, so the patterns below never see a key's body.
@@ -741,10 +761,10 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
         redacted = _API_KEY_MESSAGE_PATTERN.sub(redact_phrase_token, redacted)
     if has_token:
         redacted = _TOKEN_LIKE_PATTERN.sub(redact_token, redacted)
+    if has_curl:
+        redacted = _redact_command_options(_CURL_COMMAND_PATTERN, _CURL_USER_OPTION_PATTERN, redacted)
     if has_mysql:
-        redacted = _MYSQL_COMMAND_PATTERN.sub(_redact_mysql_passwords, redacted)
-    if has_user_option:
-        redacted = _USER_OPTION_PATTERN.sub(_redact_matched_token, redacted)
+        redacted = _redact_command_options(_MYSQL_COMMAND_PATTERN, _MYSQL_PASSWORD_OPTION_PATTERN, redacted)
     if has_assignment:
         redacted = _redact_secret_assignments(redacted)
     return _truncate_text(redacted, max_length, cut=cut)
