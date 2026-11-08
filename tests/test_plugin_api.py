@@ -88,6 +88,7 @@ _EXPORTS = [
     "OAuthDiscoveryConfig",
     "OAuthProvider",
     "PluginContext",
+    "PluginLifecycle",
     "PublicFetchError",
     "PublicFetchResult",
     "ReactionReceivedContext",
@@ -235,6 +236,7 @@ _SIGNATURES = {
         "legacy_credentials, consent_group)"
     ),
     "PluginContext": "(plugin_name, runtime_paths)",
+    "PluginLifecycle": "(plugin_name, process_state)",
     "PublicFetchError": "(message, *, code, status_code)",
     "PublicFetchResult": "(url, content_type, content)",
     "ReactionReceivedContext": (
@@ -436,6 +438,7 @@ _MEMBERS = {
         "state_root": "property",
         "is_active": "(self)",
     },
+    "mindroom.plugin_api.PluginLifecycle": {"context": "(self)"},
     "mindroom.plugin_api.HookMessageSender": {
         "__call__": (
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
@@ -512,6 +515,7 @@ _MANIFEST = {
     "oauth_module": "oauth.py",
     "hooks_module": "hooks.py",
     "routes_module": "routes.py",
+    "lifecycle_module": "lifecycle.py",
     "skills": ["skills"],
     "reserved_namespaces": ["com.example.demo."],
 }
@@ -553,7 +557,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 8), "e0c0436e47a287038f5eb87123a46e7ca387671d1a429e624dd055144d6b0084")
+_PINNED_VERSION = ((1, 9), "0f29c841746bea0c5ee471a5bcae3cf01cb97111db9bc8462014339a34d68c02")
 
 
 def _is_enum(obj: object) -> bool:
@@ -623,7 +627,8 @@ def test_each_exported_constant_keeps_its_value() -> None:
 def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
     """MindRoom ignores unknown manifest fields, so renaming a documented one would silently drop it from every plugin."""
     root = tmp_path.resolve()
-    for module in ("tools.py", "oauth.py", "hooks.py", "routes.py"):
+    module_files = ("tools.py", "oauth.py", "hooks.py", "routes.py", "lifecycle.py")
+    for module in module_files:
         (root / module).touch()
     (root / "skills").mkdir()
     (root / "mindroom.plugin.json").write_text(json.dumps(_MANIFEST))
@@ -632,9 +637,15 @@ def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
 
     plugin = plugin_imports._load_plugin_base(root)
 
-    modules = (plugin.tools_module_path, plugin.oauth_module_path, plugin.hooks_module_path, plugin.routes_module_path)
+    modules = (
+        plugin.tools_module_path,
+        plugin.oauth_module_path,
+        plugin.hooks_module_path,
+        plugin.routes_module_path,
+        plugin.lifecycle_module_path,
+    )
     assert plugin.name == "demo"
-    assert modules == (root / "tools.py", root / "oauth.py", root / "hooks.py", root / "routes.py")
+    assert modules == tuple(root / module for module in module_files)
     assert (plugin.skill_dirs, plugin.reserved_namespaces) == ([root / "skills"], ("com.example.demo.",))
     with pytest.raises(plugin_imports.PluginValidationError, match=r"needs plugin API 1\.999"):
         plugin_imports._load_plugin_base(root / "later")

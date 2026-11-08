@@ -68,6 +68,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushService
 from mindroom.memory.legacy_team_memory import migrate_team_memory
+from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
@@ -290,6 +291,7 @@ class _MultiAgentOrchestrator:
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_mcp_catalog_restarts: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     plugin_watch: PluginWatchState = field(init=False)
+    _plugin_lifespans: PluginLifespans = field(init=False, repr=False)
     agent_cli_registry: TurnToolRegistry = field(default_factory=TurnToolRegistry, init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
@@ -349,6 +351,7 @@ class _MultiAgentOrchestrator:
             lambda: self.agent_bots.values(),
         )
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
+        self._plugin_lifespans = PluginLifespans(self.runtime_paths, lambda: self.config)
         self.turn_recovery = TurnJournalRecovery(
             config=lambda: self.config,
             bots=lambda: self.agent_bots,
@@ -891,6 +894,7 @@ class _MultiAgentOrchestrator:
                     )
                     raise
                 result = self._commit_plugins(generation, config, watch)
+                await self._plugin_lifespans.apply_published()
                 logger.info(
                     "Plugin reload complete",
                     source=source,
@@ -953,6 +957,7 @@ class _MultiAgentOrchestrator:
             dispose_plugins(generation)
             raise
         self._commit_plugins(generation, config, watch)
+        await self._plugin_lifespans.apply_published()
         warn_about_config_risks(config, self.runtime_paths)
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
@@ -1127,10 +1132,12 @@ class _MultiAgentOrchestrator:
             if runtime_shutdown_event.is_set():
                 return
 
-            # Publish semantic callbacks once the router's initial owned sync has
-            # rebuilt room-backed reply grants from Matrix. Room setup keeps
-            # running in the background: a grant room it has not joined or
-            # created yet stays pending, and its sources replay after setup
+            # Publish semantic callbacks once the router's initial owned sync
+            # frame has waited up to 10 s for room-backed reply grants to be
+            # rebuilt from Matrix; sources that need a grant not yet rebuilt
+            # stay pending and replay once the refresh publishes. Room setup
+            # keeps running in the background: a grant room it has not joined
+            # or created yet stays pending, and its sources replay after setup
             # refreshes the grants.
             sync_ready = await self._wait_for_initial_membership_sync(
                 runtime_shutdown_event,
@@ -1338,6 +1345,7 @@ class _MultiAgentOrchestrator:
                         dispose_plugins(staged.generation)
                     raise
                 self._publish_config(plan, staged)
+                await self._plugin_lifespans.apply_published()
                 # Now that the removal is published, recovery can judge the removed owners as gone.
                 await self._approval_recovery.reconcile_unavailable_entities(unsettled_removals)
                 await self._script_runtime.reopen_script_calls()
@@ -1517,6 +1525,7 @@ class _MultiAgentOrchestrator:
         await run_shutdown_step("mcp_manager", self._stop_mcp_manager())
 
         fleet_shutdown = await self.fleet.stop_all()
+        await run_shutdown_step("plugin_lifespans", self._plugin_lifespans.stop())
         await run_shutdown_step("attachment_cleanup", wait_for_attachment_cleanup_tasks())
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
