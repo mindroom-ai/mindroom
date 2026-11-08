@@ -146,7 +146,7 @@ async def _output(
                 if len(kept) > _MAX_OUTPUT_BYTES:
                     del kept[: len(kept) - _MAX_OUTPUT_BYTES]
                     cut = True
-                if after is not None and stream.prompt is not None and stream.prompt > after:
+                if after is not None and stream.prompt > after:
                     # Several prompts may arrive at once, as after a command someone typed while the run's ran.
                     found = prompt_after(bytes(kept), after)
                     if found is not None:

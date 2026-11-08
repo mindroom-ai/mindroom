@@ -21,7 +21,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.terminal import client as client_module
 from mindroom.terminal import session as session_module
 from mindroom.terminal.client import TerminalDetachedError, TerminalStream, WorkerTerminals
-from mindroom.terminal.lines import terminal_line
+from mindroom.terminal.lines import TerminalLine
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
@@ -230,10 +230,9 @@ async def test_a_run_after_the_input_connection_ended_is_not_typed_on_its_succes
         connections.append(_Connection())
         return connections[-1], connections[-1]
 
-    line = terminal_line("owner", "terminal", opened=True)
+    line = TerminalLine(opened=True)
     line.prompted(1)
-    client_module._inputs.setdefault(line, client_module._TerminalInput())
-    stream = TerminalStream(_Connection(), line, connect)  # type: ignore[arg-type]
+    stream = TerminalStream(_Connection(), line, client_module._TerminalInput(), connect)  # type: ignore[arg-type]
     # Had the runner read `abc` but not the Ctrl-C after it, the prompt after `sleep` would hold `abc`.
     await stream.send_input("sleep 1\r")
     await stream.send_input("abc\x03")
