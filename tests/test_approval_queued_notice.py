@@ -5,7 +5,7 @@ The team continuation still runs through Agno until the team runtime cutover; it
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,10 +23,12 @@ from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus
+from mindroom.loop_hooks import _answer_tool_calls
 from mindroom.mid_turn import QueuedMessage
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.tool_job_helpers import answer_of
 
 if TYPE_CHECKING:
     from typing import Any
@@ -60,7 +62,10 @@ def _hooks() -> LoopHooks:
 
 @pytest.mark.asyncio
 async def test_approved_batch_notifies_next_real_model_request() -> None:
-    """A queued follow-up reaches the model once, after every resumed tool result, and the receipt follows it."""
+    """A queued follow-up reaches the model once, after every resumed tool result, and the receipt follows it.
+
+    The model read that notice, though the receipt came after it, so a call it makes next is answered unrun.
+    """
     state = _QueuedState()
     executed: list[int] = []
 
@@ -75,8 +80,9 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
         state.pending = True
         return f"Result {item}"
 
-    model = ScriptedModel([calls(*_tool_calls()), answer("Pausing here for the newer message.")])
+    model = ScriptedModel([calls(*_tool_calls()), calls(tool_call("read_item", "call-3", item=3))])
     agent = spec(model, gated(read_item))
+    hooks = replace(_hooks(), answer_tool_calls=_answer_tool_calls())
     approved = [
         ApprovalCall(
             tool_call_id=f"call-{item}",
@@ -95,7 +101,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
                 agent,
                 [Message(role="user", content="Read both items.")],
                 ctx=context(),
-                hooks=_hooks(),
+                hooks=hooks,
                 persist=None,
                 request_template=EMPTY_REQUEST,
             ),
@@ -113,7 +119,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
                     denied={},
                     external_results={},
                     context=lambda run_id: context(run_id=run_id),
-                    hooks=_hooks(),
+                    hooks=hooks,
                     persist=None,
                     request_template=EMPTY_REQUEST,
                 ),
@@ -121,6 +127,7 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
 
     assert resumed.status is RunStatus.completed
     assert executed == [1, 2]
+    assert "newer message" in str(answer_of(resumed, "call-3").content)
     [_, request] = model.requests
     messages = request.messages
     assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "user", "user"]
