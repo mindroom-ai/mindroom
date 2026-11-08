@@ -15,7 +15,6 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DepartureSource
 from mindroom.event_journal.approval_signals import EndedApproval
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome, Owed
@@ -59,6 +58,7 @@ from tests.test_reply_endings_characterization import (  # noqa: F401 - echo_too
     _ECHO_TOOL,
     _explode,
     _require_echo_approval,
+    _silent_schedule,
     _streams_then_blocks,
     _team_reply,
     _team_scripts,
@@ -353,9 +353,7 @@ async def test_a_silent_schedule_s_resume_that_reports_nothing_ends_the_turn_com
     """A silent schedule's resumed answer that reports nothing ends its turn completed, as its turn's own answer would."""
     seen: _Seen = []
     async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
-        request = _plain_request(_target())
-        origin = replace(request.response_envelope.origin, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
-        silent = replace(request, response_envelope=replace(request.response_envelope, origin=origin))
+        silent = _silent_schedule(_plain_request(_target()))
         await _respond(bot, request=silent, resume=AsyncMock(return_value=CompletedApprovalRun("NO_REPLY", {})))
 
     assert _events(seen) == [

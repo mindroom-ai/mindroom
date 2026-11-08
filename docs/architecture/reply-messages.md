@@ -67,7 +67,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 - Each bot start holds the conversations of its principal's pending approvals before it replays the journal.
 - Deleting the message a held reply answers cancels the approval, as a Stop would, and removes the reply.
 - A released approval hands its sources back to replay, unless a Stop is recorded: the reply then ends `cancelled` instead of replaying what the user stopped.
-- A silent schedule's resumed answer that reports nothing ends the message its pause showed as a completed answer that keeps what it showed, or the nothing-to-show note when it showed only its placeholder; any other answer a resume withholds fails its approval.
+- An agent's resumed silent-schedule answer that reports nothing ends the message its pause showed as a completed answer without the no-report token, or with the nothing-to-show note's text when nothing else is left; any other answer a resume withholds fails its approval.
   Redacting that message was rejected, because a redaction removes from history every run that wrote or read the message, which includes the silent run itself.
 
 ### Lifetime

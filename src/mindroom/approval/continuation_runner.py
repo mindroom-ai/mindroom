@@ -1203,12 +1203,9 @@ class ApprovalContinuationRunner:
             request,
             target_member_names=continuation.team_member_names or None,
         )
-        request = replace(
-            request,
-            system_enrichment_items=with_silent_schedule_delivery(
-                request.system_enrichment_items,
-                request.response_envelope,
-            ),
+        system_enrichment_items = with_silent_schedule_delivery(
+            request.system_enrichment_items,
+            request.response_envelope,
         )
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
@@ -1249,7 +1246,7 @@ class ApprovalContinuationRunner:
                             show_tool_calls=continuation.show_tool_calls,
                             tool_trace_collector=tool_trace_collector,
                             progress=progress,
-                            system_enrichment_items=request.system_enrichment_items,
+                            system_enrichment_items=system_enrichment_items,
                         )
             else:
                 result = await self._approval_execution.continue_run(
@@ -1262,7 +1259,7 @@ class ApprovalContinuationRunner:
                         response_run_id=continuation.run_id,
                     ),
                     progress=progress,
-                    system_enrichment_items=request.system_enrichment_items,
+                    system_enrichment_items=system_enrichment_items,
                 )
         return result
 

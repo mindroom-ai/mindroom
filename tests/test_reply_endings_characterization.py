@@ -37,7 +37,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
 from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
@@ -955,7 +955,7 @@ async def test_a_silent_schedule_that_reports_nothing_shows_nothing(
 async def _respond_auto_approved(turn: _Turn, request: ResponseRequest) -> None:
     """Answer ``request``, whose ``echo`` call pauses for an approval the policy grants at once, so the reply resumes.
 
-    It returns once the bot's background work, such as the redactions the ended approval's reply owes, is done.
+    It returns once the bot's background work is done, so assertions see the ended approval.
     """
     _require_echo_approval(turn)
     try:
@@ -1024,11 +1024,11 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
 
 
 @pytest.mark.usefixtures("echo_tool")
-@pytest.mark.parametrize("source_kind", [SILENT_SCHEDULE_SOURCE_KIND, MESSAGE_SOURCE_KIND])
+@pytest.mark.parametrize("silent", [True, False], ids=["silent-schedule", "message"])
 async def test_a_resumed_answer_a_hook_suppresses_fails_its_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    source_kind: str,
+    silent: bool,
 ) -> None:
     """Pins a resumed answer a ``message:before_response`` hook suppresses: the approval fails with its note."""
     turn = await _turn(
@@ -1040,12 +1040,8 @@ async def test_a_resumed_answer_a_hook_suppresses_fails_its_approval(
     )
     turn.hooks.suppress = True
     request = _plain_request(_target())
-    origin = replace(request.response_envelope.origin, source_kind=source_kind)
 
-    await _respond_auto_approved(
-        turn,
-        replace(request, response_envelope=replace(request.response_envelope, origin=origin)),
-    )
+    await _respond_auto_approved(turn, _silent_schedule(request) if silent else request)
 
     assert (await turn.reply()).state is rl.ReplyState.FAILED
     assert turn.homeserver.bodies[-1].endswith("Tool approval continuation failed safely.")
