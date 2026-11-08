@@ -58,6 +58,17 @@ def _power_levels(**content: Any) -> dict[str, Any]:  # noqa: ANN401
     }
 
 
+def _encryption() -> dict[str, Any]:
+    return {
+        "type": "m.room.encryption",
+        "state_key": "",
+        "sender": ROUTER,
+        "content": {"algorithm": "m.megolm.v1.aes-sha2"},
+        "event_id": "$encryption",
+        "origin_server_ts": 0,
+    }
+
+
 def _create(room_version: str, creator: str = ROUTER) -> dict[str, Any]:
     return {
         "type": "m.room.create",
@@ -394,6 +405,32 @@ async def test_the_router_is_held_to_the_power_levels_for_messages_too() -> None
     assert await _room(FakeRouterClient(state={ROOM: [_create("11"), levels]})).router_may_post(ROOM) is False
     assert await _room(FakeRouterClient(state={ROOM: [_create("11")]})).router_may_post(ROOM) is True
     assert await _room(None).router_may_post(ROOM) is None
+
+
+@pytest.mark.asyncio
+async def test_posting_in_an_encrypted_room_follows_the_power_levels_for_encrypted_events() -> None:
+    """Messages in an encrypted room are sent as ``m.room.encrypted``, so its level decides, then ``events_default``."""
+    levels = _power_levels(
+        users={ANN: 50, BOB: 10, ROUTER: 10},
+        events_default=0,
+        events={"m.room.message": 0, "m.room.encrypted": 50},
+    )
+    encrypted = _room(FakeRouterClient(state={ROOM: [_create("11"), _encryption(), levels]}))
+
+    assert await encrypted.may_post(ROOM, ANN) is True
+    assert await encrypted.may_post(ROOM, BOB) is False
+    assert await encrypted.router_may_post(ROOM) is False
+
+    plain = _room(FakeRouterClient(state={ROOM: [_create("11"), levels]}))
+
+    assert await plain.may_post(ROOM, BOB) is True
+    assert await plain.router_may_post(ROOM) is True
+
+    by_default = _power_levels(users={ANN: 50, BOB: 10}, events_default=50, events={"m.room.message": 0})
+    encrypted = _room(FakeRouterClient(state={ROOM: [_create("11"), _encryption(), by_default]}))
+
+    assert await encrypted.may_post(ROOM, ANN) is True
+    assert await encrypted.may_post(ROOM, BOB) is False
 
 
 @pytest.mark.asyncio

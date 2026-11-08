@@ -57,6 +57,10 @@ class _RoomState:
         """Return the users the room's version gives unlimited power, which power levels never list."""
         return privileged_creators(self.events.get(("m.room.create", ""), {}))
 
+    def message_type(self) -> str:
+        """Return the event type messages are sent as: ``m.room.encrypted`` in an encrypted room."""
+        return "m.room.encrypted" if ("m.room.encryption", "") in self.events else "m.room.message"
+
 
 @dataclass(frozen=True, slots=True)
 class _StateRead:
@@ -99,7 +103,7 @@ class RouterCallRoom:
         return None if state is None else state.content("m.room.member", user_id).get("membership") == "join"
 
     async def may_post(self, room_id: str, user_id: str) -> bool | None:
-        """Return whether the room's power levels let the person send ``m.room.message`` events."""
+        """Return whether the room's power levels let the person send messages, as the room's message event type."""
         client = self.client()
         if client is None:
             return None
@@ -110,11 +114,11 @@ class RouterCallRoom:
             return None
         # Without power levels everyone is at level 0, which may post; room version 12 creators are never listed.
         power_levels = state.content("m.room.power_levels")
-        required = _message_power_level(power_levels)
+        required = _send_power_level(power_levels, state.message_type())
         return user_id in state.creators() or user_power_level(power_levels, user_id) >= required
 
     async def router_may_post(self, room_id: str) -> bool | None:
-        """Return whether the room's power levels let the router send ``m.room.message`` events."""
+        """Return whether the room's power levels let the router send messages, as the room's message event type."""
         client = self.client()
         return None if client is None else await self.may_post(room_id, client.user_id)
 
@@ -277,10 +281,10 @@ async def _read_state(client: nio.AsyncClient, room_id: str) -> _RoomState | Non
     )
 
 
-def _message_power_level(power_levels: Mapping[str, object]) -> int:
-    """Return the power level ``m.room.message`` needs: its own entry, else ``events_default``, else 0."""
+def _send_power_level(power_levels: Mapping[str, object], event_type: str) -> int:
+    """Return the power level sending ``event_type`` needs: its own entry, else ``events_default``, else 0."""
     events = power_levels.get("events")
-    level = cast("Mapping[str, object]", events).get("m.room.message") if isinstance(events, dict) else None
+    level = cast("Mapping[str, object]", events).get(event_type) if isinstance(events, dict) else None
     if type(level) is int:
         return level
     default = power_levels.get("events_default")
