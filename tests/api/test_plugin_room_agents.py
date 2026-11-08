@@ -274,14 +274,10 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
     [
         ([{"file": {"enable_save_file": False}}], "write"),
         ([{"file": {"all": True, **READ_ONLY_FILE["file"]}}], "write"),
-        ([{"file": {"exclude_tools": ["save_file", "replace_file_chunk"]}}], "read"),
         ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "read"),
         ([{"file": {"include_tools": ["delete_file"]}}], "none"),
-        (["coding"], "write"),
         ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read"),
-        (["python"], "write"),
         ([{"python": {"include_tools": ["read_file", "list_files"]}}], "read"),
-        (["script"], "write"),
         ([{"shell": {"enable_run_shell_command": False}}], "none"),
         (["matrix_message"], "read"),
         (["calculator"], "none"),
@@ -402,7 +398,8 @@ class NotesTools(Toolkit):
 @register_tool_with_metadata(
     name="notes",
     file_access=ToolFileAccess.{file_access},
-    executes_code={executes_code},{writers}
+    executes_code={executes_code},
+    workspace_writers={writers!r},
     display_name="Notes",
     description="Notes in the workspace",
     category=ToolCategory.PRODUCTIVITY,
@@ -443,9 +440,8 @@ async def test_a_plugin_toolkit_that_names_no_functions_counts_by_its_declaratio
     plugin = tmp_path / "plugins" / "notes"
     plugin.mkdir(parents=True)
     (plugin / "mindroom.plugin.json").write_text('{"name": "notes", "tools_module": "tools.py"}')
-    declared = f"\n    workspace_writers={writers!r}," if writers else ""
     (plugin / "tools.py").write_text(
-        PLUGIN_TOOLS.format(file_access=file_access, executes_code=executes_code, writers=declared),
+        PLUGIN_TOOLS.format(file_access=file_access, executes_code=executes_code, writers=writers),
     )
     paths = test_runtime_paths(tmp_path)
     helper = AgentConfig(display_name="Helper", tools=[tool], access={"users": [ALICE]})

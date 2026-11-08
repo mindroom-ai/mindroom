@@ -262,11 +262,12 @@ def _toolkit_host(
 def _offered_functions(
     metadata: ToolMetadata,
     settings: Mapping[str, object],
-) -> tuple[frozenset[str] | None, frozenset[str]]:
-    """Return the toolkit's functions its settings leave on, and its writing functions they leave on.
+) -> tuple[frozenset[str] | None, bool]:
+    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
 
-    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The first is None when the toolkit
-    declares no function names, as a plugin or MCP server may, and no allowlist names them.
+    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
+    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
+    names no writing functions writes when it runs code.
     """
     values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
     include, exclude = (
@@ -284,8 +285,10 @@ def _offered_functions(
 
     available = metadata.function_names or include
     functions = None if available is None else offered(available)
+    if not metadata.workspace_writers:
+        return functions, metadata.executes_code
     writers = offered(metadata.workspace_writers)
-    return functions, writers if functions is None else writers & functions
+    return functions, bool(writers if functions is None else writers & functions)
 
 
 def _workspace(
@@ -331,14 +334,11 @@ def _workspace(
             tool_config_overrides=entry.tool_config_overrides,
         )
         # A toolkit whose functions only its build could tell offers what it builds.
-        functions, writers = _offered_functions(metadata, settings.values)
+        functions, writes = _offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
-        # One of the functions it names as writing, else any that runs code; but on a runner that sees only its own
-        # storage, it writes there, not in the workspace.
-        path_toolkits[entry.name] = (
-            bool(writers) if metadata.workspace_writers else metadata.executes_code
-        ) and _toolkit_host(agent_tools, entry.name, runtime_paths) != "scratch_worker"
+        # On a runner that sees only its own storage, a toolkit writes there, not in the workspace.
+        path_toolkits[entry.name] = writes and _toolkit_host(agent_tools, entry.name, runtime_paths) != "scratch_worker"
     # A terminal runs only beside a worker's shell commands (its only function); people type in it where that worker
     # sees the workspace.
     shell = _toolkit_host(agent_tools, "shell", runtime_paths) if "shell" in path_toolkits else None
