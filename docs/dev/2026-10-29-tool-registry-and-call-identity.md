@@ -19,6 +19,8 @@ Rejected alternatives, in the order design review rejected them:
 
 Validating a candidate config reuses the published generation's registrations for plugins whose source is unchanged and executes only new or changed plugins, in a separate module namespace through the same loader, then removes that namespace and cancels any task it started.
 A separate namespace is what isolates candidate code from live imports, which is why validation still executes new or changed plugins instead of reading them from the registry.
+Candidate code that imports the plugin's own package by name, such as `from my_plugin.helpers import x`, gets fresh copies under the real names, held in a table apart from `sys.modules`, so validation sees the tools an edited helper module registers while live code keeps the live modules.
+Giving those copies alias names in `sys.modules` was rejected: it changed `__name__`, so `importlib.metadata.version(__name__)` and relative imports into an enclosing package failed during validation only.
 Preparation stages under canonical names on the event loop, at startup as at reload, so a plugin that needs the running loop at import loads in both; the loop waits for the imports, and a concurrent lazy import in a tool thread can briefly see staged code, as before.
 `mindroom plugins check` and plugin installation run their checks inside that staging, so a callback's or factory's lazy relative import finds the plugin's own modules, as it does once the plugin is published.
 
@@ -30,6 +32,7 @@ Tool availability has one owner, the composed registry, so configs record what w
 Known limits, each a reload race or edit that normal use rarely meets, left because closing it needs per-generation import machinery or a second plugin view per turn:
 - A factory that imports its implementation lazily resolves that import through the published modules, so after a publication an older capture's first build of such a toolkit runs the newer module's code; its factory, metadata, and hooks still come from the capture.
 - After validation executes a new or changed plugin, it removes every module outside the canonical names that loaded from that plugin's root meanwhile, so a live plugin that imports its own package by absolute name from another thread in that window loads a second copy later.
+- Candidate code that reaches its own package through `sys.modules` or `importlib.import_module` instead of an import statement gets the live modules, so validation misses what such an import registers, as before.
 - A tool that rebases its context onto the live config (Dynamic Workflow, agent discovery) reads that config's view of the published plugins while the turn's hooks stay, and a delegated child built from a config edited mid-turn gets the turn's plugin view of the earlier config, so a plugin tool or MCP server the edit added is refused as unavailable until the next turn.
 
 ## One identity per tool call

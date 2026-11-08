@@ -20,7 +20,6 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from importlib import machinery, util
-from importlib.abc import Loader, MetaPathFinder
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -64,9 +63,6 @@ _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
 # Guards the canonical plugin modules in sys.modules, the module cache, the root packages, and the published generation.
 _PLUGIN_LOCK = threading.RLock()
 _CANDIDATE_NAMESPACES = itertools.count()
-# The top-level packages of the candidate namespace executing now, each with the builtins its modules execute with and,
-# for one standing in for a package the plugin's modules import by absolute name, the plugin's root.
-_CANDIDATE_PACKAGES: dict[str, tuple[dict[str, Any], Path | None]] = {}
 
 
 class _ConfiguredPluginRootCacheKey(NamedTuple):
@@ -656,21 +652,14 @@ def _execute_candidate_plugin(
     imports meanwhile stay.
     """
     prefix = f"{CANDIDATE_PLUGIN_MODULE_PREFIX}{next(_CANDIDATE_NAMESPACES)}_"
-    # The packages the plugin's live modules were imported under stand for fresh copies inside the namespace, so the
-    # plugin's helper modules execute again and register the tools the edited plugin registers.
-    aliases = {
-        package: f"{prefix}{package.replace('.', '_')}"
-        for package, root in _ROOT_PACKAGES.items()
-        if root == plugin.root
-    }
-    candidate_builtins = _candidate_builtins(aliases)
+    # The plugin's packages whose live modules are installed execute afresh too, so its helper modules register the
+    # edited plugin's tools, and live code keeps the live modules.
     packages = {
-        plugin_imports._plugin_package_name(plugin.name, plugin.root, prefix): (candidate_builtins, None),
-        **dict.fromkeys(aliases.values(), (candidate_builtins, plugin.root)),
+        package: module.__spec__
+        for package, root in _ROOT_PACKAGES.items()
+        if root == plugin.root and (module := sys.modules.get(package)) is not None and module.__spec__ is not None
     }
-    _CANDIDATE_PACKAGES.update(packages)
-    if _CANDIDATE_MODULE_FINDER not in sys.meta_path:
-        sys.meta_path.insert(0, _CANDIDATE_MODULE_FINDER)
+    imports = _CandidateImports(plugin_imports._plugin_package_name(plugin.name, plugin.root, prefix), packages)
     loaded_before = set(sys.modules)
     try:
         # A file that serves several kinds executes once, and each kind it serves is checked on that module.
@@ -679,7 +668,14 @@ def _execute_candidate_plugin(
             ("hooks", plugin.hooks_module_path),
             ("oauth", plugin.oauth_module_path),
         ):
-            entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
+            entry = _load_plugin_module(
+                plugin.name,
+                plugin.root,
+                module_path,
+                kind=kind,
+                prefix=prefix,
+                module_builtins=imports.module_builtins,
+            )
             if entry is None:
                 continue
             if kind == "tools":
@@ -690,75 +686,94 @@ def _execute_candidate_plugin(
     finally:
         candidate_modules = {**_modules_named((), prefix), **_imported_from_root(plugin.root, loaded_before)}
         _remove_modules(candidate_modules)
-        _cancel_module_tasks(candidate_modules.values())
-        for package in packages:
-            del _CANDIDATE_PACKAGES[package]
+        _cancel_module_tasks((*candidate_modules.values(), *imports.package_modules.values()))
 
 
-def _candidate_builtins(aliases: Mapping[str, str]) -> dict[str, Any]:
-    """Return builtins whose ``__import__`` imports each package of ``aliases``, and the modules under it, as its alias."""
+@dataclass(eq=False)
+class _CandidateImports:
+    """The imports of one candidate's modules, which execute afresh the plugin's modules they reach.
 
-    def candidate_import(
+    A module of the candidate ``namespace`` executes into sys.modules, as the plugin loader does. A module under one of
+    ``packages``, the plugin's packages whose live modules are installed, executes under its own name into
+    ``package_modules`` instead, never into sys.modules, so live code keeps the live one. Each executes with
+    ``module_builtins``, so its own imports do the same; other imports are untouched.
+    """
+
+    namespace: str
+    packages: Mapping[str, ModuleSpec]
+    package_modules: dict[str, ModuleType] = field(default_factory=dict)
+    module_builtins: dict[str, Any] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.module_builtins = {**vars(builtins), "__import__": self.import_}
+
+    def import_(
+        self,
         name: str,
         globals_: Mapping[str, object] | None = None,
         locals_: Mapping[str, object] | None = None,
         fromlist: Sequence[str] | None = (),
         level: int = 0,
     ) -> ModuleType:
-        package = next((p for p in aliases if name == p or name.startswith(f"{p}.")), None) if level == 0 else None
-        # ``import pack.demo.helpers`` binds ``pack``, which no alias stands for, so it keeps the live modules.
-        if package is not None and (fromlist or "." not in package):
-            name = f"{aliases[package]}{name.removeprefix(package)}"
-        return builtins.__import__(name, globals_, locals_, fromlist, level)
+        """Import as ``__import__`` does, executing afresh the candidate's and the plugin's packages' modules."""
+        absolute = name
+        if level:
+            # A relative import resolves against the importer's package; without one, importing raises as usual.
+            package = (globals_ or {}).get("__package__")
+            absolute = (
+                util.resolve_name(f"{'.' * level}{name}", package) if isinstance(package, str) and package else ""
+            )
+        modules = self._table(absolute)
+        if modules is None:
+            return builtins.__import__(name, globals_, locals_, fromlist, level)
+        module = self._load(absolute, modules)
+        if fromlist:
+            self._load_submodules(module, fromlist, modules)
+            return module
+        # ``import pack.demo.helpers`` binds ``pack``, which stays the live package when it is not the plugin's.
+        head = absolute.partition(".")[0]
+        head_modules = self._table(head)
+        return self._load(head, head_modules) if head_modules is not None else builtins.__import__(head)
 
-    return {**vars(builtins), "__import__": candidate_import}
+    def _table(self, name: str) -> dict[str, ModuleType] | None:
+        if name == self.namespace or name.startswith(f"{self.namespace}."):
+            return sys.modules
+        if any(name == package or name.startswith(f"{package}.") for package in self.packages):
+            return self.package_modules
+        return None
 
+    def _load(self, name: str, modules: dict[str, ModuleType]) -> ModuleType:
+        if (module := modules.get(name)) is not None:
+            return module
+        parent_name, _, child = name.rpartition(".")
+        parent = None if name in self.packages or not parent_name else self._load(parent_name, modules)
+        path = vars(parent).get("__path__") if parent is not None else None
+        spec = self.packages.get(name) or (machinery.PathFinder.find_spec(name, path) if path is not None else None)
+        if spec is None:
+            msg = f"No module named {name!r}"
+            raise ModuleNotFoundError(msg, name=name)
+        module = util.module_from_spec(spec)
+        vars(module)["__builtins__"] = self.module_builtins
+        modules[name] = module
+        try:
+            if spec.loader is not None:
+                spec.loader.exec_module(module)
+        except BaseException:
+            del modules[name]
+            raise
+        if parent is not None:
+            setattr(parent, child, module)
+        return module
 
-class _CandidateModuleFinder(MetaPathFinder):
-    """Find the modules of the candidate namespace executing now, which execute with its builtins."""
-
-    def find_spec(
-        self,
-        fullname: str,
-        path: Sequence[str] | None,
-        target: ModuleType | None = None,
-    ) -> ModuleSpec | None:
-        package = _CANDIDATE_PACKAGES.get(fullname.partition(".")[0])
-        if package is None:
-            return None
-        candidate_builtins, root = package
-        if root is None or "." in fullname:
-            spec = machinery.PathFinder.find_spec(fullname, path, target)
-        elif (root / "__init__.py").is_file():
-            spec = util.spec_from_file_location(fullname, root / "__init__.py", submodule_search_locations=[str(root)])
-        else:
-            spec = machinery.ModuleSpec(fullname, None, is_package=True)
-            spec.submodule_search_locations = [str(root)]
-        if spec is not None and spec.loader is not None:
-            spec.loader = _CandidateModuleLoader(spec.loader, candidate_builtins)
-        return spec
-
-
-class _CandidateModuleLoader(Loader):
-    """Execute a candidate namespace's module with the namespace's builtins, through the loader that found it."""
-
-    def __init__(self, loader: Loader, candidate_builtins: dict[str, Any]) -> None:
-        self._loader = loader
-        self._builtins = candidate_builtins
-
-    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 - whatever the loader that found the module offers
-        # Its resource and source readers, such as ``importlib.resources.files`` uses, are that loader's.
-        return getattr(self._loader, name)
-
-    def create_module(self, spec: ModuleSpec) -> ModuleType | None:
-        return self._loader.create_module(spec)
-
-    def exec_module(self, module: ModuleType) -> None:
-        vars(module)["__builtins__"] = self._builtins
-        self._loader.exec_module(module)
-
-
-_CANDIDATE_MODULE_FINDER = _CandidateModuleFinder()
+    def _load_submodules(self, package: ModuleType, fromlist: Sequence[str], modules: dict[str, ModuleType]) -> None:
+        """Load the names in ``fromlist`` that are no attribute of ``package`` yet but its submodules, as importing does."""
+        names = (*fromlist, *(vars(package).get("__all__", ()) if "*" in fromlist else ()))
+        for submodule in (f"{package.__name__}.{item}" for item in names if item != "*" and item not in vars(package)):
+            try:
+                self._load(submodule, modules)
+            except ModuleNotFoundError as error:
+                if error.name != submodule:
+                    raise
 
 
 def _module_within(module: ModuleType, root: Path) -> bool:
@@ -1179,12 +1194,14 @@ def _load_plugin_module(
     *,
     kind: str,
     prefix: str = PLUGIN_MODULE_PREFIX,
+    module_builtins: dict[str, Any] | None = None,
 ) -> plugin_imports._ModuleCacheEntry | None:
     """Execute one plugin module once per load, or return the instance this load already has.
 
     Another of the plugin's modules may have imported it already, and executing it again would leave that importer a
     copy of its own. The canonical ``prefix`` installs the module and caches it; another prefix executes it under a
-    separate namespace, with its relative imports, and caches nothing.
+    separate namespace, with its relative imports, and caches nothing. A module executes with ``module_builtins``
+    when given.
     """
     if module_path is None:
         return None
@@ -1199,8 +1216,8 @@ def _load_plugin_module(
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
         raise plugin_imports.PluginValidationError(msg)
     module, previous_packages = prepared_module
-    if (candidate_package := _CANDIDATE_PACKAGES.get(module_name.partition(".")[0])) is not None:
-        vars(module)["__builtins__"] = candidate_package[0]
+    if module_builtins is not None:
+        vars(module)["__builtins__"] = module_builtins
 
     loaded_before = set(sys.modules) if canonical else set()
     try:
