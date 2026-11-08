@@ -512,11 +512,11 @@ def test_a_stream_that_ends_stops_its_membership_rechecks(
     with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
-        time.sleep(0.1)
+        while membership.calls < 2:
+            time.sleep(0.01)
     calls = membership.calls
     time.sleep(0.1)
 
-    assert calls > 1
     assert membership.calls == calls
 
 

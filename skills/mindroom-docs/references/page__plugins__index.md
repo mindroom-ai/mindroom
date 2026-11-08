@@ -1101,7 +1101,7 @@ async def echo(websocket: WebSocket, room_id: str) -> None:
 The client offers two subprotocols, `mindroom-session` and `mindroom-session.<session_token>`, as in `new WebSocket(url, ["mindroom-session", "mindroom-session." + sessionToken])`, and the server accepts with `mindroom-session`, never echoing the token.
 `client_stream` accepts the websocket only from an origin `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, for a live session, and, given `room_id`, for a user joined to that room, checked as `require_room_member` checks it; leave `room_id` out for a stream that serves no room.
 It refuses any other handshake with an HTTP answer before accepting, as `require_room_member` answers: 401 for a missing, unknown, or expired session, 403 for an unlisted origin or a non-member, and 503 when membership is unavailable; a browser reports only a failed connection.
-Once accepted, the websocket closes with code 4401 as soon as its session expires or the client revokes it, after which the client signs in again.
+Once accepted, the websocket closes with code 4401 as soon as its session ends: it expires, the client revokes it, or the same user's ninth session replaces it, since MindRoom keeps eight per user; the client then signs in again.
 Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when membership is unavailable, with the same reason `require_room_member` gives for its 503, which the client may retry.
 Closing cancels the `async with` block where it waits, and the route runs on after the block.
 A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.5"` in its manifest.

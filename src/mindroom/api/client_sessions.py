@@ -153,7 +153,7 @@ def _live_session(app: FastAPI, token: str) -> ClientSession:
 
 
 def allowed_client_origin(websocket: WebSocket) -> bool:
-    """Return whether a websocket comes from a browser origin that may use client sessions.
+    """Return whether a websocket comes from an origin ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists.
 
     CORS lets the same origins call the client API routes, but browsers do not apply it to websockets.
     """
