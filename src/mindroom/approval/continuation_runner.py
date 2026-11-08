@@ -110,6 +110,7 @@ from mindroom.reply_scope import (
     pause_decision,
     pause_write,
 )
+from mindroom.reply_turn.enrichment import with_silent_schedule_delivery
 from mindroom.reply_turn.request import (
     ResponseRequest,
     correlation_id_for_request,
@@ -1195,10 +1196,18 @@ class ApprovalContinuationRunner:
         tool_context = replace(tool_context, tool_calls_shown=continuation.show_tool_calls and not request.quiet)
         if cli_approval_handler is not None:
             tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
-        # The agent's or team's new runs get the hook's instructions; a run that paused keeps the system prompt it stored.
+        # The agent's or team's new runs get the hook's instructions and, after them, a silent schedule's quiet-delivery
+        # guidance, as its turn did; a run that paused keeps the system prompt it stored.
         request = await self.deps.request_preparer.with_system_enrichment(
             request,
             target_member_names=continuation.team_member_names or None,
+        )
+        request = replace(
+            request,
+            system_enrichment_items=with_silent_schedule_delivery(
+                request.system_enrichment_items,
+                request.response_envelope,
+            ),
         )
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
