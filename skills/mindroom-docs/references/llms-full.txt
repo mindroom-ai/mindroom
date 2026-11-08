@@ -18324,6 +18324,29 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
 
+### Redacting credentials
+
+To keep or show text from a tool call, such as a shell command or a search query, without the credentials it may carry, pass it through `redact_sensitive_text` from `mindroom.plugin_api`, which needs plugin API 1.17:
+
+```python
+from mindroom.plugin_api import ToolBeforeCallContext, hook, redact_sensitive_text
+
+
+@hook("tool:before_call")
+async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
+    command = ctx.arguments.get("args")
+    if ctx.tool_name == "run_shell_command" and isinstance(command, str):
+        line = redact_sensitive_text(" ".join(command.split()), max_length=500)
+        with (ctx.state_root / "commands.log").open("a") as log:
+            log.write(f"{ctx.room_id} {line}\n")
+```
+
+It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+`max_length` cuts the result to that many characters, ending in `... [truncated]`.
+It never raises: text it cannot check, such as text over 64 KiB without `max_length`, comes back as `[redaction failed]`.
+What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.
+To show a tool call's whole arguments as its reply's tool trace does, use the hook context's [`chat_preview()`](https://docs.mindroom.chat/hooks/#event-specific-fields) instead.
+
 ### Calling a configured model
 
 A tool that runs its own model calls, such as a research loop, builds a provider for a model named in `config.yaml` and sends it one prompt at a time:
