@@ -38,9 +38,9 @@ OTHER_ROOM = "!other:example.org"
 def main_app() -> Iterator[FastAPI]:
     """The global API app, with whatever room readers it had put back afterwards, even after a failure."""
     state = ensure_app_state(main.app)
-    previous = state.room_members, state.room_state, state.room_direct
+    previous = state.room_members, state.room_state, state.room_direct, state.room_history
     yield main.app
-    state.room_members, state.room_state, state.room_direct = previous
+    state.room_members, state.room_state, state.room_direct, state.room_history = previous
 
 
 def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
@@ -373,9 +373,9 @@ def test_bind_then_unbind_clears() -> None:
     """Unbinding removes every room reader."""
     app = _bound(_client())
     state = ensure_app_state(app)
-    assert None not in (state.room_members, state.room_state, state.room_direct)
+    assert None not in (state.room_members, state.room_state, state.room_direct, state.room_history)
     unbind_room_members(app)
-    assert (state.room_members, state.room_state, state.room_direct) == (None, None, None)
+    assert (state.room_members, state.room_state, state.room_direct, state.room_history) == (None, None, None, None)
 
 
 def _orchestrator_config(tmp_path: Path, *, role: str = "Write code") -> Config:

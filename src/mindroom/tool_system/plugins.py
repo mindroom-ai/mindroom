@@ -169,7 +169,7 @@ _PROCESS_STATE: dict[str, dict[str, Any]] = {}
 _ROOT_PACKAGES: dict[str, Path] = {}
 
 # The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` sets it, and
-# ``mindroom.plugin_http.plugin_context`` reads it.
+# ``mindroom.plugin_http``'s ``plugin_context`` and ``require_room_messenger`` read it.
 PLUGIN_NAME_SCOPE_KEY = "mindroom.plugin_name"
 
 

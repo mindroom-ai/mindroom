@@ -17,6 +17,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_contex
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
+from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.thread_mutation_impact import (
     event_thread_membership_known,
     redaction_thread_membership_known,
@@ -114,7 +115,6 @@ class MatrixApiTools(Toolkit):
         "redact": 2,
     }
     _HARD_BLOCKED_STATE_TYPES: ClassVar[frozenset[str]] = frozenset({"m.room.create"})
-    _RESERVED_MINDROOM_PREFIXES: ClassVar[tuple[str, ...]] = ("com.mindroom.", "io.mindroom.")
     _DANGEROUS_STATE_TYPES: ClassVar[frozenset[str]] = frozenset(
         {
             "m.room.power_levels",
@@ -211,9 +211,8 @@ class MatrixApiTools(Toolkit):
             return None, f"{field_name} is required and must be a non-empty string."
         return normalized_value, None
 
-    @classmethod
+    @staticmethod
     def _validate_content(
-        cls,
         content: dict[str, object] | None,
         plugin_namespaces: tuple[str, ...],
     ) -> tuple[dict[str, object] | None, str | None]:
@@ -223,43 +222,19 @@ class MatrixApiTools(Toolkit):
             json.dumps(content, sort_keys=True)
         except (TypeError, ValueError) as exc:
             return None, f"content must be JSON-serializable: {exc}"
-        reserved_keys = cls._reserved_content_keys(content, cls._RESERVED_MINDROOM_PREFIXES)
+        reserved_keys = reserved_content_keys(content, MINDROOM_RESERVED_PREFIXES)
         if reserved_keys:
             return None, (
                 f"content must not set MindRoom-reserved keys ({', '.join(reserved_keys)}); "
                 "they carry runtime trust metadata such as the relayed requester identity."
             )
-        plugin_keys = cls._reserved_content_keys(content, plugin_namespaces)
+        plugin_keys = reserved_content_keys(content, plugin_namespaces)
         if plugin_keys:
             return None, (
                 f"content must not set plugin-reserved keys ({', '.join(plugin_keys)}); "
                 "a plugin reserves their namespace for content only it writes."
             )
         return content, None
-
-    @staticmethod
-    def _reserved_content_keys(value: object, prefixes: tuple[str, ...]) -> list[str]:
-        """Return every key starting with one of *prefixes* that the model placed anywhere in *value*.
-
-        A managed Matrix account speaks for the runtime and its plugins, so
-        content the model composes must never carry the namespaces they read
-        as their own metadata. Nested payloads count: edits and sidecars
-        promote inner objects into the content receivers read.
-
-        The walk keeps its own stack: content the model chose can nest deeply
-        enough to exhaust the interpreter's, and a rejection is only useful if
-        it reaches the caller.
-        """
-        found: set[str] = set()
-        pending: list[object] = [value]
-        while pending:
-            current = pending.pop()
-            if isinstance(current, dict):
-                found.update(key for key in current if isinstance(key, str) and key.startswith(prefixes))
-                pending.extend(current.values())
-            elif isinstance(current, (list, tuple)):
-                pending.extend(current)
-        return sorted(found)
 
     @classmethod
     def _reserved_event_type_error(
@@ -280,7 +255,7 @@ class MatrixApiTools(Toolkit):
         not be able to author one of these events from the agent's Matrix
         account at all. A plugin's reserved namespaces hold its events alike.
         """
-        if event_type.startswith(cls._RESERVED_MINDROOM_PREFIXES):
+        if event_type.startswith(MINDROOM_RESERVED_PREFIXES):
             reservation = "is reserved for MindRoom runtime state"
         elif event_type.startswith(plugin_namespaces):
             reservation = "is reserved by a plugin"
@@ -1328,8 +1303,8 @@ class MatrixApiTools(Toolkit):
         `room_id` defaults to the current Matrix tool runtime context room.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
-        `com.mindroom.*` and `io.mindroom.*` are reserved for runtime metadata: `content` may not set keys in
-        those namespaces, and `send_event`/`put_state` may not write event types in them.
+        `com.mindroom.*`, `io.mindroom.*`, and the chat client's `chat.mindroom.*` are reserved for runtime metadata:
+        `content` may not set keys in those namespaces, and `send_event`/`put_state` may not write event types in them.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state and redact for a small set of high-risk room-state event types,
         which also require the requester to be a joined room admin in the target room.

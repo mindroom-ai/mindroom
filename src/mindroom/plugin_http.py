@@ -22,7 +22,11 @@ from mindroom.api.client_sessions import (
 )
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.entity_directory import entity_directory
+from mindroom.hooks.types import format_hook_source
+from mindroom.matrix.history_visibility import RoomHistory
+from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.room_modes import change_room_thread_mode
@@ -35,10 +39,10 @@ from mindroom.room_thread_modes import (
     RoomThreadMode,
     resolve_room_thread_mode_override,
 )
-from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
     from types import EllipsisType
 
     from mindroom.api.client_sessions import ClientSession
@@ -49,6 +53,8 @@ if TYPE_CHECKING:
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = [
     "ClientUser",
+    "RoomHistory",
+    "RoomMessenger",
     "RoomModes",
     "RoomPower",
     "RoomReader",
@@ -58,6 +64,7 @@ __all__ = [
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
+    "require_room_messenger",
     "require_room_reader",
 ]
 
@@ -66,6 +73,7 @@ _MEMBERSHIP_RECHECK_SECONDS = 60.0
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
 _ROUTER_NOT_RUNNING = "The router is not running in this room."
+_NOT_A_MEMBER = "Not a member of this room."
 
 
 @dataclass(frozen=True)
@@ -219,6 +227,7 @@ class RoomReader:
     _room_direct: Callable[[], Awaitable[bool]] = field(repr=False)
     _room_id: str = field(repr=False)
     _router: Callable[[], AgentBot | None] = field(repr=False)
+    _room_history: Callable[[], Awaitable[RoomHistory | None]] = field(repr=False)
 
     async def power(self) -> RoomPower:
         """Read the room's power levels now, answering 503 when they cannot be read."""
@@ -282,6 +291,17 @@ class RoomReader:
                 "The modes were saved, but the room's thread mode is not published yet; try again.",
             )
 
+    async def history(self) -> RoomHistory:
+        """Read the room's history visibility and where the caller's view of its history begins under it.
+
+        It reads the caller's membership again, answering 403 once they are no longer joined, and 503 when the read
+        fails or times out.
+        """
+        history = await self._room_history()
+        if history is None:
+            raise HTTPException(403, _NOT_A_MEMBER)
+        return history
+
 
 async def require_room_reader(request: Request, room_id: Annotated[str, Path()]) -> RoomReader:
     """Return what a route may read and change about ``room_id``, once the client session's user is joined to it.
@@ -299,7 +319,144 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
         partial(_bound(state.room_direct), room_id),
         room_id,
         lambda: state.runtime.agent_bot(ROUTER_AGENT_NAME),
+        partial(_bound(state.room_history), room_id, user.user_id),
     )
+
+
+# Matrix's own content keys are those without a namespace, such as `body` and `msgtype`, and those under these.
+_MATRIX_KEY_PREFIXES = ("m.", "org.matrix.")
+
+
+@dataclass(frozen=True)
+class RoomMessenger:
+    """Posts to one room as the router for a route whose caller is joined to it, never from or as any person's account.
+
+    Each message carries its plugin's name as its hook source.
+    """
+
+    user: ClientUser
+    """The session's user, joined to the room."""
+    _request: Request = field(repr=False)
+    _room_id: str = field(repr=False)
+    _plugin_name: str = field(repr=False)
+
+    async def notice(
+        self,
+        text: str,
+        *,
+        thread_id: str | None = None,
+        content: Mapping[str, object] | None = None,
+    ) -> str:
+        """Post ``text`` as the router's ``m.notice``, which mentions no one and wakes no agent; return its event ID.
+
+        It checks no power level: the route decides who may have the router post. ``content`` adds namespaced keys of
+        the plugin's own, and it answers 400 before anything is sent when ``content`` sets one of Matrix's own keys,
+        such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.``, ``chat.mindroom.``
+        or another loaded plugin's reserved namespaces at any depth. It answers 503 when the router is not running or not in the room,
+        or when the send fails.
+        """
+        router = self._router()
+        extra = self._content(router, content)
+        extra["msgtype"] = "m.notice"
+        return await self._send(router, text, thread_id, extra, ())
+
+    async def relay(
+        self,
+        text: str,
+        *,
+        mentions: Sequence[str],
+        thread_id: str | None = None,
+        content: Mapping[str, object] | None = None,
+    ) -> str:
+        """Post ``text`` as the router for the caller, waking exactly the agents and teams ``mentions`` names.
+
+        It names the caller as the message's original sender, so each agent it wakes answers and authorizes them, and
+        its text says it is sent for them. ``mentions`` must name at least one agent or team, and only agents and teams
+        joined to the room, else it answers 400. Just before sending it checks again that the session is live (401),
+        that the caller is joined (403) and may send ``m.room.message`` (403), answering 503 when either cannot be read.
+        ``content`` and the other answers are as for ``notice()``. It returns the message's event ID.
+        """
+        if not mentions:
+            raise HTTPException(400, "A relay mentions at least one agent or team.")
+        room = await require_room_reader(self._request, self._room_id)
+        if not (await room.power()).may_send(room.user.user_id, "m.room.message"):
+            raise HTTPException(403, "Not allowed to send messages in this room.")
+        # The session may have ended while the room was read.
+        await require_client_user(self._request)
+        router = self._router()
+        extra = self._content(router, content)
+        directory = entity_directory(router.config, router.runtime_paths)
+        for mentioned in mentions:
+            entity = directory.get(mentioned)
+            if entity is None or entity.kind == "router" or mentioned not in room.members:
+                raise HTTPException(400, f"A relay mentions only agents and teams in this room, not {mentioned}.")
+        extra[ORIGINAL_SENDER_KEY] = room.user.user_id
+        return await self._send(router, f"Sent for {room.user.user_id}:\n\n{text}", thread_id, extra, mentions)
+
+    def _router(self) -> AgentBot:
+        """Return the router bot running now, so a restarted router posts with its new client, once it is in the room."""
+        embedded = ensure_app_state(self._request.app).embedded
+        router = None if embedded is None else embedded.agent_bot(ROUTER_AGENT_NAME)
+        if router is None or not router.running or (client := router.client) is None:
+            raise HTTPException(503, "MindRoom's router is not running; try again.")
+        if self._room_id not in client.rooms:
+            raise HTTPException(503, "MindRoom's router is not in this room.")
+        return router
+
+    def _content(self, router: AgentBot, content: Mapping[str, object] | None) -> dict[str, object]:
+        """Return a copy of ``content``, answering 400 unless its keys are namespaced and none is reserved for another.
+
+        A Matrix key such as ``body``, ``m.relates_to`` or ``m.new_content`` would change what the message says, where
+        it goes, or which message it edits; a MindRoom key would claim metadata such as its requester, and another
+        plugin's key a card that plugin's clients trust.
+        """
+        extra = dict(content or {})
+        if matrix_keys := sorted(key for key in extra if "." not in key or key.startswith(_MATRIX_KEY_PREFIXES)):
+            raise HTTPException(400, f"content must not set Matrix's own keys ({', '.join(matrix_keys)}).")
+        plugins = config_plugins(router.config, router.runtime_paths).loaded_plugins
+        others = (
+            namespace
+            for plugin in plugins
+            if plugin.name != self._plugin_name
+            for namespace in plugin.reserved_namespaces
+        )
+        if reserved := reserved_content_keys(extra, (*MINDROOM_RESERVED_PREFIXES, *others)):
+            msg = f"content must not set keys MindRoom or another plugin reserves ({', '.join(reserved)})."
+            raise HTTPException(400, msg)
+        return extra
+
+    async def _send(
+        self,
+        router: AgentBot,
+        text: str,
+        thread_id: str | None,
+        extra: dict[str, object],
+        mentions: Sequence[str],
+    ) -> str:
+        # One hop into the synthetic chain, as a hook's own send outside a message is, so hooks reacting to it cannot loop.
+        extra[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = 1
+        event_id = await router.hook_context.send_message(
+            self._room_id,
+            text,
+            thread_id,
+            format_hook_source(self._plugin_name, "http"),
+            extra,
+            mentions=list(dict.fromkeys(mentions)),
+        )
+        if event_id is None:
+            raise HTTPException(503, "The message could not be sent; try again.")
+        return event_id
+
+
+async def require_room_messenger(request: Request, room_id: Annotated[str, Path()]) -> RoomMessenger:
+    """Return a ``RoomMessenger`` for ``room_id``, once the client session's user is joined to it.
+
+    It checks the caller exactly as ``require_room_member`` does, answering 401, 403 or 503, and serves only a
+    plugin's own routes.
+    """
+    plugin_name = _route_plugin_name(request, "require_room_messenger")
+    user = await require_room_member(request, room_id)
+    return RoomMessenger(user, request, room_id, plugin_name)
 
 
 async def client_rooms(request: Request, candidates: Iterable[str]) -> list[str]:
@@ -330,7 +487,7 @@ async def _require_joined(connection: HTTPConnection, user_id: str, room_id: str
     """Return the room's joined users with their display names, once ``user_id`` is one of them."""
     members = await _bound(ensure_app_state(connection.app).room_members)(room_id)
     if user_id not in members:
-        raise HTTPException(403, "Not a member of this room.")
+        raise HTTPException(403, _NOT_A_MEMBER)
     return members
 
 
@@ -348,10 +505,7 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
     Called again, as by a websocket after a config reload, it returns the newer config's context. It raises
     ``PluginInactiveError``, which the route answers with 503, when that config no longer loads the plugin.
     """
-    plugin_name = connection.scope.get(PLUGIN_NAME_SCOPE_KEY)
-    if plugin_name is None:
-        msg = "plugin_context() serves only a plugin's own routes"
-        raise RuntimeError(msg)
+    plugin_name = _route_plugin_name(connection, "plugin_context")
     state = require_api_state(connection.app)
     snapshot = state.snapshot
 
@@ -360,3 +514,12 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
         return latest.runtime_config if latest.runtime_paths == snapshot.runtime_paths else None
 
     return build_plugin_context(plugin_name, snapshot.runtime_config, snapshot.runtime_paths, current_config)
+
+
+def _route_plugin_name(connection: HTTPConnection, helper: str) -> str:
+    """Return the name of the plugin whose route serves ``connection``; ``helper`` serves no other route."""
+    plugin_name = connection.scope.get(PLUGIN_NAME_SCOPE_KEY)
+    if plugin_name is None:
+        msg = f"{helper}() serves only a plugin's own routes"
+        raise RuntimeError(msg)
+    return plugin_name
