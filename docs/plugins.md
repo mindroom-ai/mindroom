@@ -1051,6 +1051,7 @@ Routes follow plugin reloads, so the next request after a reload runs the new co
 Every plugin reload, and every config reload that changes `plugins:`, closes each open plugin websocket with code 1012 (service restart), so its client reconnects to the new code; a reload that fails leaves them open.
 A request for a plugin that is not loaded or has no routes, or for a path its router does not define, answers 404.
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
+A route that uses its [plugin context](#plugin-context) after a config reload disabled or removed its plugin answers 503 instead.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
 MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, `require_room_reader`, `require_room_messenger`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
@@ -1271,7 +1272,7 @@ A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its mani
 | `settings` | The `settings` of the plugin's entry in `config`, as a read-only mapping whose nested values are the context's own copy, so no change reaches the config |
 | `config` | The config the request or tool call runs under |
 | `runtime_paths` | The runtime's paths |
-| `state_root` | The plugin's [state directory](hooks.md#plugin-state), the one its hooks get as `ctx.state_root`; reading it here sets its mode to 0700 |
+| `state_root` | The plugin's [state directory](hooks.md#plugin-state), the one its hooks get as `ctx.state_root` |
 | `is_active()` | Whether the config MindRoom runs now still loads the plugin |
 
 A context keeps the settings of the config it was made under, and a tool's context has its turn's or request's config.
