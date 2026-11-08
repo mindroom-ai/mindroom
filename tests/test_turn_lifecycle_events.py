@@ -601,6 +601,17 @@ async def test_a_settlement_leaves_the_end_of_a_turn_an_approval_owns_to_that_ap
     assert _events(seen) == events
 
 
+async def test_a_turn_no_plugin_follows_to_its_end_reads_no_approval_to_end_it(tmp_path: Path) -> None:
+    """With no `turn:ended` hook, a settled turn skips the journal read that decides who owns its end."""
+    approval_owns_end = AsyncMock(return_value=False)
+    lifecycle = _lifecycle(tmp_path, [])
+
+    async with lifecycle.turn(approval_owns_end=approval_owns_end):
+        await _finalize(lifecycle, FinalDeliveryOutcome(ending=Completed()))
+
+    approval_owns_end.assert_not_awaited()
+
+
 async def _finalize(
     lifecycle: ResponseLifecycle,
     outcome: FinalDeliveryOutcome,

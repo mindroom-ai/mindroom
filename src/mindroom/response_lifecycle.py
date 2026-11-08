@@ -900,9 +900,11 @@ class ResponseLifecycle:
             raise
         finally:
             end = self._turn_end or (TurnOutcome.CANCELLED if cancelled else TurnOutcome.FAILED)
+            hooks = self.deps.response_hooks
             if end == "paused":
-                await self.deps.response_hooks._emit_turn_event(EVENT_TURN_PAUSED, self.identity)
-            elif not await approval_owns_end():
+                await hooks._emit_turn_event(EVENT_TURN_PAUSED, self.identity)
+            # With no turn:ended hook there is no end to emit, so no journal read decides who owns it.
+            elif hooks.hook_context.registry.has_hooks(EVENT_TURN_ENDED) and not await approval_owns_end():
                 await self.end_turn(end)
 
     async def end_turn(self, outcome: TurnOutcome) -> None:
