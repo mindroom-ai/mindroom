@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -20,7 +21,11 @@ from mindroom.api.client_sessions import (
     offered_session,
     presented_session,
 )
-from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
+from mindroom.api.config_lifecycle import (
+    bind_current_request_snapshot,
+    rebind_current_request_snapshot,
+    require_api_state,
+)
 from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_directory import entity_directory
@@ -68,6 +73,7 @@ __all__ = [
     "require_room_member",
     "require_room_messenger",
     "require_room_reader",
+    "stream_room_reader",
 ]
 
 # A stream in a room rechecks its user's membership this long after each check.
@@ -103,23 +109,37 @@ async def require_room_member(request: Request, room_id: Annotated[str, Path()])
 
 
 @asynccontextmanager
-async def client_stream(websocket: WebSocket, room_id: str | None = None) -> AsyncIterator[ClientUser]:
+async def client_stream(
+    websocket: WebSocket,
+    room_id: str | None = None,
+    *,
+    admit: Callable[[ClientUser], bool | Awaitable[bool]] | None = None,
+) -> AsyncIterator[ClientUser]:
     """Sign a websocket's caller in with their client session, accept it, and yield their user while it stays signed in.
 
     The client offers the subprotocols ``mindroom-session`` and ``mindroom-session.<session_token>``, from an origin
-    ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists, and given ``room_id`` its user must be joined to that room. Before
-    accepting, a refusal raises ``HTTPException``, which the handshake answers: 401 for no live session, 403 for
-    another origin or a non-member, 503 when membership is unavailable. Once accepted with ``mindroom-session``, the
-    block is cancelled where it waits and the websocket closed with 4401 when the session expires or is revoked, and
-    given ``room_id``, with 1008 when a recheck finds the user gone or 1013 when one fails; code after the block runs.
+    ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists, and given ``room_id`` its user must be joined to that room. Given
+    ``admit``, the route's own rule, sync or async, is then asked whether to let the user in. Before accepting, a
+    refusal raises ``HTTPException``, which the handshake answers: 401 for no live session, 403 for another origin or a
+    non-member, 503 when membership is unavailable or ``admit`` returns false. Once accepted with
+    ``mindroom-session``, the block is cancelled where it waits and the websocket closed with 4401 when the session
+    expires or is revoked, and given ``room_id``, with 1008 when a recheck finds the user gone or 1013 when one fails;
+    code after the block runs.
     """
     if not allowed_client_origin(websocket):
         raise HTTPException(403, "Origin is not allowed.")
     session = offered_session(websocket)
+    user = ClientUser(session.user_id)
     if room_id is not None:
         await _require_joined(websocket, session.user_id, room_id)
-        # The session may have ended while membership was read.
-        offered_session(websocket)
+    if admit is not None:
+        answer = admit(user)
+        if inspect.isawaitable(answer):
+            answer = await answer
+        if not answer:
+            raise HTTPException(503, "The route refused this stream; try again later.")
+    # The session may have ended while membership was read or the route's check ran.
+    offered_session(websocket)
     await websocket.accept(subprotocol=SESSION_PROTOCOL)
     stream = asyncio.timeout(None)
 
@@ -132,7 +152,7 @@ async def client_stream(websocket: WebSocket, room_id: str | None = None) -> Asy
     watcher = asyncio.create_task(watch())
     try:
         async with stream:
-            yield ClientUser(session.user_id)
+            yield user
     except TimeoutError:
         if not stream.expired():
             raise
@@ -246,8 +266,9 @@ class RoomReader:
     async def is_direct(self) -> bool:
         """Return whether MindRoom's agents treat the room as a direct message; a hint for display, never a grant.
 
-        It is their own answer, which they keep for a few minutes and which counts a room as not direct when the
-        homeserver answers the lookup with an error; it answers 503 when the lookup raises or times out.
+        It is their own answer, which they keep for a few minutes; it answers 503 when the bot's direct-message list
+        or the room's state cannot be read and nothing else marks the room as direct, or when the lookup raises or
+        times out.
         """
         return await self._room_direct()
 
@@ -310,8 +331,10 @@ class RoomReader:
     async def agents(self) -> list[AgentWorkspace]:
         """Return the agents joined to the room that the caller may use there, in config order, with their workspaces.
 
-        It leaves out an agent whose contact room this is, and answers 503 while the agents' identities or access rules
-        cannot be resolved, as the Computer does, or while the runtime has not applied the API's membership policy.
+        It leaves out an agent whose contact room this is, and, logging why, one without its account, with unresolved
+        grant rooms, or with unreadable contacts or stored tool settings. It answers 503 while the router's rooms are
+        unknown and an agent's access rules wait on them, or while the runtime has not applied the API's membership
+        policy.
         """
         return await self._room_agents(self.power, None)
 
@@ -333,8 +356,24 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
     else of the room.
     """
     user = await require_client_user(request)
-    members = await _require_joined(request, user.user_id, room_id)
-    state = ensure_app_state(request.app)
+    return await _room_reader(request, user, room_id)
+
+
+async def stream_room_reader(websocket: WebSocket, user: ClientUser, room_id: str) -> RoomReader:
+    """Return what a ``client_stream`` block for ``user`` may read and change about ``room_id`` now.
+
+    It is ``require_room_reader`` for a websocket, which can't send a session's ``Authorization``: it reads the room's
+    members again, answering 403 once ``user`` left and 503 when they can't be read, and answers ``agents()`` and
+    ``agent()`` under the config the API serves now, or 409 when the API serves another runtime. A stream that keeps
+    checking what its caller may do calls it again for each check.
+    """
+    rebind_current_request_snapshot(websocket)
+    return await _room_reader(websocket, user, room_id)
+
+
+async def _room_reader(connection: HTTPConnection, user: ClientUser, room_id: str) -> RoomReader:
+    members = await _require_joined(connection, user.user_id, room_id)
+    state = ensure_app_state(connection.app)
     return RoomReader(
         user,
         members,
@@ -343,7 +382,7 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
         room_id,
         lambda: state.runtime.agent_bot(ROUTER_AGENT_NAME),
         partial(_bound(state.room_history), room_id, user.user_id),
-        partial(room_agent_workspaces, request, user.user_id, room_id, members),
+        partial(room_agent_workspaces, connection, user.user_id, room_id, members),
     )
 
 
@@ -376,8 +415,8 @@ class RoomMessenger:
         It checks no power level: the route decides who may have the router post. ``content`` adds namespaced keys of
         the plugin's own, and it answers 400 before anything is sent when ``content`` sets one of Matrix's own keys,
         such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.``, ``chat.mindroom.``
-        or another loaded plugin's reserved namespaces at any depth. It answers 503 when the router is not running or not in the room,
-        or when the send fails.
+        or a namespace another loaded plugin reserves and this one does not, at any depth. It answers 503 when the router
+        is not running or not in the room, or when the send fails.
         """
         router = self._router()
         extra = self._content(router, content)
@@ -437,13 +476,16 @@ class RoomMessenger:
         extra = dict(content or {})
         if matrix_keys := sorted(key for key in extra if "." not in key or key.startswith(_MATRIX_KEY_PREFIXES)):
             raise HTTPException(400, f"content must not set Matrix's own keys ({', '.join(matrix_keys)}).")
-        plugins = config_plugins(router.config, router.runtime_paths).loaded_plugins
-        others = (
+        plugins = config_plugins(router.config, router.runtime_paths)
+        # A namespace this plugin reserves is its own even when another plugin reserves it too, as plugins of one
+        # family sharing a namespace do; a narrower one another plugin reserves inside it stays that plugin's.
+        own = {
             namespace
-            for plugin in plugins
-            if plugin.name != self._plugin_name
+            for plugin in plugins.loaded_plugins
+            if plugin.name == self._plugin_name
             for namespace in plugin.reserved_namespaces
-        )
+        }
+        others = (namespace for namespace in plugins.reserved_namespaces if namespace not in own)
         if reserved := reserved_content_keys(extra, (*MINDROOM_RESERVED_PREFIXES, *others)):
             msg = f"content must not set keys MindRoom or another plugin reserves ({', '.join(reserved)})."
             raise HTTPException(400, msg)

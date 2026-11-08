@@ -14,6 +14,7 @@ from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.main import Config
+from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DepartureSource
 from mindroom.event_journal.approval_signals import EndedApproval
@@ -50,7 +51,7 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
-from tests.fakes.scripted_model import Await, answer, calls, tool_call
+from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
 from tests.journal_membership_helpers import admit_room_membership
 from tests.response_runner_helpers import _noop_typing, _plain_request, _target
 from tests.test_cancelled_response_hook import _lifecycle_with, _no_effects, _response_hook_service
@@ -58,6 +59,7 @@ from tests.test_reply_endings_characterization import (  # noqa: F401 - echo_too
     _ECHO_TOOL,
     _explode,
     _require_echo_approval,
+    _silent_schedule,
     _streams_then_blocks,
     _team_reply,
     _team_scripts,
@@ -83,6 +85,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.response_lifecycle import ResponseLifecycle
+    from mindroom.response_runner import _LockedTurn
 
 pytestmark = pytest.mark.asyncio
 
@@ -184,6 +187,60 @@ async def test_a_model_failure_ends_the_turn_failed_though_its_reply_shows_the_e
     await turn.runner.generate_response(_plain_request(_target()))
 
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "failed")]
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+@pytest.mark.parametrize(
+    ("decision", "outcome"),
+    [
+        pytest.param([Await(_explode)], "failed", id="check-fails"),
+        pytest.param(answer('{"action": "stay_silent", "reason": "Nothing to add."}'), "completed", id="declined"),
+    ],
+)
+async def test_a_participation_check_that_fails_ends_the_turn_failed_and_one_that_declines_completed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+    decision: list[ScriptStep],
+    outcome: str,
+) -> None:
+    """Neither shows a reply, but a check whose model call raised fails the turn, while a decision not to answer completes it."""
+    turn = await _turn(tmp_path, monkeypatch, streaming=streaming, scripts={"default": [decision]})
+    seen: _Seen = []
+    _record_turn_events(turn.bot, seen, (*_TURN_EVENTS, EVENT_MESSAGE_CANCELLED))
+
+    await turn.runner.generate_response(replace(_plain_request(_target()), participation=ParticipationConfig()))
+
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, outcome)]
+    assert turn.homeserver.writes == []
+
+
+@pytest.mark.parametrize("approved", [False, True], ids=["before-decision", "after-approval"])
+async def test_a_delivery_error_fails_a_participation_turn_and_shows_only_after_its_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    approved: bool,
+) -> None:
+    """A delivery that raises fails the turn: before the participation check decided it stays quiet, after an approval its error shows."""
+    turn = await _turn(tmp_path, monkeypatch, streaming=False, scripts={"default": []})
+    seen: _Seen = []
+    _record_turn_events(turn.bot, seen, (*_TURN_EVENTS, EVENT_MESSAGE_CANCELLED))
+
+    async def deliver(dispatched: _LockedTurn, **_kwargs: object) -> None:
+        if approved:
+            assert dispatched.runtime.participation is not None
+            dispatched.runtime.participation.approve_existing_response()
+        msg = "delivery broke"
+        raise RuntimeError(msg)
+
+    with patch.object(turn.runner, "_deliver_turn", new=deliver):
+        await turn.runner.generate_response(replace(_plain_request(_target()), participation=ParticipationConfig()))
+
+    shown = [(EVENT_MESSAGE_CANCELLED, None)] if approved else []
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), *shown, (EVENT_TURN_ENDED, "failed")]
+    assert ["delivery broke" in str(write.get("body")) for write in turn.homeserver.writes] == (
+        [True] if approved else []
+    )
 
 
 async def test_a_stopped_reply_ends_its_turn_cancelled_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -345,6 +402,21 @@ async def test_a_resume_that_fails_ends_the_turn_failed_once(tmp_path: Path) -> 
         (EVENT_TURN_PAUSED, None),
         (EVENT_TURN_RESUMED, None),
         (EVENT_TURN_ENDED, "failed"),
+    ]
+
+
+async def test_a_silent_schedule_s_resume_that_reports_nothing_ends_the_turn_completed(tmp_path: Path) -> None:
+    """A silent schedule's resumed answer that reports nothing ends its turn completed, as its turn's own answer would."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
+        silent = _silent_schedule(_plain_request(_target()))
+        await _respond(bot, request=silent, resume=AsyncMock(return_value=CompletedApprovalRun("NO_REPLY", {})))
+
+    assert _events(seen) == [
+        (EVENT_TURN_STARTED, None),
+        (EVENT_TURN_PAUSED, None),
+        (EVENT_TURN_RESUMED, None),
+        (EVENT_TURN_ENDED, "completed"),
     ]
 
 

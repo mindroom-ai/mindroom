@@ -321,13 +321,24 @@ async def test_is_direct_follows_core_direct_message_rule(member_content: dict[s
 
 @pytest.mark.asyncio
 async def test_a_failed_direct_message_read_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A direct-message read that raises or hangs is 503, never a guess."""
+    """A direct-message read that fails, raises or hangs is 503, never a guess."""
     monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
     client = _client()
     reader = await _reader(client)
+    client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN")
+    assert await _answer(reader.is_direct()) == (503, "Direct message lookup failed; try again.")
     client.list_direct_rooms.side_effect = nio.exceptions.ProtocolError("connection reset")
     assert await _answer(reader.is_direct()) == (503, "Direct message lookup failed; try again.")
     client.list_direct_rooms = _never_answers
+    assert await _answer(reader.is_direct()) == (503, "Direct message lookup failed; try again.")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_state_read_after_a_clean_direct_message_read_answers_503() -> None:
+    """A room the direct-message list leaves out is 503 when its state read fails, never a guess that it is a group."""
+    client = _client()
+    reader = await _reader(client)
+    client.room_get_state.return_value = nio.RoomGetStateError("Internal server error", "M_UNKNOWN")
     assert await _answer(reader.is_direct()) == (503, "Direct message lookup failed; try again.")
 
 

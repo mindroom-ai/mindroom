@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import pytest
 import typing_extensions
 
-from mindroom import plugin_api, plugin_http
+from mindroom import plugin_api, plugin_http, plugin_testing
 from mindroom.tool_system import plugin_imports
 
 if TYPE_CHECKING:
@@ -485,6 +485,14 @@ _MEMBERS = {
         "add_room_to_space": "(self, space_room_id, room_id)",
         "put_room_state": "(self, room_id, event_type, state_key, content)",
     },
+    "mindroom.plugin_testing.LoadedPlugin": {
+        "add_room": "(self, room_id, members, *, power_levels, direct, history_visibility, key)",
+        "client": "(self, user_id)",
+        "sign_out": "(self, user_id)",
+        "call_tool": "(self, tool, function, arguments, *, agent, sender, room)",
+        "fire": "(self, event, *, agent, sender, room, body, **fields)",
+    },
+    "mindroom.tool_system.invocation.CallResult": {"succeeded": "property", "failure_text": "property"},
     "mindroom.history.types.HistoryScope": {"key": "property"},
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": {
         "_google_cloud_credentials": "(self)",
@@ -541,7 +549,7 @@ _MANIFEST = {
     "reserved_namespaces": ["com.example.demo."],
 }
 
-# What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
+# What docs/plugins.md has plugins and their tests import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "AgentWorkspace",
@@ -559,7 +567,9 @@ _HTTP_EXPORTS = [
     "require_room_member",
     "require_room_messenger",
     "require_room_reader",
+    "stream_room_reader",
 ]
+_TESTING_EXPORTS = ["LoadedPlugin", "Room", "SentMessage", "TurnRefused", "load_plugin"]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
         "(*, name, tools, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs)"
@@ -574,17 +584,22 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
-    "mindroom.plugin_http.client_stream": "(websocket, room_id)",
+    "mindroom.plugin_http.client_stream": "(websocket, room_id, *, admit)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
     "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
+    "mindroom.plugin_testing.Room": "(room_id, members, power_levels, direct, history_visibility, key, sent)",
+    "mindroom.plugin_testing.SentMessage": "(text, thread_id, source, content, mentions)",
+    "mindroom.plugin_testing.load_plugin": "(path, tmp_dir, *, config, settings)",
+    "mindroom.tool_system.invocation.CallResult": "(status, value, error)",
+    "mindroom.plugin_http.stream_room_reader": "(websocket, user, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 14), "a8efbbfefe953b2b3a79db6ac8c79016e631d19b15199cb50b33ac07bec1a671")
+_PINNED_VERSION = ((1, 18), "27885455c15898f06a8a62a7f190f6ef2d8c077e1545772e0cf62b274968872d")
 
 
 def _is_enum(obj: object) -> bool:
@@ -679,16 +694,27 @@ def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
 
 
 def test_the_entry_points_plugins_import_from_other_modules_keep_their_parameter_names_and_kinds() -> None:
-    """`mindroom.plugin_http` exports exactly the route helpers, and each named entry point keeps its parameters."""
+    """`mindroom.plugin_http` and `mindroom.plugin_testing` export exactly their helpers, and each keeps its parameters."""
     shapes = {path: _parameter_shape(pkgutil.resolve_name(path)) for path in _ELSEWHERE_SIGNATURES}
 
     assert plugin_http.__all__ == _HTTP_EXPORTS
+    assert plugin_testing.__all__ == _TESTING_EXPORTS
     assert shapes == _ELSEWHERE_SIGNATURES
 
 
 def test_the_pins_record_the_plugin_api_version_they_describe() -> None:
     """A change to the pinned surface fails here until the version is bumped and pinned with the surface's digest."""
-    pins = [_EXPORTS, _SIGNATURES, _ENUM_MEMBERS, _MEMBERS, _CONSTANTS, _MANIFEST, _HTTP_EXPORTS, _ELSEWHERE_SIGNATURES]
+    pins = [
+        _EXPORTS,
+        _SIGNATURES,
+        _ENUM_MEMBERS,
+        _MEMBERS,
+        _CONSTANTS,
+        _MANIFEST,
+        _HTTP_EXPORTS,
+        _TESTING_EXPORTS,
+        _ELSEWHERE_SIGNATURES,
+    ]
     digest = hashlib.sha256(json.dumps(pins, sort_keys=True).encode()).hexdigest()
 
     assert (plugin_api.PLUGIN_API_VERSION, digest) == _PINNED_VERSION, (

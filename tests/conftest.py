@@ -1533,6 +1533,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
+    client.list_direct_rooms = AsyncMock(return_value=nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND"))
     serve_media_from_download(client)
 
     return client
@@ -2938,6 +2939,7 @@ def _restore_published_plugins() -> Iterator[None]:
     published = plugins_module._PUBLISHED
     module_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
     manifest_cache = dict(plugin_imports._PLUGIN_CACHE)
+    root_packages = dict(plugins_module._ROOT_PACKAGES)
     modules = {
         name: module
         for name, module in sys.modules.items()
@@ -2950,6 +2952,8 @@ def _restore_published_plugins() -> Iterator[None]:
     plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._PLUGIN_CACHE.update(manifest_cache)
+    plugins_module._ROOT_PACKAGES.clear()
+    plugins_module._ROOT_PACKAGES.update(root_packages)
     for name in [
         name
         for name in sys.modules

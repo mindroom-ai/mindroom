@@ -20,7 +20,6 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
-from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.room_agent_access import room_execution_identity
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.workspace_files import operations
@@ -83,8 +82,7 @@ async def _made_root(request: Request, room: RoomReader, room_id: str, agent_use
     if workspace.root.is_dir():
         return workspace.root
     paths = bind_current_request_snapshot(request).runtime_paths
-    requester_id = resolve_human_requester_alias(room.user.user_id, workspace.config, paths)
-    identity = room_execution_identity(workspace.name, requester_id, room_id, paths)
+    identity = room_execution_identity(workspace.name, room.user.user_id, room_id, workspace.config, paths)
     # The same config, paths and identity the room's check resolved this root from.
     await asyncio.to_thread(resolve_agent_runtime, workspace.name, workspace.config, paths, identity, create=True)
     return workspace.root

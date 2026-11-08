@@ -8,6 +8,9 @@ dedicated worker as a shell call does; nothing else starts it, and a stopped wor
 The terminals of one agent's workspace in one worker share an owner key, derived from the request's worker, agent
 and workspace: two requesters for whom the agent's calls go to the same worker and workspace see the same
 terminals, and nobody else does.
+
+Every viewer's typing is recorded on its terminal's line (``mindroom.terminal.lines``), and a terminal's shell never
+starts with a response's CLI grant: the shell outlives the response, while the grant is only for its own commands.
 """
 
 from __future__ import annotations
@@ -22,15 +25,18 @@ from typing import TYPE_CHECKING, Literal
 import aiohttp
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from mindroom.agent_cli.shell_contract import unbound_agent_cli_shell_env
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.http_error_detail import validation_error_detail
 from mindroom.logging_config import get_logger
+from mindroom.terminal.lines import PromptMarks, TerminalLine, forget_line, terminal_line
 from mindroom.terminal.session import TerminalError, TerminalEvent, TerminalInfo
 from mindroom.tool_system.sandbox_proxy import worker_call
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.terminal.lines import LineState
     from mindroom.tool_system.sandbox_proxy import WorkerCall, WorkerStandIns
     from mindroom.workers.protocol import ExecuteRequest
 
@@ -69,22 +75,44 @@ class _Refusal(BaseModel):
 class TerminalStream:
     """One attached viewer: the scrollback, then live output, then the shell's exit; and its keys and size."""
 
-    def __init__(self, websocket: aiohttp.ClientWebSocketResponse) -> None:
+    def __init__(self, websocket: aiohttp.ClientWebSocketResponse, line: TerminalLine) -> None:
         self._websocket = websocket
+        self.line = line
+        """The terminal's line, which this viewer's typing and the prompts it reads update."""
+        self.prompt: tuple[int, int] | None = None
+        """The number and exit status of the last prompt mark this viewer read."""
+        self._marks = PromptMarks()
 
     async def receive(self) -> TerminalEvent:
         """Return the next output or the exit; raise ``TerminalDetachedError`` when the viewer must attach again."""
         message = await self._websocket.receive()
         if message.type == aiohttp.WSMsgType.BINARY:
+            for number, status in self._marks.feed(message.data):
+                self.line.prompted(number)
+                self.prompt = (number, status)
             return TerminalEvent("output", data=message.data)
         if message.type == aiohttp.WSMsgType.TEXT:
             with contextlib.suppress(ValidationError):
                 return TerminalEvent("exit", code=_Exit.model_validate_json(message.data).code)
         raise TerminalDetachedError
 
-    async def send_input(self, data: str) -> None:
-        """Type ``data``."""
-        await self._send({"type": "input", "data": data})
+    async def send_input(self, data: str, *, judged: LineState | None = None, empty_line: bool = False) -> int:
+        """Type ``data``, after the input before it, record it on the terminal's line, and return the line's ``awaited``.
+
+        Given ``judged``, only while the line is still the one it describes, and with ``empty_line`` only while the
+        shell waits at its prompt with nothing typed; otherwise it types nothing and raises ``TerminalError`` (409).
+        """
+        async with self.line.lock:
+            if (judged is not None and not self.line.unchanged(judged)) or (empty_line and not self.line.empty):
+                raise TerminalError(409, "The terminal's line is not the one these keys were checked against.")
+            awaited = self.line.awaited
+            self.line.type(data)
+            try:
+                await self._send({"type": "input", "data": data})
+            except BaseException:
+                self.line.lost()
+                raise
+        return awaited
 
     async def resize(self, cols: int, rows: int) -> None:
         """Change the terminal's size."""
@@ -154,6 +182,17 @@ class WorkerTerminals:
 
     stand_ins: WorkerStandIns
 
+    @property
+    def scope(self) -> tuple[str | None, str | None, str | None]:
+        """What the terminals' owner derives from, read without asking the worker backend: worker, agent, workspace."""
+        target = self.stand_ins.worker_target
+        base_dir = (self.stand_ins.tool_init_overrides or {}).get("base_dir")
+        return (
+            None if target is None else target.worker_key,
+            None if target is None else target.routing_agent_name,
+            None if base_dir is None else str(base_dir),
+        )
+
     async def _worker(self, *, start: bool) -> WorkerCall | None:
         try:
             return await asyncio.to_thread(worker_call, self.stand_ins, "run_shell_command", start=start)
@@ -168,7 +207,8 @@ class WorkerTerminals:
 
     async def open(self, *, cols: int = 80, rows: int = 24, cwd: str | None = None) -> TerminalInfo:
         """Start a terminal in ``cwd``, a folder inside the workspace (the workspace itself by default)."""
-        worker = await self._worker(start=True)
+        with unbound_agent_cli_shell_env():
+            worker = await self._worker(start=True)
         if worker is None:
             raise TerminalError(503, "The agent's worker is not ready.")
         body: dict[str, object] = {
@@ -177,7 +217,9 @@ class WorkerTerminals:
             "rows": rows,
             "cwd": cwd,
         }
-        return _parsed(_INFO, await _send(worker, "POST", _SESSIONS_PATH, body=body))
+        info = _parsed(_INFO, await _send(worker, "POST", _SESSIONS_PATH, body=body))
+        terminal_line(self.scope, info.id, opened=True)
+        return info
 
     async def sessions(self) -> list[TerminalInfo]:
         """Describe the workspace's terminals, oldest first."""
@@ -190,6 +232,7 @@ class WorkerTerminals:
         """End a terminal."""
         path = _session_path(session_id)
         await _send(await self._running_worker(), "DELETE", path)
+        forget_line(self.scope, session_id)
 
     @contextlib.asynccontextmanager
     async def attach(self, session_id: str) -> AsyncIterator[TerminalStream]:
@@ -214,7 +257,7 @@ class WorkerTerminals:
             async with websocket:
                 keepalive = asyncio.create_task(self._keep_worker(), name="terminal-worker-keepalive")
                 try:
-                    yield TerminalStream(websocket)
+                    yield TerminalStream(websocket, terminal_line(self.scope, session_id))
                 finally:
                     keepalive.cancel()
                     await asyncio.wait({keepalive})

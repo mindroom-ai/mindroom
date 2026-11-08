@@ -4862,6 +4862,7 @@ A silent schedule does not show its trigger in the room.
 A successful run that returns nothing, whitespace, or only `NO_REPLY` (any case) posts no message.
 Findings, failures, and messages that tools send explicitly remain visible.
 Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
+When an agent's silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/), it shows a waiting message; when the run resumes after the decision with nothing to report, that message ends showing only the run's tool calls, or `Done.` when tool calls are hidden, and no new message is posted.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
 Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
 
@@ -10257,6 +10258,7 @@ Use these tools to inspect and edit files, run shell commands or Python, manage 
 
 - [`file`] - Generic file reads, writes, listings, searches, and line-range edits.
 - [`shell`] - Shell commands with time limits, environment passthrough, and PATH prepends.
+- [`terminal`] - Persistent terminals beside the agent's shell commands, which people in the room watch and type in.
 - [`python`] - Python code execution and package installation.
 - [`coding`] - Line-numbered reads, precise edits, grep, file discovery, and directory listing; the best default for code-editing agents.
 - [`shared_directories`] - Directories an agent creates and invites other agents to read.
@@ -10427,6 +10429,37 @@ export NPM_CONFIG_PREFIX="$PWD/.local"
 export NPM_CONFIG_CACHE="$PWD/.cache/npm"
 export PATH="$PWD/.local/bin:$PATH"
 EOF
+```
+
+## [`terminal`]
+
+`terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client that shows terminals.
+Use it for work people should see or that keeps state between commands, such as a dev server, a REPL, an interactive program, or a long build.
+
+- `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
+- `terminal_run(session_id, command, timeout_s)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30) for its next prompt, and returns the output and exit status; a command still running then keeps running.
+- `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command.
+- `terminal_read(session_id)` returns the terminal's recent output as text.
+- `terminal_list()` lists the workspace's terminals, including the ones people opened.
+
+An agent has terminals only when it also has [`shell`] with `run_shell_command` and that shell runs in a worker; otherwise it is offered none of these functions.
+A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
+Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
+People who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
+The shell expands no `!` history and reads no history file or key bindings, so `!!` is typed as written.
+A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
+
+The [approval rules](https://docs.mindroom.chat/tool-approval/) for `run_shell_command` also judge what the agent types.
+`terminal_open` asks whenever those rules may ask, `terminal_run` is judged as its command, and `terminal_send` as the command its Enter runs, including what anyone typed on that line before.
+When the line can't be known, such as after arrow keys, Tab, or keys typed while a command runs, or when the agent types through `mindroom-agent` in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), the rules ask whenever they may.
+Keys approved against a line that someone changed before they were typed are not typed, and the agent reads the terminal and tries again.
+
+```yaml
+agents:
+  ops:
+    tools:
+      - shell
+      - terminal
 ```
 
 ## [`python`]
@@ -17379,10 +17412,11 @@ Every tool, including plugin tools, must declare one of these file access classe
 [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) runs only in a worker and confines its upload, drop, screenshot, and PDF paths to the worker workspace whatever the agent's `file_access`.
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
-Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above and `script` carry it.
+Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above, `script`, and `terminal` carry it.
 A worker isolates the unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, and `stdio` MCP servers), so enable them only for agents trusted with everything the primary runtime can reach.
 `script` also runs in the primary process, but there it only reads the one source file it launches, from the agent workspace through no-follow descriptors whatever the agent's `file_access`, so it declares no file access; its scripts run on the worker backend.
+`terminal` also runs in the primary process, but it only types into and reads the terminals of the agent's shell in its worker, so it declares no file access, and it offers nothing to an agent whose shell runs in the primary.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools, path tools under `file_access: unrestricted`, or `script` under a local `MINDROOM_SANDBOX_EXECUTION_MODE`, which runs scripts in the primary process, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
 
@@ -17440,17 +17474,20 @@ A plugin route that raises answers 500 without the error's detail, except that o
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
 `GET /api/plugins` checks the session the same way and answers any session, whatever its user's rooms, with this MindRoom's plugin API version and the manifest `name` and `mindroom_plugin_api` of each enabled plugin that loaded, never a plugin's path, settings, or load error.
 Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
-`require_room_reader` makes the same check before it reads anything else of the room, whatever the room's history visibility or join rule, and its `RoomReader` reads members' display names from that same lookup and power levels and direct-message status through a bot it picks the same way, each when the route asks, answering 503 rather than a refusal when a power-level read fails or times out; `is_direct()` is the agents' cached direct-message heuristic, which counts a lookup the homeserver answers with an error as not direct, never an authorization.
+`require_room_reader` makes the same check before it reads anything else of the room, whatever the room's history visibility or join rule, and its `RoomReader` reads members' display names from that same lookup and power levels and direct-message status through a bot it picks the same way, each when the route asks, answering 503 rather than a refusal when a power-level read fails or times out; `is_direct()` is the agents' cached direct-message heuristic, which answers 503 when the bot's direct-message list or the room's state cannot be read and nothing else marks the room as direct, never an authorization.
 `RoomReader.set_modes()` changes the room's thread and reply mode overrides only for a caller a fresh power-level read shows with room admin power, the bar `!thread_mode` and `!reply_mode` set, answering 403 otherwise and 503 when that read fails, before it writes anything.
 `RoomReader.history()` reads the caller's membership again with the room's history visibility, answering 403 once they have left and 503 when the read fails or times out; the start of their view rests on `origin_server_ts`, which the sending homeserver sets, so it counts only events of the caller's own homeserver, the only one whose users get client sessions, and ends at an invite another homeserver sent.
-`RoomReader.agents()` and `agent()` admit an agent by the check the worker Computer uses, under the config the API serves rather than the one the runtime runs: the user ID names a current agent, it and the caller are both joined, by the lookup that admitted the caller here and by the router's for the Computer, and after an authoritative refresh of room grants the agent's access rules let the caller converse with it there, answering 503 while identities or grants are unresolved; plugin routes never refresh grants under a membership policy the running runtime has not applied.
+`RoomReader.agents()` and `agent()` admit an agent by the check the worker Computer uses, under the config the API serves rather than the one the runtime runs: the user ID names a current agent, it and the caller are both joined, by the lookup that admitted the caller here and by the router's for the Computer, and under current room grants the agent's access rules let the caller converse with it there; `agent()` answers 503 while identities or grants are unresolved, and `agents()` leaves such an agent out and answers 503 only while the router's rooms are unknown; grants are current as the router's sync keeps them, refreshed through the runtime's one refresh when they need it, and the room read again when its ready grants lack a caller its live roster shows joined, and plugin routes never refresh grants under a membership policy the running runtime has not applied.
 Each admitted agent's `root` is the workspace a turn of that agent for that caller in that room resolves, never a path from the request; `files` and `terminal` follow the agent's toolkits as their declarations and settings describe them, and give only `read` and `watch` to a caller whose power level keeps them from posting; a contact room opens none, because its turns run as the agent's owner.
+`terminal` is `none` unless the agent's shell offers `run_shell_command` in a worker, and `type` only where that worker mounts the workspace, a dedicated worker or a `static_runner` the deployment says mounts the agents' storage, because only there does typing act on the files the caller sees as the agent's `root`.
+The terminal routes under `/api/rooms/` take the same sessions and admit through `RoomReader.agent()` on every request, open, close, and take input only with `type`, and take no path or worker from the client; their streams recheck `agent()` every 15 seconds under the config served then, dropping input once the caller may only watch and closing once the agent is no longer open to them.
+A person's typing is recorded on the terminal's line like the agent's, so an agent's Enter on a line a person typed is judged as the whole command ([Persistent Terminals](https://docs.mindroom.chat/architecture/terminals/)).
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
-The [workspace file routes](https://docs.mindroom.chat/workspace-files/) under `/api/workspaces/v1/` take the same sessions and admit the caller through `RoomReader.agent()` on every request, so a saved change to an agent's access applies to the next request; they serve only the `root` that check resolves, never a path or folder from the request, refuse paths that leave it by `..` or a link, and change files only for a caller whose `files` is `write`.
+The [workspace file routes](https://docs.mindroom.chat/workspace-files/) under `/api/rooms/` take the same sessions and admit the caller through `RoomReader.agent()` on every request, so a saved change to an agent's access applies to the next request; they serve only the `root` that check resolves, never a path or folder from the request, refuse paths that leave it by `..` or a link, and change files only for a caller whose `files` is `write`.
 Code the agent runs controls everything in the workspace, so the routes treat it as the primary's other workspace reads and writes do, and the workspace is the agent's `HOME`, so they hide the credentials that page lists, even through a link, and never move or delete a folder that keeps one by its place.
 The change stream watches each folder reached from the root without a link, at most 10,000, and reports only paths that stay inside, so a link planted in the workspace never makes the primary watch or report anything outside it.
 `require_room_messenger` makes the same check, and its `RoomMessenger` posts only as the router, never from a person's account: `notice()` is an `m.notice` naming no requester, and `relay()` names the session's own user, never one a request names, as original sender, so each agent it wakes authorizes that user, after checking again just before sending that the session is live and the user is joined and may send `m.room.message`.
-A relay mentions only agents and teams joined to the room, and both refuse content keys under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or another loaded plugin's reserved namespaces at any depth and Matrix's own top-level keys, such as `body`, `m.relates_to`, and `m.new_content`, so neither a route nor its client can claim a requester, hide whom a relay is for, edit another message, or forge another plugin's card through content.
+A relay mentions only agents and teams joined to the room, and both refuse content keys under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, at any depth, and Matrix's own top-level keys, such as `body`, `m.relates_to`, and `m.new_content`, so neither a route nor its client can claim a requester, hide whom a relay is for, edit another message, or forge another plugin's card through content.
 `notice()` checks no power level, so a member the power levels keep from posting can still have a route post a router notice; the route chooses who may.
 Routes only administrators may use depend on `require_platform_administrator`, which authenticates the caller the same way and answers 403 unless the session's user, or the person it is a bridge alias of, is in `administrators` in the config the API serves when the request arrives.
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
@@ -17458,7 +17495,7 @@ A browser cannot set a websocket's headers, so a plugin websocket route signs it
 Browsers apply no CORS to websockets, so `client_stream` itself refuses an `Origin` missing from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, and given a room it checks membership as `require_room_member` does before accepting and every 60 seconds after, closing the websocket when the user has left or membership is unavailable.
 A plugin websocket route without `client_stream` is public and accepts any origin.
 The call transcript routes under `/api/call-transcripts/v1/` take the same sessions and check rooms themselves through the router: room membership to read a room's live call, permission to post messages to start or join a call, and for a call's own routes the room the call is in, never one the request names, answering 404 to anyone outside it.
-CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-transcripts/`, and `/api/workspaces/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin, call transcript, and workspace file routes too, and there is no separate list.
+CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-transcripts/`, and `/api/rooms/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin, call transcript, and room routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
@@ -17525,7 +17562,8 @@ Do not report or "fix" these; they are deliberate.
   Worker code may already have copied a credential it was granted, so rotate the credential at its provider to revoke it.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
-- A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, and other code in the same worker can read them, as with the CLI grant.
+  A terminal's shell never gets it, because the shell outlives the response ([Persistent Terminals](https://docs.mindroom.chat/architecture/terminals/)).
+- A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, except that a terminal a `terminal_open` call starts keeps them in its shell, and other code in the same worker can read them, as with the CLI grant.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
 - A shared agent's later turns in a conversation replay each earlier turn's context, including another requester's `persist=False` hook items such as a location, so it can repeat them to anyone in that conversation, like persisted items; private agents keep each requester's conversations apart.
 - Unless `knowledge_graph_edits` is off, any requester of a shared agent, or a tool result that steers it, can have it delete facts and entities from the shared graph, merge its entities, or rewrite their summaries, as with any write tool; the edits reach only that agent's own graph.
@@ -17957,7 +17995,7 @@ my-plugin/
 ```
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, HTTP routes, a lifespan, and skills.
-Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, and the HTTP route helpers stay in the modules their sections name.
+Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit`, the memory helpers, the HTTP route helpers, and the [testing kit](#testing-plugins) stay in the modules their sections name.
 `mindroom.plugin_api` also exports the types to annotate with: `Config` and `RuntimePaths` for the `config` and `runtime_paths` that hooks, tools, and automations receive, `HookContext` for any hook's context, `HookMessageSender` and `HookMatrixAdmin` for `message_sender` and `matrix_admin`, and `ToolTraceEntry` for the entries of a response draft's `tool_trace`.
 Other `mindroom` modules can change in any release.
 
@@ -18108,7 +18146,7 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `requires_room_context` | bool | `False` | The tool needs a live Matrix room, so it is hidden where none exists, such as the MCP gateway, the OpenAI-compatible API, and room-less runs, and it always runs in the primary runtime |
 | `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
-| `workspace_writers` | tuple of strings | `()` | The functions that change files in the agent's workspace, by writing them or by running code there; while the agent offers one, people who may post in its room may change its [workspace files](https://docs.mindroom.chat/workspace-files/), and a tool that names none counts every function when it sets `executes_code`; a plugin that passes it states `"mindroom_plugin_api": "1.14"` |
+| `workspace_writers` | tuple of strings | `()` | The functions that change files in the agent's workspace, by writing them or by running code there; while the agent offers one, people who may post in its room may change its [workspace files](https://docs.mindroom.chat/workspace-files/), and a tool that names none counts every function when it sets `executes_code`; a plugin that passes it states `"mindroom_plugin_api": "1.18"` |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
 | `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
 | `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
@@ -18857,7 +18895,7 @@ Each call to `power()` or `history()` reads again, and `members` is read anew fo
 `power()`, `is_direct()`, and `history()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
 `history()` reads the caller's membership again and answers 403 like `require_room_member` once they are no longer joined, and 503 with `Room history read failed; try again.` when its read fails or times out.
-`is_direct()` keeps its answer for a few minutes, but when the homeserver fails the lookup with an error it may count a direct room as not direct and does not keep that answer; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
+`is_direct()` keeps its answer for a few minutes; it answers 503 with `Direct message lookup failed; try again.` when the bot's direct-message list or the room's state cannot be read and nothing else marks the room as direct, or when the lookup raises or times out.
 
 `set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
 Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 503 with `The router is not running in this room.` while the router is stopped or not in the room, as in a direct message with one agent.
@@ -18888,8 +18926,9 @@ async def change_modes(
 ```
 
 `agents()` and `agent()` check what the [worker Computer](https://docs.mindroom.chat/tools/worker-computer/) checks before it opens: the agent is a current agent, it and the caller are both joined to the room, and its [access rules](https://docs.mindroom.chat/authorization/#responder-access) let the caller use it there.
-`agents()` leaves out each agent that fails, and `agent()` answers 403 with `The selected user is not a current agent.`, `Requester and agent must both be joined to this room.`, or `Requester cannot use this agent.`.
-Both answer 503 with `Agent identities are not ready.` or `Responder membership policy is unresolved.` until MindRoom can decide, and with `Agent access is unavailable; try again.` while the router is not running or MindRoom has not yet applied a saved config that adds or removes an agent or team or changes an `access.current_room_members` or `access.members_of_rooms` rule.
+`agent()` answers 403 with `The selected user is not a current agent.`, `Requester and agent must both be joined to this room.`, or `Requester cannot use this agent.`, and 503 with `Agent identities are not ready.` or `Responder membership policy is unresolved.` until MindRoom can decide.
+`agents()` leaves out each agent that fails, and also, logging `room_agent_left_out`, one whose Matrix account is not ready, whose room grants Matrix has not confirmed, or whose contacts or stored tool settings cannot be read; it answers 503 with `Responder membership policy is unresolved.` only while MindRoom cannot list the router's rooms and an agent's access waits on them.
+Both answer 503 with `Agent access is unavailable; try again.` while the router is not running or MindRoom has not yet applied a saved config that adds or removes an agent or team or changes an `access.current_room_members` or `access.members_of_rooms` rule.
 A contact room opens no agent: `agents()` leaves out its agent, and `agent()` answers 403 with `No workspace opens through a contact room.`.
 Each answer follows the config the API serves when the request arrives, so a saved change to an agent's access shows on the next request.
 An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether it is `private`, the `config` it was resolved under, and what the caller may do there:
@@ -18897,8 +18936,8 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 | Field | Value |
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
-| `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a function a toolkit names in its `workspace_writers`, such as `save_file` of `file`, or any function of a code-running toolkit that names none, such as `shell`. Else `read`, also for toolkits that save files without naming the function |
-| `terminal` | `none` without the `shell` toolkit, `type` when the caller may post messages in the room, else `watch` |
+| `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a function a toolkit names in its `workspace_writers`, such as `save_file` of `file`, or any function of a code-running toolkit that names none, such as `shell`, and that toolkit runs in the primary process or in a worker that mounts the agent's workspace, as for `terminal`. Else `read`, also for toolkits that save files without naming the function, and for writing toolkits routed to a `static_runner` that sees only its own storage |
+| `terminal` | `none` when the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
 
 A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, only reads, and `include_tools` or `exclude_tools` can take writing functions away.
 `agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.
@@ -18906,7 +18945,7 @@ MindRoom resolves `root` itself, never from the request; a route that opens file
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, and one that uses `agents()` or `agent()` states `"1.13"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process states `"1.17"`.
 
 A route that posts to a room depends on `require_room_messenger`.
 It checks the caller exactly as `require_room_member` does, with the same answers, and returns a `RoomMessenger`, which posts as the router, never from the caller's account:
@@ -18935,11 +18974,12 @@ async def ask(body: Ask, messenger: Annotated[RoomMessenger, Depends(require_roo
 
 Both return the message's event ID, and post in the thread `thread_id` names, else in the room's timeline.
 `content` adds namespaced keys of the plugin's own to the message, such as a card under one of its [reserved namespaces](#reserved-namespaces).
-It answers 400 and sends nothing when `content` sets a key of Matrix's own, one without a namespace such as `body` or `msgtype` or one under `m.` or `org.matrix.`, or, anywhere in it, a key under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or another loaded plugin's reserved namespaces, so a route may pass a client's content through without letting it change the text, edit another message, forge another plugin's card, or claim to be someone else.
+It answers 400 and sends nothing when `content` sets a key of Matrix's own, one without a namespace such as `body` or `msgtype` or one under `m.` or `org.matrix.`, or, anywhere in it, a key under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, so a route may pass a client's content through without letting it change the text, edit another message, forge another plugin's card, or claim to be someone else.
+Plugins that reserve the same namespace, such as a family of plugins sharing one, can each post keys in it, but a narrower namespace another plugin reserves inside it, such as `com.example.cards.` inside `com.example.`, stays refused.
 `relay()` answers 400 unless `mentions` names at least one agent or team and only agents and teams joined to the room, never a person or the router.
 Just before it sends, `relay()` checks the caller again, with the answers of `require_room_member` and `power()`: 401 once their session has ended, 403 once they have left the room or may no longer send `m.room.message` there, and 503 when either cannot be read.
 Both answer 503 with `MindRoom's router is not running; try again.` while the router is down, with `MindRoom's router is not in this room.` in a room the router has not joined, such as a direct message with one agent, where an agent can call [`invite_router`](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing) first, and with `The message could not be sent; try again.` when Matrix refuses the message.
-A plugin that uses `require_room_messenger` states `"mindroom_plugin_api": "1.12"` in its manifest.
+A plugin that uses `require_room_messenger` states `"mindroom_plugin_api": "1.12"` in its manifest, and `"1.15"` when it posts keys in a namespace another plugin also reserves.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
@@ -18974,8 +19014,46 @@ It refuses any other handshake with an HTTP answer before accepting, as `require
 Once accepted, the websocket closes with code 4401 as soon as its session ends: it expires, the client revokes it, or the same user's ninth session replaces it, since MindRoom keeps eight per user; the client then signs in again.
 Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when membership is unavailable, with the same reason `require_room_member` gives for its 503, which the client may retry.
 Closing cancels the `async with` block where it waits, and the route runs on after the block.
-A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest.
+
+A route with an admission rule of its own, such as a cap on each user's open streams, passes it as `admit`: a function, plain or `async`, that gets the signed-in `ClientUser` once the checks above pass and returns whether to accept.
+A plain function runs on the server's event loop, so it must not block.
+When it returns false, `client_stream` refuses the handshake with 503 and `The route refused this stream; try again later.`, so the client never sees the stream open, as it would if the route closed it after accepting.
+A check that raises `HTTPException` refuses with that answer instead, and one that raises anything else answers 500, as a route that raises does.
+
+```python
+# routes.py
+from collections import Counter
+
+from fastapi import APIRouter, WebSocket
+
+from mindroom.plugin_http import ClientUser, client_stream
+
+router = APIRouter()
+open_streams: Counter[str] = Counter()
+
+
+def under_cap(user: ClientUser) -> bool:
+    return open_streams[user.user_id] < 4
+
+
+@router.websocket("/feed")
+async def feed(websocket: WebSocket) -> None:
+    async with client_stream(websocket, admit=under_cap) as user:
+        open_streams[user.user_id] += 1
+        try:
+            async for text in websocket.iter_text():
+                await websocket.send_text(text)
+        finally:
+            open_streams[user.user_id] -= 1
+```
+
+A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest, and one that passes `admit` states `"1.14"`.
 Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
+
+Inside the block, `await stream_room_reader(websocket, user, room_id)` returns the `RoomReader` a route gets from `require_room_reader`, for the user `client_stream` yields.
+It answers 409 when MindRoom now serves another runtime, then checks membership again as `require_room_member` does, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment.
+A stream that keeps checking what its caller may do, such as whether they may still type, calls it again for each check.
+A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.17"` in its manifest.
 
 ## Plugin context
 
@@ -19062,7 +19140,7 @@ async def lifespan(lifecycle: PluginLifecycle):
 MindRoom starts each plugin's lifespan once the plugin loads at startup, in the process that runs the agents.
 `mindroom plugins check`, `mindroom config validate`, and `mindroom doctor` import the lifecycle module but never run `lifespan`, and workers never run it either.
 The plugin's routes, tools, and hooks can import the lifecycle module, such as `from .lifecycle import STATE`, to use what its lifespan set up, and they share one copy of it with the lifespan.
-Keep what they share in the lifecycle module or in a helper module they all import: a tools, hooks, OAuth, or routes module that the lifecycle module imports can end up as a separate copy from the one MindRoom serves.
+Any of the plugin's modules can import another the same way and gets the copy MindRoom serves, but importing a module the manifest names by its package name, such as `from my_plugin.hooks import STATE`, gives a separate copy.
 A worker that loads a module importing the lifecycle module imports it too.
 Every plugin reload, and every config reload that changes `plugins:`, runs every plugin's code again, so it restarts every lifespan, including those of plugins that did not change.
 The new lifespan starts while the old one still runs, so hand over what only one holder can have, such as a listening port or a lock file, through `process_state` instead of opening it again, or the new start fails.
@@ -19213,6 +19291,75 @@ For plugin code, MindRoom also guarantees:
 Agent workspaces can contain files worker code wrote, so read and write them without following links: `read_regular_file_within_root`, `write_file_within_root`, and `open_directory_within_root` from `mindroom.plugin_api` do that.
 To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths, ctx.execution_identity))` with `refresh_agent_memory_search` from `mindroom.memory`.
 [`prompt_curation.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/prompt_curation.py) and [`dreaming.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/dreaming.py) are complete examples: a single prompt with a re-check, and a proposal reviewed in a second thread before code applies it.
+
+## Testing plugins
+
+`mindroom.plugin_testing`, from plugin API 1.16, loads a plugin in its own tests as MindRoom starts it and drives its routes, tools, and hooks without a homeserver or a model.
+It patches nothing: client sessions, room membership, and each agent's [access](https://docs.mindroom.chat/authorization/#responder-access) decide as in a deployment, from the config the test gives, so a test that needs another sender grants them access there.
+It imports no test runner; with pytest, a fixture wraps `load_plugin`, and async tests such as these need `pytest-asyncio`.
+This example tests a plugin named `greeter` whose tool greets with its `greeting` setting, whose `message:received` hook answers `Got: <body>`, and whose route `GET /rooms/{room_id}/hello` greets a member:
+
+```python
+from pathlib import Path
+
+import pytest
+
+from mindroom.plugin_testing import TurnRefused, load_plugin
+
+ROOM = "!lobby:example.org"
+ALICE = "@alice:example.org"
+CONFIG = {"agents": {"helper": {"display_name": "Helper", "tools": ["greeter"], "access": {"users": [ALICE]}}}}
+
+
+@pytest.fixture
+def plugin(tmp_path):
+    with load_plugin(Path(__file__).parents[1], tmp_path, config=CONFIG, settings={"greeting": "Howdy"}) as loaded:
+        loaded.add_room(ROOM, members={ALICE: "Alice", "@bob:example.org": "Bob"})
+        yield loaded
+
+
+def test_route(plugin):
+    assert plugin.client(ALICE).get(f"/api/plugins/greeter/rooms/{ROOM}/hello").json() == {"hello": ALICE}
+    assert plugin.client("@carol:example.org").get(f"/api/plugins/greeter/rooms/{ROOM}/hello").status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_tool(plugin):
+    result = await plugin.call_tool("greeter", "greet", {"name": "Ann"}, agent="helper", sender=ALICE, room=ROOM)
+    assert (result.status, result.value) == ("ok", "Howdy, Ann!")
+
+
+@pytest.mark.asyncio
+async def test_hook(plugin):
+    room = plugin.add_room("!side:example.org", members={ALICE: "Alice"})
+    await plugin.fire("message:received", agent="helper", sender=ALICE, room=room.room_id, body="hi")
+    assert [sent.text for sent in room.sent] == ["Got: hi"]
+    with pytest.raises(TurnRefused):
+        await plugin.fire("message:received", agent="helper", sender="@bob:example.org", room=ROOM, body="hi")
+```
+
+| Call | What it does |
+| --- | --- |
+| `load_plugin(path, tmp_dir, *, config=None, settings=None)` | Loads the plugin at `path` with `settings` for the `with` block, keeping its data under `tmp_dir`, and yields a handle with `config` and `runtime_paths`. `config` is what a `config.yaml` holds, without `plugins`; one without `models` gets a `default` model that nothing calls. A config that does not validate or a plugin that fails to load, even only its routes or lifecycle module, raises, naming why, and the block's end restores the plugins loaded before it. |
+| `add_room(room_id, members, *, power_levels=None, direct=False, history_visibility="shared", key=None)` | Adds a room the router is joined to and returns it. `members` maps each joined user to their display name, `key` is the room key an agent's `rooms` or `members_of_rooms` names, and `direct` marks the members' joins as a direct message's. The router is a member too and test rooms have no name, so MindRoom also counts a room where one member is alone with the router as direct. The room's `sent` lists what hooks and `RoomMessenger` posted there, each with `text`, `thread_id`, `source` (`<plugin>:<event>`), `content`, and `mentions`. |
+| `client(user_id=None)` | Returns a FastAPI `TestClient` of the plugin's routes, signed in as `user_id` when given, which works until the block ends. Its `websocket_connect` offers that session as `client_stream` expects, from an allowed origin. |
+| `sign_out(user_id)` | Ends the user's client sessions, so their clients answer 401. |
+| `await call_tool(tool, function, arguments, *, agent, sender, room)` | Runs one call as `agent` runs it for `sender` in `room`, through the `tool:*` hooks and with `current_plugin_context`, and returns its `status` (`ok`, `failed`, `declined`, ...), `value`, and `failure_text`. It raises `LookupError` for a tool or function the agent lacks and `PermissionError` for a function that may need approval. |
+| `await fire(event, *, agent, sender, room, body="", **fields)` | Runs the hooks of a `message:*`, `system:enrich`, or custom event for `sender`'s message `body` in `room`, and returns what they returned to MindRoom: the enrichment items, the transformed draft, the context, or `None` for a custom event. `fields` are the event context's own required fields, such as `target_entity_name` and `target_member_names` for enrichment, or for `message:before_response`, `message:final_response_transform`, `message:after_response`, and `message:cancelled` those of its draft, result, or info. A custom event takes `payload` and `source_plugin` and runs as a tool call's `emit_custom_event` emits it, so its hooks can emit further events. |
+
+`call_tool` and `fire` raise `TurnRefused` and run nothing unless `sender` is joined to `room` and `agent` would answer them there.
+Each `call_tool` and `fire` starts from a new message of `sender`'s, which roots a thread as it would live: in thread mode `resolved_thread_id` is that message's ID, and in room mode it is None.
+A sender is a person: for a bridge alias, hooks see the person it stands for as `envelope.requester_id` and the alias as `envelope.sender_id`, and tools run for the person; an agent's or bot account's ID raises `ValueError`.
+A fired message mentions no one and carries no attachments.
+Adding a room again replaces it, so a test changes who is joined by adding the room again with its new members.
+A room never added is one no MindRoom bot is in, so a signed-in caller of a route that checks room membership gets 503 for it.
+An agent's Matrix ID, to make it a room's member or a relay's mention, is its key in `entity_directory(plugin.config, plugin.runtime_paths)` from `mindroom.plugin_api`.
+Once read, whether a room is a direct message is kept for a few minutes, as running agents keep it, but never shared with another `load_plugin` block.
+MindRoom's environment lookups for the plugin, such as `runtime_paths.env_value`, read only a `.env` file in `tmp_dir`; plugin code that reads `os.environ` still sees the test's own environment.
+
+The kit does not run agent turns, models, conversation history, workers, tool approval, OAuth flows, MCP server tools, automations, the plugin's `lifespan`, the main app's middleware, such as its response security headers and request size limit, or more than one plugin at once.
+It fires no other built-in event, and hooks get no `matrix_admin` and cannot `put_room_state`; `RoomReader.set_modes` saves a thread mode but answers 503, as it cannot publish one.
+A call to the Matrix client other than its member and state reads raises `AttributeError` naming the call.
 
 # Hooks
 
@@ -19454,7 +19601,7 @@ Custom events default to 1000 ms.
   They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
   A plugin that uses them states `"mindroom_plugin_api": "1.10"` in its manifest, so an older MindRoom skips it with a clear reason.
   Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
-  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
+  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text, and an adaptive participation check that could not decide, such as when its model request fails, which sends no reply.
   A reply resumed after an approval whose answer a `message:before_response` hook withholds shows that as a failed approval, and its turn ends `failed`.
   A reply that [pauses for a tool approval](https://docs.mindroom.chat/tool-approval/#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
   A call that asks for approval from its [background job](https://docs.mindroom.chat/tools/agent-orchestration/#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
@@ -19596,7 +19743,8 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
   When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
-- Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
+  A terminal that a [`terminal_open`](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) call starts keeps that call's changes in its shell for as long as it runs, so later replies and people type with them, while a terminal a person opens from a chat client gets none.
+- Only the `shell` tool's commands and the terminals `terminal_open` starts receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
 - The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
 - A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
   A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
@@ -19829,7 +19977,8 @@ Retention applies only to bots whose [`accept_invites`](https://docs.mindroom.ch
 
 ## Testing
 
-Hook functions are plain async functions, so a test can await one with a stub context:
+To run a plugin's hooks as MindRoom does, for a message an agent would answer, use [`mindroom.plugin_testing`](https://docs.mindroom.chat/plugins/#testing-plugins).
+Hook functions are also plain async functions, so a unit test can await one with a stub context:
 
 ```python
 from types import SimpleNamespace
@@ -21687,6 +21836,7 @@ What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
+  Set `MINDROOM_STATIC_RUNNER_AGENT_STORAGE=true` on the primary when its `static_runner` mounts the agents' storage, as the Kubernetes chart does; only then may people in a room type in the [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) of agents whose shell runs there, and otherwise they only watch them.
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
@@ -21847,12 +21997,13 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, or `off`; see [Execution modes](#execution-modes) | _(unset)_ |
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
+| `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not a background job, and for every `browser_mcp` call; a `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |
-| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers, and to call client sessions and [plugin HTTP routes](https://docs.mindroom.chat/plugins/#http-routes) | `[]` |
+| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers, and to call client sessions, [plugin HTTP routes](https://docs.mindroom.chat/plugins/#http-routes), and the terminal routes | `[]` |
 
 The Helm chart sets the Kubernetes backend variables.
 To deploy that backend without Helm, see [Worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings).

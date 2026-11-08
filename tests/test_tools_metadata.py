@@ -2029,6 +2029,7 @@ def test_only_code_execution_tools_execute_code() -> None:
         "python",
         "script",
         "shell",
+        "terminal",
     }
 
 

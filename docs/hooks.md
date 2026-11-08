@@ -242,7 +242,7 @@ Custom events default to 1000 ms.
   They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
   A plugin that uses them states `"mindroom_plugin_api": "1.10"` in its manifest, so an older MindRoom skips it with a clear reason.
   Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
-  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
+  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text, and an adaptive participation check that could not decide, such as when its model request fails, which sends no reply.
   A reply resumed after an approval whose answer a `message:before_response` hook withholds shows that as a failed approval, and its turn ends `failed`.
   A reply that [pauses for a tool approval](tool-approval.md#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
   A call that asks for approval from its [background job](tools/agent-orchestration.md#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
@@ -384,7 +384,8 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
   When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
-- Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
+  A terminal that a [`terminal_open`](tools/execution-and-coding.md#terminal) call starts keeps that call's changes in its shell for as long as it runs, so later replies and people type with them, while a terminal a person opens from a chat client gets none.
+- Only the `shell` tool's commands and the terminals `terminal_open` starts receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
 - The [agent CLI](tools/agent-cli.md)'s variables, the egress proxy variables from the [egress broker](deployment/egress-broker.md) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](deployment/sandbox-proxy.md#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
 - A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
   A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
@@ -617,7 +618,8 @@ Retention applies only to bots whose [`accept_invites`](configuration/agents.md)
 
 ## Testing
 
-Hook functions are plain async functions, so a test can await one with a stub context:
+To run a plugin's hooks as MindRoom does, for a message an agent would answer, use [`mindroom.plugin_testing`](plugins.md#testing-plugins).
+Hook functions are also plain async functions, so a unit test can await one with a stub context:
 
 ```python
 from types import SimpleNamespace

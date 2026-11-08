@@ -2345,6 +2345,8 @@ async def test_agent_leaves_unconfigured_rooms(tmp_path: Path) -> None:
 
     # Mock the client
     mock_client = AsyncMock(rooms={})
+    mock_client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
+    mock_client.room_get_state.return_value = nio.RoomGetStateResponse([], "!room2:localhost")
     bot.client = mock_client
 
     # Mock joined_rooms to return both room1 and room2 (agent is in both)

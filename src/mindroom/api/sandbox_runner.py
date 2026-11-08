@@ -1885,7 +1885,7 @@ def _persistent_browser_runtime(
 def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRoute) -> _PreparedToolCall:
     """Validate one call and return its dispatch; a job's request runs as part of its job."""
     # Plugin tools come from the request's config, not from a startup config runners never receive.
-    # The loader re-runs only plugin modules edited since their last load.
+    # The loader re-runs only plugins whose tools, hooks, or OAuth module changed since their last load.
     tools = refresh_plugins(route.config, route.runtime_paths).tools
     request = _validated_execute_request(payload, tool_metadata=tools.entries)
     credential_overrides: dict[str, Any] = {}

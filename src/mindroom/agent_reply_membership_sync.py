@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import nio
 
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, retry_delay_seconds
 from mindroom.event_journal import (
     DepartureSource,
     EventKind,
@@ -124,18 +124,44 @@ class AgentReplyMembershipSync:
         homeserver and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
         A stopping router cancels it at once, and its owner's shutdown drain, the router's, covers one started later.
         """
+        task = self._refresh_task_when_needed(config, refresh, owner=owner, after_backoff=True)
+        if task is not None:
+            with suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), 10)
+
+    async def refresh_for_access_check(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
+        """Refresh at once when grants need it, even during backoff, and wait until the refresh ends.
+
+        Access checks outside the router's sync call this, so they refresh only then, share a refresh in flight with
+        the router's sync, and update its backoff. Waiting never cancels the refresh, and one that raises or is
+        cancelled leaves the grants as they were.
+        """
+        task = self._refresh_task_when_needed(config, refresh, owner=None, after_backoff=False)
+        if task is not None:
+            await asyncio.wait([task])
+
+    def _refresh_task_when_needed(
+        self,
+        config: Config,
+        refresh: Callable[[], Awaitable[None]],
+        *,
+        owner: object | None,
+        after_backoff: bool,
+    ) -> asyncio.Task[None] | None:
+        """When grants need it, return the refresh in flight, else start one if ``after_backoff`` allows."""
+        # A sync gap cannot invalidate explicit-user grants. Do not turn a
+        # no-op rebuild into downstream room and call reconciliation scans.
+        if not self._memberships.needs_refresh(config):
+            return None
         if self._refresh_task is None or self._refresh_task.done():
-            # A sync gap cannot invalidate explicit-user grants. Do not turn a
-            # no-op rebuild into downstream room and call reconciliation scans.
-            if not self._memberships.needs_refresh(config) or time.monotonic() < self._refresh_retry_at:
-                return
+            if after_backoff and time.monotonic() < self._refresh_retry_at:
+                return None
             self._refresh_task = create_background_task(
                 self._refresh(config, refresh),
                 name="agent_reply_membership_refresh",
                 owner=owner,
             )
-        with suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(self._refresh_task), 10)
+        return self._refresh_task
 
     def cancel_refresh(self) -> None:
         """Cancel a running refresh; a later frame starts another while grants still need one."""
@@ -149,11 +175,11 @@ class AgentReplyMembershipSync:
             self._refresh_retry_at = 0.0
             return
         self._refresh_attempt += 1
-        backoff_seconds = min(
-            _REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** (self._refresh_attempt - 1)),
-            _REFRESH_BACKOFF_MAX_SECONDS,
+        self._refresh_retry_at = time.monotonic() + retry_delay_seconds(
+            self._refresh_attempt,
+            initial_delay_seconds=_REFRESH_BACKOFF_INITIAL_SECONDS,
+            max_delay_seconds=_REFRESH_BACKOFF_MAX_SECONDS,
         )
-        self._refresh_retry_at = time.monotonic() + backoff_seconds
 
     async def apply_live_transition(
         self,
