@@ -26,7 +26,6 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
-from mindroom.mid_turn import QueuedMessage
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import execution, results
@@ -87,6 +86,7 @@ from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    NewerMessageWaits,
     ProcessRuntime,
     SpanRecorder,
     always_owned,
@@ -635,16 +635,6 @@ async def test_human_followup_releases_original_call_once(tmp_path: Path) -> Non
         await runtime.shutdown()
 
 
-class _NewerMessageWaits:
-    """The reply's queue, which holds a newer human message."""
-
-    def has_pending_human_messages(self) -> bool:
-        return True
-
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$newer", None),)
-
-
 @pytest.mark.asyncio
 async def test_a_run_a_job_makes_is_told_of_no_newer_message(tmp_path: Path) -> None:
     """A newer message tells the reply that waits for a job to pause, never a run the job makes."""
@@ -661,7 +651,7 @@ async def test_a_run_a_job_makes_is_told_of_no_newer_message(tmp_path: Path) -> 
     actor = job_actor(job_tool(runs_a_batch))
     try:
         async with execution_resources():
-            with tool_runtime_context(context), queued_message_signal_context(_NewerMessageWaits()):
+            with tool_runtime_context(context), queued_message_signal_context(NewerMessageWaits()):
                 outcome = await call_job_tool(actor, "runs_a_batch", call_id="once", run_id="once-run")
     finally:
         await runtime.shutdown()

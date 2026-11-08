@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom import authorization
-from mindroom.constants import EXACT_MENTIONS_KEY, ROUTER_AGENT_NAME, WAKE_MENTIONED_KEY
+from mindroom.constants import (
+    COPIED_MENTIONS_KEY,
+    EXACT_MENTIONS_KEY,
+    ROUTER_AGENT_NAME,
+    SKIP_MENTIONS_KEY,
+    WAKE_MENTIONED_KEY,
+)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.mentions import resolve_mentioned_user_ids_from_text
 from mindroom.matrix.room_membership import room_membership_is_complete
@@ -54,6 +60,17 @@ class AgentResponseDecision:
     sender_visible_thread_agents: tuple[MatrixID, ...] = ()
 
 
+def should_skip_mentions(content: dict[str, Any] | None) -> bool:
+    """Return whether mentions in this message content should be ignored."""
+    if not isinstance(content, dict):
+        return False
+    if content.get(SKIP_MENTIONS_KEY):
+        return True
+
+    new_content = content.get("m.new_content")
+    return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY))
+
+
 def _extract_mentioned_user_ids(
     content: dict[str, object],
     config: Config,
@@ -65,6 +82,21 @@ def _extract_mentioned_user_ids(
         return user_ids
     registry = entity_identity_registry(config, runtime_paths)
     return [user_id for user_id in user_ids if not registry.is_managed_user_id(user_id)]
+
+
+def history_mentioned_user_ids(
+    content: dict[str, Any],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[str]:
+    """Return the user IDs a thread message counts as mentioning when a later message reads the thread's history."""
+    if not should_skip_mentions(content):
+        return _extract_mentioned_user_ids(content, config, runtime_paths)
+    # A skip-marked message mentions nobody, but a thread-move copy keeps whom its original mentioned.
+    copied = content.get(COPIED_MENTIONS_KEY)
+    if not isinstance(copied, list):
+        return []
+    return [user_id for user_id in copied[:_MAX_MENTIONED_USER_IDS] if isinstance(user_id, str)]
 
 
 def _listed_or_found_user_ids(
@@ -289,7 +321,7 @@ def get_all_mentioned_agents_in_thread(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
-    """Get all unique agent MatrixIDs that have been mentioned anywhere in the thread.
+    """Get all unique agent MatrixIDs the thread's messages count as mentioning; see ``history_mentioned_user_ids``.
 
     Preserves the order of first mention while preventing duplicates.
     """
@@ -298,8 +330,7 @@ def get_all_mentioned_agents_in_thread(
     registry = entity_identity_registry(config, runtime_paths)
 
     for msg in thread_history:
-        content = msg.content
-        user_ids = _extract_mentioned_user_ids(content, config, runtime_paths)
+        user_ids = history_mentioned_user_ids(msg.content, config, runtime_paths)
         agents = _agents_from_user_ids(user_ids, registry)
 
         for agent in agents:

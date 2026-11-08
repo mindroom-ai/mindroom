@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from mindroom.constants import (
+    COPIED_MENTIONS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
@@ -35,6 +36,7 @@ from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
+from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import is_visible_tool_marker_line
 
@@ -81,6 +83,7 @@ def _plan_thread_copy(
     entity_name_for_sender: Callable[[str], str | None],
     target_posters: frozenset[str],
     display_names: Mapping[str, str],
+    mentioned_user_ids: Callable[[dict[str, Any]], list[str]],
 ) -> list[_PlannedCopy]:
     """Return the posts that recreate one thread's conversation in another room.
 
@@ -96,6 +99,9 @@ def _plan_thread_copy(
         # Copies are history, never requests: no mention in them may wake an agent.
         content[SKIP_MENTIONS_KEY] = True
         content["m.mentions"] = {}
+        if mentioned := mentioned_user_ids(message.content):
+            # The copy keeps counting them as mentioned earlier in the thread, so a team the thread formed carries on.
+            content[COPIED_MENTIONS_KEY] = mentioned
         entity = entity_name_for_sender(message.sender)
         speaks_for = message.content.get(ORIGINAL_SENDER_KEY)
         if entity is not None and isinstance(speaks_for, str) and speaks_for:
@@ -246,6 +252,11 @@ async def _prepare_move(  # noqa: PLR0911
         entity_name_for_sender=registry.current_entity_name_for_user_id,
         target_posters=frozenset(poster_clients),
         display_names=room_member_display_names(context.room) if context.room is not None else {},
+        mentioned_user_ids=lambda content: history_mentioned_user_ids(
+            content,
+            context.current_config,
+            context.runtime_paths,
+        ),
     )
     if not plan:
         return "This thread has no messages to move."
