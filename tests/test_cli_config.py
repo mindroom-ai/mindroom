@@ -251,7 +251,7 @@ def test_config_validate_prints_configured_names_whole_on_one_line(
     model = "a:fire:model_name_long_enough_to_push_each_summary_line_past_eighty_columns"
     target = narrow_markup_dir / "config.yaml"
     config_text = (
-        f'models:\n  "{model}":\n    provider: anthropic\n    id: claude-sonnet-5\n'
+        f'models:\n  "{model}":\n    provider: anthropic\n    id: claude-sonnet-5-5\n'
         f'agents:\n  {agent}:\n    display_name: Assistant\n    model: "{model}"\n'
         f"teams:\n  {team}:\n    display_name: Team\n    role: Helps\n    agents: [{agent}]\n"
         f'    model: "{model}"\n'
