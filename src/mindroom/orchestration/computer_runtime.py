@@ -13,6 +13,9 @@ from mindroom.api.app_state import ensure_app_state
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.room_agent_access import admit_room_agent
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backend_kinds import worker_backend_kind
@@ -75,11 +78,7 @@ def _computer_browser_provider(agent_name: str, config: Config, runtime_paths: R
         raise ComputerError(409, "Computer requires exactly one browser provider and explicit user_agent worker scope.")
     provider = providers[0]
 
-    # Match normal toolkit placement without adding heavy tool imports to API startup.
-    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
-    from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
-    from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
-
+    # Match normal toolkit placement.
     tools = config_plugins(config, runtime_paths).tools
     if not resolve_agent_tools(config, agent_name, tools).runs_in_worker(
         provider,

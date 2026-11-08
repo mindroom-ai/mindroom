@@ -1124,12 +1124,12 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 | Field | Value |
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
-| `files` | `none` when none of the agent's toolkits takes local paths; `write` when one edits files or runs code, `file` or `coding` with a writing function on or a code-running toolkit such as `shell` or `python`, and the caller may post messages in the room; else `read` |
+| `files` | `none` when none of the agent's toolkits takes local paths or runs code; `write` when one edits files or runs code, `file` or `coding` with a writing function on or a code-running toolkit such as `shell`, `python`, or `script` with a function that runs code on, and the caller may post messages in the room; else `read` |
 | `terminal` | `none` without the `shell` toolkit, `type` when the caller may post messages in the room, else `watch` |
 
 A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false` only reads, and `include_tools` or `exclude_tools` can take writing functions away.
-They read the room's power levels as `power()` does, with its answers.
-MindRoom resolves `root` itself, never from the request, so a route that serves files keeps every path it opens under it.
+`agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.
+MindRoom resolves `root` itself, never from the request; a route that opens files there uses `resolve_agent_file` and `write_agent_file` (see [Agent files](#agent-files)) with `file_access="workspace"`, which refuse a path or link that leaves it, since code the agent runs can plant links in its workspace.
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.

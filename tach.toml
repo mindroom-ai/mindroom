@@ -5388,6 +5388,7 @@ depends_on = []
 visibility = [
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
+    "mindroom.room_agent_access",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_system.metadata",
 ]
@@ -8289,6 +8290,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.filters",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.worker_routing",

@@ -330,7 +330,7 @@ Matrix sync callback
 | `entity_directory.py` | `entity_directory`, the router and configured agents and teams with prepared Matrix accounts by user ID, with each one's kind, display name, and agent tool names, for plugins |
 | `plugin_context.py` | `PluginContext`, a plugin's own settings, state directory, and config for its routes and tools, which fails closed once a reload disables the plugin |
 | `plugin_lifecycle.py` | `PluginLifespans` runs the `lifespan` of each plugin the primary publishes, starting a reload's new lifespans before it closes the replaced plugins' websockets and stops the old ones, and stopping them all at shutdown |
-| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks and room reads (`RoomReader`, `RoomPower`, `client_rooms`), administrator checks, and the route's `PluginContext` |
+| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks and room reads (`RoomReader`, `RoomPower`, `client_rooms`), the agents a caller may use in a room with their workspaces (`AgentWorkspace`), administrator checks, and the route's `PluginContext` |
 | `orchestration/plugin_http_runtime.py` | Live room reads for plugin HTTP routes: a running bot in the room answers each read, the router first, and concurrent membership callers for one room share a lookup |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
@@ -595,6 +595,7 @@ Matrix sync callback
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
+| `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
 | `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
 | `config/access.py` | Membership access configuration models (responder access, room defaults) |
 | `config/legacy_access.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |

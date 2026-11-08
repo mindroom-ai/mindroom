@@ -25,12 +25,14 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.test_generated_agents import _load, _personal, _with_template
 
 if TYPE_CHECKING:
@@ -103,7 +105,8 @@ class _Room:
             threading.Lock(),
             config_lifecycle.ApiSnapshot(1, self.paths, runtime_config=self.config),
         )
-        state.embedded = SimpleNamespace(  # type: ignore[assignment]
+        bind_test_embedded_runtime(
+            self.app,
             agent_reply_memberships=self.memberships,
             agent_bot={ROUTER_AGENT_NAME: self.router}.get,
         )
@@ -225,6 +228,8 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
         (["coding"], "write", "none"),
         ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read", "none"),
         (["python"], "write", "none"),
+        ([{"python": {"include_tools": ["read_file", "list_files"]}}], "read", "none"),
+        (["script"], "write", "none"),
         ([{"shell": {"enable_run_shell_command": False}}], "none", "none"),
         (["matrix_message"], "read", "none"),
         (["calculator"], "none", "none"),
@@ -241,6 +246,20 @@ async def test_files_follow_what_each_toolkit_offers_by_its_own_settings(
     room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=tools, access={"users": [ALICE]})})
 
     assert _access(await room.agents(ALICE)) == [("helper", files, terminal)]
+
+
+@pytest.mark.asyncio
+async def test_a_setting_saved_on_the_dashboard_counts_like_an_authored_one(tmp_path: Path) -> None:
+    """A stored filter, even one saved as legacy comma-separated text, takes writing functions away as the build does."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"users": [ALICE]})})
+    assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
+
+    get_runtime_credentials_manager(room.paths).save_credentials(
+        "file",
+        {"exclude_tools": "save_file, replace_file_chunk"},
+    )
+
+    assert _access(await room.agents(ALICE)) == [("helper", "read", "none")]
 
 
 @pytest.mark.asyncio

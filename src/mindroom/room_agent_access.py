@@ -30,7 +30,8 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import resolve_tool_settings
+from mindroom.tool_system.filters import tool_name_allowed
+from mindroom.tool_system.metadata import normalize_string_array_override, resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -50,10 +51,23 @@ if TYPE_CHECKING:
 
 # As long as plugin routes wait for a room read, and the Computer for its whole check.
 _ACCESS_TIMEOUT_SECONDS = 20
-# The functions that write any content to any path of the workspace, by toolkit; delete alone edits nothing.
-_FILE_WRITERS = {
+# The functions that write any content to any path of the workspace or run code there, by toolkit; delete alone
+# edits nothing. Any function of another toolkit that runs code counts.
+_WRITERS = {
     "file": frozenset({"save_file", "replace_file_chunk"}),
     "coding": frozenset({"write_file", "edit_file"}),
+    "python": frozenset(
+        {
+            "run_python_code",
+            "save_to_file_and_run",
+            "run_python_file_return_variable",
+            "pip_install_package",
+            "uv_pip_install_package",
+        },
+    ),
+    "script": frozenset({"start_script"}),
+    "claude_agent": frozenset({"claude_start_session", "claude_send"}),
+    "docker": frozenset({"build_image", "run_container", "start_container", "exec_in_container"}),
 }
 
 
@@ -148,7 +162,7 @@ class AgentWorkspace:
     root: Path
     """The workspace folder, which may not exist before the agent's first turn for this caller."""
     files: Literal["none", "read", "write"]
-    """``read`` with a toolkit that takes local paths, ``write`` with one that edits files or runs code there."""
+    """``read`` with a toolkit that takes local paths or runs code, ``write`` with one that edits files or runs code."""
     terminal: Literal["none", "watch", "type"]
     """``watch`` with a shell, ``type`` with a shell and power to post messages in the room."""
     config: Config = field(repr=False)
@@ -158,14 +172,15 @@ class AgentWorkspace:
 def _offered_functions(metadata: ToolMetadata, settings: Mapping[str, object]) -> frozenset[str]:
     """Return the toolkit's functions its settings leave on: Agno's ``all`` or ``enable_<function>``, then filters."""
     values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
-    include = values.get("include_tools")
-    exclude = values.get("exclude_tools") or ()
+    include, exclude = (
+        normalize_string_array_override(values.get(name), preserve_empty_list=True)
+        for name in ("include_tools", "exclude_tools")
+    )
     return frozenset(
         function
         for function in metadata.function_names
         if (values.get("all") or values.get(f"enable_{function}", True))
-        and (not isinstance(include, list) or function in include)
-        and (not isinstance(exclude, list) or function not in exclude)
+        and tool_name_allowed(function, include=include, exclude=exclude)
     )
 
 
@@ -203,7 +218,8 @@ def _workspace(
     path_toolkits: dict[str, tuple[ToolMetadata, frozenset[str]]] = {}
     for entry in resolve_agent_tools(config, name, tools).candidates(matrix_room_tools=True):
         metadata = tools.get(entry.name)
-        if metadata is None or metadata.file_access is ToolFileAccess.NONE:
+        # Code a toolkit runs works in the workspace whatever paths the toolkit takes.
+        if metadata is None or (metadata.file_access is ToolFileAccess.NONE and not metadata.executes_code):
             continue
         settings = resolve_tool_settings(
             entry.name,
@@ -218,7 +234,7 @@ def _workspace(
         if functions := _offered_functions(metadata, settings.values):
             path_toolkits[entry.name] = (metadata, functions)
     writes = any(
-        metadata.executes_code or not functions.isdisjoint(_FILE_WRITERS.get(toolkit, ()))
+        not functions.isdisjoint(_WRITERS[toolkit]) if toolkit in _WRITERS else metadata.executes_code
         for toolkit, (metadata, functions) in path_toolkits.items()
     )
     return AgentWorkspace(
