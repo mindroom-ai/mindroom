@@ -5861,6 +5861,7 @@ What people see in MindRoom Chat:
 - Anyone in the call can pause transcription for everyone, and anyone in it can resume it; while paused, nothing anyone says is transcribed, and the transcript shows one gap for each pause.
 - When the call ends, the router edits the row to `Call ended · N min`.
 - About 20 seconds after the end, the router posts one message in the row's thread: the notes (what the call was about, decisions, action items with who will do them, and open questions) above the full transcript, or `Call · N min` above it without a notes model; the row then links to it.
+- With notes, the router then titles the row's thread from them, as an agent's reply titles its thread, unless someone pinned the thread's title or resolved the thread.
 - The finished transcript holds only what was said and transcribed: it leaves out the gaps for pauses and the stretches that could not be transcribed.
 - The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
 
@@ -5883,7 +5884,7 @@ The rules:
 
 Privacy:
 
-- Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
+- Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, the transcript goes to the `notes_model` provider when notes are on, and the notes go to the thread summary model that titles the thread.
 - MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
 - Redacting the message removes it from the room, but a transcript too large for one event leaves its sidecar file in the homeserver's media store until the homeserver's operator purges it, and clients may keep copies they already loaded.
 - A message that cannot be posted, because the router has left the room or may not post in it, or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
