@@ -122,7 +122,7 @@ class AgentReplyMembershipSync:
 
         A slower refresh keeps running in the background, so the router's sync frame never stalls behind a slow
         homeserver and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
-        The owner's shutdown drain, the router's, waits for or cancels it, as stopping the frame did before.
+        A stopping router cancels it at once, and its owner's shutdown drain, the router's, covers one started later.
         """
         if self._refresh_task is None or self._refresh_task.done():
             # A sync gap cannot invalidate explicit-user grants. Do not turn a
@@ -136,6 +136,11 @@ class AgentReplyMembershipSync:
             )
         with suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(self._refresh_task), 10)
+
+    def cancel_refresh(self) -> None:
+        """Cancel a running refresh; a later frame starts another while grants still need one."""
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
 
     async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
         await refresh()
