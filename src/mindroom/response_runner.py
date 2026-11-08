@@ -81,6 +81,7 @@ from mindroom.reply_turn.locked_turn import (
     ReplyTurnDeps,
     existing_event,
     existing_event_id,
+    participation_silence,
 )
 from mindroom.reply_turn.request import (
     PreparedResponseRuntime,
@@ -1941,7 +1942,7 @@ class ResponseRunner:
             raise
 
         if participation is not None and participation.is_silent:
-            return DECLINED
+            return participation_silence(participation)
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
@@ -2009,7 +2010,7 @@ class ResponseRunner:
             raise
 
         if runtime.participation is not None and runtime.participation.is_silent:
-            return DECLINED
+            return participation_silence(runtime.participation)
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
