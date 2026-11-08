@@ -24,8 +24,8 @@ from mindroom.tool_system.plugins import candidate_tool_registry
 from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.conftest import (
-    SETTLE_TIMEOUT_SECONDS,
     bind_runtime_paths,
+    loop_runs_while_blocked,
     publish_test_plugins,
     register_test_tool,
     test_runtime_paths,
@@ -170,18 +170,18 @@ async def test_a_judge_may_return_its_calls_as_any_sequence(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "shell_rule",
+    "rules",
     [
-        pytest.param({"match": _SHELL, "action": "auto_approve"}, id="auto-approved"),
-        pytest.param(None, id="default-auto-approves"),
+        pytest.param(({"match": _SHELL, "action": "auto_approve"},), id="auto-approved"),
+        pytest.param((), id="default-auto-approves"),
     ],
 )
 async def test_a_judge_that_fails_cannot_refuse_a_call_no_judged_rule_can_ask_about(
     tmp_path: Path,
-    shell_rule: dict[str, object] | None,
+    rules: tuple[dict[str, object], ...],
 ) -> None:
     """When no shell call could ever ask, the judge is not consulted, so its failure leaves the call approved."""
-    config, runtime_paths = _config(tmp_path, *([] if shell_rule is None else [shell_rule]))
+    config, runtime_paths = _config(tmp_path, *rules)
     alias = ApprovalAlias(judged_as=_SHELL, judge=timed_out_judge)
 
     assert await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias) == (
@@ -192,27 +192,19 @@ async def test_a_judge_that_fails_cannot_refuse_a_call_no_judged_rule_can_ask_ab
 
 @pytest.mark.asyncio
 async def test_a_judge_that_waits_leaves_other_conversations_running(tmp_path: Path) -> None:
-    """A judge waiting on a service holds up only the call it judges, so another room's reply finishes meanwhile."""
+    """A judge waiting on a service holds up only the call it judges, so other conversations keep running meanwhile."""
     config, runtime_paths = _config(tmp_path, _shell_review())
-    other_reply_sent = threading.Event()
+    loop = asyncio.get_running_loop()
+    judge_saw_loop_running: list[bool] = []
 
     def judge_waiting_on_a_service(arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]]:
-        if not other_reply_sent.wait(timeout=SETTLE_TIMEOUT_SECONDS):
-            msg = "the other room's reply waited for the judge"
-            raise TimeoutError(msg)
+        judge_saw_loop_running.append(loop_runs_while_blocked(loop))
         return [{"args": arguments["command"]}]
 
-    async def other_room_reply() -> None:
-        await asyncio.sleep(0)
-        other_reply_sent.set()
-
     alias = ApprovalAlias(judged_as=_SHELL, judge=judge_waiting_on_a_service)
-    decision, _ = await asyncio.gather(
-        _asks(config, runtime_paths, {"command": "rm -rf build"}, alias),
-        other_room_reply(),
-    )
 
-    assert decision[0] is True
+    assert (await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias))[0] is True
+    assert judge_saw_loop_running == [True]
 
 
 @pytest.mark.asyncio
