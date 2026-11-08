@@ -1734,6 +1734,11 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         # The stopped attempt made no tool call, so the account names none.
         assert "tool calls below" not in account
         assert _sent_bodies(restarted)[-1] == f"Partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+        # The replay streams below what the restart stopped, though its requester is away.
+        statuses = [
+            call.kwargs["content"].get(STREAM_STATUS_KEY) for call in restarted.client.room_send.await_args_list
+        ]
+        assert statuses == ["streaming", "completed"]
         assert not await restarted._reply_runtime.store.is_pending("$event")
     finally:
         response.cancel()
