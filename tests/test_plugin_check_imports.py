@@ -94,7 +94,11 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
         ),
         "helpers/__init__.py": "from mindroom.logging_config import get_logger\n",
         "tests/test_hooks.py": "from mindroom.hooks.decorators import get_hook_metadata\n",
+        "conftest.py": "import mindroom.constants\n",
+        "test_hooks.py": "from mindroom.hooks.decorators import get_hook_metadata\n",
+        "testing.py": "import mindroom.constants\n",
         "helpers/tests/test_helpers.py": "from mindroom.constants import ROUTER_AGENT_NAME\n",
+        "helpers/conftest.py": "import mindroom.constants\n",
         "plugins/nested/mindroom.plugin.json": "{}",
         "plugins/nested/hooks.py": "from mindroom.hooks import hook\n",
         "plugins/shared.py": "from mindroom.logging_config import get_logger\n",
@@ -112,12 +116,48 @@ def test_imports_outside_plugin_api_reads_the_plugins_own_python_files_in_order(
 
     assert _outside_imports(plugin_root) == [
         "helpers/__init__.py:1: mindroom.logging_config.get_logger",
+        "helpers/conftest.py:1: mindroom.constants",
         "helpers/tests/test_helpers.py:1: mindroom.constants.ROUTER_AGENT_NAME",
         "hooks.py:2: mindroom.constants.ROUTER_AGENT_NAME",
         "hooks.py:9: mindroom.hooks",
         "hooks.py:10: mindroom.hooks.hook",
         "plugins/shared.py:1: mindroom.logging_config.get_logger",
+        "testing.py:1: mindroom.constants",
     ]
+
+
+@pytest.mark.parametrize("field", ["tools_module", "hooks_module", "oauth_module", "routes_module"])
+def test_imports_outside_plugin_api_reads_a_root_test_file_the_manifest_names(tmp_path: Path, field: str) -> None:
+    """A root-level test file that the manifest names is a module MindRoom loads, so its imports count."""
+    _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "imports-demo", field: "./test_module.py"},
+        modules={"test_module.py": "import mindroom.constants\n", "conftest.py": "import mindroom.constants\n"},
+    )
+    # Through a symlink, so the scan's paths differ from the manifest's resolved module paths.
+    plugin_link = tmp_path / "plugin-link"
+    plugin_link.symlink_to(tmp_path / "plugin")
+
+    assert _outside_imports(plugin_link) == ["test_module.py:1: mindroom.constants"]
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        pytest.param(b'{"name": "caf\xe9"}', id="not-utf-8"),
+        pytest.param(b"[" * 100_000 + b"]" * 100_000, id="nested-too-deeply"),
+    ],
+)
+def test_imports_outside_plugin_api_lists_imports_of_a_plugin_whose_manifest_does_not_load(
+    tmp_path: Path,
+    manifest: bytes,
+) -> None:
+    """A manifest that fails to load, which `check_plugin` then reports, still gets the other files' imports listed."""
+    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.hooks import hook\n")
+    (plugin_root / "mindroom.plugin.json").write_bytes(manifest)
+    (plugin_root / "test_hooks.py").write_text("import mindroom.constants\n", encoding="utf-8")
+
+    assert _outside_imports(plugin_root) == ["hooks.py:1: mindroom.hooks.hook"]
 
 
 def test_imports_outside_plugin_api_skips_a_directory_it_cannot_enter(tmp_path: Path) -> None:
@@ -231,6 +271,21 @@ def test_plugins_check_cli_strict_accepts_a_plugin_that_imports_only_the_plugin_
         "from mindroom.plugin_api import hook\n"
         "from mindroom.plugin_http import ClientUser, require_client_user, require_room_member\n",
     )
+
+    result = runner.invoke(app, ["plugins", "check", "--strict", str(plugin_root)])
+
+    assert result.exit_code == 0, result.output
+    assert "Plugin is compatible: imports-demo" in result.stdout
+    assert "plugin API" not in result.stdout
+
+
+def test_plugins_check_cli_strict_accepts_a_plugin_whose_tests_beside_its_modules_import_internals(
+    tmp_path: Path,
+) -> None:
+    """Root-level `conftest.py` and `test_*.py`, which MindRoom never loads, do not fail `--strict`."""
+    plugin_root = _hooks_plugin(tmp_path / "plugin", "from mindroom.plugin_api import hook\n")
+    (plugin_root / "conftest.py").write_text("import mindroom.constants\n", encoding="utf-8")
+    (plugin_root / "test_hooks.py").write_text("from mindroom.hooks import hook\n", encoding="utf-8")
 
     result = runner.invoke(app, ["plugins", "check", "--strict", str(plugin_root)])
 
