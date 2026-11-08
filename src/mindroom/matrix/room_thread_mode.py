@@ -37,9 +37,10 @@ async def reconcile_room_thread_mode(
         identities = prepared_entity_names_by_user_id(config, runtime_paths)
         if identities.get(client.user_id) != ROUTER_AGENT_NAME:
             return
-        # Serialize the comparison and write so concurrent triggers cannot send duplicate or stale values.
-        async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
-            async with asyncio.timeout(10):
+        # The deadline covers the lock wait too, so a sync frame queued behind other triggers stalls at most 10 s.
+        async with asyncio.timeout(10):
+            # Serialize the comparison and write so concurrent triggers cannot send duplicate or stale values.
+            async with _LOCKS.setdefault((runtime_paths.storage_root, room_id), asyncio.Lock()):
                 room = client.rooms[room_id]
                 responders = configured_responder_entities_for_room(room, config, runtime_paths)
                 if responders is None:
