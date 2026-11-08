@@ -522,6 +522,7 @@ _MANIFEST = {
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "ClientUser",
+    "client_stream",
     "plugin_context",
     "require_client_user",
     "require_platform_administrator",
@@ -534,6 +535,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.client_stream": "(websocket, room_id)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
@@ -541,7 +543,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 6), "b3d1d6c5bd13e39f21d187a0df9e3244f8d79ced4459f88c2373b18270a7eea2")
+_PINNED_VERSION = ((1, 7), "600f8608881f7b869465dc6e39bb862a5982de4898885b3b98e8ad8d92c0cd74")
 
 
 def _is_enum(obj: object) -> bool:

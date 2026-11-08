@@ -736,7 +736,7 @@ async def feed_xml(url: str) -> str:
 
 A fetch is a GET that follows up to ten redirects and refuses every hop to a loopback, private, link-local, or cloud-metadata address, including an address a hostname resolves to when it connects.
 It sends no credentials, refuses a URL that carries a user name or password, and fails when the whole fetch takes longer than 30 seconds.
-Pass `user_agent` to send your own `User-Agent` header instead of HTTPX's default.
+Pass `user_agent`, which needs plugin API 1.3, to send your own `User-Agent` header instead of HTTPX's default.
 It returns a `PublicFetchResult` with the `url` its redirects ended on, the `content_type` header, and the `content` bytes of the 2xx response.
 Any failure raises `PublicFetchError`, whose message never contains the URL and whose `code` is `url_not_allowed`, `timeout`, `too_many_redirects`, `too_large` (more than `max_bytes`), `content_encoding` (a compressed or otherwise encoded body), `http_status` (with the response's `status_code`), or `request_failed`.
 In a worker whose internet traffic must go through the proxy that `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` names, pass `use_env_proxy=True`, which also honors `NO_PROXY`; that proxy resolves hostnames itself, so it must refuse private addresses as well.
@@ -1064,7 +1064,7 @@ The client signs in by posting a Matrix OpenID token to `POST /api/client-sessio
 Sign-in needs a homeserver that binds OpenID tokens to this deployment, MindRoom's Tuwunel fork with `mindroom_openid_audience` on (see [Token Binding](connections-portal.md#token-binding)); on any other homeserver `POST /api/client-sessions` answers 403, with no setting to allow it, because another backend the user opens could replay their token here.
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
 To end its session at once, as at sign-out, the client sends `DELETE /api/client-sessions` with the same header, which answers 204; from then on that token answers 401 like an expired one.
-A response a route is already streaming continues after its session expires or is revoked.
+A response a route is already streaming continues after its session expires or is revoked; a [websocket](#websocket-routes) instead closes.
 Browser origins that may call these routes and `/api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](tools/worker-computer.md); there is no separate setting for plugin routes.
 Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, besides the two headers above, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
 A route that acts on one room depends on `require_room_member` instead, as in the example above: `user: ClientUser = Depends(require_room_member)`.
@@ -1081,6 +1081,35 @@ The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugi
 ```json
 {"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
 ```
+
+### Websocket routes
+
+A browser cannot set a websocket's `Authorization` header, so a websocket route signs its caller in with `client_stream` from `mindroom.plugin_http` instead:
+
+```python
+# routes.py
+from fastapi import APIRouter, WebSocket
+
+from mindroom.plugin_http import client_stream
+
+router = APIRouter()
+
+
+@router.websocket("/rooms/{room_id}/echo")
+async def echo(websocket: WebSocket, room_id: str) -> None:
+    async with client_stream(websocket, room_id) as user:
+        async for text in websocket.iter_text():
+            await websocket.send_text(f"{user.user_id}: {text}")
+```
+
+The client offers two subprotocols, `mindroom-session` and `mindroom-session.<session_token>`, as in `new WebSocket(url, ["mindroom-session", "mindroom-session." + sessionToken])`, and the server accepts with `mindroom-session`, never echoing the token.
+`client_stream` accepts the websocket only from an origin `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, for a live session, and, given `room_id`, for a user joined to that room, checked as `require_room_member` checks it; leave `room_id` out for a stream that serves no room.
+It refuses any other handshake with an HTTP answer before accepting, as `require_room_member` answers: 401 for a missing, unknown, or expired session, 403 for an unlisted origin or a non-member, and 503 when membership is unavailable; a browser reports only a failed connection.
+Once accepted, the websocket closes with code 4401 as soon as its session ends: it expires, the client revokes it, or the same user's ninth session replaces it, since MindRoom keeps eight per user; the client then signs in again.
+Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when membership is unavailable, with the same reason `require_room_member` gives for its 503, which the client may retry.
+Closing cancels the `async with` block where it waits, and the route runs on after the block.
+A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest.
+Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 ## Plugin context
 

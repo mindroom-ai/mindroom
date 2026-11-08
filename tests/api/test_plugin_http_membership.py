@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from mindroom.api import main
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import _client_session_store
+from mindroom.api.client_sessions import client_session_store
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
@@ -47,7 +47,7 @@ def main_app() -> Iterator[FastAPI]:
 
 def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
     """A request signed in with a client session of ``user_id``."""
-    token = _client_session_store(app).create(user_id).token
+    token = client_session_store(app).create(user_id).token
     return Request({"type": "http", "app": app, "headers": [(b"authorization", f"Bearer {token}".encode())]})
 
 

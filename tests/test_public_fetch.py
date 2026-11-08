@@ -14,24 +14,14 @@ import pytest
 
 from mindroom import public_fetch
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
-from tests.public_fetch_helpers import serve
+from tests.public_fetch_helpers import PUBLIC_ADDRESS, public_dns, serve
 
-_PUBLIC_ADDRESS = "93.184.216.34"
 _PROXY_HOST = "10.0.0.10"
 
 
 def _page(status: int, body: bytes = b"", headers: dict[str, str] | None = None) -> httpx.Response:
     """A response whose body streams like one off the network, so the fetch reads it raw."""
     return httpx.Response(status, headers=headers, stream=httpx.ByteStream(body))
-
-
-def _public_dns(monkeypatch: pytest.MonkeyPatch, addresses: tuple[str, ...] = (_PUBLIC_ADDRESS,)) -> None:
-    """Resolve every hostname to `addresses`, in order."""
-
-    def resolve(_host: str, port: int, *_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, port)) for address in addresses]
-
-    monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
 
 async def _refusal(url: str, *, max_bytes: int = 1024) -> PublicFetchError:
@@ -287,7 +277,7 @@ async def test_a_server_that_trickles_bytes_fails_at_the_deadline(
 ) -> None:
     """One deadline bounds the whole fetch, however steadily a slow server keeps sending."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 0.3)
-    _public_dns(monkeypatch)
+    public_dns(monkeypatch)
 
     async def connect(_backend: httpcore.AnyIOBackend, *_args: object, **_kwargs: object) -> _TrickleStream:
         return _TrickleStream(prefix)
@@ -305,10 +295,10 @@ async def test_a_server_that_trickles_bytes_fails_at_the_deadline(
 async def test_a_host_whose_first_address_never_answers_is_reached_at_its_next(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each address gets its own connect timeout, so a dead first address leaves the deadline for the next one."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 1.0)
-    monkeypatch.setattr(public_fetch, "_CONNECT_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(public_fetch, "CONNECT_TIMEOUT_SECONDS", 0.1)
     dead, live = "93.184.216.34", "93.184.216.35"
 
-    _public_dns(monkeypatch, (dead, live))
+    public_dns(monkeypatch, (dead, live))
     attempts: list[str] = []
 
     async def connect(
@@ -372,7 +362,7 @@ class _RecordingStream(httpcore.AsyncMockStream):
 @pytest.mark.parametrize(
     ("use_env_proxy", "dialed", "request_line"),
     [
-        (False, (_PUBLIC_ADDRESS, 80), b"GET /page HTTP/1.1\r\n"),
+        (False, (PUBLIC_ADDRESS, 80), b"GET /page HTTP/1.1\r\n"),
         (True, (_PROXY_HOST, 3128), b"GET http://media.example/page HTTP/1.1\r\n"),
     ],
 )
@@ -388,7 +378,7 @@ async def test_the_environment_proxy_carries_a_fetch_only_when_asked(
             monkeypatch.delenv(name)
     monkeypatch.delenv("REQUEST_METHOD", raising=False)
     monkeypatch.setenv("HTTP_PROXY", f"http://{_PROXY_HOST}:3128")
-    _public_dns(monkeypatch)
+    public_dns(monkeypatch)
     streams: list[tuple[tuple[str, int], _RecordingStream]] = []
 
     async def connect(_backend: httpcore.AnyIOBackend, host: str, port: int, **_kwargs: object) -> _RecordingStream:
