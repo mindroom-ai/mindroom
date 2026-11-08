@@ -179,7 +179,7 @@ def _router_room_lifecycle(
         BotRoomLifecycleDeps(
             agent_name=ROUTER_AGENT_NAME,
             agent_user=_router_user(),
-            runtime=SimpleNamespace(client=client, config=config),
+            runtime=SimpleNamespace(client=client, config=config, agent_reply_memberships=MagicMock()),
             runtime_paths=runtime_paths,
             continuity_store=SyncContinuityStore(runtime_paths.storage_root, ROUTER_AGENT_NAME),
             get_logger=lambda: get_logger("tests.room_invites"),
@@ -989,7 +989,7 @@ _SPACE = [_state("m.room.create", {"room_version": "11", "type": "m.space"})]
         pytest.param(_CHAT_ROOM, _CHAT_ROOM, True, id="plain-room"),
     ],
 )
-async def test_router_joins_a_room_under_a_chat_room_without_its_welcome(
+async def test_router_welcomes_an_invited_room_unless_it_is_under_a_chat_room(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     room_state: list[dict[str, object]] | None,
@@ -997,14 +997,9 @@ async def test_router_joins_a_room_under_a_chat_room_without_its_welcome(
     welcomed: bool,
 ) -> None:
     """A room under a chat room continues its conversation, so the router greets it only when its parent is no chat room."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
-    install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    invite = _current_invite("!under:localhost", "@alice:localhost")
+    lifecycle = _router_room_lifecycle(config, invite, AsyncMock(return_value=True))
     states = {"!under:localhost": room_state, "!above:localhost": above_state}
 
     async def room_get_state(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
@@ -1023,22 +1018,19 @@ async def test_router_joins_a_room_under_a_chat_room_without_its_welcome(
                 return nio.RoomGetStateEventResponse(event["content"], event_type, state_key, room_id)
         return nio.RoomGetStateEventError("unreadable", "M_FORBIDDEN")
 
-    bot.client.room_get_state = AsyncMock(side_effect=room_get_state)
-    bot.client.room_get_state_event = AsyncMock(side_effect=room_get_state_event)
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(return_value=RoomJoinOutcome.JOINED))
+    client = lifecycle.deps.runtime.client
+    client.room_get_state = AsyncMock(side_effect=room_get_state)
+    client.room_get_state_event = AsyncMock(side_effect=room_get_state_event)
     welcome_message = AsyncMock(return_value=True)
-    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
-    monkeypatch.setattr(bot.orchestrator.scheduled_tasks, "restore_room", AsyncMock(return_value=0))
-    room = MagicMock(room_id="!under:localhost")
-    room.canonical_alias = None
+    monkeypatch.setattr(lifecycle, "send_welcome_message_if_empty", welcome_message)
 
-    await _handle_invite(bot, room, MagicMock(sender="@alice:localhost"))
+    await lifecycle._handle_recorded_invite(invite, "@alice:localhost")
 
     if welcomed:
         welcome_message.assert_awaited_once_with("!under:localhost", "@alice:localhost")
     else:
         welcome_message.assert_not_awaited()
-    assert bot._room_lifecycle.invited_room_ids() == {"!under:localhost"}
+    assert lifecycle.invited_room_ids() == {"!under:localhost"}
 
 
 @pytest.mark.asyncio
