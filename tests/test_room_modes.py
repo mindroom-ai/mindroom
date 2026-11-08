@@ -187,6 +187,7 @@ async def test_an_admin_sets_and_clears_the_reply_mode_and_the_thread_mode_stays
         ("member", (403, "Only room admins change the room's modes.")),
         ("unreadable", (503, "Room state read failed; try again.")),
         ("router_stopped", (503, "The router is not running.")),
+        ("router_missing", (503, "The router is not running.")),
     ],
 )
 async def test_a_refused_change_writes_and_publishes_nothing(
@@ -194,13 +195,17 @@ async def test_a_refused_change_writes_and_publishes_nothing(
     case: str,
     expected: tuple[int, str],
 ) -> None:
-    """A member without admin power gets 403, and an unreadable power read or a stopped router 503."""
+    """A member without admin power gets 403, and an unreadable power read or a stopped or missing router 503."""
     reader = await room.reader(BOB if case == "member" else ALICE)
     if case == "unreadable":
         room.client.room_get_state.side_effect = None
         room.client.room_get_state.return_value = nio.RoomGetStateError("unavailable")
     if case == "router_stopped":
         room.router.running = False
+    if case == "router_missing":
+        ensure_app_state(room.app).embedded = SimpleNamespace(agent_bot=lambda _name: None)  # type: ignore[assignment]
+        with pytest.raises(HTTPException, match=r"^503: The router is not running\.$"):
+            reader.modes()
     assert await _answer(reader.set_modes(thread="room", reply="mentions")) == expected
     assert room.stored() == (None, None)
     room.client.room_put_state.assert_not_awaited()
@@ -211,6 +216,22 @@ async def test_a_non_member_is_refused_before_any_power_read(room: _Room) -> Non
     """Carol, who is not in the room, gets 403 from membership, and the room's power levels are never read."""
     assert await _answer(room.reader(CAROL)) == (403, "Not a member of this room.")
     room.client.room_get_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_thread_mode_reset_without_an_override_says_so_and_still_republishes(room: _Room) -> None:
+    """`!thread_mode reset` answers as before through the shared path, and still publishes the configured mode."""
+    answer = await handle_thread_mode_command(
+        "reset",
+        client=room.client,
+        config=room.config,
+        runtime_paths=room.paths,
+        room_id=ROOM_ID,
+        requester_user_id=ALICE,
+        sender_user_id=ALICE,
+    )
+    assert answer == "This room has no thread mode override."
+    assert room.published() == {"mode": "thread"}
 
 
 @pytest.mark.asyncio
