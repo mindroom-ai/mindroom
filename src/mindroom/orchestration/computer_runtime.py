@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import nio
+from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
-from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
+from mindroom.room_agent_access import admit_room_agent
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
@@ -39,36 +39,26 @@ async def _authorize_computer(
     memberships: AgentReplyMembershipIndex,
 ) -> ComputerTarget:
     """Require exact live room membership, responder access, and ordinary browser routing."""
+
+    async def joined_members() -> frozenset[str]:
+        response = await client.joined_members(room_id)
+        if not isinstance(response, nio.JoinedMembersResponse):
+            raise ComputerError(503, "Authoritative room membership is unavailable.")
+        return frozenset(member.user_id for member in response.members)
+
     try:
-        name = entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
-            agent_user_id,
-            include_router=False,
-        )
-    except MissingManagedEntityAccountError:
-        raise ComputerError(503, "Agent identities are not ready.") from None
-    if name is None or name not in config.agents:
-        raise ComputerError(403, "The selected user is not a current agent.")
-    response = await client.joined_members(room_id)
-    if not isinstance(response, nio.JoinedMembersResponse):
-        raise ComputerError(503, "Authoritative room membership is unavailable.")
-    joined = {member.user_id for member in response.members}
-    if requester_id not in joined or agent_user_id not in joined:
-        raise ComputerError(403, "Requester and agent must both be joined to this room.")
-    await memberships.refresh(config, runtime_paths, client)
-    try:
-        allowed = is_sender_allowed_for_responder(
+        name = await admit_room_agent(
             requester_id,
-            name,
             room_id,
-            config,
-            runtime_paths,
-            memberships,
-            require_resolved_membership=True,
+            agent_user_id,
+            joined_members,
+            config=config,
+            runtime_paths=runtime_paths,
+            client=client,
+            memberships=memberships,
         )
-    except ReplyMembershipPendingError:
-        raise ComputerError(503, "Responder membership policy is unresolved.") from None
-    if not allowed:
-        raise ComputerError(403, "Requester cannot use this agent.")
+    except HTTPException as error:
+        raise ComputerError(error.status_code, error.detail) from None
     return _resolve_target(requester_id, room_id, agent_user_id, name, config, runtime_paths)
 
 

@@ -1094,6 +1094,8 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `members` | A read-only mapping from each joined user's ID to their display name in the room, or `None` when they have none, from the lookup that checked the caller |
 | `await power()` | A `RoomPower` read from the room's power levels at that moment |
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
+| `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
+| `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 
 `RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
@@ -1104,9 +1106,26 @@ Each call to `power()` reads again, and `members` is read anew for each request,
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
 `is_direct()` keeps its answer for a few minutes and counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
 
+`agents()` and `agent()` check what the [worker Computer](https://docs.mindroom.chat/tools/worker-computer/) checks before it opens: the agent is a current agent, it and the caller are both joined to the room, and its [access rules](https://docs.mindroom.chat/authorization/#responder-access) let the caller use it there.
+`agents()` leaves out each agent that fails, and `agent()` answers 403 with `The selected user is not a current agent.`, `Requester and agent must both be joined to this room.`, or `Requester cannot use this agent.`.
+Both answer 503 with `Agent identities are not ready.` or `Responder membership policy is unresolved.` until MindRoom can decide, and with `Agent access is unavailable; try again.` while the router is not running or MindRoom has not yet applied a saved config that adds or removes an agent or changes an `access.current_room_members` or `access.members_of_rooms` rule.
+A contact room opens no agent: `agents()` leaves out its agent, and `agent()` answers 403 with `No workspace opens through a contact room.`.
+Each answer follows the config the API serves when the request arrives, so a saved change to an agent's access shows on the next request.
+An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether it is `private`, the `config` it was resolved under, and what the caller may do there:
+
+| Field | Value |
+|-------|-------|
+| `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
+| `files` | `none` when none of the agent's toolkits takes local paths; `write` when one edits files or runs code, `file` or `coding` with a writing function on or a code-running toolkit such as `shell` or `python`, and the caller may post messages in the room; else `read` |
+| `terminal` | `none` without the `shell` toolkit, `type` when the caller may post messages in the room, else `watch` |
+
+A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false` only reads, and `include_tools` or `exclude_tools` can take writing functions away.
+They read the room's power levels as `power()` does, with its answers.
+MindRoom resolves `root` itself, never from the request, so a route that serves files keeps every path it opens under it.
+
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, and one that uses `agents()` or `agent()` states `"1.8"`.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:

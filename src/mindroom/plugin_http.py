@@ -23,6 +23,7 @@ from mindroom.api.client_sessions import (
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
+from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = [
+    "AgentWorkspace",
     "ClientUser",
     "RoomPower",
     "RoomReader",
@@ -189,6 +191,9 @@ class RoomReader:
     """Each joined user's display name in the room, None for one without; read by the check that proved membership."""
     _room_state: Callable[[], Awaitable[RoomStateSnapshot]] = field(repr=False)
     _room_direct: Callable[[], Awaitable[bool]] = field(repr=False)
+    _room_agents: Callable[[Callable[[], Awaitable[RoomPower]], str | None], Awaitable[list[AgentWorkspace]]] = field(
+        repr=False,
+    )
 
     async def power(self) -> RoomPower:
         """Read the room's power levels now, answering 503 when they cannot be read."""
@@ -207,6 +212,22 @@ class RoomReader:
         """
         return await self._room_direct()
 
+    async def agents(self) -> list[AgentWorkspace]:
+        """Return the agents joined to the room that the caller may use there, in config order, with their workspaces.
+
+        It answers 503 while the agents' identities or access rules cannot be resolved, as the Computer does.
+        """
+        return await self._room_agents(self.power, None)
+
+    async def agent(self, agent_user_id: str) -> AgentWorkspace:
+        """Return the agent ``agent_user_id`` names with its workspace once the caller may use it there.
+
+        It answers as the Computer does: 403 for a user ID that is no current agent, an agent not joined to the room, or
+        one whose access rules refuse the caller, and 503 while those cannot be resolved.
+        """
+        (workspace,) = await self._room_agents(self.power, agent_user_id)
+        return workspace
+
 
 async def require_room_reader(request: Request, room_id: Annotated[str, Path()]) -> RoomReader:
     """Return what a route may read about ``room_id``, once the client session's user is joined to it.
@@ -222,6 +243,7 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
         members,
         partial(_bound(state.room_state), room_id),
         partial(_bound(state.room_direct), room_id),
+        partial(room_agent_workspaces, request, user.user_id, room_id, members),
     )
 
 
