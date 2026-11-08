@@ -50,16 +50,18 @@ def test_route_answers_a_signed_in_member_only(plugin: LoadedPlugin) -> None:
 
 
 def test_a_route_posts_as_the_router_and_streams_to_a_member(tmp_path: Path) -> None:
-    """A `RoomMessenger` notice lands in the room's `sent`, and a member's websocket is signed in from an allowed origin."""
+    """A `RoomMessenger` notice lands in the room's `sent`, a relay to a person is refused, and a member streams."""
     with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:
         room = plugin.add_room(ROOM, members={ALICE: "Alice"})
         alice = plugin.client(ALICE)
 
         posted = alice.post(f"{ROUTES}/notice")
+        relayed_to_a_person = alice.post(f"{ROUTES}/relay", params={"mention": ALICE})
         with alice.websocket_connect(f"{ROUTES}/stream") as stream:
             greeting = stream.receive_text()
 
     assert posted.status_code == 200
+    assert relayed_to_a_person.status_code == 400
     assert [(sent.text, sent.source, sent.content["msgtype"]) for sent in room.sent] == [
         (f"{ALICE} says hello", "greeter:http", "m.notice"),
     ]
@@ -210,11 +212,13 @@ def test_the_block_restores_the_published_plugins_and_their_modules(tmp_path: Pa
 
 
 def test_a_plugin_that_fails_to_load_raises_its_error(tmp_path: Path) -> None:
-    """A plugin whose module raises fails the load, naming that error."""
-    broken = tmp_path / "broken"
-    broken.mkdir()
-    (broken / "mindroom.plugin.json").write_text('{"name": "broken", "tools_module": "tools.py"}', encoding="utf-8")
-    (broken / "tools.py").write_text("raise RuntimeError('broken on import')\n", encoding="utf-8")
+    """A plugin whose tools, routes or lifecycle module raises fails the load, naming that error."""
+    for module in ("tools", "routes", "lifecycle"):
+        broken = tmp_path / module
+        broken.mkdir()
+        manifest = f'{{"name": "broken", "{module}_module": "{module}.py"}}'
+        (broken / "mindroom.plugin.json").write_text(manifest, encoding="utf-8")
+        (broken / f"{module}.py").write_text(f"raise RuntimeError('broken {module}')\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="broken on import"), load_plugin(broken, tmp_path / "runtime"):
-        pass
+        with pytest.raises(Exception, match=f"broken {module}"), load_plugin(broken, tmp_path / f"{module}-runtime"):
+            pass

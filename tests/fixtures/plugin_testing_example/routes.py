@@ -37,6 +37,12 @@ async def notice(messenger: Annotated[RoomMessenger, Depends(require_room_messen
     return {"event_id": await messenger.notice(f"{messenger.user.user_id} says hello")}
 
 
+@router.post("/rooms/{room_id}/relay")
+async def relay(mention: str, messenger: Annotated[RoomMessenger, Depends(require_room_messenger)]) -> dict[str, str]:
+    """Relay a greeting to the agent or team ``mention`` names, as the router for the caller."""
+    return {"event_id": await messenger.relay("hello", mentions=[mention])}
+
+
 @router.websocket("/rooms/{room_id}/stream")
 async def stream(websocket: WebSocket, room_id: str) -> None:
     """Greet the signed-in member over a websocket."""
