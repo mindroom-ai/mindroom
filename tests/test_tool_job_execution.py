@@ -1446,6 +1446,8 @@ async def test_a_call_that_ran_never_reads_as_one_that_did_not(
             assert tool.is_error
             assert "The call ran" in str(tool.result)
             assert "do not call it again" in str(tool.result)
+        if result == "cyclic":
+            assert "could not be saved (it refers to itself)" in str(tool.result)
     finally:
         await runtime.shutdown()
 
