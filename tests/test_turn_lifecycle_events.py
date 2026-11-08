@@ -505,19 +505,23 @@ async def test_a_cancelled_observer_of_a_pause_or_end_leaves_the_others_to_see_i
     assert seen == [event_name]
 
 
-@pytest.mark.parametrize("ending", [Completed(), Owed()], ids=["completed", "owed"])
-async def test_a_run_whose_error_became_its_answer_ends_its_turn_failed(
+@pytest.mark.parametrize(("ending", "outcome"), [(Completed(), "failed"), (Owed(), "completed")], ids=["shown", "owed"])
+async def test_an_answer_the_outbox_owes_completes_its_turn_whatever_its_run_reports(
     tmp_path: Path,
     ending: Completed | Owed,
+    outcome: str,
 ) -> None:
-    """An answer that only reports the run's error fails the turn, whether Matrix took it or the outbox still owes it."""
+    """A shown answer that only reports its run's error fails the turn; one the outbox still owes completes it.
+
+    A resumed reply's owed answer reports no successful run, so the run's report cannot tell an owed answer's outcome.
+    """
     seen: _Seen = []
     lifecycle = _lifecycle(tmp_path, _recorders(seen))
 
     async with lifecycle.turn():
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending), ResponseOutcome(run_succeeded=False))
 
-    assert _events(seen) == [(EVENT_TURN_ENDED, "failed")]
+    assert _events(seen) == [(EVENT_TURN_ENDED, outcome)]
 
 
 async def test_a_pause_at_process_shutdown_reports_nothing_more(tmp_path: Path) -> None:

@@ -802,8 +802,8 @@ class ResponseHookService:
 def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | Literal["paused"]:
     """Return how a settled turn ends for its hooks: paused for approval, or the outcome ``turn:ended`` reports.
 
-    A run that failed but answered with its error completed its reply, not its turn, whether Matrix took that answer or
-    the outbox still owes it; an answer withheld on purpose completed it.
+    A run that failed but answered with its error completed its reply, not its turn; an answer withheld on purpose, or
+    one the outbox still owes, completed it.
     """
     match ending:
         case AwaitingApproval():
@@ -812,7 +812,7 @@ def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | L
             return "cancelled"
         case Failed():
             return "failed"
-        case Completed() | Owed() if not run_succeeded:
+        case Completed() if not run_succeeded:
             return "failed"
         case _:
             return "completed"
