@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -103,23 +104,37 @@ async def require_room_member(request: Request, room_id: Annotated[str, Path()])
 
 
 @asynccontextmanager
-async def client_stream(websocket: WebSocket, room_id: str | None = None) -> AsyncIterator[ClientUser]:
+async def client_stream(
+    websocket: WebSocket,
+    room_id: str | None = None,
+    *,
+    admit: Callable[[ClientUser], bool | Awaitable[bool]] | None = None,
+) -> AsyncIterator[ClientUser]:
     """Sign a websocket's caller in with their client session, accept it, and yield their user while it stays signed in.
 
     The client offers the subprotocols ``mindroom-session`` and ``mindroom-session.<session_token>``, from an origin
-    ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists, and given ``room_id`` its user must be joined to that room. Before
-    accepting, a refusal raises ``HTTPException``, which the handshake answers: 401 for no live session, 403 for
-    another origin or a non-member, 503 when membership is unavailable. Once accepted with ``mindroom-session``, the
-    block is cancelled where it waits and the websocket closed with 4401 when the session expires or is revoked, and
-    given ``room_id``, with 1008 when a recheck finds the user gone or 1013 when one fails; code after the block runs.
+    ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists, and given ``room_id`` its user must be joined to that room. Given
+    ``admit``, the route's own rule, sync or async, is then asked whether to let the user in. Before accepting, a
+    refusal raises ``HTTPException``, which the handshake answers: 401 for no live session, 403 for another origin or a
+    non-member, 503 when membership is unavailable or ``admit`` returns false. Once accepted with
+    ``mindroom-session``, the block is cancelled where it waits and the websocket closed with 4401 when the session
+    expires or is revoked, and given ``room_id``, with 1008 when a recheck finds the user gone or 1013 when one fails;
+    code after the block runs.
     """
     if not allowed_client_origin(websocket):
         raise HTTPException(403, "Origin is not allowed.")
     session = offered_session(websocket)
+    user = ClientUser(session.user_id)
     if room_id is not None:
         await _require_joined(websocket, session.user_id, room_id)
-        # The session may have ended while membership was read.
-        offered_session(websocket)
+    if admit is not None:
+        answer = admit(user)
+        if inspect.isawaitable(answer):
+            answer = await answer
+        if not answer:
+            raise HTTPException(503, "The route refused this stream; try again later.")
+    # The session may have ended while membership was read or the route's check ran.
+    offered_session(websocket)
     await websocket.accept(subprotocol=SESSION_PROTOCOL)
     stream = asyncio.timeout(None)
 
@@ -132,7 +147,7 @@ async def client_stream(websocket: WebSocket, room_id: str | None = None) -> Asy
     watcher = asyncio.create_task(watch())
     try:
         async with stream:
-            yield ClientUser(session.user_id)
+            yield user
     except TimeoutError:
         if not stream.expired():
             raise
