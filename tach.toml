@@ -8230,13 +8230,13 @@ depends_on = [
 path = "mindroom.api.computers"
 depends_on = [
     "mindroom.api.app_state",
+    "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
     "mindroom.matrix_openid",
     "mindroom.worker_computer.client",
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend_kinds",
-    "mindroom.origins",
 ]
 
 [[modules]]
@@ -8245,6 +8245,7 @@ depends_on = [
     "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
     "mindroom.matrix_openid",
+    "mindroom.origins",
 ]
 
 [[modules]]
