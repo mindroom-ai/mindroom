@@ -193,8 +193,13 @@ def test_config_search_locations_print_numbers_paths_and_statuses(
     assert lines[2] == f"  2. {existing.resolve()} (exists)"
 
 
-def test_config_init_prints_env_and_config_paths_whole_on_one_line(narrow_markup_dir: Path) -> None:
+def test_config_init_prints_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A path with a bracketed folder, longer than the terminal is wide, prints whole on each `config init` line."""
+    # An owner exported in the shell would win over the one this test saves in `.env`.
+    monkeypatch.delenv(OWNER_MATRIX_USER_ID_ENV, raising=False)
     target = narrow_markup_dir / "config.yaml"
     env_path = narrow_markup_dir / ".env"
     init = ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--no-input"]
