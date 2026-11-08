@@ -325,6 +325,16 @@ def _revoke(world: _World) -> None:
         client_session_store(world.app).revoke(token)
 
 
+def _revoke_while_the_room_is_read(world: _World) -> None:
+    state = world.client.room_get_state.return_value
+
+    async def read_and_revoke(*_args: object) -> nio.RoomGetStateResponse:
+        _revoke(world)
+        return state
+
+    world.client.room_get_state.side_effect = read_and_revoke
+
+
 def _leave(world: _World) -> None:
     world.client.joined_members.return_value = _joined(ROOM, dict.fromkeys((ALICE, BOB, ROUTER, OPEN)))
 
@@ -347,6 +357,7 @@ def _lose_power_read(world: _World) -> None:
     [
         (_expire, 401),
         (_revoke, 401),
+        (_revoke_while_the_room_is_read, 401),
         (_leave, 403),
         (_demote, 403),
         (_lose_membership_read, 503),
@@ -355,6 +366,7 @@ def _lose_power_read(world: _World) -> None:
     ids=[
         "session-expired",
         "session-revoked",
+        "session-revoked-during-the-reads",
         "left-the-room",
         "lost-power-to-post",
         "membership-unreadable",
