@@ -1252,7 +1252,40 @@ It refuses any other handshake with an HTTP answer before accepting, as `require
 Once accepted, the websocket closes with code 4401 as soon as its session ends: it expires, the client revokes it, or the same user's ninth session replaces it, since MindRoom keeps eight per user; the client then signs in again.
 Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when membership is unavailable, with the same reason `require_room_member` gives for its 503, which the client may retry.
 Closing cancels the `async with` block where it waits, and the route runs on after the block.
-A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest.
+
+A route with an admission rule of its own, such as a cap on each user's open streams, passes it as `admit`: a function, plain or `async`, that gets the signed-in `ClientUser` once the checks above pass and returns whether to accept.
+A plain function runs on the server's event loop, so it must not block.
+When it returns false, `client_stream` refuses the handshake with 503 and `The route refused this stream; try again later.`, so the client never sees the stream open, as it would if the route closed it after accepting.
+A check that raises `HTTPException` refuses with that answer instead, and one that raises anything else answers 500, as a route that raises does.
+
+```python
+# routes.py
+from collections import Counter
+
+from fastapi import APIRouter, WebSocket
+
+from mindroom.plugin_http import ClientUser, client_stream
+
+router = APIRouter()
+open_streams: Counter[str] = Counter()
+
+
+def under_cap(user: ClientUser) -> bool:
+    return open_streams[user.user_id] < 4
+
+
+@router.websocket("/feed")
+async def feed(websocket: WebSocket) -> None:
+    async with client_stream(websocket, admit=under_cap) as user:
+        open_streams[user.user_id] += 1
+        try:
+            async for text in websocket.iter_text():
+                await websocket.send_text(text)
+        finally:
+            open_streams[user.user_id] -= 1
+```
+
+A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest, and one that passes `admit` states `"1.14"`.
 Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 ## Plugin context

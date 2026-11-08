@@ -26,6 +26,7 @@ from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import ClientSessionStore, client_session_store
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.plugin_http import ClientUser
 from tests.conftest import bind_runtime_paths, publish_test_plugins
 from tests.test_plugin_routes import _app, _write_plugin
 
@@ -39,6 +40,7 @@ ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
 CLIENT_ORIGIN = "https://chat.example.org"
 NO_SESSION = "Missing, invalid or expired client session."
+REFUSED = "The route refused this stream; try again later."
 
 # The routes reach the test through this module, which the autouse plugin-state restore removes after each test.
 PROBE_MODULE = "mindroom_test_probe_client_stream"
@@ -89,6 +91,13 @@ async def times_out(websocket: WebSocket) -> None:
         await websocket.send_text("timed out")
 
 
+@router.websocket("/rooms/{room_id}/admits")
+async def admits(websocket: WebSocket, room_id: str) -> None:
+    async with client_stream(websocket, room_id, admit=_probe.admit) as user:
+        await websocket.send_text(user.user_id)
+        await asyncio.Event().wait()
+
+
 @router.get("/whoami")
 async def whoami(user: ClientUser = Depends(require_client_user)) -> dict:
     return {"user_id": user.user_id}
@@ -132,6 +141,7 @@ def app(tmp_path: Path) -> FastAPI:
     """API app serving the demo plugin's websocket routes and client sessions, with the client origin allowed."""
     probe = ModuleType(PROBE_MODULE)
     probe.after_block = []
+    probe.admit = None
     sys.modules[PROBE_MODULE] = probe
     _write_plugin(tmp_path, ROUTES)
     config_path = tmp_path / "config.yaml"
@@ -170,6 +180,19 @@ def _membership(app: FastAPI) -> _Membership:
 
 def _echo_path(room_id: str = ROOM) -> str:
     return f"/api/plugins/demo/rooms/{quote(room_id, safe='')}/echo"
+
+
+def _admits_path(room_id: str = ROOM) -> str:
+    return f"/api/plugins/demo/rooms/{quote(room_id, safe='')}/admits"
+
+
+def _admit_with(check: Callable[[ClientUser], object], *, asynchronous: bool = False) -> None:
+    """Make ``check``, wrapped as a coroutine function when ``asynchronous``, the admission check at ``_admits_path``."""
+
+    async def async_check(user: ClientUser) -> object:
+        return check(user)
+
+    sys.modules[PROBE_MODULE].admit = async_check if asynchronous else check
 
 
 def _offers(token: str) -> list[str]:
@@ -277,13 +300,15 @@ def test_an_expired_or_revoked_session_is_refused_with_401(app: FastAPI, client:
     assert denial.status_code == 401
 
 
+@pytest.mark.parametrize("during", ["membership", "admission"])
 @pytest.mark.parametrize("ending", ["revoked", "expired"])
-def test_a_session_that_ends_during_the_membership_check_is_refused_with_401(
+def test_a_session_that_ends_during_the_handshakes_checks_is_refused_with_401(
     app: FastAPI,
     client: TestClient,
     ending: str,
+    during: str,
 ) -> None:
-    """The handshake never accepts a session that ended while the room's membership was read."""
+    """The handshake never accepts a session that ended while the room's membership was read or the route's check ran."""
     store = client_session_store(app)
     token = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
@@ -295,9 +320,17 @@ def test_a_session_that_ends_during_the_membership_check_is_refused_with_401(
         else:
             clock.offset = 3600
 
-    _membership(app).during = end
+    if during == "membership":
+        _membership(app).during = end
+    else:
 
-    denial = _denial(client, _echo_path(), _offers(token), {"origin": CLIENT_ORIGIN})
+        async def check(_user: ClientUser) -> bool:
+            end()
+            return True
+
+        _admit_with(check)
+
+    denial = _denial(client, _admits_path(), _offers(token), {"origin": CLIENT_ORIGIN})
 
     assert (denial.status_code, denial.json()) == (401, {"detail": NO_SESSION})
 
@@ -325,6 +358,86 @@ def test_unavailable_membership_is_refused_with_503(
     denial = _denial(client, _echo_path(), _offers(token), {"origin": CLIENT_ORIGIN})
 
     assert (denial.status_code, denial.json()) == (503, {"detail": detail})
+
+
+def _answering(answer: bool, asked: list[ClientUser]) -> Callable[[ClientUser], bool]:
+    """Return an admission check that records each user it is asked about and answers ``answer``."""
+
+    def check(user: ClientUser) -> bool:
+        asked.append(user)
+        return answer
+
+    return check
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_an_admitting_check_is_asked_about_the_signed_in_user_and_the_stream_opens(
+    app: FastAPI,
+    client: TestClient,
+    asynchronous: bool,
+) -> None:
+    """A route's check, sync or async, is asked once about the session's user, and the stream then runs as without one."""
+    asked: list[ClientUser] = []
+    _admit_with(_answering(True, asked), asynchronous=asynchronous)
+    token = client_session_store(app).create(ALICE).token
+
+    with _connect(client, token, _admits_path()) as websocket:
+        assert websocket.receive_text() == ALICE
+        assert websocket.accepted_subprotocol == "mindroom-session"
+        _revoke(client, token)
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_text()
+
+    assert closed.value.code == 4401
+    assert asked == [ClientUser(ALICE)]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_refusing_check_refuses_the_handshake_with_503(
+    app: FastAPI,
+    client: TestClient,
+    asynchronous: bool,
+) -> None:
+    """The route's refusal answers the handshake before accept, so the client never sees the stream open."""
+    asked: list[ClientUser] = []
+    _admit_with(_answering(False, asked), asynchronous=asynchronous)
+    token = client_session_store(app).create(ALICE).token
+
+    denial = _denial(client, _admits_path(), _offers(token), {"origin": CLIENT_ORIGIN})
+
+    assert (denial.status_code, denial.json()) == (503, {"detail": REFUSED})
+    assert asked == [ClientUser(ALICE)]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_check_may_refuse_with_its_own_http_answer(app: FastAPI, client: TestClient, asynchronous: bool) -> None:
+    """A check that raises `HTTPException` refuses the handshake with that answer instead of 503."""
+
+    def check(_user: ClientUser) -> bool:
+        raise HTTPException(429, "Too many streams.")
+
+    _admit_with(check, asynchronous=asynchronous)
+    token = client_session_store(app).create(ALICE).token
+
+    denial = _denial(client, _admits_path(), _offers(token), {"origin": CLIENT_ORIGIN})
+
+    assert (denial.status_code, denial.json()) == (429, {"detail": "Too many streams."})
+
+
+def test_a_check_is_asked_only_once_the_handshakes_own_checks_pass(app: FastAPI, client: TestClient) -> None:
+    """A caller from another origin, without a live session, or outside the room never reaches the route's check."""
+    asked: list[ClientUser] = []
+    _admit_with(_answering(True, asked))
+    token = client_session_store(app).create(ALICE).token
+
+    for path, protocols, origin, status in (
+        (_admits_path(), _offers(token), "https://evil.example.org", 403),
+        (_admits_path(), ["mindroom-session"], CLIENT_ORIGIN, 401),
+        (_admits_path("!other:example.org"), _offers(token), CLIENT_ORIGIN, 403),
+    ):
+        assert _denial(client, path, protocols, {"origin": origin}).status_code == status
+
+    assert asked == []
 
 
 def test_http_routes_still_sign_in_with_the_authorization_header_only(app: FastAPI, client: TestClient) -> None:
@@ -542,6 +655,7 @@ def _assert_well_formed_denial(lines: list[str], body: bytes, status: int) -> No
 async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(app: FastAPI) -> None:
     """Under the websocket transport `mindroom run` uses, the handshake and every refusal are parseable HTTP."""
     token = client_session_store(app).create(ALICE).token
+    _admit_with(lambda _user: False)
     async with _serving(app) as port:
         offers = ", ".join(_offers(token))
         lines, _ = await _handshake(port, _echo_path(), CLIENT_ORIGIN, offers)
@@ -553,11 +667,28 @@ async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(ap
             (_echo_path(), CLIENT_ORIGIN, "mindroom-session", 401),
             (_echo_path(), "https://evil.example.org", offers, 403),
             (_echo_path("!other:example.org"), CLIENT_ORIGIN, offers, 403),
+            (_admits_path(), CLIENT_ORIGIN, offers, 503),
             ("/api/plugins/nope/ws", CLIENT_ORIGIN, offers, 404),
         ):
             lines, body = await _handshake(port, path, origin, protocols)
             _assert_well_formed_denial(lines, body, status)
             assert token.encode() not in body
+
+
+@pytest.mark.asyncio
+async def test_a_failing_check_refuses_with_500_on_the_embedded_servers_transport(app: FastAPI) -> None:
+    """A check that fails answers the handshake as any route that raises does, and never accepts."""
+
+    async def check(_user: ClientUser) -> bool:
+        msg = "check failed"
+        raise RuntimeError(msg)
+
+    _admit_with(check)
+    token = client_session_store(app).create(ALICE).token
+    async with _serving(app) as port:
+        lines, _ = await _handshake(port, _admits_path(), CLIENT_ORIGIN, ", ".join(_offers(token)))
+
+    assert lines[0].split()[1] == "500"
 
 
 @pytest.mark.asyncio
