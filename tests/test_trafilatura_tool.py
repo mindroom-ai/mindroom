@@ -6,6 +6,7 @@ import gzip
 import json
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
 
@@ -17,8 +18,9 @@ from trafilatura import spider
 from trafilatura.downloads import USER_AGENT
 
 import mindroom.tools.agno_compat_trafilatura as compat
+from mindroom import public_fetch
 from mindroom.tools.trafilatura import trafilatura_tools
-from tests.public_fetch_helpers import serve_routes
+from tests.public_fetch_helpers import TrickleBody, serve, serve_routes
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -37,6 +39,11 @@ _ARTICLE_HTML = """
   </body>
 </html>
 """
+# The article page linking to two pages instead of one.
+_HOMEPAGE_HTML = _ARTICLE_HTML.replace(
+    '<p><a href="/docs">Documentation</a></p>',
+    '<p><a href="/docs">Documentation</a> <a href="/guide">Guide</a></p>',
+)
 _DOCS_HTML = """
 <html>
   <body>
@@ -59,7 +66,7 @@ def _isolate_trafilatura(monkeypatch: pytest.MonkeyPatch) -> None:
     """Use public test DNS, a fresh crawler URL store, and no crawler politeness delay."""
     monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", _public_getaddrinfo)
     monkeypatch.setattr(spider, "URL_STORE", UrlStore(compressed=False, strict=False))
-    monkeypatch.setattr(spider, "sleep", lambda _seconds: None)
+    monkeypatch.setitem(spider.DEFAULT_CONFIG["DEFAULT"], "SLEEP_TIME", "0")
 
 
 @pytest.fixture
@@ -119,9 +126,10 @@ def test_trafilatura_revalidates_redirects_before_following(monkeypatch: pytest.
         trafilatura_tools()().extract_text(start_url),
         trafilatura_tools()().extract_metadata_only(start_url),
         trafilatura_tools()().extract_batch([start_url]),
+        trafilatura_tools()().crawl_website(start_url),
     ]
 
-    assert {str(request.url) for request in requests} == {start_url}
+    assert {str(request.url) for request in requests} == {start_url, "https://example.com/robots.txt"}
     for result in results:
         assert _DENIED in result
 
@@ -224,12 +232,16 @@ def test_trafilatura_rejects_compressed_download(monkeypatch: pytest.MonkeyPatch
     assert result == f"Error: Could not fetch content from URL: {url}"
 
 
-def _crawl(monkeypatch: pytest.MonkeyPatch, docs_response: httpx.Response) -> tuple[str, list[str]]:
+def _crawl(
+    monkeypatch: pytest.MonkeyPatch,
+    docs_response: httpx.Response,
+    homepage_html: str = _ARTICLE_HTML,
+) -> tuple[str, list[str]]:
     homepage = "https://example.com/"
     requests = serve_routes(
         monkeypatch,
         {
-            homepage: httpx.Response(200, text=_ARTICLE_HTML),
+            homepage: httpx.Response(200, text=homepage_html),
             "https://example.com/docs": docs_response,
             "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
         },
@@ -255,16 +267,80 @@ def test_trafilatura_crawl_counts_the_page_a_redirect_ends_on_as_visited(monkeyp
     assert "https://example.com/guide" in json.loads(result)["known_links"]
 
 
-def test_trafilatura_crawl_rejects_discovered_redirect_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Links discovered by the crawler should be revalidated at every redirect hop."""
+@pytest.mark.parametrize(
+    "refused_location",
+    ["http://127.0.0.1:8765/api/config/raw", "https://user:secret@example.com/private"],
+)
+def test_trafilatura_crawl_skips_a_discovered_link_it_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    refused_location: str,
+) -> None:
+    """A crawled link refused at a redirect hop is skipped, and the crawl goes on to the next link."""
     result, requested_urls = _crawl(
         monkeypatch,
-        httpx.Response(302, headers={"Location": "http://127.0.0.1:8765/api/config/raw"}),
+        httpx.Response(302, headers={"Location": refused_location}),
+        homepage_html=_HOMEPAGE_HTML,
     )
 
-    assert _DENIED in result
-    assert "https://example.com/docs" in requested_urls
+    crawl = json.loads(result)
+    assert crawl["to_visit"] == []
+    assert "Configure a bridge" in crawl["extracted_content"]["https://example.com/guide"]
+    assert _DENIED in crawl["extracted_content"]["https://example.com/docs"]
     assert all(url.startswith("https://example.com/") for url in requested_urls)
+
+
+def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch longer than the per-call limit is refused before anything downloads."""
+    requests = serve_routes(monkeypatch, {})
+
+    result = trafilatura_tools()().extract_batch([f"https://example.com/{index}" for index in range(11)])
+
+    assert result == "Error: extract_batch takes at most 10 URLs per call; split the list into several calls."
+    assert requests == []
+
+
+def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A download that keeps trickling ends at the call's time limit, and no later download starts."""
+    monkeypatch.setattr(compat, "_CALL_SECONDS", 0.3)
+    # Each download's own deadline stays well past the call's limit, and short enough to fail in seconds without it.
+    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 10)
+    requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=TrickleBody()))
+    urls = [f"https://example.com/{index}" for index in range(3)]
+    toolkit = trafilatura_tools()()
+    started = time.monotonic()
+
+    batch = json.loads(toolkit.extract_batch(urls))
+
+    assert time.monotonic() - started < 5
+    assert batch["failed_urls"] == urls
+    assert batch["results"] == {}
+    assert len(requests) == 1
+
+
+def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extracts_what_it_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long robots.txt crawl delay ends the crawl's visits at half the time limit, and the other half extracts."""
+    monkeypatch.setattr(compat, "_CALL_SECONDS", 2.0)
+    homepage = "https://example.com/"
+    serve_routes(
+        monkeypatch,
+        {
+            "https://example.com/robots.txt": httpx.Response(200, text="User-agent: *\nCrawl-delay: 3600\n"),
+            homepage: httpx.Response(200, text=_HOMEPAGE_HTML),
+            "https://example.com/docs": httpx.Response(200, text=_DOCS_HTML),
+            "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
+        },
+    )
+    toolkit = trafilatura_tools()()
+    started = time.monotonic()
+
+    crawl = json.loads(toolkit.crawl_website(homepage, extract_content=True))
+
+    assert time.monotonic() - started < 5
+    (unvisited,) = crawl["to_visit"]
+    assert unvisited in {"https://example.com/docs", "https://example.com/guide"}
+    assert "Configure a bridge" in crawl["extracted_content"][unvisited]
 
 
 def test_trafilatura_factory_installs_guarded_fetchers() -> None:
@@ -273,4 +349,6 @@ def test_trafilatura_factory_installs_guarded_fetchers() -> None:
 
     assert agno_trafilatura.fetch_url is compat._fetch_url
     assert spider.fetch_url is compat._fetch_url
-    assert spider.fetch_response is compat._fetch_response
+    assert spider.fetch_response is compat._crawl_fetch_response
+    assert spider.crawl_page is compat._crawl_page
+    assert spider.sleep is compat._pause

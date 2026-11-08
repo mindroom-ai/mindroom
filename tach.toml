@@ -8464,7 +8464,7 @@ visibility = ["mindroom.tools.trafilatura"]
 
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_trafilatura"]
-expose = ["install_server_fetch_guard"]
+expose = ["TimeLimitedTrafilaturaTools", "install_server_fetch_guard"]
 
 [[modules]]
 path = "mindroom.tools.file_generation"
