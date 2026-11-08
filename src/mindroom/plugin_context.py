@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from mindroom.tool_system.plugin_identity import plugin_state_root
 from mindroom.tool_system.plugins import PluginInactiveError, config_plugins
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 
@@ -50,11 +51,7 @@ class PluginContext:
     def state_root(self) -> Path:
         """The plugin's own state directory under the storage root, created at mode 0700 on first use."""
         self._require_active()
-        root = self.runtime_paths.storage_root / "plugins" / self.plugin_name
-        root.mkdir(parents=True, exist_ok=True)
-        # Also when a hook's ``ctx.state_root``, the same directory, created it with the default mode.
-        root.chmod(0o700)
-        return root
+        return plugin_state_root(self.runtime_paths.storage_root, self.plugin_name)
 
     def is_active(self) -> bool:
         """Return whether the current config still loads this plugin."""

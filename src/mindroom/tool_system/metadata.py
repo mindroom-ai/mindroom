@@ -183,7 +183,7 @@ def _validate_text_authored_override_value(
     agent_override_field = _agent_override_field(metadata, field.name)
     try:
         if field.type == "string[]":
-            values = _normalize_string_array_override(value, preserve_empty_list=True)
+            values = normalize_string_array_override(value, preserve_empty_list=True)
             pattern = (field.validation or {}).get("pattern")
             if pattern:
                 if values is None and isinstance(value, str):
@@ -197,7 +197,7 @@ def _validate_text_authored_override_value(
                     raise ToolConfigOverrideError(msg)
             return values
         if agent_override_field is not None and agent_override_field.type == "string[]":
-            normalized = _normalize_string_array_override(value)
+            normalized = normalize_string_array_override(value)
             return None if normalized is None else ", ".join(normalized)
     except TypeError as exc:
         msg = f"{full_path}: {exc}."
@@ -539,7 +539,7 @@ def _pop_implicit_toolkit_filters(
     include_tools, exclude_tools = (
         None
         if name in declared_names
-        else _normalize_string_array_override(init_kwargs.pop(name, None), preserve_empty_list=True)
+        else normalize_string_array_override(init_kwargs.pop(name, None), preserve_empty_list=True)
         for name in ("include_tools", "exclude_tools")
     )
     return include_tools, exclude_tools
@@ -1093,7 +1093,7 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
     return tools
 
 
-def _normalize_string_array_override(
+def normalize_string_array_override(
     value: object,
     *,
     preserve_empty_list: bool = False,

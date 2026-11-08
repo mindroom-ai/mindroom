@@ -12,7 +12,7 @@ from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.events import tool_args_chat_preview
-from mindroom.tool_system.plugin_identity import validate_plugin_name
+from mindroom.tool_system.plugin_identity import plugin_state_root
 from mindroom.tool_system.tool_environment import ToolEnvironment
 
 from .registry import HookRegistry
@@ -368,10 +368,8 @@ class HookContext:
 
     @property
     def state_root(self) -> Path:
-        """Return the plugin state root, creating it on first access."""
-        plugin_root = self.runtime_paths.storage_root / "plugins" / validate_plugin_name(self.plugin_name)
-        plugin_root.mkdir(parents=True, exist_ok=True)
-        return plugin_root
+        """Return the plugin's own state directory, created at mode 0700 on first access."""
+        return plugin_state_root(self.runtime_paths.storage_root, self.plugin_name)
 
     async def send_message(
         self,

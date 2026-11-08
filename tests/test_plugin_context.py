@@ -158,7 +158,7 @@ def test_state_root_is_one_private_directory_per_plugin_created_on_first_use(tmp
     """Each plugin's state root is its own directory under the storage root, mode 0700, made when first used."""
     _, client, runtime_paths = _client(tmp_path, {"name": "demo"}, {"name": "other"})
     plugins_root = runtime_paths.storage_root / "plugins"
-    # A hook's state root made the directory before, with the default mode.
+    # An earlier release's hook made the directory before, with the default mode.
     (plugins_root / "other").mkdir(parents=True, mode=0o755)
     (plugins_root / "other").chmod(0o755)
     client.get("/api/plugins/demo/context")
