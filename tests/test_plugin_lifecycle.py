@@ -571,7 +571,6 @@ async def test_a_broken_lifespan_costs_the_plugin_only_its_lifespan(
     assert lifespan_errors == (["Plugin lifespan failed to start"] if error is None else [])
 
 
-@pytest.mark.xfail(strict=True, reason="pending: plugin checks do not read the lifecycle module's error yet")
 @pytest.mark.parametrize(("lifecycle", "error"), BROKEN_LIFECYCLE_MODULES)
 def test_plugin_check_fails_on_a_broken_lifecycle_module(tmp_path: Path, lifecycle: str, error: str) -> None:
     """`mindroom plugins check` refuses a plugin whose lifecycle module cannot load, with the reason."""
