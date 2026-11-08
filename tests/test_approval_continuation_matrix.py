@@ -673,6 +673,7 @@ async def test_resumed_with_refused_final_finishes_its_paused_reply(tmp_path: Pa
                 ending=Failed(FailureCause.DELIVERY_FAILED),
                 event_id="$waiting",
                 is_visible_response=True,
+                final_visible_body="The refused answer.",
             ),
             current,
         )
@@ -689,6 +690,8 @@ async def test_resumed_with_refused_final_finishes_its_paused_reply(tmp_path: Pa
         source_pending=False,
         reply=ReplyState.FAILED,
     )
+    # The frozen answer is owed to its approval, which finishes it; the turn's outcome carries none of its facts.
+    assert observer.lifecycle.finalize.await_args.args[0] == FinalDeliveryOutcome(ending=Owed())
 
 
 async def _cancelled_resume(
@@ -799,7 +802,8 @@ async def test_resumed_cancelled_after_a_queued_answer_waits_for_it(tmp_path: Pa
         # Its answer is owed, which holds the reply as a pause does, and ends its turn as an answered one.
         assert await task is True
     assert await _outcome(bot, observer) == Outcome(continuation="claimed", finalized=1, reply=ReplyState.COMPLETED)
-    assert observer.lifecycle.finalize.await_args.args[0].ending == Owed()
+    # The owed answer carries no reply facts: nothing reads them before the outbox finishes it.
+    assert observer.lifecycle.finalize.await_args.args[0] == FinalDeliveryOutcome(ending=Owed())
 
 
 async def test_resumed_advanced_to_a_ready_generation_resumes_it(tmp_path: Path) -> None:
