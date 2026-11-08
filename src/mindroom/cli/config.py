@@ -1426,14 +1426,17 @@ DEFAULT_API_HOST = "0.0.0.0"  # noqa: S104
 DEFAULT_API_PORT = 8765
 
 
-def warn_dashboard_without_key(address: str, remedy: str) -> None:
-    """Warn that anyone who can reach the dashboard API at ``address`` can administer MindRoom."""
+def warn_dashboard_without_key(address: str, env_path: Path, remedy_tail: str) -> None:
+    """Warn that anyone who can reach the dashboard API at ``address`` can administer MindRoom.
+
+    The advice to set the key in ``env_path`` ends with ``remedy_tail``, fixed Rich markup.
+    """
     print_literal(
         "[yellow]Warning:[/yellow] The dashboard API listens on ",
         address,
         " without MINDROOM_API_KEY, so anyone who can reach that address can administer MindRoom.",
     )
-    console.print(f"  {remedy}")
+    print_literal("  Set MINDROOM_API_KEY in ", env_path, remedy_tail)
 
 
 def worker_dashboard_api_key_needed(runtime_paths: constants.RuntimePaths) -> bool:

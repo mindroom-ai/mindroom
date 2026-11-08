@@ -315,7 +315,7 @@ def test_dashboard_key_warnings_print_the_address_and_env_path_whole_on_one_line
     )
     env_path = runtime_paths.env_path
 
-    config_cli.warn_dashboard_without_key("[fe80::1]:8765", "Set MINDROOM_API_KEY.")
+    config_cli.warn_dashboard_without_key("[fe80::1]:8765", env_path, ", or pass --api-host 127.0.0.1.")
     with patch.object(config_cli, "write_private_env_text", side_effect=OSError("read-only [mount]")):
         config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
     config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
@@ -325,6 +325,7 @@ def test_dashboard_key_warnings_print_the_address_and_env_path_whole_on_one_line
         "Warning: The dashboard API listens on [fe80::1]:8765 without MINDROOM_API_KEY, "
         "so anyone who can reach that address can administer MindRoom."
     ) in lines
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in lines
     assert (
         "Warning: Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
         f"and {env_path} could not be updated: read-only [mount]"
@@ -333,6 +334,24 @@ def test_dashboard_key_warnings_print_the_address_and_env_path_whole_on_one_line
         f"Generated MINDROOM_API_KEY in {env_path} because dedicated workers can reach the dashboard API; "
         "the dashboard login page asks for this key."
     ) in lines
+
+
+def test_run_prints_the_dashboard_key_remedy_with_the_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mindroom run` on an open dashboard names the `.env` to set the key in, whole, even under a bracketed folder."""
+    for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+
+    with patch("mindroom.orchestrator.main", AsyncMock()):
+        result = _invoke_with_runtime(["run"], cfg)
+
+    assert result.exit_code == 0, result.output
+    env_path = (narrow_markup_dir / ".env").resolve()
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in result.output.splitlines()
 
 
 def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> None:

@@ -288,7 +288,8 @@ def _warn_if_service_dashboard_is_open(service_environment: Mapping[str, str]) -
         return
     warn_dashboard_without_key(
         f"{DEFAULT_API_HOST}:{DEFAULT_API_PORT}",
-        f"Set MINDROOM_API_KEY in {runtime_paths.env_path}, then run [cyan]mindroom service restart[/cyan].",
+        runtime_paths.env_path,
+        ", then run [cyan]mindroom service restart[/cyan].",
     )
 
 
