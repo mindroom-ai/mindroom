@@ -582,40 +582,47 @@ def test_plugin_check_fails_on_a_broken_lifecycle_module(tmp_path: Path, lifecyc
         check_plugin(root)
 
 
+# Where the plugin's shared state lives: in the lifecycle module, which the routes and tools import, or in the routes
+# module, which the lifecycle module imports. Each pair is the lifecycle module's head and the routes module's.
+SHARED_STATE = {
+    "lifecycle": (
+        "from contextlib import asynccontextmanager\n\nSTATE = {{}}\n",
+        "from .lifecycle import STATE\n",
+    ),
+    "routes": (
+        "from contextlib import asynccontextmanager\n\nfrom .routes import STATE\n",
+        "STATE = {{}}\n",
+    ),
+}
+
+
 @pytest.mark.asyncio
-async def test_the_plugins_other_modules_share_the_lifecycle_module_its_lifespan_runs_in(tmp_path: Path) -> None:
-    """Routes and tools that import the lifecycle module see what its lifespan set up."""
-    lifecycle = """
-from contextlib import asynccontextmanager
-
-STATE = {{}}
-
+@pytest.mark.parametrize("owner", ["lifecycle", "routes"])
+async def test_the_plugins_modules_share_what_its_lifespan_sets_up_whichever_imports_which(
+    tmp_path: Path,
+    owner: str,
+) -> None:
+    """The lifespan and the routes, and the tools that import the lifecycle module, share one copy of the state."""
+    lifecycle_head, routes_head = SHARED_STATE[owner]
+    lifecycle = f"""{lifecycle_head}
 
 @asynccontextmanager
 async def lifespan(lifecycle):
     STATE["client"] = "open"
     yield
 """
-    routes = """
-from fastapi import APIRouter
+    routes = f"""from fastapi import APIRouter
 
-from .lifecycle import STATE
-
+{routes_head}
 router = APIRouter()
 
 
 @router.get("/client")
 async def client() -> dict:
-    return {{"client": STATE.get("client")}}
+    return {{{{"client": STATE.get("client")}}}}
 """
-    root = _write(
-        tmp_path,
-        _probe(),
-        "demo",
-        lifecycle=lifecycle,
-        routes=routes,
-        tools="from .lifecycle import STATE\n",
-    )
+    tools = "from .lifecycle import STATE\n" if owner == "lifecycle" else None
+    root = _write(tmp_path, _probe(), "demo", lifecycle=lifecycle, routes=routes, tools=tools)
     config, lifespans = _lifespans(tmp_path, "demo")
     await _publish(lifespans)
     await lifespans.stop()
@@ -623,8 +630,33 @@ async def client() -> dict:
     assert TestClient(_app(config, lifespans.runtime_paths)).get("/api/plugins/demo/client").json() == {
         "client": "open",
     }
-    lifecycle_module = cached_plugin_module((root / "lifecycle.py").resolve())
-    assert cached_plugin_module((root / "tools.py").resolve()).STATE is lifecycle_module.STATE
+    if owner == "lifecycle":
+        assert cached_plugin_module((root / "tools.py").resolve()).STATE == {"client": "open"}
+
+
+def test_a_helper_module_the_lifecycle_and_tools_modules_import_registers_its_tools_for_the_plugin(
+    tmp_path: Path,
+) -> None:
+    """A tool registered in a helper module that both import belongs to the plugin, in its check and once published."""
+    helper = TOOLS.replace('name="demo_lifecycle_tool"', 'name="demo_helper_tool"')
+    lifecycle = """
+from contextlib import asynccontextmanager
+
+from .helpers import demo_tools
+
+
+@asynccontextmanager
+async def lifespan(lifecycle):
+    yield
+"""
+    root = _write(tmp_path, _probe(), "demo", lifecycle=lifecycle, tools="from .helpers import demo_tools\n")
+    (root / "helpers.py").write_text(helper, encoding="utf-8")
+    config, lifespans = _lifespans(tmp_path, "demo")
+
+    publish_test_plugins(config, lifespans.runtime_paths)
+
+    assert "demo_helper_tool" in config_plugins(config, lifespans.runtime_paths).tools
+    assert check_plugin(root).tool_names == ("demo_helper_tool",)
 
 
 @asynccontextmanager

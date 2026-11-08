@@ -743,28 +743,6 @@ def _materialize_plugin(
     *,
     primary_modules: bool,
 ) -> _LoadedPlugin:
-    lifecycle_entry: plugin_imports._ModuleCacheEntry | None = None
-    lifespan: PluginLifespan | None = None
-    lifespan_error: plugin_imports.PluginValidationError | None = None
-    if primary_modules and plugin.lifecycle_module_path is not None:
-        # First, so the plugin's other modules that import it share the instance whose lifespan runs. A broken
-        # lifecycle module costs only the lifespan, as a broken routes module costs only the routes.
-        try:
-            lifecycle_entry = _load_plugin_module(
-                plugin.name,
-                plugin.root,
-                plugin.lifecycle_module_path,
-                kind="lifecycle",
-            )
-            assert lifecycle_entry is not None
-            lifespan = _plugin_lifespan(lifecycle_entry.module)
-        except plugin_imports.PluginValidationError as error:
-            logger.warning(
-                "Plugin lifecycle module failed to load; running no lifespan",
-                plugin_name=plugin.name,
-                error=str(error),
-            )
-            lifespan_error = error
     tools_entry = _load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
     # Without its own hooks module, a plugin's hooks live in its tools module.
     hooks_entry = (
@@ -785,14 +763,29 @@ def _materialize_plugin(
         except plugin_imports.PluginValidationError as error:
             logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
             routes_error = error
-    entries = tuple(
+    lifecycle_module: ModuleType | None = None
+    lifespan: PluginLifespan | None = None
+    lifespan_error: plugin_imports.PluginValidationError | None = None
+    if primary_modules and plugin.lifecycle_module_path is not None:
+        # Likewise, a broken lifecycle module costs only the lifespan.
+        try:
+            lifecycle_module = _lifecycle_module(plugin, plugin.lifecycle_module_path)
+            lifespan = _plugin_lifespan(lifecycle_module)
+        except plugin_imports.PluginValidationError as error:
+            logger.warning(
+                "Plugin lifecycle module failed to load; running no lifespan",
+                plugin_name=plugin.name,
+                error=str(error),
+            )
+            lifespan_error = error
+    loaded = (tools_entry, hooks_entry, oauth_entry, routes_entry)
+    modules = tuple(
         dict.fromkeys(
-            entry
-            for entry in (tools_entry, hooks_entry, oauth_entry, routes_entry, lifecycle_entry)
-            if entry is not None
+            module
+            for module in (*(entry.module for entry in loaded if entry is not None), lifecycle_module)
+            if module is not None
         ),
     )
-    modules = tuple(entry.module for entry in entries)
     # Candidate validation never imports a routes or lifecycle module, so ``source`` leaves them out.
     module_paths = (
         (plugin.tools_module_path, tools_entry),
@@ -836,6 +829,21 @@ def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
         msg = "OAuth plugin module must define callable register_oauth_providers(settings, runtime_paths)"
         raise plugin_imports.PluginValidationError(msg)
     return callback
+
+
+def _lifecycle_module(plugin: plugin_imports._PluginBase, module_path: Path) -> ModuleType:
+    """Return the plugin's lifecycle module, loaded after its other modules so a tool it imports registers for them.
+
+    Another of the plugin's modules may have imported it already. A staged load starts without canonical plugin
+    modules, so that instance belongs to this load, and executing the file again would leave the importer a copy of
+    its state that the lifespan never sets up.
+    """
+    imported = sys.modules.get(plugin_imports._module_name(plugin.name, plugin.root, module_path))
+    if imported is not None:
+        return imported
+    entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind="lifecycle")
+    assert entry is not None
+    return entry.module
 
 
 def _plugin_lifespan(module: ModuleType) -> PluginLifespan:
