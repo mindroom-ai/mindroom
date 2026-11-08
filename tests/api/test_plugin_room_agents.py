@@ -32,6 +32,7 @@ from mindroom.room_agent_access import _WRITERS
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from tests.access_schema_support import joined_members_response
 from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.runtime_fakes import bind_test_embedded_runtime
@@ -80,14 +81,8 @@ class _Room:
         self.ids = {name: matrix_id.full_id for name, matrix_id in entity_ids(config, paths).items()}
         members = [ALICE, BOB, CAROL, self.ids[ROUTER_AGENT_NAME], *(self.ids[name] for name in joined)]
         self.client = SimpleNamespace(
-            user_id=self.ids[ROUTER_AGENT_NAME],
             rooms={ROOM: nio.MatrixRoom(ROOM, self.ids[ROUTER_AGENT_NAME])},
-            joined_members=AsyncMock(
-                return_value=nio.JoinedMembersResponse(
-                    members=[nio.RoomMember(user_id, None, None) for user_id in members],
-                    room_id=ROOM,
-                ),
-            ),
+            joined_members=AsyncMock(return_value=joined_members_response(ROOM, *members)),
             joined_rooms=AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])),
             room_get_state=AsyncMock(
                 return_value=nio.RoomGetStateResponse(
@@ -100,7 +95,6 @@ class _Room:
             ),
         )
         self.router = SimpleNamespace(client=self.client, running=True, config=self.config)
-        self.memberships = AgentReplyMembershipIndex()
         self.app = FastAPI()
         state = ensure_app_state(self.app)
         state.api_state = config_lifecycle.ApiState(
@@ -109,7 +103,7 @@ class _Room:
         )
         bind_test_embedded_runtime(
             self.app,
-            agent_reply_memberships=self.memberships,
+            agent_reply_memberships=AgentReplyMembershipIndex(),
             agent_bot={ROUTER_AGENT_NAME: self.router}.get,
         )
         # Another running bot in the room answers room reads while the router is down.
@@ -220,21 +214,21 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    ("tools", "files", "terminal"),
+    ("tools", "files"),
     [
-        ([{"file": {"enable_save_file": False}}], "write", "none"),
-        ([{"file": {"all": True, **READ_ONLY_FILE["file"]}}], "write", "none"),
-        ([{"file": {"exclude_tools": ["save_file", "replace_file_chunk"]}}], "read", "none"),
-        ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "read", "none"),
-        ([{"file": {"include_tools": ["delete_file"]}}], "none", "none"),
-        (["coding"], "write", "none"),
-        ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read", "none"),
-        (["python"], "write", "none"),
-        ([{"python": {"include_tools": ["read_file", "list_files"]}}], "read", "none"),
-        (["script"], "write", "none"),
-        ([{"shell": {"enable_run_shell_command": False}}], "none", "none"),
-        (["matrix_message"], "read", "none"),
-        (["calculator"], "none", "none"),
+        ([{"file": {"enable_save_file": False}}], "write"),
+        ([{"file": {"all": True, **READ_ONLY_FILE["file"]}}], "write"),
+        ([{"file": {"exclude_tools": ["save_file", "replace_file_chunk"]}}], "read"),
+        ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "read"),
+        ([{"file": {"include_tools": ["delete_file"]}}], "none"),
+        (["coding"], "write"),
+        ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read"),
+        (["python"], "write"),
+        ([{"python": {"include_tools": ["read_file", "list_files"]}}], "read"),
+        (["script"], "write"),
+        ([{"shell": {"enable_run_shell_command": False}}], "none"),
+        (["matrix_message"], "read"),
+        (["calculator"], "none"),
     ],
 )
 @pytest.mark.asyncio
@@ -242,12 +236,11 @@ async def test_files_follow_what_each_toolkit_offers_by_its_own_settings(
     tmp_path: Path,
     tools: list[object],
     files: str,
-    terminal: str,
 ) -> None:
-    """Toolkits that take local paths give read; those that edit files or run code give write; a shell gives one."""
+    """Toolkits that take local paths give read; those that edit files or run code give write."""
     room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=tools, access={"users": [ALICE]})})
 
-    assert _access(await room.agents(ALICE)) == [("helper", files, terminal)]
+    assert _access(await room.agents(ALICE)) == [("helper", files, "none")]
 
 
 PLUGIN_TOOLS = """
@@ -315,9 +308,8 @@ def test_each_named_writer_is_a_function_its_toolkit_declares() -> None:
     """A renamed writing or code-running function would otherwise turn ``write`` into ``read`` without notice."""
     tools = builtin_tool_registry()
 
-    assert {
-        name: functions <= set(tools.entries[name].function_names) for name, functions in _WRITERS.items()
-    } == dict.fromkeys(_WRITERS, True)
+    for name, functions in _WRITERS.items():
+        assert functions <= set(tools.entries[name].function_names), name
 
 
 @pytest.mark.asyncio

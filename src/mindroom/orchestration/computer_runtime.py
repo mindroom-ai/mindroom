@@ -11,12 +11,12 @@ from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.room_agent_access import admit_room_agent
+from mindroom.room_agent_access import admit_room_agent, room_execution_identity
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.models import WorkerSpec
@@ -107,16 +107,7 @@ def _resolve_target(
     runtime_paths: RuntimePaths,
 ) -> ComputerTarget:
     _computer_browser_provider(name, config, runtime_paths)
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=room_id,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
+    identity = room_execution_identity(name, requester_id, room_id, runtime_paths)
     target = build_agent_toolkit_worker_target(
         "user_agent",
         name,
