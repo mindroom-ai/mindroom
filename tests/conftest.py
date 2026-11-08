@@ -2938,6 +2938,7 @@ def _restore_published_plugins() -> Iterator[None]:
     published = plugins_module._PUBLISHED
     module_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
     manifest_cache = dict(plugin_imports._PLUGIN_CACHE)
+    root_modules = dict(plugins_module._ROOT_MODULES)
     modules = {
         name: module
         for name, module in sys.modules.items()
@@ -2950,6 +2951,8 @@ def _restore_published_plugins() -> Iterator[None]:
     plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._PLUGIN_CACHE.update(manifest_cache)
+    plugins_module._ROOT_MODULES.clear()
+    plugins_module._ROOT_MODULES.update(root_modules)
     for name in [
         name
         for name in sys.modules

@@ -1041,11 +1041,11 @@ def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: 
         )
 
 
-def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_imports(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Validation does not publish the plugin tools that a helper module of the plugin registers."""
+def _write_package_helper_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Write the importable package plugin ``demo_pkg``, whose tools module imports its helper module by absolute name.
+
+    The helper module registers ``helper_tool``; the plugin's root is returned.
+    """
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "demo_pkg"
     plugin_root.mkdir(parents=True)
@@ -1075,8 +1075,16 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text("from demo_pkg.helpers import helper_tools\n", encoding="utf-8")
-
     monkeypatch.syspath_prepend(str(site_packages))
+    return plugin_root
+
+
+def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_imports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation does not publish the plugin tools that a helper module of the plugin registers."""
+    _write_package_helper_plugin(tmp_path, monkeypatch)
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
@@ -1105,6 +1113,70 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
         # Validation leaves no helper it imported, so loading the plugin imports and registers it again.
         assert "demo_pkg.helpers" not in sys.modules
         assert "helper_tool" in _load(validated, runtime_paths).tools
+
+
+@pytest.mark.parametrize("worker", [False, True], ids=["primary", "worker"])
+@pytest.mark.parametrize("first_load_fails", [False, True], ids=["loaded", "failed"])
+@pytest.mark.parametrize("helper_import", ["demo_pkg.helpers", ".helpers"])
+def test_reloading_a_package_plugin_keeps_the_tools_its_helper_module_registers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker: bool,
+    first_load_fails: bool,
+    helper_import: str,
+) -> None:
+    """A tools module edit reloads the helper module it imports, whether the plugin loaded before."""
+    tools_path = _write_package_helper_plugin(tmp_path, monkeypatch) / "tools.py"
+    healthy_source = f"from {helper_import} import helper_tools\n"
+    tools_path.write_text(healthy_source, encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+    if first_load_fails:
+        tools_path.write_text(f"{healthy_source}raise RuntimeError('not yet')\n", encoding="utf-8")
+
+    def load() -> ConfigPlugins:
+        return plugins_module.refresh_plugins(config, runtime_paths) if worker else _load(config, runtime_paths)
+
+    with _forgetting_modules("demo_pkg"):
+        assert ("helper_tool" in load().tools) is not first_load_fails
+        tools_path.write_text(f"{healthy_source}# edited\n", encoding="utf-8")
+        _bump_mtime(tools_path)
+        assert "helper_tool" in load().tools
+
+
+@pytest.mark.parametrize("worker", [False, True], ids=["primary", "worker"])
+@pytest.mark.parametrize("edited", ["hooks.py", "tools.py"])
+def test_a_tools_module_shares_the_hooks_module_it_imports_before_and_after_a_reload(
+    tmp_path: Path,
+    worker: bool,
+    edited: str,
+) -> None:
+    """The plugin's tools and hooks modules hold one copy of state the tools module imports from the hooks module."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text("from .hooks import STATE\n", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    def shared_state() -> bool:
+        if worker:
+            plugins_module.refresh_plugins(config, runtime_paths)
+        else:
+            _load(config, runtime_paths)
+        return (
+            cached_plugin_module(plugin_root / "tools.py").STATE is cached_plugin_module(plugin_root / "hooks.py").STATE
+        )
+
+    assert shared_state()
+    edited_path = plugin_root / edited
+    edited_path.write_text(edited_path.read_text(encoding="utf-8") + "# edited\n", encoding="utf-8")
+    _bump_mtime(edited_path)
+    assert shared_state()
 
 
 def test_plugin_loading_removes_tools_for_successfully_removed_plugins(tmp_path: Path) -> None:
