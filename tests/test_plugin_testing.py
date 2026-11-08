@@ -176,6 +176,24 @@ async def test_a_member_of_a_room_never_added_with_its_key_is_refused(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_adding_a_grant_room_again_changes_whom_it_admits(tmp_path: Path) -> None:
+    """Who joined or left a room the agent's grant names counts from the next decision, whatever other rooms exist."""
+    # Another agent's room the test never adds keeps the grants unresolved, as a room the router has not joined does.
+    config = {"agents": {**HOST_CONFIG["agents"], "other": {"display_name": "Other", "rooms": ["dev"]}}}
+    public = "!public:example.org"
+    with load_plugin(EXAMPLE, tmp_path, config=config, settings=SETTINGS) as plugin:
+        plugin.add_room(ROOM, members={ALICE: "Alice"}, key="lobby")
+        plugin.add_room(public, members={ALICE: "Alice", BOB: "Bob"})
+        await plugin.fire("message:received", agent="host", sender=ALICE, room=public, body="hi")
+
+        plugin.add_room(ROOM, members={BOB: "Bob"}, key="lobby")
+
+        await plugin.fire("message:received", agent="host", sender=BOB, room=public, body="hi")
+        with pytest.raises(TurnRefused):
+            await plugin.fire("message:received", agent="host", sender=ALICE, room=public, body="hi")
+
+
+@pytest.mark.asyncio
 async def test_message_fires_the_hook_whose_send_lands_in_the_room(tmp_path: Path) -> None:
     """An admitted sender's message runs the `message:received` hook, which reads the room's state and answers there.
 

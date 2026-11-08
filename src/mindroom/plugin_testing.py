@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NoReturn, Self, cast
 from uuid import uuid4
 
@@ -133,8 +134,8 @@ class Room:
     """A room as the plugin's tests set it up, which MindRoom's router is joined to, and what was sent to it."""
 
     room_id: str
-    members: dict[str, str | None]
-    """Each joined user's display name, None for one without."""
+    members: Mapping[str, str | None]
+    """Each joined user's display name, None for one without; add the room again to change who is joined."""
     power_levels: dict[str, Any] | None = None
     """The content of the room's ``m.room.power_levels``; None for a room without one."""
     direct: bool = False
@@ -258,13 +259,16 @@ class LoadedPlugin:
     ) -> Room:
         """Add a room the router is joined to, with ``members`` joined by display name, and return it.
 
-        ``key`` names the room as an agent's ``rooms`` or an ``access`` rule does. A room never added is one no
-        MindRoom bot is in.
+        ``key`` names the room as an agent's ``rooms`` or an ``access`` rule does. Adding a room again replaces it, as
+        a membership change would. A room never added is one no MindRoom bot is in.
         """
         levels = dict(power_levels) if power_levels is not None else None
-        room = self._rooms[room_id] = Room(room_id, dict(members), levels, direct, history_visibility, key)
+        room = Room(room_id, MappingProxyType(dict(members)), levels, direct, history_visibility, key)
+        self._rooms[room_id] = room
         if key is not None:
             update_matrix_state(self.runtime_paths, lambda state: state.add_room(key, room_id, "", key))
+        # The next decision reads every room again, as membership events make the router do live.
+        self._memberships.invalidate(self.config, reason="plugin_testing_room_added")
         return room
 
     def client(self, user_id: str | None = None) -> TestClient:

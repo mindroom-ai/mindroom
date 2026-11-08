@@ -1532,7 +1532,8 @@ To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to m
 
 `mindroom.plugin_testing`, from plugin API 1.16, loads a plugin in its own tests as MindRoom starts it and drives its routes, tools, and hooks without a homeserver or a model.
 It patches nothing: client sessions, room membership, and each agent's [access](authorization.md#responder-access) decide as in a deployment, from the config the test gives, so a test that needs another sender grants them access there.
-It imports no test runner; with pytest, a fixture wraps `load_plugin`, and async tests such as these need `pytest-asyncio`:
+It imports no test runner; with pytest, a fixture wraps `load_plugin`, and async tests such as these need `pytest-asyncio`.
+This example tests a plugin named `greeter` whose tool greets with its `greeting` setting, whose `message:received` hook answers `Got: <body>`, and whose route `GET /rooms/{room_id}/hello` greets a member:
 
 ```python
 from pathlib import Path
@@ -1584,6 +1585,8 @@ async def test_hook(plugin):
 
 `call_tool` and `fire` raise `TurnRefused` and run nothing unless `sender` is joined to `room` and `agent` would answer them there.
 A sender is a person: a bridge alias reaches hooks and tools as the person it stands for, and an agent's or bot account's ID raises `ValueError`.
+A fired message mentions no one and carries no attachments.
+Adding a room again replaces it, so a test changes who is joined by adding the room again with its new members.
 Each starts from a new message of `sender`'s, which roots a thread unless the agent answers in room mode, so `resolved_thread_id` is that message's ID as it would be live.
 A room never added is one no MindRoom bot is in, so routes answer 503 for it.
 An agent's Matrix ID, to make it a room's member or a relay's mention, is its key in `entity_directory(plugin.config, plugin.runtime_paths)` from `mindroom.plugin_api`.
