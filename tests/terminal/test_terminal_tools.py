@@ -95,7 +95,8 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     assert (await _call(functions["terminal_send"], session_id=session_id, keys="<ctrl-c>")).startswith(
         "Sent. New output:\n^C\n",
     )
-    assert await _call(functions["terminal_run"], session_id=session_id, command="echo $((6*7))") == (
+    # A command that ends with a newline is still one line.
+    assert await _call(functions["terminal_run"], session_id=session_id, command="echo $((6*7))\n") == (
         "42\n[Exit status 0.]"
     )
     assert "42" in await _call(functions["terminal_read"], session_id=session_id)
@@ -115,7 +116,7 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     assert refused.startswith("Error: send <ctrl-c> on its own")
     too_long = await _call(functions["terminal_send"], session_id=session_id, keys="x" * 16385)
     assert too_long == "Error: Type at most 16384 characters at once; send a long text in parts."
-    for command in ("ls\x01", "\x03ls", "cd /tmp\nls"):
+    for command in ("ls\x01", "\x03ls", "cd /tmp\nls", "ls\x7f", "ls\x9b"):
         refused = await _call(functions["terminal_run"], session_id=session_id, command=command)
         assert refused.startswith("Error: a command is one line of plain text;")
     # A line longer than any answer keeps its newest part.
