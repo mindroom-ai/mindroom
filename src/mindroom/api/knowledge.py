@@ -19,7 +19,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from mindroom.api import config_lifecycle
 from mindroom.constants import resolve_config_relative_path
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.file_listing import git_checkout_present, include_knowledge_relative_path
+from mindroom.knowledge.file_listing import (
+    git_checkout_present,
+    include_knowledge_relative_path,
+    pinned_canonical_directory,
+)
 from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.indexing_config import knowledge_git_dir
@@ -36,13 +40,12 @@ from mindroom.knowledge.status import (
     mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, resolve_path_within_root
+from mindroom.path_confinement import open_regular_file_at, resolve_path_within_root
 from mindroom.redaction import redact_url_credentials
 from mindroom.runtime_resolution import shared_knowledge_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from contextlib import AbstractContextManager
     from typing import BinaryIO
 
     from mindroom.config.main import Config
@@ -92,16 +95,6 @@ def _knowledge_root(
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
-
-
-def _open_checked_directory(root: Path, relative_path: Path = Path()) -> AbstractContextManager[int]:
-    """Pin a directory at or below the checked canonical root, following no link on its whole path.
-
-    Workers can write bases inside agent workspaces, so a folder checked by
-    name may be swapped for a link before the mutation; acting relative to
-    this descriptor refuses the swap instead of reaching the link target.
-    """
-    return open_directory_within_root(Path(root.anchor), root.relative_to(root.anchor) / relative_path)
 
 
 def _resolve_within_root(root: Path, relative_path: str) -> Path:
@@ -563,7 +556,7 @@ async def _write_uploads(
             return [], False
         root.mkdir(parents=True, exist_ok=True)
         # Upload names are single components, so every upload is staged and published in the pinned root.
-        with _open_checked_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             staged_uploads: list[_StagedUpload] = []
             try:
                 staged_uploads = [await _stage_upload(root_fd, target) for target in upload_targets]
@@ -759,7 +752,7 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         relative_file = target.relative_to(root)
         relative_path = relative_file.as_posix()
         _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
-        with _open_checked_directory(root, relative_file.parent) as parent_fd:
+        with pinned_canonical_directory(target.parent) as parent_fd:
             os.unlink(relative_file.name, dir_fd=parent_fd)
         cancelled_after_source_changed = await _mark_committed_mutation_and_schedule_refresh(
             base_id,

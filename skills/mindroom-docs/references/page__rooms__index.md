@@ -90,6 +90,7 @@ A listed room they cannot join without an invitation, such as a private one, nee
 They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
 Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
 A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.
+Whether the router greets a room under a room it is invited into is described under [Welcome Messages](https://docs.mindroom.chat/configuration/router/#welcome-messages).
 
 ## Room Cleanup
 

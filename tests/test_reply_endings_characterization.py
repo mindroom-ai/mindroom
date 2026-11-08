@@ -56,9 +56,10 @@ from mindroom.hooks import (
     SessionHookContext,
     hook,
 )
-from mindroom.llm.messages import system_text
-from mindroom.llm.provider import TextDelta
+from mindroom.llm.messages import Message, system_text
+from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_presentation, render_body
 from mindroom.response_sources import Owned, SourceFate
@@ -442,9 +443,10 @@ def _team_scope(turn: _Turn) -> HistoryScope:
     )
 
 
-async def _team_reply(turn: _Turn) -> SourceFate:
+async def _team_reply(turn: _Turn, request: ResponseRequest | None = None) -> SourceFate:
+    """Answer ``request``, a plain message unless given, with the collaborate team of both members."""
     return await turn.runner.generate_team_response_helper(
-        _plain_request(_target()),
+        request or _plain_request(_target()),
         member_names=list(_MEMBERS),
         team_mode="collaborate",
     )
@@ -952,15 +954,17 @@ async def test_a_silent_schedule_that_reports_nothing_shows_nothing(
     assert not await turn.pending()
 
 
-async def _respond_auto_approved(turn: _Turn, request: ResponseRequest) -> None:
+async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team: bool = False) -> None:
     """Answer ``request``, whose ``echo`` call pauses for an approval the policy grants at once, so the reply resumes.
 
-    It returns once the bot's background work is done, so assertions see the ended approval.
+    A ``team`` answer is the collaborate team's of both members. It returns once the bot's background work is done, so
+    assertions see the ended approval.
     """
     _require_echo_approval(turn)
     try:
         with patch("mindroom.approval.response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))):
-            assert await turn.runner.generate_response(request) == Owned()
+            fate = await (_team_reply(turn, request) if team else turn.runner.generate_response(request))
+            assert fate == Owned()
         assert await wait_for_background_tasks(timeout=5, owner=turn.bot._runtime_view)
     finally:
         await shutdown_approval_runtime()
@@ -981,6 +985,15 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest) -> None:
             "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
             id="fresh-attempt",
         ),
+        # The fresh attempt answers nothing: a quiet turn neither retries it nor answers with the empty-reply notice.
+        pytest.param(
+            [
+                calls(tool_call("switch_thread_model", "call-2", model_name="default", when="after-toolcall")),
+                answer(""),
+            ],
+            "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
+            id="empty-fresh-attempt",
+        ),
     ],
 )
 @pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
@@ -996,7 +1009,7 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
 
     The message keeps what its pause showed, its calls finished, and never shows the no-report token; one that showed
     only its placeholder ends with the nothing-to-show note. It stays, so the run stays in history. Every run the
-    resume starts asks for quiet delivery, as the turn's own did, and nothing streams.
+    resume starts asks for quiet delivery, as the turn's own did, and nothing streams or shows typing.
     """
     turn = await _turn(
         tmp_path,
@@ -1016,11 +1029,191 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
     assert turn.homeserver.statuses == ["pending", "completed"]
     assert turn.homeserver.bodies[-1] == (f"\n\n{shown_calls}" if show_tool_calls else "Done.")
     assert turn.bot.client.room_redact.await_args_list == []
+    assert turn.bot.client.room_typing.await_args_list == []
     assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
     assert not await turn.pending()
     _first, *after_pause = turn.models["default"].requests
     assert len(after_pause) == len(resumed)
     assert all(_QUIET_DELIVERY in system_text(request.messages) for request in after_pause)
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("silent", [True, False], ids=["silent-schedule", "message"])
+async def test_an_approved_run_shows_typing_unless_its_turn_is_a_silent_schedule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    silent: bool,
+) -> None:
+    """Pins the typing of a reply whose approved run resumes: a message's shows it, a silent schedule's never does."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), answer("A finding.")]},
+    )
+    request = _plain_request(_target())
+
+    await _respond_auto_approved(turn, _silent_schedule(request) if silent else request)
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    typing = [call.args[1] for call in turn.bot.client.room_typing.await_args_list]
+    # The turn types until it pauses, and its resume types again until its answer.
+    assert typing == ([] if silent else [True, False, True, False])
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_whose_answer_ends_with_the_no_report_line_reports_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a silent schedule whose model narrates, calls a tool, and ends with the no-report token: nothing is posted."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=show_tool_calls,
+        tools=[_ECHO_TOOL],
+        scripts={
+            "default": [calls(tool_call("echo", "call-1", text="hi"), content="Let me check."), answer("NO_REPLY")],
+        },
+    )
+
+    assert await turn.runner.generate_response(_silent_schedule(_plain_request(_target()))) == Owned()
+
+    assert (await turn.reply()).state is rl.ReplyState.GONE
+    assert await turn.span_outcomes() == [rl.SpanOutcome.SUPPRESSED]
+    assert turn.homeserver.writes == []
+    assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_s_waiting_message_keeps_its_narration_without_the_no_report_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a silent schedule that narrates before its approval and reports nothing after it.
+
+    The waiting message ends with what it showed, the narration and its finished calls, and never the token.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=show_tool_calls,
+        tools=[_ECHO_TOOL],
+        scripts={
+            "default": [calls(tool_call("echo", "call-1", text="hi"), content="Let me check."), answer("NO_REPLY")],
+        },
+    )
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())))
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    assert turn.homeserver.bodies[-1] == ("Let me check.\n\n🔧 `echo` [1]" if show_tool_calls else "Let me check.")
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+@pytest.mark.parametrize(
+    ("finding", "checker_answer", "members_shown", "members_hidden"),
+    [
+        pytest.param("", "NO_REPLY", None, None, id="nothing-found"),
+        pytest.param(
+            "Writer found a leak.",
+            "NO_REPLY",
+            "**Writer**:\n\n🔧 `echo` [1]\n\nWriter found a leak.",
+            "**Writer**: Writer found a leak.",
+            id="member-finding",
+        ),
+        # The checker reported before the writer's call paused, so its run ended before the resume.
+        pytest.param(
+            "NO_REPLY",
+            "Checker found a leak.",
+            "**Writer**:\n\n🔧 `echo` [1]\n\n**Checker**: Checker found a leak.",
+            "**Checker**: Checker found a leak.",
+            id="finding-before-the-pause",
+        ),
+    ],
+)
+async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+    finding: str,
+    checker_answer: str,
+    members_shown: str | None,
+    members_hidden: str | None,
+) -> None:
+    """Pins a silent schedule's team whose leader answers the no-report token after a member's approved call.
+
+    With nothing found, the waiting message ends with the nothing-to-show note; a member's finding stays shown, even one
+    reported before the pause, without any token.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=show_tool_calls,
+        scripts={
+            "default": [calls(tool_call("delegate_task_to_members", "call-all", task="Check")), answer("NO_REPLY")],
+            "writer-model": [calls(tool_call("echo", "call-1", text="hi")), answer(finding)],
+            "checker-model": [answer(checker_answer)],
+        },
+    )
+    turn.bot.config.agents["writer"].tools = [_ECHO_TOOL]
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())), team=True)
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.statuses[-1] == "completed"
+    assert turn.bot.client.room_typing.await_args_list == []
+    if members_shown is None:
+        ended = "Done."
+    elif show_tool_calls:
+        ended = f"{_TEAM_HEADER}{members_shown}\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [2]"
+    else:
+        ended = f"{_TEAM_HEADER}{members_hidden}\n\n\n*No team consensus - showing individual responses only*"
+    # The pause's message is the only one, and its end is an edit of it.
+    assert len(turn.homeserver.writes) == 2
+    assert turn.homeserver.bodies[-1] == ended
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+async def test_a_silent_schedule_s_resumed_finding_that_streamed_no_text_is_shown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins a silent schedule whose approved run hands its finding over whole, with no text delta, while calls are hidden.
+
+    The waiting message showed nothing of the run's text, yet the finding is the reply's answer, not a report of nothing.
+    """
+    whole = [
+        UsageReported(MessageMetrics()),
+        TurnCompleted(message=Message(role="assistant", content="Disk full."), stop_reason="end"),
+    ]
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=False,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), whole]},
+    )
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())))
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.bodies[-1] == "Disk full."
 
 
 @pytest.mark.usefixtures("echo_tool")

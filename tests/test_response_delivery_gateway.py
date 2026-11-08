@@ -379,7 +379,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
     @pytest.mark.parametrize(
         "text",
-        ["", " \n\t", SILENT_SCHEDULE_NO_REPLY_TOKEN, f"  {SILENT_SCHEDULE_NO_REPLY_TOKEN.lower()}\n"],
+        [
+            "",
+            " \n\t",
+            SILENT_SCHEDULE_NO_REPLY_TOKEN,
+            f"  {SILENT_SCHEDULE_NO_REPLY_TOKEN.lower()}\n",
+            f"Let me check.\n\n {SILENT_SCHEDULE_NO_REPLY_TOKEN} \n\n",
+        ],
     )
     async def test_silent_schedule_no_report_response_is_suppressed_after_hooks(
         self,
@@ -387,7 +393,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         alice: PrincipalStore,
         text: str,
     ) -> None:
-        """Silent whitespace settles as suppressed without creating a Matrix event."""
+        """A silent answer that is blank or whose last non-blank line is the token settles as suppressed, unsent."""
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
 
@@ -570,12 +576,15 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """Display-only tool markers must not turn a silent no-report result into a visible response."""
+        """Display-only tool markers must not turn a silent no-report result into a visible response.
+
+        The marker comes last, so only its stripping leaves the token as the last line.
+        """
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": SILENT_SCHEDULE_NO_REPLY_TOKEN}))
         request = replace(
             self._final_request(
-                f"🔧 `run_shell_command` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}",
+                f"{SILENT_SCHEDULE_NO_REPLY_TOKEN}\n\n🔧 `run_shell_command` [1]",
                 source_kind=SILENT_SCHEDULE_SOURCE_KIND,
             ),
             tool_trace=[
@@ -622,14 +631,23 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         send.assert_not_awaited()
 
-    async def test_silent_schedule_unmatched_tool_marker_no_reply_remains_visible(
+    @pytest.mark.parametrize(
+        ("text", "shown"),
+        [
+            ("🔧 `reported_finding` [1]", True),
+            # A last no-report line withholds the answer whatever comes before it.
+            (f"🔧 `reported_finding` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}", False),
+        ],
+    )
+    async def test_silent_schedule_unmatched_tool_marker_remains_visible_unless_the_answer_reports_nothing(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
+        text: str,
+        shown: bool,
     ) -> None:
         """Marker-shaped findings must not be stripped when they do not match the trace."""
         gateway = _gateway(tmp_path, alice)
-        text = f"🔧 `reported_finding` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}"
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
         request = replace(
             self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
@@ -646,15 +664,45 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await final_in_span(gateway, alice, request)
 
+        assert outcome.ending == (Completed() if shown else Suppressed(Suppression.SILENT_NO_REPORT))
+        assert send.await_count == int(shown)
+
+    @pytest.mark.parametrize(
+        ("text", "shown"),
+        [
+            (f"Checked the inbox.\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}", "Checked the inbox."),
+            (SILENT_SCHEDULE_NO_REPLY_TOKEN, note_segment(NoteKind.NOTHING_TO_SHOW).text),
+        ],
+    )
+    async def test_a_silent_schedule_s_no_report_answer_finishes_the_message_its_reply_shows(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        text: str,
+        shown: str,
+    ) -> None:
+        """A turn whose reply shows a message, such as one approved in place, ends it without the token, unsuppressed."""
+        gateway = _gateway(tmp_path, alice)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$edit", {"body": shown}))
+        request = replace(
+            self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            existing_event_id="$waiting",
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(gateway, alice, request)
+
         assert outcome.ending == Completed()
-        assert outcome.event_id == "$sent"
+        assert outcome.final_visible_event_id == "$waiting"
         send.assert_awaited_once()
+        assert send.await_args.args[2]["m.new_content"]["body"] == shown
 
     @pytest.mark.parametrize(
         ("text", "source_kind"),
         [
             ("Finding", SILENT_SCHEDULE_SOURCE_KIND),
             (f"Finding mentions {SILENT_SCHEDULE_NO_REPLY_TOKEN}", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"{SILENT_SCHEDULE_NO_REPLY_TOKEN}\nFinding after the token", SILENT_SCHEDULE_SOURCE_KIND),
             (f"[{SILENT_SCHEDULE_NO_REPLY_TOKEN}]", SILENT_SCHEDULE_SOURCE_KIND),
             (SILENT_SCHEDULE_NO_REPLY_TOKEN, MESSAGE_SOURCE_KIND),
         ],

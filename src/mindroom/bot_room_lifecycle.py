@@ -100,6 +100,8 @@ class BotRoomLifecycleDeps:
     send_response: _SendRoomResponse
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
+    # Refreshes the shared reply-membership index when it needs it, as an access check does.
+    refresh_memberships: Callable[[], Awaitable[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
@@ -345,6 +347,9 @@ class BotRoomLifecycle:
         # A personal room is a private conversation with its own agent, which greets the owner itself.
         if any(room_id in personal_room_ids(self.deps.runtime_paths, name) for name in self._config().agents):
             return
+        # A room under a chat room continues that room's conversation, whose people already know the router.
+        if await _is_under_a_chat_room(self._client(), room_id):
+            return
         if await self.send_welcome_message_if_empty(room_id, sender):
             return
         msg = f"Failed to complete welcome message for {room_id}"
@@ -546,13 +551,9 @@ class BotRoomLifecycle:
                 return False
 
             if not response.chunk:
-                if visible_to_sender_id is not None and not is_sender_allowed_for_agent_reply_in_room(
-                    visible_to_sender_id,
-                    self.deps.agent_name,
-                    self._config(),
+                if visible_to_sender_id is not None and not await self._inviter_has_reply_access(
                     room_id,
-                    self.deps.runtime_paths,
-                    self.deps.runtime.agent_reply_memberships,
+                    visible_to_sender_id,
                 ):
                     self._logger().debug(
                         "invite_welcome_suppressed_by_reply_permissions",
@@ -574,6 +575,31 @@ class BotRoomLifecycle:
                 self._welcomed_room_ids.add(room_id)
                 self._logger().debug("Welcome message already sent", room_id=room_id)
             return True
+
+    async def _inviter_has_reply_access(self, room_id: str, sender: str) -> bool:
+        """Return whether an inviter may talk to the router in a room, reading the room's members again before a denial.
+
+        The router learns a room's members from its own sync after joining, which the invitation's welcome can precede.
+        """
+        memberships = self.deps.runtime.agent_reply_memberships
+
+        def allowed() -> bool:
+            return is_sender_allowed_for_agent_reply_in_room(
+                sender,
+                self.deps.agent_name,
+                self._config(),
+                room_id,
+                self.deps.runtime_paths,
+                memberships,
+            )
+
+        if allowed():
+            return True
+        memberships.reread_room(room_id)
+        # A refresh already in flight may have listed the router's rooms before this join, so a second one follows it.
+        for _ in range(2):
+            await self.deps.refresh_memberships()
+        return allowed()
 
     async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
         """Generate and deliver one welcome after its caller owns the send boundary."""
@@ -840,8 +866,22 @@ async def _listed_rooms(client: nio.AsyncClient, room_id: str) -> dict[str, str]
 async def _names_parent(client: nio.AsyncClient, room_id: str, parent_id: str) -> bool:
     """Return whether a room names `parent_id` as its canonical parent with `m.space.parent`."""
     response = await client.room_get_state_event(room_id, "m.space.parent", parent_id)
-    return (
-        isinstance(response, nio.RoomGetStateEventResponse)
-        and response.content.get("canonical") is True
-        and bool(response.content.get("via"))
-    )
+    return isinstance(response, nio.RoomGetStateEventResponse) and _is_canonical_parent(response.content)
+
+
+async def _is_under_a_chat_room(client: nio.AsyncClient, room_id: str) -> bool:
+    """Return whether a room names a room that is not a Space as its canonical parent; an unreadable one counts as none."""
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return False
+    for event in response.events:
+        if event["type"] == "m.space.parent" and _is_canonical_parent(event["content"]):
+            create = await client.room_get_state_event(event["state_key"], "m.room.create")
+            if isinstance(create, nio.RoomGetStateEventResponse) and create.content.get("type") != "m.space":
+                return True
+    return False
+
+
+def _is_canonical_parent(content: Mapping[str, object]) -> bool:
+    """Return whether `m.space.parent` content names its room as the canonical parent."""
+    return content.get("canonical") is True and bool(content.get("via"))

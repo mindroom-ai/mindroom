@@ -704,11 +704,12 @@ async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
 ) -> None:
     """A reply resumed after a tool approval runs the hook once, on its paused message, and resumes with its instructions.
 
-    A team's resume names the team's members to the hook. A silent schedule's resume also carries its quiet-delivery
-    guidance after the hook's instructions, as its turn did.
+    A team's resume names the team's members to the hook and runs on the model its run paused on. A silent schedule's
+    resume also carries its quiet-delivery guidance after the hook's instructions, as its turn did.
     """
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.models["large"] = runner.deps.runtime.config.models["default"]
     await _admit_approval_source(runner.deps.replies.store)
     seen = _install_marker_hook(bot)
     tool_context = turn_tool_context(
@@ -721,7 +722,7 @@ async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
         origin=message_origin(sender_id="@user:localhost", source_kind=source_kind),
         correlation_id="corr-resume",
         execution_identity=tool_context.execution_identity,
-        runtime_model_name="default",
+        runtime_model_name="large",
         team_member_names=member_names or (),
         team_mode="coordinate" if member_names else None,
     )
@@ -753,3 +754,5 @@ async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
     items = resumed.await_args.kwargs["system_enrichment_items"]
     assert items[0] == _MARKER
     assert [item.key for item in items] == keys
+    if member_names:
+        assert team_resume.await_args.kwargs["model_name"] == "large"
