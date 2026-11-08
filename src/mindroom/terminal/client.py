@@ -82,43 +82,41 @@ class _TerminalInput:
 
     🔒 Separate connections reach the runner in no promised order, so typing recorded before a judged call could reach
     the shell after it, onto the line that call was judged against. Its holder sends while holding the line's lock; it
-    opens at the first send while viewers are attached and closes once the last one detaches, and the next one opens
-    only after that close.
+    opens at a send while viewers are attached and closes, before any next one opens, with the last viewer.
     """
 
     def __init__(self) -> None:
         self.viewers = 0
-        self._client: aiohttp.ClientSession | None = None
         self._websocket: aiohttp.ClientWebSocketResponse | None = None
         self._reader: asyncio.Task[None] | None = None
 
     async def send(self, frame: dict[str, object], connect: _Connect, line: TerminalLine) -> None:
         if self._websocket is None or self._websocket.closed:
             await self.close()
-            self._client, self._websocket = await connect()
-            self._reader = asyncio.create_task(_drained(self._websocket, line), name="terminal-input-reader")
+            client, self._websocket = await connect()
+            self._reader = asyncio.create_task(_drained(client, self._websocket, line), name="terminal-input-reader")
         try:
             await self._websocket.send_json(frame)
         except (aiohttp.ClientError, ConnectionResetError):
             raise TerminalDetachedError from None
 
     async def close(self) -> None:
-        reader, websocket, client = self._reader, self._websocket, self._client
-        self._reader = self._websocket = self._client = None
-        if reader is not None:
-            reader.cancel()
-            await asyncio.wait({reader})
-        if websocket is not None:
-            await websocket.close()
-        if client is not None:
-            await client.close()
+        if self._reader is not None:
+            self._reader.cancel()
+            await asyncio.wait({self._reader})
+        self._reader = self._websocket = None
 
 
-async def _drained(websocket: aiohttp.ClientWebSocketResponse, line: TerminalLine) -> None:
+async def _drained(
+    client: aiohttp.ClientSession,
+    websocket: aiohttp.ClientWebSocketResponse,
+    line: TerminalLine,
+) -> None:
     """Discard what the runner shows the input connection, which its viewers see; typing it ends with may be lost."""
-    async for _ in websocket:
-        pass
-    line.lost()
+    async with client, websocket:
+        async for _ in websocket:
+            pass
+        line.lost()
 
 
 _inputs: weakref.WeakKeyDictionary[TerminalLine, _TerminalInput] = weakref.WeakKeyDictionary()
