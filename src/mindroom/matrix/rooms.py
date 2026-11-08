@@ -918,7 +918,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool | None:
     # Get the room state events, specifically member events.
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
-        return False if direct_room_ids is not None else None
+        return None if direct_room_ids is None else False
 
     is_dm = _has_is_direct_marker(response.events)
     # After a failed m.direct read only a marked room is known; nothing is cached, so the next call reads it again.
@@ -929,7 +929,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool | None:
 
 
 async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> list[str]:
-    """Return rooms from *room_ids* known not to be DM rooms."""
+    """Return rooms from *room_ids* that are not DM rooms, leaving out rooms whose DM status is unknown."""
     return [room_id for room_id in room_ids if await is_dm_room(client, room_id) is False]
 
 
@@ -968,7 +968,7 @@ async def leave_non_dm_rooms(
     *,
     leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
-    """Leave rooms known not to be DMs, settling each departure before continuing; a later pass retries unknown ones."""
+    """Leave non-DM rooms, settling each departure before continuing, and skip rooms whose DM status is unknown."""
     for room_id in room_ids:
         is_dm = await is_dm_room(client, room_id)
         if is_dm is None:
