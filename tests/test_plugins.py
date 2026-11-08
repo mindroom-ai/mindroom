@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import importlib
 import json
 import os
 import py_compile
 import re
 import sys
 import uuid
+import zipfile
 from contextlib import contextmanager
+from importlib import machinery
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -1460,12 +1463,16 @@ def test_a_manifest_module_imported_by_package_name_is_the_module_mindroom_loads
     runtime_paths = runtime_paths_for(config)
 
     with _forgetting_modules("demo_pkg"):
+        loaded_hooks = []
         for _ in range(2):
             load(config, runtime_paths)
             hooks = cached_plugin_module(plugin_root / "hooks.py")
             assert cached_plugin_module(plugin_root / "tools.py").state() is hooks.STATE
             assert sys.modules["demo_pkg.hooks"] is hooks
+            loaded_hooks.append(hooks)
             _edit(plugin_root / "tools.py")
+        # The reload executed the hooks module again.
+        assert loaded_hooks[0] is not loaded_hooks[1]
 
 
 @_PRIMARY_AND_WORKER
@@ -1495,11 +1502,15 @@ def test_a_plugin_that_puts_its_root_on_sys_path_shares_the_modules_it_imports_b
     runtime_paths = runtime_paths_for(config)
 
     with _forgetting_modules(hooks_name):
+        loaded_hooks = []
         for _ in range(2):
             load(config, runtime_paths)
             hooks = cached_plugin_module(plugin_root / f"{hooks_name}.py")
             assert cached_plugin_module(plugin_root / "tools.py").STATE is hooks.STATE
+            loaded_hooks.append(hooks)
             _edit(plugin_root / "tools.py")
+        # The reload executed the hooks module again.
+        assert loaded_hooks[0] is not loaded_hooks[1]
 
 
 def _same_size_edit_in_place(path: Path, source: str) -> None:
@@ -1511,13 +1522,18 @@ def _same_size_edit_in_place(path: Path, source: str) -> None:
 
 
 @_PRIMARY_AND_WORKER
+@pytest.mark.parametrize("looked_up_before", [False, True], ids=["new", "looked-up-before"])
 def test_a_reload_runs_a_helper_in_a_subpackage_from_its_source_not_a_stale_bytecode_cache(
     tmp_path: Path,
     load: Callable[[Config, RuntimePaths], ConfigPlugins],
+    looked_up_before: bool,
 ) -> None:
     """A same-size edit of a helper in a subpackage that keeps its mtime runs at the next reload."""
     plugin_root = tmp_path / "plugins" / "demo"
     (plugin_root / "lib").mkdir(parents=True)
+    if looked_up_before:
+        # Python caches the finder of a directory it searched before any config named the plugin.
+        machinery.PathFinder.find_spec("util", [str(plugin_root.resolve() / "lib")])
     (plugin_root / "mindroom.plugin.json").write_text(
         json.dumps({"name": "demo", "tools_module": "tools.py", "skills": []}),
         encoding="utf-8",
@@ -1595,6 +1611,103 @@ def test_validation_counts_the_helper_tools_of_a_published_package_plugin_whose_
         assert "helper_tool" in tools
         assert skipped == ()
         assert sys.modules["demo_pkg.helpers"] is installed_helpers
+
+
+def test_a_package_plugin_whose_tools_module_is_its_package_registers_its_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manifest naming the package's ``__init__.py`` as its tools module loads that package and its tools."""
+    name = f"initpkg_{uuid.uuid4().hex}"
+    plugin_root = tmp_path / "site-packages" / name
+    _write_working_tool_plugin(plugin_root, plugin_name="init-pkg", tool_name="init_pkg_tool")
+    (plugin_root / "tools.py").rename(plugin_root / "__init__.py")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "init-pkg", "tools_module": "__init__.py", "skills": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(plugin_root.parent))
+
+    plugins = _load(Config(plugins=[name]), _minimal_runtime_paths(tmp_path))
+
+    assert "init_pkg_tool" in plugins.tools
+    assert cached_plugin_module(plugin_root.resolve() / "__init__.py") is sys.modules[name]
+
+
+@pytest.mark.parametrize("holder", ["sys-path", "sys-modules", "no-spec"])
+def test_a_plugin_whose_package_name_another_module_holds_loads_its_own_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holder: str,
+) -> None:
+    """A plugin whose package name Python gives another module, or cannot look up, still runs its own tools module."""
+    name = f"shadow_{uuid.uuid4().hex}"
+    plugin_root = tmp_path / "site-packages" / name
+    _write_working_tool_plugin(plugin_root, plugin_name="shadowed", tool_name="shadowed_tool")
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(plugin_root.parent))
+    if holder == "sys-path":
+        other = tmp_path / "earlier" / name
+        other.mkdir(parents=True)
+        (other / "__init__.py").write_text("", encoding="utf-8")
+        (other / "tools.py").write_text("raise RuntimeError('another package')\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(other.parent))
+    elif holder == "sys-modules":
+        tools = ModuleType(f"{name}.tools")
+        tools.__file__ = str(tmp_path / "elsewhere" / "tools.py")
+        monkeypatch.setitem(sys.modules, tools.__name__, tools)
+    else:
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+
+    plugins = _load(Config(plugins=[str(plugin_root)]), _minimal_runtime_paths(tmp_path))
+
+    assert "shadowed_tool" in plugins.tools
+    assert cached_plugin_module(plugin_root.resolve() / "tools.py").demo_plugin_tools().__name__ == "DemoTool"
+
+
+def test_a_plugin_imports_a_zip_archive_inside_its_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tools module that puts a zip archive from its own directory on ``sys.path`` imports from it."""
+    monkeypatch.setattr(sys, "path", [*sys.path])
+    vendored = f"vendored_{uuid.uuid4().hex}"
+    plugin_root = tmp_path / "plugins" / "demo"
+    _write_working_tool_plugin(plugin_root, plugin_name="demo", tool_name="zip_tool")
+    with zipfile.ZipFile(plugin_root / "vendor.zip", "w") as archive:
+        archive.writestr(f"{vendored}.py", "VALUE = 'from the archive'\n")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        "import sys\n"
+        "from pathlib import Path\n\n"
+        "sys.path.append(str(Path(__file__).with_name('vendor.zip')))\n\n"
+        f"from {vendored} import VALUE\n",
+        encoding="utf-8",
+    )
+
+    with _forgetting_modules(vendored):
+        _load(Config(plugins=["./plugins/demo"]), _minimal_runtime_paths(tmp_path))
+
+        assert cached_plugin_module(tools_path.resolve()).VALUE == "from the archive"
+
+
+@pytest.mark.usefixtures("restored_builtin_tools")
+def test_a_tools_module_imported_by_its_package_name_before_the_plugin_first_loads_registers_its_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tools module something imported by its package name while the plugin's manifest was broken registers later."""
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text("{", encoding="utf-8")
+    config = Config(plugins=["demo_pkg"])
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+
+    with _forgetting_modules("demo_pkg"):
+        assert "helper_tool" not in _load(config, runtime_paths).tools
+        importlib.import_module("demo_pkg.tools")
+        manifest_path.write_text(manifest, encoding="utf-8")
+        _bump_mtime(manifest_path)
+
+        assert "helper_tool" in _load(config, runtime_paths).tools
 
 
 @pytest.mark.asyncio
@@ -3592,13 +3705,27 @@ def _write_import_task_plugin(plugin_root: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_running(tmp_path: Path) -> None:
+@pytest.mark.parametrize("package", [False, True], ids=["directory", "package"])
+async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package: bool,
+) -> None:
     """Validating or loading a plugin whose module raises after starting a task ends that task too."""
     probe = ModuleType(f"mindroom_test_probe_{uuid.uuid4().hex}")
     probe.tasks = []
     sys.modules[probe.__name__] = probe
-    plugin_root = tmp_path / "plugins" / "fails-after-task"
-    plugin_root.mkdir(parents=True)
+    if package:
+        # Its hooks module loads under the package's name.
+        entry = f"fails_pkg_{uuid.uuid4().hex}"
+        plugin_root = tmp_path / "site-packages" / entry
+        plugin_root.mkdir(parents=True)
+        (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(plugin_root.parent))
+    else:
+        entry = "./plugins/fails-after-task"
+        plugin_root = tmp_path / "plugins" / "fails-after-task"
+        plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
         json.dumps({"name": "fails-after-task", "hooks_module": "hooks.py", "skills": []}),
         encoding="utf-8",
@@ -3607,7 +3734,7 @@ async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_r
     hooks_path.write_text("", encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(Config(plugins=["./plugins/fails-after-task"]), config_path)
+    config = _bind_runtime_paths(Config(plugins=[entry]), config_path)
     hooks_path.write_text(
         "import asyncio\n"
         f"import {probe.__name__} as probe\n"
@@ -3622,7 +3749,7 @@ async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_r
     generation = None
     try:
         with pytest.raises(ConfigRuntimeValidationError, match="setup failed after the poller started"):
-            _bind_runtime_paths(Config(plugins=["./plugins/fails-after-task"]), config_path)
+            _bind_runtime_paths(Config(plugins=[entry]), config_path)
         generation = prepare_plugins(config, runtime_paths_for(config))
         [skipped] = generation.skipped
         assert "setup failed after the poller started" in str(skipped.error)

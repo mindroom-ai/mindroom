@@ -514,9 +514,9 @@ def _importable_name(plugin_root: Path, module_path: Path) -> str | None:
         base = Path(entry).resolve()
         if not plugin_root.is_relative_to(base):
             continue
-        parts = (*plugin_root.relative_to(base).parts, *relative)
-        if parts and all(part.isidentifier() for part in parts) and _names_file(".".join(parts), module_path):
-            return ".".join(parts)
+        name = ".".join((*plugin_root.relative_to(base).parts, *relative))
+        if _names_file(name, module_path):
+            return name
     return None
 
 
