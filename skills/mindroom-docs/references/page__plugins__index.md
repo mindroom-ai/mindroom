@@ -1099,8 +1099,9 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
 `may_send(user_id, event_type)` tells whether that level lets the user send message events of the type, which needs the type's level in the power levels' `events`, else their `events_default`, and in an encrypted room also the level of `m.room.encrypted`, the type messages go out as.
 `RoomPower` also carries the `power_levels` content it read, the room's `creators`, and whether it is `encrypted`.
-Each call to `power()` or `is_direct()` reads again, and `members` is read anew for each request, so a changed name or power level shows on the next one.
-They read through the same bot as membership and answer 503 rather than `False` when the read fails or times out: `Room state read failed; try again.` from `power()`, `Direct message lookup failed; try again.` from `is_direct()`, or `No running MindRoom bot is in this room.`.
+Each call to `power()` reads again, and `members` is read anew for each request, so a changed name or power level shows on the next one.
+Both read through the same bot as membership, and `power()` answers 503 rather than `False` when its read fails or times out: `Room state read failed; try again.`, or `No running MindRoom bot is in this room.`.
+`is_direct()` gives the agents' own answer, which they keep for up to five minutes and which counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` only when the lookup raises or times out.
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.

@@ -116,7 +116,8 @@ class RoomReader:
     async def is_direct(self) -> bool:
         """Return whether MindRoom's agents treat the room as a direct message; a hint for display, never a grant.
 
-        Answers 503 when that cannot be read.
+        It is their own answer, which they keep for a few minutes and which counts a room as not direct when the
+        homeserver answers the lookup with an error; it answers 503 when the lookup raises or times out.
         """
         return await self._room_direct()
 

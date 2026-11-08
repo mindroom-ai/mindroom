@@ -36,13 +36,13 @@ OTHER_ROOM = "!other:example.org"
 
 @pytest.fixture
 def main_app() -> Iterator[FastAPI]:
-    """The global API app, with whatever room-members reader it had put back afterwards, even after a failure."""
+    """The global API app, with whatever room readers it had put back afterwards, even after a failure."""
     state = ensure_app_state(main.app)
-    previous = state.room_members
+    previous = state.room_members, state.room_state, state.room_direct
     try:
         yield main.app
     finally:
-        state.room_members = previous
+        state.room_members, state.room_state, state.room_direct = previous
 
 
 def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
