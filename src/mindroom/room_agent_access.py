@@ -1,7 +1,7 @@
 """Which of a room's agents a Matrix user may use there, and the workspace each of those agents gives them.
 
 The worker Computer and plugin routes share one check: the agent's user ID names a current configured agent, it and
-the requester are both joined to the room, and after a refresh of the reply-membership index the agent's access rules
+the requester are both joined to the room, and once the reply-membership index is current the agent's access rules
 let the requester converse with it there. A refusal raises ``HTTPException``: 403 for a proven no, 503 while agent
 identities or the membership policy are unresolved.
 """
@@ -9,6 +9,7 @@ identities or the membership policy are unresolved.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -23,8 +24,10 @@ from mindroom.contacts.store import contact_room_ids
 from mindroom.entity_resolution import (
     EntityIdentityRegistry,
     MissingManagedEntityAccountError,
+    current_entity_id,
     entity_identity_registry,
 )
+from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -36,10 +39,9 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
     from pathlib import Path
 
-    import nio
     from fastapi import Request
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -48,6 +50,8 @@ if TYPE_CHECKING:
     from mindroom.plugin_http import RoomPower
     from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+logger = get_logger(__name__)
 
 # As long as plugin routes wait for a room read, and the Computer for its whole check.
 _ACCESS_TIMEOUT_SECONDS = 20
@@ -101,6 +105,42 @@ def _may_converse(
         raise HTTPException(503, "Responder membership policy is unresolved.") from None
 
 
+@contextmanager
+def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[None]:
+    """With ``leave_out``, leave an agent out of a listing, logging why, when resolving it fails; else raise.
+
+    These failures belong to one agent: its account is not prepared, its grant rooms are unresolved, or its contacts
+    or stored tool settings are corrupt.
+    """
+    try:
+        yield
+    except (HTTPException, MissingManagedEntityAccountError, ValueError, TypeError) as error:
+        if not leave_out:
+            raise
+        logger.warning(
+            "room_agent_left_out",
+            agent_name=agent_name,
+            room_id=room_id,
+            reason=f"{type(error).__name__}: {error}",
+        )
+
+
+async def _refresh_memberships(
+    requester_id: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    refresh_memberships: Callable[[bool], Awaitable[None]],
+) -> None:
+    """Bring ``memberships`` current for ``requester_id``, whom the live roster of ``room_id`` just showed joined.
+
+    The router applies a join from its own sync, which can trail that roster, so a ready view of the room without the
+    requester refreshes as well; one that has them refreshes only when the index needs it.
+    """
+    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
+
+
 async def admit_room_agent(
     requester_id: str,
     room_id: str,
@@ -109,12 +149,13 @@ async def admit_room_agent(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    client: nio.AsyncClient,
     memberships: AgentReplyMembershipIndex,
+    refresh_memberships: Callable[[bool], Awaitable[None]],
 ) -> str:
     """Return the name of the agent ``agent_user_id`` names once ``requester_id`` may use it in ``room_id``.
 
     ``joined_members`` returns the room's joined users; the check awaits it only once the agent is found.
+    ``refresh_memberships`` refreshes ``memberships`` when they need it, or when its argument says they are stale.
     """
     name = _identities(config, runtime_paths).current_entity_name_for_user_id(agent_user_id, include_router=False)
     if name is None or name not in config.agents:
@@ -122,7 +163,7 @@ async def admit_room_agent(
     joined = await joined_members()
     if requester_id not in joined or agent_user_id not in joined:
         raise HTTPException(403, "Requester and agent must both be joined to this room.")
-    await memberships.refresh(config, runtime_paths, client)
+    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
     if not _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
         raise HTTPException(403, "Requester cannot use this agent.")
     return name
@@ -135,37 +176,49 @@ async def _admitted_agents(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    client: nio.AsyncClient,
     memberships: AgentReplyMembershipIndex,
+    refresh_memberships: Callable[[bool], Awaitable[None]],
 ) -> list[tuple[str, str]]:
-    """Return each agent joined to the room that ``requester_id`` may use there, by name and user ID, in config order."""
-    ids = _identities(config, runtime_paths).current_ids
-    joined_agents = [(name, ids[name].full_id) for name in config.agents if ids[name].full_id in joined]
+    """Return each agent joined to the room that ``requester_id`` may use there, by name and user ID, in config order.
+
+    It leaves out an agent without its account or whose own grant rooms are unresolved, and answers 503 while the
+    router's rooms are unknown and an agent's access waits on them.
+    """
+    joined_agents: list[tuple[str, str]] = []
+    for name in config.agents:
+        with _leaving_out(name, room_id, leave_out=True):
+            user_id = current_entity_id(name, runtime_paths).full_id
+            if user_id in joined:
+                joined_agents.append((name, user_id))
     if not joined_agents:
         return []
-    await memberships.refresh(config, runtime_paths, client)
-    return [
-        (name, user_id)
-        for name, user_id in joined_agents
-        if _may_converse(requester_id, name, room_id, config, runtime_paths, memberships)
-    ]
+    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
+    # Without the router's rooms every room grant is unresolved, and an empty answer would read as no agents.
+    leave_out = memberships.knows_joined_rooms()
+    admitted: list[tuple[str, str]] = []
+    for name, user_id in joined_agents:
+        with _leaving_out(name, room_id, leave_out=leave_out):
+            if _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
+                admitted.append((name, user_id))
+    return admitted
 
 
 def room_execution_identity(
     agent_name: str,
     requester_id: str,
     room_id: str,
+    config: Config,
     runtime_paths: RuntimePaths,
 ) -> ToolExecutionIdentity:
     """Return the identity by which a turn of ``agent_name`` for ``requester_id`` in ``room_id`` resolves its worker.
 
-    A turn's thread never changes its worker or workspace.
+    A turn resolves a bridge alias to the person it stands for, and its thread never changes its worker or workspace.
     """
     return build_tool_execution_identity(
         channel="matrix",
         agent_name=agent_name,
         runtime_paths=runtime_paths,
-        requester_id=requester_id,
+        requester_id=resolve_human_requester_alias(requester_id, config, runtime_paths),
         room_id=room_id,
         thread_id=None,
         resolved_thread_id=None,
@@ -224,7 +277,7 @@ def _workspace(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> AgentWorkspace:
-    identity = room_execution_identity(name, requester_id, room_id, runtime_paths)
+    identity = room_execution_identity(name, requester_id, room_id, config, runtime_paths)
     storage = resolve_agent_storage(name, config, runtime_paths, identity)
     workspace = resolve_agent_workspace_from_state_path(
         name,
@@ -282,8 +335,9 @@ async def room_agent_workspaces(
 ) -> list[AgentWorkspace]:
     """Return the workspaces ``user_id``, joined to the room with ``members``, may open there, under the served config.
 
-    Given ``agent_user_id``, only that agent's, answering as the Computer does; otherwise every one in config order.
-    A contact room opens none. Writing and typing need power to post messages in the room.
+    Given ``agent_user_id``, only that agent's, answering as the Computer does; otherwise every one in config order,
+    leaving out, with a logged reason, one that cannot be resolved. A contact room opens none. Writing and typing need
+    power to post messages in the room.
     """
     snapshot = bind_current_request_snapshot(request)
     config = snapshot.runtime_config
@@ -300,6 +354,7 @@ async def room_agent_workspaces(
     ):
         raise HTTPException(503, _ACCESS_UNAVAILABLE)
     runtime_paths = snapshot.runtime_paths
+    leave_out = agent_user_id is None
     try:
         async with asyncio.timeout(_ACCESS_TIMEOUT_SECONDS):
             if agent_user_id is None:
@@ -309,8 +364,8 @@ async def room_agent_workspaces(
                     members,
                     config=config,
                     runtime_paths=runtime_paths,
-                    client=router.client,
                     memberships=runtime.agent_reply_memberships,
+                    refresh_memberships=runtime.refresh_agent_reply_memberships_when_needed,
                 )
             else:
 
@@ -324,33 +379,35 @@ async def room_agent_workspaces(
                     joined_members,
                     config=config,
                     runtime_paths=runtime_paths,
-                    client=router.client,
                     memberships=runtime.agent_reply_memberships,
+                    refresh_memberships=runtime.refresh_agent_reply_memberships_when_needed,
                 )
                 admitted = [(name, agent_user_id)]
     except TimeoutError:
         raise HTTPException(503, _ACCESS_UNAVAILABLE) from None
-    # Every turn in a contact room runs as its agent's owner, whom the other side must never reach through it.
-    opened = [
-        (name, agent_id)
-        for name, agent_id in admitted
-        if room_id not in contact_room_ids(config, runtime_paths, name, any_status=True)
-    ]
+    opened: list[tuple[str, str]] = []
+    for name, agent_id in admitted:
+        with _leaving_out(name, room_id, leave_out=leave_out):
+            # Every turn in a contact room runs as its agent's owner, whom the other side must never reach through it.
+            if room_id not in contact_room_ids(config, runtime_paths, name, any_status=True):
+                opened.append((name, agent_id))
     if not opened:
-        if agent_user_id is not None:
+        if not leave_out:
             raise HTTPException(403, "No workspace opens through a contact room.")
         return []
     may_send = (await power()).may_send(user_id, "m.room.message")
-    requester_id = resolve_human_requester_alias(user_id, config, runtime_paths)
-    return [
-        _workspace(
-            name,
-            agent_id,
-            requester_id,
-            room_id,
-            may_send=may_send,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-        for name, agent_id in opened
-    ]
+    workspaces: list[AgentWorkspace] = []
+    for name, agent_id in opened:
+        with _leaving_out(name, room_id, leave_out=leave_out):
+            workspaces.append(
+                _workspace(
+                    name,
+                    agent_id,
+                    user_id,
+                    room_id,
+                    may_send=may_send,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                ),
+            )
+    return workspaces

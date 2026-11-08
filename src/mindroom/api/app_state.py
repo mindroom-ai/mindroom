@@ -45,6 +45,9 @@ class EmbeddedRuntime:
 
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler
     agent_reply_memberships: AgentReplyMembershipIndex
+    # Brings those grants current for an access check, refreshing them when they need it, or when its argument says
+    # they trail Matrix, through the runtime's one refresh.
+    refresh_agent_reply_memberships_when_needed: Callable[[bool], Awaitable[None]]
     response_admission_gate: ResponseAdmissionGate
     budget_monitor: BudgetMonitor
     # The scheduled-task owner, whose bots back schedule edits the router may not write.

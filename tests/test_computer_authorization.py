@@ -6,17 +6,25 @@ from unittest.mock import AsyncMock
 import aiohttp
 import nio
 import pytest
+from fastapi import FastAPI
 from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api import main as api_main
+from mindroom.api.app_state import ensure_app_state
+from mindroom.api.computers import ComputerRuntime
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
 from mindroom.orchestration.computer_runtime import _authorize_computer, _computer_browser_provider
+from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 from mindroom.worker_computer.sessions import ComputerError
+from tests.api.test_plugin_room_agents import _Router
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.runtime_fakes import ready_runtime
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 TEST_OPENID_TOKEN = "openid-test"  # noqa: S105 - isolated test credential
@@ -111,6 +119,7 @@ async def test_live_membership_policy_and_canonical_browser_scope(
     )
     if denial == "pending":
         client.joined_members.return_value = nio.JoinedMembersError("unavailable")
+    memberships = AgentReplyMembershipIndex()
     call = _authorize_computer(
         "@alice:example.org",
         "!room:example.org",
@@ -118,7 +127,8 @@ async def test_live_membership_policy_and_canonical_browser_scope(
         config=config,
         runtime_paths=paths,
         client=client,
-        memberships=AgentReplyMembershipIndex(),
+        memberships=memberships,
+        refresh_memberships=lambda _stale: memberships.refresh(config, paths, client),
     )
     if denial:
         with pytest.raises(ComputerError) as error:
@@ -166,6 +176,7 @@ async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: P
         client.joined_rooms.side_effect = failure
     else:
         client.joined_members.side_effect = [joined, failure]
+    memberships = AgentReplyMembershipIndex()
     with capture_logs() as logs, pytest.raises(ComputerError) as error:
         await _authorize_computer(
             "@alice:example.org",
@@ -174,7 +185,8 @@ async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: P
             config=config,
             runtime_paths=paths,
             client=client,
-            memberships=AgentReplyMembershipIndex(),
+            memberships=memberships,
+            refresh_memberships=lambda _stale: memberships.refresh(config, paths, client),
         )
     assert error.value.status_code == 503
     assert "refresh-secret" not in str(logs)
@@ -252,3 +264,116 @@ def test_computer_browser_provider_matches_api_checks(
         with pytest.raises(ComputerError) as error:
             _computer_browser_provider("writer", config, paths)
         assert error.value.status_code == status
+
+
+ROOM = "!room:example.org"
+ALICE = "@alice:example.org"
+ALIAS = "@telegram_alice:example.org"
+
+
+def _bound_computer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    joined_rooms: list[str],
+) -> tuple[ComputerRuntime, AsyncMock, str, RuntimePaths]:
+    """Bind the runtime's Computer authorization with Alice, her bridge alias, and the writer in ``ROOM``.
+
+    Return it, the router's client, the writer's user ID, and the runtime's paths.
+    """
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MATRIX_HOMESERVER": "https://example.org",
+            "MINDROOM_WORKER_BACKEND": "docker",
+            WORKER_COMPUTER_ENABLED_ENV: "true",
+        },
+    )
+    persist_entity_accounts(config, paths)
+    agent_id = entity_ids(config, paths)["writer"].full_id
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=joined_rooms)
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user, None, None) for user in (ALICE, ALIAS, agent_id)],
+        room_id=ROOM,
+    )
+    runtime = ready_runtime(config, paths)
+    runtime.fleet.add(ROUTER_AGENT_NAME, _Router(client, config))  # type: ignore[arg-type]
+    app = FastAPI()
+    api_main.initialize_api_app(app, paths)
+    monkeypatch.setattr(api_main, "app", app)
+    runtime._computer_runtime.bind_if_ready(config, runtime.agent_bots)
+    computer = ensure_app_state(app).computer_runtime
+    assert computer is not None
+    return computer, client, agent_id, paths
+
+
+def _writer(**access: object) -> Config:
+    return Config(
+        agents={
+            "writer": AgentConfig(
+                display_name="Writer",
+                tools=["browser"],
+                worker_tools=["browser"],
+                worker_scope="user_agent",
+                access=ResponderAccessConfig.model_validate(access),
+            ),
+        },
+        authorization={"aliases": {ALICE: [ALIAS]}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_computer_checks_read_only_their_room_once_grants_are_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the router in many rooms, the first check refreshes grants once; each later one reads only its room."""
+    others = [f"!other{index}:example.org" for index in range(60)]
+    computer, client, agent_id, _paths = _bound_computer(
+        tmp_path,
+        monkeypatch,
+        _writer(users=[ALICE]),
+        [ROOM, *others],
+    )
+
+    await computer.authorize(ALICE, ROOM, agent_id)
+    assert (client.joined_rooms.await_count, client.joined_members.await_count) == (1, 1 + 1 + len(others))
+
+    for _ in range(3):
+        before = client.joined_members.await_count
+        await computer.authorize(ALICE, ROOM, agent_id)
+        assert client.joined_members.await_count - before == 1
+    assert client.joined_rooms.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_alias_opens_the_computer_its_person_s_turns_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller signed in as Alice's bridge alias reaches the worker Alice's turns of the agent use, not one of its own."""
+    computer, _client, agent_id, paths = _bound_computer(tmp_path, monkeypatch, _writer(users=[ALICE]), [ROOM])
+
+    alias = await computer.authorize(ALIAS, ROOM, agent_id)
+    person = await computer.authorize(ALICE, ROOM, agent_id)
+
+    turn = build_agent_toolkit_worker_target(
+        "user_agent",
+        "writer",
+        is_private=False,
+        execution_identity=build_tool_execution_identity(
+            channel="matrix",
+            agent_name="writer",
+            runtime_paths=paths,
+            requester_id=ALICE,
+            room_id=ROOM,
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session",
+        ),
+        runtime_paths=paths,
+    )
+    assert alias.requester_id == ALIAS
+    assert alias.spec.worker_key == person.spec.worker_key == turn.worker_key

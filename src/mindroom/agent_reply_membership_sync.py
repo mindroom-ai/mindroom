@@ -124,18 +124,51 @@ class AgentReplyMembershipSync:
         homeserver and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
         A stopping router cancels it at once, and its owner's shutdown drain, the router's, covers one started later.
         """
+        task = self._refresh_task_when_needed(config, refresh, owner=owner, stale=False, after_backoff=True)
+        if task is not None:
+            with suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), 10)
+
+    async def refresh_when_needed(
+        self,
+        config: Config,
+        refresh: Callable[[], Awaitable[None]],
+        *,
+        stale: bool,
+    ) -> None:
+        """Refresh at once when grants need it or the caller saw them trail Matrix, even during backoff, and wait.
+
+        A refresh in flight serves instead of another, and one started here is the router's own, with its backoff, so
+        an access check outside the router's sync reads current grants without refreshing them on every call. Waiting
+        never cancels the refresh, and a refresh that fails or is cancelled leaves the grants as they were.
+        """
+        task = self._refresh_task_when_needed(config, refresh, owner=None, stale=stale, after_backoff=False)
+        if task is not None:
+            await asyncio.wait([task])
+
+    def _refresh_task_when_needed(
+        self,
+        config: Config,
+        refresh: Callable[[], Awaitable[None]],
+        *,
+        owner: object | None,
+        stale: bool,
+        after_backoff: bool,
+    ) -> asyncio.Task[None] | None:
+        """Return the refresh in flight, else start one when grants are ``stale`` or need it, and it is due."""
         if self._refresh_task is None or self._refresh_task.done():
             # A sync gap cannot invalidate explicit-user grants. Do not turn a
             # no-op rebuild into downstream room and call reconciliation scans.
-            if not self._memberships.needs_refresh(config) or time.monotonic() < self._refresh_retry_at:
-                return
+            if not (stale or self._memberships.needs_refresh(config)) or (
+                after_backoff and time.monotonic() < self._refresh_retry_at
+            ):
+                return None
             self._refresh_task = create_background_task(
                 self._refresh(config, refresh),
                 name="agent_reply_membership_refresh",
                 owner=owner,
             )
-        with suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(self._refresh_task), 10)
+        return self._refresh_task
 
     def cancel_refresh(self) -> None:
         """Cancel a running refresh; a later frame starts another while grants still need one."""

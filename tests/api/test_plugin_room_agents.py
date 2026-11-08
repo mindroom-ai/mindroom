@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -15,15 +16,17 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 from fastapi import FastAPI, HTTPException, Request
+from structlog.testing import capture_logs
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
+from mindroom.api.main import bind_embedded_runtime
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
@@ -35,7 +38,7 @@ from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from tests.access_schema_support import joined_members_response
 from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.runtime_fakes import ready_runtime
 from tests.test_generated_agents import _load, _personal, _with_template
 
 if TYPE_CHECKING:
@@ -72,8 +75,39 @@ def _agents() -> dict[str, AgentConfig]:
     }
 
 
+@dataclass
+class _Router:
+    """The running router, recording what each grant refresh's follow-up asks of it."""
+
+    client: SimpleNamespace
+    config: Config
+    running: bool = True
+    follow_ups: list[str] = field(default_factory=list)
+
+    def schedule_pending_invite_reconciliation(self) -> None:
+        self.follow_ups.append("invites")
+
+    async def revoke_reply_authorized_calls(self) -> None:
+        self.follow_ups.append("revoke_calls")
+
+    def schedule_reply_authorized_call_reconciliation(self) -> None:
+        self.follow_ups.append("reconcile_calls")
+
+    def schedule_reply_authorized_call_revocation(self) -> None:
+        self.follow_ups.append("scheduled_revoke")
+
+    def release_pending_turn_journal_replay(self) -> None:
+        pass
+
+    async def recover_pending_turn_journal_events(self) -> None:
+        self.follow_ups.append("turns")
+
+
 class _Room:
-    """A running router, Alice, Bob, Carol, and the ``joined`` agents in ``ROOM``, which the API serves ``config`` for."""
+    """A running router, Alice, Bob, Carol, and the ``joined`` agents in ``ROOM``, which the API serves ``config`` for.
+
+    The runtime is the production one, so each access check refreshes grants through the runtime's own refresh.
+    """
 
     def __init__(self, config: Config, paths: RuntimePaths, joined: tuple[str, ...]) -> None:
         self.paths = paths
@@ -94,18 +128,16 @@ class _Room:
                 ),
             ),
         )
-        self.router = SimpleNamespace(client=self.client, running=True, config=self.config)
+        self.router = _Router(self.client, config)
+        self.runtime = ready_runtime(config, paths)
+        self.runtime.fleet.add(ROUTER_AGENT_NAME, self.router)  # type: ignore[arg-type]
         self.app = FastAPI()
         state = ensure_app_state(self.app)
         state.api_state = config_lifecycle.ApiState(
             threading.Lock(),
             config_lifecycle.ApiSnapshot(1, self.paths, runtime_config=self.config),
         )
-        bind_test_embedded_runtime(
-            self.app,
-            agent_reply_memberships=AgentReplyMembershipIndex(),
-            agent_bot={ROUTER_AGENT_NAME: self.router}.get,
-        )
+        bind_embedded_runtime(self.app, self.runtime.embedded_runtime())
         # Another running bot in the room answers room reads while the router is down.
         bots = {ROUTER_AGENT_NAME: self.router, "other": SimpleNamespace(client=self.client, running=True)}
         bind_room_members(self.app, bots)  # type: ignore[arg-type]
@@ -114,6 +146,14 @@ class _Room:
         """Serve ``config`` from the API, as a config save does."""
         state = config_lifecycle.require_api_state(self.app)
         state.snapshot = config_lifecycle.ApiSnapshot(state.snapshot.generation + 1, self.paths, runtime_config=config)
+
+    def apply(self, config: Config) -> None:
+        """Run ``config`` in the runtime, as a reload does once the API serves it."""
+        self.runtime.config = self.router.config = config
+
+    def refreshes(self) -> int:
+        """How many grant refreshes the router's client has served."""
+        return self.client.joined_rooms.await_count
 
     async def agents(self, user_id: str) -> list[AgentWorkspace]:
         return await (await self._reader(user_id)).agents()
@@ -340,25 +380,106 @@ async def test_a_setting_saved_on_the_dashboard_counts_like_an_authored_one(tmp_
 
 
 @pytest.mark.asyncio
-async def test_pending_membership_policy_and_unprepared_identities_answer_503(tmp_path: Path) -> None:
-    """A room-backed grant Matrix cannot confirm, or an agent without its account, answers 503, never a guess."""
+async def test_pending_membership_policy_answers_503_until_matrix_confirms_it(tmp_path: Path) -> None:
+    """While the router's rooms are unknown, a check that waits on a room grant answers 503, never a guess.
+
+    A caller the agent's own rules admit is still listed.
+    """
     room = _room(
         tmp_path,
-        {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"current_room_members": True})},
+        {
+            "helper": AgentConfig(
+                display_name="Helper",
+                tools=["file"],
+                access={"current_room_members": True, "users": [ALICE]},
+            ),
+        },
     )
     room.client.joined_rooms.return_value = nio.JoinedRoomsError("unavailable")
 
     pending = (503, "Responder membership policy is unresolved.")
-    assert await _status(room.agents(ALICE)) == pending
-    assert await _status(room.agent(ALICE, room.ids["helper"])) == pending
-
-    room.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM])
+    assert await _status(room.agents(BOB)) == pending
+    assert await _status(room.agent(BOB, room.ids["helper"])) == pending
     assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
 
-    unprepared = Config(agents={**room.config.agents, "newcomer": AgentConfig(display_name="Newcomer")})
-    room.serve(unprepared)
-    room.router.config = unprepared
-    assert await _status(room.agents(ALICE)) == (503, "Agent identities are not ready.")
+    room.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM])
+    assert _access(await room.agents(BOB)) == [("helper", "read", "none")]
+
+
+@pytest.mark.asyncio
+async def test_a_member_who_joined_after_the_last_refresh_is_admitted_after_one_refresh(tmp_path: Path) -> None:
+    """The router applies joins from its own sync, which can trail the room's live roster, so one refresh catches up."""
+    dave = "@dave:localhost"
+    room = _room(
+        tmp_path,
+        {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"current_room_members": True})},
+    )
+    assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
+    assert room.refreshes() == 1
+
+    room.client.joined_members.return_value = joined_members_response(ROOM, ALICE, BOB, CAROL, dave, *room.ids.values())
+    assert [workspace.name for workspace in await room.agents(dave)] == ["helper"]
+    assert room.refreshes() == 2
+
+    for _ in range(2):
+        assert (await room.agent(dave, room.ids["helper"])).name == "helper"
+        assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
+    assert room.refreshes() == 2
+
+
+def _broken(room: _Room, kind: str) -> str:
+    """Add an agent ``kind`` breaks, joined to the room unless it has no account, and return its user ID."""
+    agents = _agents()
+    if kind == "unprepared":
+        agents["broken"] = AgentConfig(display_name="Broken", tools=["file"], access={"users": [ALICE]})
+        config = Config(agents=agents)
+        room.serve(config)
+        room.apply(config)
+        return "@mindroom_broken:localhost"
+    if kind == "pending":
+        # A grant room MindRoom has not created stays unresolved.
+        agents["broken"] = AgentConfig(display_name="Broken", tools=["file"], access={"members_of_rooms": ["lobby"]})
+    else:
+        agents["broken"] = AgentConfig(display_name="Broken", tools=["coding"], access={"users": [ALICE]})
+        get_runtime_credentials_manager(room.paths).save_credentials("coding", {"exclude_tools": 5})
+    config = Config(agents=agents, rooms={"lobby": {}})
+    ids = entity_ids(config, room.paths)
+    room.ids["broken"] = ids["broken"].full_id
+    members = [ALICE, BOB, CAROL, *(matrix_id.full_id for matrix_id in ids.values())]
+    room.client.joined_members.return_value = joined_members_response(ROOM, *members)
+    room.serve(config)
+    room.apply(config)
+    return room.ids["broken"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "error"),
+    [
+        ("unprepared", (503, "Agent identities are not ready.")),
+        ("pending", (503, "Responder membership policy is unresolved.")),
+        ("tool_setting", TypeError),
+    ],
+)
+@pytest.mark.asyncio
+async def test_one_agent_that_cannot_be_resolved_is_left_out_and_the_rest_are_listed(
+    tmp_path: Path,
+    kind: str,
+    error: tuple[int, str] | type[Exception],
+) -> None:
+    """An agent without its account, with an unresolved grant room, or with a corrupt stored setting fails only itself."""
+    room = _room(tmp_path, _agents())
+    broken = _broken(room, kind)
+
+    with capture_logs() as logs:
+        listed = await room.agents(ALICE)
+
+    assert _access(listed) == [("coder", "write", "type"), ("notes", "read", "none")]
+    assert [log["agent_name"] for log in logs if log["event"] == "room_agent_left_out"] == ["broken"]
+    if isinstance(error, tuple):
+        assert await _status(room.agent(ALICE, broken)) == error
+    else:
+        with pytest.raises(error):
+            await room.agent(ALICE, broken)
 
 
 @pytest.mark.asyncio
@@ -376,7 +497,7 @@ async def test_a_changed_membership_policy_waits_for_the_runtime_without_touchin
     assert await _status(room.agents(ALICE)) == (503, "Agent access is unavailable; try again.")
     room.client.joined_rooms.assert_not_called()
 
-    room.router.config = saved
+    room.apply(saved)
     assert _access(await room.agents(CAROL)) == [("coder", "write", "none"), ("notes", "read", "none")]
 
 
@@ -430,3 +551,75 @@ async def test_a_contact_room_opens_no_workspace(tmp_path: Path) -> None:
 
     assert await room.agents(ALICE) == []
     assert await _status(room.agent(ALICE, agent_id)) == (403, "No workspace opens through a contact room.")
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_contacts_store_leaves_out_only_the_personal_agent(tmp_path: Path) -> None:
+    """Only a personal agent reads the contacts store, so a corrupt one leaves out that agent and lists the rest."""
+    data = _with_template()
+    data["personal_agents"]["mind"]["agent"] |= {"contacts": {}, "tools": ["file"]}
+    data["agents"]["creator"]["access"] = {"users": [ALICE]}
+    room = _Room(
+        _load(tmp_path, data, entries=[_personal(ALICE)]),
+        test_runtime_paths(tmp_path),
+        ("mind_alice", "creator"),
+    )
+    tracking_dir(room.paths).mkdir(parents=True, exist_ok=True)
+    (tracking_dir(room.paths) / "contacts.json").write_text("{not json", encoding="utf-8")
+
+    assert [workspace.name for workspace in await room.agents(ALICE)] == ["creator"]
+    with pytest.raises(ValueError, match="Contacts file"):
+        await room.agent(ALICE, room.ids["mind_alice"])
+
+
+@pytest.mark.asyncio
+async def test_requests_refresh_grants_only_when_they_need_it_and_share_one_refresh(tmp_path: Path) -> None:
+    """With the router in many rooms, a burst of requests makes one refresh, and once grants are current none makes one.
+
+    Each request still reads the room's own members once.
+    """
+    room = _room(tmp_path, _agents())
+    others = [f"!other{index}:localhost" for index in range(60)]
+    room.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM, *others])
+
+    def grant_room_reads() -> int:
+        return sum(call.args[0] != ROOM for call in room.client.joined_members.await_args_list)
+
+    burst = await asyncio.gather(*(room.agents(ALICE) for _ in range(5)))
+
+    assert [_access(listed) for listed in burst] == [[("coder", "write", "type"), ("notes", "read", "none")]] * 5
+    assert (room.refreshes(), grant_room_reads()) == (1, len(others))
+    for _ in range(3):
+        before = room.client.joined_members.await_count
+        assert len(await room.agents(BOB)) == 2
+        assert (await room.agent(CAROL, room.ids["notes"])).name == "notes"
+        assert room.client.joined_members.await_count - before == 2
+    assert (room.refreshes(), grant_room_reads()) == (1, len(others))
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_a_request_starts_while_the_router_backs_off_runs_the_runtime_follow_up_once(
+    tmp_path: Path,
+) -> None:
+    """A request refreshes grants the router's backoff left stale, and turns, calls, and invites resume once."""
+    room = _room(tmp_path, _agents())
+    membership_sync = room.runtime.agent_reply_membership_sync
+
+    async def router_frame() -> None:
+        await membership_sync.refresh_if_needed(room.runtime.config, room.runtime.refresh_agent_reply_memberships)
+        assert await wait_for_background_tasks(5, owner=room.runtime.turn_recovery.task_owner)
+
+    room.client.joined_rooms.return_value = nio.JoinedRoomsError("unavailable")
+    await router_frame()
+    assert room.runtime.agent_reply_memberships.needs_refresh(room.config)
+    room.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM])
+    await router_frame()
+    assert room.refreshes() == 1, "the router backs off"
+    room.router.follow_ups.clear()
+
+    assert len(await room.agents(ALICE)) == 2
+    await router_frame()
+
+    assert room.refreshes() == 2
+    assert not room.runtime.agent_reply_memberships.needs_refresh(room.config)
+    assert sorted(room.router.follow_ups) == ["invites", "reconcile_calls", "revoke_calls", "turns"]

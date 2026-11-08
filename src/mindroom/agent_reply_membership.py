@@ -171,6 +171,25 @@ class AgentReplyMembershipIndex:
             for room in snapshot.rooms
         )
 
+    def knows_joined_rooms(self) -> bool:
+        """Return whether the snapshot knows the router's rooms, which an invalidation or a failed room list unsets."""
+        return self._snapshot.possible_joined_room_ids is not None
+
+    def misses_member(
+        self,
+        sender_id: str,
+        room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether the snapshot holds one room ready without a sender, as before the router applies their join."""
+        snapshot = self._snapshot
+        return (
+            snapshot.policy_signature == _agent_reply_membership_policy_signature(config)
+            and any(room.ready and room.room_id == room_id for room in snapshot.rooms)
+            and not self.is_current_room_member(sender_id, room_id, config, runtime_paths)
+        )
+
     def awaits_router_join(
         self,
         sender_id: str,
