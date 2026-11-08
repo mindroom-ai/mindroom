@@ -2213,7 +2213,7 @@ def test_listing_targets_never_walk_out_through_parent_traversal(tmp_path: Path)
     (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
     target = knowledge_file_listing_module._ListingTarget(root / "..", "dir")
 
-    with knowledge_file_listing_module._pinned_directory(root) as root_fd:
+    with knowledge_file_listing_module.pinned_canonical_directory(root) as root_fd:
         assert list(knowledge_file_listing_module._iter_target_files(root_fd, target, root)) == []
 
 

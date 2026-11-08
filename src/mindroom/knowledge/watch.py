@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+import os
+from contextlib import aclosing, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from watchfiles import Change, awatch
+from watchfiles import Change, DefaultFilter, awatch
 
-from mindroom.knowledge.file_listing import include_semantic_knowledge_relative_path
+from mindroom.knowledge.file_listing import include_semantic_knowledge_relative_path, pinned_canonical_directory
 from mindroom.knowledge.legacy_chroma_storage import chroma_era_shared_base_ids
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
@@ -27,6 +28,12 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
 logger = get_logger(__name__)
+
+# Each new folder makes the watcher walk the base again, which takes time in proportion to its folders.
+_MAX_WATCHED_FOLDERS = 10_000
+# Watchfiles drops every change below these folders, so watching them would only use up watches.
+_IGNORED_FOLDER_NAMES = frozenset(DefaultFilter.ignore_dirs)
+_DEFAULT_FILTER = DefaultFilter()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +135,30 @@ def _shared_poll_targets(
     return targets
 
 
+def _watched_folders(root: Path) -> list[Path]:
+    """Return the base folder and the folders below it, reached without a link, up to the cap."""
+    folders: list[Path] = []
+    with pinned_canonical_directory(root) as root_fd:
+        for folder, subfolders, _files, _folder_fd in os.fwalk(".", dir_fd=root_fd):
+            subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES]
+            folders.append(root / folder)
+            if len(folders) == _MAX_WATCHED_FOLDERS:
+                break
+    return folders
+
+
+def _is_new_watched_folder(change: Change, path: str) -> bool:
+    changed = Path(path)
+    return (
+        change == Change.added and changed.name not in _IGNORED_FOLDER_NAMES and changed.is_dir(follow_symlinks=False)
+    )
+
+
+def _report_change(change: Change, path: str) -> bool:
+    """Filter changes as watchfiles does by default, but report every new folder, since it must be watched too."""
+    return _DEFAULT_FILTER(change, path) or _is_new_watched_folder(change, path)
+
+
 def _changed_path_is_indexable(target: _WatchTarget, config: Config, changed_path: Path) -> bool:
     try:
         relative_path = changed_path.relative_to(target.path)
@@ -219,11 +250,46 @@ class KnowledgeSourceWatcher:
         runtime_paths: RuntimePaths,
         stop_event: asyncio.Event,
     ) -> None:
+        # Changes made while the watcher restarts go unseen, so the first batch after a restart refreshes the base.
+        refresh_pending = False
+        warned_cap = False
         try:
-            async for changes in awatch(target.path, stop_event=stop_event):
-                if not changes or not _changes_include_indexable_path(target, config, changes):
-                    continue
-                await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
+            while not stop_event.is_set():
+                folders = await asyncio.to_thread(_watched_folders, target.path)
+                if len(folders) == _MAX_WATCHED_FOLDERS and not warned_cap:
+                    warned_cap = True
+                    logger.warning(
+                        "Knowledge filesystem watcher watches only some folders; changes in the others refresh on search",
+                        knowledge_path=str(target.path),
+                        base_ids=list(target.base_ids),
+                        watched_folders=len(folders),
+                    )
+                # A recursive watch follows links out of the base, so each folder is watched alone.
+                # Yielding on timeouts delivers a first batch within a second of the watch starting, even without a change.
+                watcher = awatch(
+                    *folders,
+                    watch_filter=_report_change,
+                    stop_event=stop_event,
+                    rust_timeout=1_000,
+                    yield_on_timeout=True,
+                    recursive=False,
+                )
+                try:
+                    async with aclosing(watcher) as batches:
+                        async for changes in batches:
+                            if any(_is_new_watched_folder(change, path) for change, path in changes):
+                                refresh_pending = True
+                                break
+                            if refresh_pending or _changes_include_indexable_path(target, config, changes):
+                                refresh_pending = False
+                                await self._schedule_refresh_for_target(
+                                    target,
+                                    config=config,
+                                    runtime_paths=runtime_paths,
+                                )
+                except FileNotFoundError:
+                    # A folder disappeared between the walk and the watch, so walk again.
+                    refresh_pending = True
         except Exception:
             logger.exception(
                 "Knowledge filesystem watcher stopped after failure",

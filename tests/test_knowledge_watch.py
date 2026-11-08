@@ -1,0 +1,216 @@
+"""Shared knowledge folder watching, driven by real filesystem events."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import aclosing, asynccontextmanager
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
+
+import pytest
+from structlog.testing import capture_logs
+from watchfiles import Change
+
+import mindroom.knowledge.watch as knowledge_watch
+from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, runtime_paths_for
+from tests.knowledge_test_support import _config
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+    from pathlib import Path
+
+
+@dataclass
+class _RecordedWatch:
+    """The folders each watcher start watched, whether recursively, and every batch of changes it received."""
+
+    starts: list[tuple[frozenset[str], bool]] = field(default_factory=list)
+    batches: list[set[tuple[Change, str]]] = field(default_factory=list)
+
+    def changed_paths(self) -> set[str]:
+        return {path for batch in self.batches for _change, path in batch}
+
+
+@pytest.fixture
+def recorded_watch(monkeypatch: pytest.MonkeyPatch) -> _RecordedWatch:
+    """Record the real watcher's starts and batches without changing what it does."""
+    recorded = _RecordedWatch()
+    real_awatch = knowledge_watch.awatch
+
+    async def _recording_awatch(*paths: Path, **kwargs: object) -> AsyncIterator[set[tuple[Change, str]]]:
+        recorded.starts.append((frozenset(map(str, paths)), bool(kwargs.get("recursive", True))))
+        async with aclosing(real_awatch(*paths, **kwargs)) as batches:
+            async for changes in batches:
+                recorded.batches.append(changes)
+                yield changes
+
+    monkeypatch.setattr(knowledge_watch, "awatch", _recording_awatch)
+    return recorded
+
+
+@pytest.fixture
+def docs(tmp_path: Path) -> Path:
+    """Return a canonical base folder holding one subfolder, ``notes``."""
+    path = tmp_path / "docs"
+    (path / "notes").mkdir(parents=True)
+    return path.resolve()
+
+
+async def _until(condition: Callable[[], object], failure: str) -> None:
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not condition():  # noqa: ASYNC110 - the states polled here are plain attributes
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        pytest.fail(failure)
+
+
+async def _write_until_seen(recorded: _RecordedWatch, path: Path) -> None:
+    """Write ``path`` again until the watcher reports it, since a folder created moments ago may not be watched yet."""
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while str(path) not in recorded.changed_paths():
+                path.write_text("changed", encoding="utf-8")
+                await asyncio.sleep(0.2)
+    except TimeoutError:
+        pytest.fail(f"the watcher never reported {path}")
+
+
+@asynccontextmanager
+async def _watching(tmp_path: Path, docs: Path, scheduler: MagicMock, recorded: _RecordedWatch) -> AsyncIterator[None]:
+    """Watch the ``docs`` base from its first watcher start until the block ends."""
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"], watch=True)
+    watcher = KnowledgeSourceWatcher(scheduler, runtime_paths_for(config))
+    await watcher.sync(config)
+    try:
+        await _until(lambda: recorded.starts, "the watcher did not start")
+        yield
+    finally:
+        await watcher.stop()
+
+
+def _watched_paths(recorded: _RecordedWatch) -> set[str]:
+    return {path for folders, _recursive in recorded.starts for path in folders}
+
+
+@pytest.mark.asyncio
+async def test_watch_never_follows_a_link_out_of_the_base(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+) -> None:
+    """A link inside a base adds no watch outside it, so changes behind the link schedule no refresh."""
+    outside = tmp_path / "outside"
+    (outside / "deep").mkdir(parents=True)
+    (docs / "linked").symlink_to(outside, target_is_directory=True)
+    inside = docs / "notes" / "inside.md"
+
+    async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
+        (outside / "deep" / "outside.md").write_text("outside", encoding="utf-8")
+        inside.write_text("inside", encoding="utf-8")
+        await _until(lambda: str(inside) in recorded_watch.changed_paths(), "the change inside the base was not seen")
+
+    # Changes arrive in order, so the change behind the link, made first, would have arrived by now.
+    assert not [path for path in recorded_watch.changed_paths() if path.startswith(str(docs / "linked"))]
+    assert recorded_watch.starts == [(frozenset({str(docs), str(docs / "notes")}), False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_folder", ["new/nested", "drafts~"], ids=["nested", "name-watchfiles-filters"])
+async def test_watch_refreshes_for_changes_in_existing_and_new_folders(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+    new_folder: str,
+) -> None:
+    """A change in a folder that existed at start, or in one created while watching, schedules a refresh."""
+    scheduler = MagicMock()
+    async with _watching(tmp_path, docs, scheduler, recorded_watch):
+        await _write_until_seen(recorded_watch, docs / "notes" / "existing.md")
+        await _until(lambda: scheduler.schedule_refresh.called, "a change in an existing folder did not refresh")
+
+        (docs / new_folder).mkdir(parents=True)
+        scheduler.reset_mock()
+        await _write_until_seen(recorded_watch, docs / new_folder / "doc.md")
+        await _until(lambda: scheduler.schedule_refresh.called, "a change in a new folder did not refresh")
+
+    assert scheduler.schedule_refresh.call_args.args == ("docs",)
+
+
+@pytest.mark.asyncio
+async def test_watch_refreshes_for_a_file_written_into_a_new_folder_at_once(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+) -> None:
+    """A file written into a new folder before the watcher reaches that folder still schedules a refresh."""
+    scheduler = MagicMock()
+    async with _watching(tmp_path, docs, scheduler, recorded_watch):
+        (docs / "fresh").mkdir()
+        (docs / "fresh" / "doc.md").write_text("fresh", encoding="utf-8")
+        await _until(lambda: scheduler.schedule_refresh.called, "the file in the new folder did not refresh")
+
+
+@pytest.mark.asyncio
+async def test_watch_keeps_watching_when_a_folder_disappears_before_its_watch_starts(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A folder deleted between finding it and watching it makes the watcher look again instead of stopping."""
+    real_watched_folders = knowledge_watch._watched_folders
+    walks: list[Path] = []
+
+    def _first_walk_finds_a_deleted_folder(root: Path) -> list[Path]:
+        walks.append(root)
+        folders = real_watched_folders(root)
+        return [*folders, root / "deleted"] if len(walks) == 1 else folders
+
+    monkeypatch.setattr(knowledge_watch, "_watched_folders", _first_walk_finds_a_deleted_folder)
+    scheduler = MagicMock()
+    async with _watching(tmp_path, docs, scheduler, recorded_watch):
+        await _until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
+        await _until(lambda: scheduler.schedule_refresh.called, "the watcher did not refresh after looking again")
+        await _write_until_seen(recorded_watch, docs / "notes" / "doc.md")
+
+
+@pytest.mark.asyncio
+async def test_watch_skips_folders_whose_changes_are_ignored(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+) -> None:
+    """Version-control and dependency folders, whose changes never refresh a base, use no watches."""
+    for ignored in (".git/objects", "node_modules/pkg"):
+        (docs / ignored).mkdir(parents=True)
+
+    async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
+        pass
+
+    assert not [path for path in _watched_paths(recorded_watch) if ".git" in path or "node_modules" in path]
+    assert not knowledge_watch._is_new_watched_folder(Change.added, str(docs / "node_modules"))
+    assert knowledge_watch._is_new_watched_folder(Change.added, str(docs / "notes"))
+
+
+@pytest.mark.asyncio
+async def test_watch_stops_at_the_folder_cap(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base with more folders than the cap watches only that many, and warns once however often it looks again."""
+    monkeypatch.setattr(knowledge_watch, "_MAX_WATCHED_FOLDERS", 2)
+    (docs / "more").mkdir()
+
+    with capture_logs() as logs:
+        async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
+            (docs / "another").mkdir()
+            await _until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
+
+    assert [len(folders) for folders, _recursive in recorded_watch.starts] == [2, 2]
+    warnings = [entry for entry in logs if entry["event"].startswith("Knowledge filesystem watcher watches only")]
+    assert [entry["watched_folders"] for entry in warnings] == [2]
