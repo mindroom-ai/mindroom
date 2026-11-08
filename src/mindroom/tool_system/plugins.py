@@ -916,7 +916,8 @@ class PluginRoutesApp:
 
         async def tracked_send(message: Message) -> None:
             if closed:
-                # As when its client left: the route ends rather than send on a closed websocket.
+                # As when its client left: the route ends rather than send on a closed websocket. Deferred, as
+                # FastAPI is above: workers and slim entry points load this module too.
                 from starlette.websockets import WebSocketDisconnect  # noqa: PLC0415
 
                 raise WebSocketDisconnect(1012)
