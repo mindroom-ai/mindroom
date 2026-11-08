@@ -211,6 +211,48 @@ async def test_watch_keeps_watching_when_a_folder_disappears_before_its_watch_st
 
 
 @pytest.mark.asyncio
+async def test_watch_stops_and_logs_when_scheduling_a_refresh_fails(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+) -> None:
+    """A missing file while scheduling a refresh stops the watcher with its error, instead of being taken for a vanished folder."""
+    scheduler = MagicMock()
+    scheduler.schedule_refresh.side_effect = FileNotFoundError("missing")
+    with capture_logs() as logs:
+        async with _watching(tmp_path, docs, scheduler, recorded_watch):
+            (docs / "notes" / "doc.md").write_text("changed", encoding="utf-8")
+            await _until(
+                lambda: any(entry["event"] == "Knowledge filesystem watcher stopped after failure" for entry in logs),
+                "the watcher did not stop after the failure",
+            )
+
+    assert len(recorded_watch.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_watch_covers_a_folder_created_while_its_watch_starts(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A folder created after the watcher found its parent, but before watching began, is watched too."""
+    real_watched_folders = knowledge_watch._watched_folders
+    late = docs / "notes" / "late"
+
+    def _folder_appears_after_the_walk(root: Path) -> list[Path]:
+        folders = real_watched_folders(root)
+        late.mkdir(exist_ok=True)
+        return folders
+
+    monkeypatch.setattr(knowledge_watch, "_watched_folders", _folder_appears_after_the_walk)
+    async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
+        monkeypatch.setattr(knowledge_watch, "_watched_folders", real_watched_folders)
+        await _write_until_seen(recorded_watch, late / "doc.md")
+
+
+@pytest.mark.asyncio
 async def test_watch_skips_folders_whose_changes_are_ignored(
     tmp_path: Path,
     docs: Path,
@@ -245,5 +287,7 @@ async def test_watch_stops_at_the_folder_cap(
             await _until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
 
     assert [len(folders) for folders, _recursive in recorded_watch.starts] == [2, 2]
-    warnings = [entry for entry in logs if entry["event"].startswith("Knowledge filesystem watcher watches only")]
+    warnings = [
+        entry for entry in logs if entry["event"].startswith("Knowledge filesystem watcher stops at its folder cap")
+    ]
     assert [entry["watched_folders"] for entry in warnings] == [2]
