@@ -27,6 +27,7 @@ from mindroom.external_triggers.store import external_trigger_replay_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from multiprocessing.process import BaseProcess
     from multiprocessing.queues import Queue
     from multiprocessing.synchronize import Event
 
@@ -42,6 +43,19 @@ def _scope_path(tmp_path: Path, scope: str = "campground") -> Path:
     path = tmp_path / "external_triggers" / "replay" / f"{hashlib.sha256(scope.encode()).hexdigest()}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _worker_results[T](result_queue: Queue[T], processes: list[BaseProcess]) -> list[T]:
+    """Return one result per worker, however long a busy machine takes to start them; fail once all exited without one."""
+    results: list[T] = []
+    while len(results) < len(processes):
+        # A worker flushes its result before it exits, so one read after all exited still finds every result.
+        running = any(process.is_alive() for process in processes)
+        try:
+            results.append(result_queue.get(timeout=0.05))
+        except Empty:
+            assert running, "a replay-store worker exited without a result"
+    return results
 
 
 def _claim_nonce_with_slow_read_worker(
@@ -154,10 +168,12 @@ def test_shared_store_processes_coordinate_nonce_claims(tmp_path: Path) -> None:
     context = multiprocessing.get_context("spawn")
     start_event = context.Event()
     result_queue = context.Queue()
+    # A worker a failure leaves running ends with the test worker instead of outliving it.
     processes = [
         context.Process(
             target=_claim_nonce_with_slow_read_worker,
             args=(str(tmp_path), start_event, result_queue),
+            daemon=True,
         )
         for _ in range(2)
     ]
@@ -166,26 +182,13 @@ def test_shared_store_processes_coordinate_nonce_claims(tmp_path: Path) -> None:
         process.start()
     start_event.set()
 
-    results: list[bool] = []
-    try:
-        for _ in processes:
-            try:
-                status, payload = result_queue.get(timeout=10)
-            except Empty as exc:
-                msg = "timed out waiting for replay-store worker result"
-                raise AssertionError(msg) from exc
-            assert status == "ok", payload
-            assert isinstance(payload, bool), payload
-            results.append(payload)
-    finally:
-        for process in processes:
-            process.join(timeout=10)
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=5)
+    results = _worker_results(result_queue, processes)
+    for process in processes:
+        process.join()
 
+    assert all(status == "ok" and isinstance(payload, bool) for status, payload in results), results
     assert [process.exitcode for process in processes] == [0, 0]
-    assert sorted(results) == [False, True]
+    assert sorted(payload for _status, payload in results) == [False, True]
 
 
 def test_claims_read_and_rewrite_only_their_own_scope(tmp_path: Path) -> None:
@@ -908,10 +911,12 @@ def test_concurrent_first_deliveries_reserve_one_thread_key(tmp_path: Path) -> N
     context = multiprocessing.get_context("spawn")
     start_event = context.Event()
     result_queue = context.Queue()
+    # A worker a failure leaves running ends with the test worker instead of outliving it.
     processes = [
         context.Process(
             target=_claim_thread_key_with_slow_read_worker,
             args=(str(tmp_path), start_event, result_queue),
+            daemon=True,
         )
         for _ in range(2)
     ]
@@ -920,22 +925,10 @@ def test_concurrent_first_deliveries_reserve_one_thread_key(tmp_path: Path) -> N
         process.start()
     start_event.set()
 
-    results: list[str] = []
-    try:
-        for _ in processes:
-            try:
-                status, payload = result_queue.get(timeout=10)
-            except Empty as exc:
-                msg = "timed out waiting for replay-store worker result"
-                raise AssertionError(msg) from exc
-            assert status == "ok", payload
-            results.append(payload)
-    finally:
-        for process in processes:
-            process.join(timeout=10)
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=5)
+    results = _worker_results(result_queue, processes)
+    for process in processes:
+        process.join()
 
+    assert all(status == "ok" for status, _payload in results), results
     assert [process.exitcode for process in processes] == [0, 0]
-    assert sorted(results) == ["fresh", "pending"]
+    assert sorted(payload for _status, payload in results) == ["fresh", "pending"]
