@@ -164,7 +164,7 @@ _PUBLISHED = PluginGeneration()
 
 # Each plugin's ``PluginLifecycle.process_state`` by plugin name, kept for the process, so it outlives reloads.
 _PROCESS_STATE: dict[str, dict[str, Any]] = {}
-# Each module a plugin load imported from the plugin's root under a name outside the plugin namespaces, such as
+# Each module a plugin load imported from the plugin's root under a name outside the canonical prefix, such as
 # ``demo_pkg.helpers``, with that root: one of the plugin's modules, so its next load imports it and registers its tools
 # again.
 _ROOT_MODULES: dict[str, Path] = {}
@@ -379,16 +379,15 @@ def _canonical_plugin_modules() -> dict[str, ModuleType]:
 def _plugin_modules(plugin: plugin_imports._PluginBase) -> dict[str, ModuleType]:
     """Return one plugin's canonical modules: those under its package and those its loads imported from its root."""
     package_name = plugin_imports._plugin_package_name(plugin.name, plugin.root)
-    return {
+    modules = {
         module_name: module
         for module_name, module in tuple(sys.modules.items())
-        if module is not None
-        and (
-            module_name == package_name
-            or module_name.startswith(f"{package_name}.")
-            or _ROOT_MODULES.get(module_name) == plugin.root
-        )
+        if (module_name == package_name or module_name.startswith(f"{package_name}.")) and module is not None
     }
+    for module_name, root in tuple(_ROOT_MODULES.items()):
+        if root == plugin.root and (module := sys.modules.get(module_name)) is not None:
+            modules[module_name] = module
+    return modules
 
 
 def _evict_plugin_modules(plugin: plugin_imports._PluginBase) -> dict[str, ModuleType]:
@@ -404,13 +403,13 @@ def _evict_plugin_modules(plugin: plugin_imports._PluginBase) -> dict[str, Modul
 
 
 def _imported_from_root(root: Path, loaded_before: set[str]) -> dict[str, ModuleType]:
-    """Return the modules imported from ``root`` since ``loaded_before`` under a name outside the plugin namespaces."""
+    """Return the modules imported from ``root`` since ``loaded_before`` under a name outside the canonical prefix."""
     return {
         module_name: module
         for module_name, module in tuple(sys.modules.items())
         if module is not None
         and module_name not in loaded_before
-        and not module_name.startswith((PLUGIN_MODULE_PREFIX, CANDIDATE_PLUGIN_MODULE_PREFIX))
+        and not module_name.startswith(PLUGIN_MODULE_PREFIX)
         and _module_within(module, root)
     }
 

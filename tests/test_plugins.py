@@ -1139,9 +1139,54 @@ def test_reloading_a_package_plugin_keeps_the_tools_its_helper_module_registers(
 
     with _forgetting_modules("demo_pkg"):
         assert ("helper_tool" in load().tools) is not first_load_fails
+        helpers_path = tools_path.with_name("helpers.py")
+        imported_helpers = [
+            module for module in sys.modules.values() if getattr(module, "__file__", None) == str(helpers_path)
+        ]
+        # A failed load leaves none of the plugin's modules behind.
+        assert len(imported_helpers) == (0 if first_load_fails else 1)
         tools_path.write_text(f"{healthy_source}# edited\n", encoding="utf-8")
         _bump_mtime(tools_path)
         assert "helper_tool" in load().tools
+
+
+def test_a_worker_refresh_whose_edited_tools_module_fails_keeps_the_installed_helper_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker refresh that fails to load the edited plugin reinstates the helper module it had installed."""
+    tools_path = _write_package_helper_plugin(tmp_path, monkeypatch) / "tools.py"
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("demo_pkg"):
+        plugins_module.refresh_plugins(config, runtime_paths)
+        installed = sys.modules["demo_pkg.helpers"]
+        tools_path.write_text(
+            f"{tools_path.read_text(encoding='utf-8')}raise RuntimeError('broken')\n",
+            encoding="utf-8",
+        )
+        _bump_mtime(tools_path)
+        assert "helper_tool" not in plugins_module.refresh_plugins(config, runtime_paths).tools
+        assert sys.modules["demo_pkg.helpers"] is installed
+
+
+def test_a_package_plugins_helper_module_follows_the_published_plugin_modules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper module a package plugin imports by absolute name is installed and restored with its other modules."""
+    _write_package_helper_plugin(tmp_path, monkeypatch)
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("demo_pkg"):
+        _load(config, runtime_paths)
+        published = sys.modules["demo_pkg.helpers"]
+        generation = prepare_plugins(config, runtime_paths)
+        assert sys.modules["demo_pkg.helpers"] is published
+        publish_plugins(generation)
+        assert sys.modules["demo_pkg.helpers"] is generation.modules["demo_pkg.helpers"] is not published
 
 
 @pytest.mark.parametrize("worker", [False, True], ids=["primary", "worker"])
