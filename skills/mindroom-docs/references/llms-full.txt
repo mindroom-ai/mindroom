@@ -18765,13 +18765,13 @@ from mindroom.plugin_http import RoomMessenger, require_room_messenger
 
 
 class Ask(BaseModel):
-    agent_id: str
+    agent_user_id: str
     question: str
 
 
 @router.post("/rooms/{room_id}/ask")
 async def ask(body: Ask, messenger: Annotated[RoomMessenger, Depends(require_room_messenger)]) -> dict[str, str]:
-    return {"event_id": await messenger.relay(body.question, mentions=[body.agent_id])}
+    return {"event_id": await messenger.relay(body.question, mentions=[body.agent_user_id])}
 ```
 
 | Member | Value |
