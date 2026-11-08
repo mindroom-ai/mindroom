@@ -241,7 +241,12 @@ class LoadedPlugin:
         bots = {ROUTER_AGENT_NAME: router}
         state.embedded = cast(
             "EmbeddedRuntime",
-            _StandIn("MindRoom runtime", agent_bot=bots.get, agent_reply_memberships=self._memberships),
+            _StandIn(
+                "MindRoom runtime",
+                agent_bot=bots.get,
+                agent_reply_memberships=self._memberships,
+                refresh_agent_reply_memberships_when_needed=self._refresh_memberships_when_needed,
+            ),
         )
         bind_room_members(self._app, cast("Mapping[str, AgentBot]", bots))
         state.room_direct = self._room_direct
@@ -465,6 +470,11 @@ class LoadedPlugin:
             return None
         room.sent.append(SentMessage(body, thread_id, source_hook, dict(extra_content or {}), mentions))
         return f"$sent{next(self._event_ids)}"
+
+    async def _refresh_memberships_when_needed(self) -> None:
+        """Refresh the membership index from the rooms when it needs it, as the runtime does for an access check."""
+        if self._memberships.needs_refresh(self.config):
+            await self._memberships.refresh(self.config, self.runtime_paths, self._client)
 
     def _joined(self, room: Room) -> dict[str, str | None]:
         return {**self._router_member, **room.members}

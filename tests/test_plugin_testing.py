@@ -165,6 +165,18 @@ async def test_a_member_of_a_room_the_agent_serves_is_admitted_by_its_room_key(t
     assert greeted.status == "ok"
 
 
+def test_a_route_lists_the_agents_a_room_grant_admits_before_any_turn(tmp_path: Path) -> None:
+    """A route's agent list reads the room grants as running agents do for it, with no turn having read them first."""
+    with load_plugin(EXAMPLE, tmp_path, config=HOST_CONFIG, settings=SETTINGS) as plugin:
+        directory = entity_directory(plugin.config, plugin.runtime_paths)
+        (host,) = (user for user, entity in directory.items() if entity.name == "host")
+        plugin.add_room(ROOM, members={BOB: "Bob", host: "Host"}, key="lobby")
+
+        about = plugin.client(BOB).get(f"{ROUTES}/about")
+
+    assert (about.status_code, about.json()["agents"]) == (200, ["host"])
+
+
 @pytest.mark.asyncio
 async def test_a_member_of_a_room_never_added_with_its_key_is_refused(tmp_path: Path) -> None:
     """Without the room key, the agent's room grant admits no one, so the call is refused."""
