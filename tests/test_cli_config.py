@@ -200,7 +200,7 @@ def test_config_init_prints_env_and_config_paths_whole_on_one_line(narrow_markup
     init = ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--no-input"]
 
     created = runner.invoke(app, init).output.splitlines()
-    env_path.write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:selfhosted.example\n", encoding="utf-8")
+    env_path.write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:fire:\n", encoding="utf-8")
     kept = runner.invoke(app, init).output.splitlines()
     overwritten = runner.invoke(app, [*init, "--force"]).output.splitlines()
 
@@ -213,7 +213,7 @@ def test_config_init_prints_env_and_config_paths_whole_on_one_line(narrow_markup
     assert f"Generated MINDROOM_API_KEY in {env_path}; restart MindRoom if it is already running to apply it." in kept
     assert (
         f"Warning: {OWNER_MATRIX_USER_ID_ENV} in {env_path} is not a valid Matrix user ID "
-        "('@Alice:selfhosted.example'), so the owner placeholders in config.yaml were left for you to replace."
+        "('@Alice:fire:'), so the owner placeholders in config.yaml were left for you to replace."
     ) in kept
     assert f"Env file overwritten: {env_path}" in overwritten
 
@@ -2123,20 +2123,22 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
-    def test_validate_prints_room_names_as_written(self, tmp_path: Path) -> None:
-        """The summary prints configured room names verbatim, even ones that look like Rich markup."""
+    def test_validate_prints_room_names_as_written(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The summary prints configured room names verbatim on one line, even ones that look like Rich markup."""
+        monkeypatch.setattr(config_cli.console, "_width", 80)
+        long_room = "a-room-name-long-enough-to-push-the-summary-line-past-eighty-columns"
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
-            'agents:\n  assistant:\n    display_name: Assistant\n    model: default\n    rooms: ["[/fast]", "[bold]lobby"]\n'
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            f'    rooms: ["[/fast]", "[bold]lobby", ":fire:", "{long_room}"]\n'
             "router:\n  model: default\n",
         )
 
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
         assert result.exit_code == 0, result.output
-        output = normalize_console_output(result.output)
-        assert "Rooms: 2 ([/fast], [bold]lobby)" in output
+        assert f"  Rooms:  4 (:fire:, [/fast], [bold]lobby, {long_room})" in result.output.splitlines()
 
     def test_validate_prints_a_rejected_key_that_looks_like_markup_as_written(self, tmp_path: Path) -> None:
         """A validation error quotes the config key it rejects verbatim, even one that looks like Rich markup."""

@@ -242,6 +242,7 @@ def _config_init_owner_user_id(runtime_paths: RuntimePaths) -> str | None:
             f"[yellow]Warning:[/yellow] {constants.OWNER_MATRIX_USER_ID_ENV} in {escape(source)} "
             f"is not a valid Matrix user ID ({escape(repr(raw_owner_user_id))}), "
             "so the owner placeholders in config.yaml were left for you to replace.",
+            emoji=False,
             soft_wrap=True,
         )
     return owner_user_id
@@ -836,7 +837,7 @@ def config_validate(
     console.print(f"  Models: {len(config.models)} ({', '.join(config.models.keys()) or 'none'})")
     # Room references may contain brackets, which Rich would read as markup; agent, team, and model names cannot.
     rooms = config.get_all_configured_rooms()
-    console.print(f"  Rooms:  {len(rooms)} ({escape(', '.join(sorted(rooms))) or 'none'})")
+    print_literal(f"  Rooms:  {len(rooms)} (", ", ".join(sorted(rooms)) or "none", ")")
 
     # Check for missing API keys based on configured providers
     check_env_keys(config, runtime_paths=runtime_paths)
