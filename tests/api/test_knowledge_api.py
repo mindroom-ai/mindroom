@@ -1233,6 +1233,26 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     assert scheduler.scheduled == []
 
 
+def test_failed_batch_upload_removes_the_files_it_staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch upload that fails on its third file leaves neither that file nor the two staged before it."""
+    client = _test_client(tmp_path)
+    docs = tmp_path / "docs"
+    publish_api_config(client.app, _knowledge_config(docs))
+    monkeypatch.setattr(knowledge_api, "_MAX_UPLOAD_BYTES", 5)
+
+    response = client.post(
+        "/api/knowledge/bases/research/upload",
+        files=[
+            ("files", ("one.md", b"one", "text/markdown")),
+            ("files", ("two.md", b"two", "text/markdown")),
+            ("files", ("three.md", b"too large", "text/markdown")),
+        ],
+    )
+
+    assert response.status_code == 413
+    assert list(docs.iterdir()) == []
+
+
 @pytest.mark.asyncio
 async def test_replacement_upload_cancellation_preserves_existing_file(
     tmp_path: Path,
