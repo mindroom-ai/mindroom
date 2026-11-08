@@ -617,7 +617,8 @@ Retention applies only to bots whose [`accept_invites`](configuration/agents.md)
 
 ## Testing
 
-Hook functions are plain async functions, so a test can await one with a stub context:
+To run a plugin's hooks as MindRoom does, for a message an agent would answer, use [`mindroom.plugin_testing`](plugins.md#testing-plugins).
+Hook functions are also plain async functions, so a unit test can await one with a stub context:
 
 ```python
 from types import SimpleNamespace
