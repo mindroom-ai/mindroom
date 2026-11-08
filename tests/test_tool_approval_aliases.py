@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
+from array import array
 from collections import UserList
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -21,7 +23,13 @@ from mindroom.tool_system.declarations import ApprovalAlias, ToolCategory, ToolF
 from mindroom.tool_system.plugins import candidate_tool_registry
 from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
-from tests.conftest import bind_runtime_paths, publish_test_plugins, register_test_tool, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    loop_runs_while_blocked,
+    publish_test_plugins,
+    register_test_tool,
+    test_runtime_paths,
+)
 from tests.tool_approval_helpers import timed_out_judge
 
 if TYPE_CHECKING:
@@ -158,6 +166,52 @@ async def test_a_judge_may_return_its_calls_as_any_sequence(
     alias = ApprovalAlias(judged_as=_SHELL, judge=lambda arguments: sequence([{"args": arguments["command"]}]))
 
     assert (await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias))[0] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rules",
+    [
+        pytest.param(({"match": _SHELL, "action": "auto_approve"},), id="auto-approved"),
+        pytest.param((), id="default-auto-approves"),
+    ],
+)
+async def test_a_judge_that_fails_cannot_refuse_a_call_no_judged_rule_can_ask_about(
+    tmp_path: Path,
+    rules: tuple[dict[str, object], ...],
+) -> None:
+    """When no shell call could ever ask, the judge is not consulted, so its failure leaves the call approved."""
+    config, runtime_paths = _config(tmp_path, *rules)
+    consulted: list[Mapping[str, object]] = []
+
+    def failing_judge(arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]] | None:
+        consulted.append(arguments)
+        return timed_out_judge(arguments)
+
+    alias = ApprovalAlias(judged_as=_SHELL, judge=failing_judge)
+
+    assert await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias) == (
+        False,
+        config.tool_approval.timeout_days * 24 * 60 * 60,
+    )
+    assert consulted == []
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_waits_leaves_other_conversations_running(tmp_path: Path) -> None:
+    """A judge waiting on a service holds up only the call it judges, so other conversations keep running meanwhile."""
+    config, runtime_paths = _config(tmp_path, _shell_review())
+    loop = asyncio.get_running_loop()
+    judge_saw_loop_running: list[bool] = []
+
+    def judge_waiting_on_a_service(arguments: Mapping[str, object]) -> Sequence[Mapping[str, object]]:
+        judge_saw_loop_running.append(loop_runs_while_blocked(loop))
+        return [{"args": arguments["command"]}]
+
+    alias = ApprovalAlias(judged_as=_SHELL, judge=judge_waiting_on_a_service)
+
+    assert (await _asks(config, runtime_paths, {"command": "rm -rf build"}, alias))[0] is True
+    assert judge_saw_loop_running == [True]
 
 
 @pytest.mark.asyncio
@@ -421,6 +475,9 @@ def test_the_tools_catalog_lists_a_tool_whose_alias_and_factory_hold_uncopyable_
         pytest.param(lambda arguments: [arguments["command"]], "neither a sequence", id="list-of-text"),
         pytest.param(lambda _arguments: "", "neither a sequence", id="empty-text"),
         pytest.param(lambda _arguments: b"", "neither a sequence", id="empty-bytes"),
+        pytest.param(lambda _arguments: bytearray(), "neither a sequence", id="empty-bytearray"),
+        pytest.param(lambda _arguments: memoryview(b""), "neither a sequence", id="empty-memoryview"),
+        pytest.param(lambda _arguments: array("b"), "neither a sequence", id="empty-array"),
         pytest.param(lambda _arguments: {}, "neither a sequence", id="empty-mapping"),
     ],
 )
