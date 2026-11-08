@@ -1,0 +1,6 @@
+{
+  "name": "greeter",
+  "tools_module": "tools.py",
+  "hooks_module": "hooks.py",
+  "routes_module": "routes.py"
+}
