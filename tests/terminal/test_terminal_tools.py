@@ -25,8 +25,7 @@ from mindroom.terminal.client import TerminalDetachedError
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalEvent
 from mindroom.tool_system import agent_tool_calls
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call, run_tool_call
-from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -47,7 +46,6 @@ pytestmark = pytest.mark.asyncio
 # A review script that asks before a shell command that runs rm.
 _RM_REVIEW = "def check(tool_name, arguments, agent_name):\n    return 'rm' in arguments['args'].split()\n"
 _ASK_FOR_SHELL = {"rules": [{"match": "run_shell_command", "action": "require_approval"}]}
-_RESTRICTED = "Error: this agent can't type in terminals, because its run_shell_command calls may ask for approval"
 _NOT_AT_PROMPT = "Error: the terminal's shell is not waiting at an empty prompt"
 
 
@@ -168,41 +166,33 @@ async def test_an_agent_types_in_terminals_only_while_its_shell_commands_never_a
     approval: dict[str, Any],
     restricted: bool,
 ) -> None:
-    """Any rule that may ask about ``run_shell_command`` refuses the typing functions; watching stays open."""
+    """Any rule that may ask about ``run_shell_command`` leaves the agent only reading and listing, and says why."""
     paths = primary_paths(tmp_path, runner)
     config = _config(paths, ["shell", "terminal"], approval)
     functions = _functions(config, paths)
-    session_id = (await _terminals(config, paths).open(cols=80, rows=24)).id
+    terminals = _terminals(config, paths)
+    session_id = (await terminals.open(cols=80, rows=24)).id
 
-    typed = [
-        await _call(functions["terminal_open"]),
-        await _call(functions["terminal_run"], session_id=session_id, command="echo ran-$((6*7))"),
-        await _call(functions["terminal_send"], session_id=session_id, keys="echo sent-$((7*7))<enter>"),
-    ]
-    assert [answer.startswith(_RESTRICTED) for answer in typed] == [restricted] * 3
-    read = await _call(functions["terminal_read"], session_id=session_id)
-    assert ("ran-42" in read, "sent-49" in read) == (not restricted, not restricted)
+    assert {"terminal_open", "terminal_run", "terminal_send"}.isdisjoint(functions) == restricted
+    instructions = agent_toolkit("terminal", config, paths).instructions or ""
+    assert ("run commands with run_shell_command" in instructions) == restricted
+    if restricted:
+        # People still type in the agent's terminals.
+        async with terminals.attach(session_id) as person:
+            await person.send_input("echo ran-$((6*7))\r")
+    else:
+        await _call(functions["terminal_run"], session_id=session_id, command="echo ran-$((6*7))")
+    assert "ran-42" in await _call(functions["terminal_read"], session_id=session_id)
     assert f"- {session_id}: running" in await _call(functions["terminal_list"])
 
 
-async def test_a_restricted_agent_is_refused_on_every_path_a_call_runs_by(tmp_path: Path, runner: str) -> None:
-    """The refusal is the function's own answer, so it reaches the agent however the call came."""
+async def test_under_a_default_that_asks_no_path_offers_a_typing_call_to_approve(tmp_path: Path, runner: str) -> None:
+    """Each path calls only what the toolkit offers, so no approval card can ask for typing the agent may not do."""
     paths = primary_paths(tmp_path, runner)
-    config = _config(paths, ["shell", "terminal"], _ASK_FOR_SHELL)
+    config = _config(paths, ["shell", "terminal"], {"default": "require_approval"})
     functions = _functions(config, paths)
-    context = ToolCallContext(run_id="run", session_id="session", user_id="@alice:localhost", call_id="call")
+    assert sorted(functions) == ["terminal_list", "terminal_read"]
 
-    # The model loop's runner.
-    outcome = await execute_tool_call(functions["terminal_open"], {}, context, middleware=())
-    assert str(outcome.content).startswith(_RESTRICTED)
-    # The runner of scheduled calls and script runs.
-    result = await run_tool_call(
-        functions["terminal_run"],
-        {"session_id": "t", "command": "ls"},
-        context,
-        middleware=(),
-    )
-    assert str(result.value).startswith(_RESTRICTED)
     # The agent CLI, through the catalog of the response it belongs to.
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
         run=RunContext(
@@ -228,10 +218,8 @@ async def test_a_restricted_agent_is_refused_on_every_path_a_call_runs_by(tmp_pa
         replace(function, toolkit="terminal", registered_toolkit="terminal") for function in functions.values()
     )
     await catalog.prepare([AdaptedToolkit(name="terminal", functions=named, instructions=None)])
-    binding = await catalog.bind(ToolKey("terminal", "terminal_send"))
-    arguments = {"session_id": "t", "keys": "ls<enter>"}
-    events = [event async for event in agent_tool_calls.execute_agent_tool_call(binding, "cli", arguments)]
-    assert str(events[-1].call.result).startswith(_RESTRICTED)
+    with pytest.raises(UnknownToolError, match="its functions: terminal_list, terminal_read"):
+        await catalog.bind(ToolKey("terminal", "terminal_send"))
 
 
 async def test_a_shell_started_in_a_terminal_keeps_runs_out_until_it_exits(tmp_path: Path, runner: str) -> None:

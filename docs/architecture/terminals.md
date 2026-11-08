@@ -29,7 +29,7 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 
 ## Agent typing
 
-An agent types into terminals only while its `run_shell_command` calls never ask for approval, and its typing functions refuse otherwise; the refusal is the functions' own answer, so it holds on every path a call takes, the model loop, the agent CLI, scheduled calls, and scripts alike.
+An agent types into terminals only while its `run_shell_command` calls never ask for approval; otherwise the toolkit offers it only `terminal_read` and `terminal_list`, and every path a call takes, the model loop, the agent CLI, scheduled calls, and scripts, calls only what the toolkit offers, so no approval card can ask for typing it may not do, as it would under `tool_approval.default: require_approval` if the typing functions were offered and refused when called.
 Approval rules judge a command's text, and what text typed into a persistent shell runs depends on what ran in it before: aliases and functions defined earlier, history expansion and other shell options, a shell started inside, and a program reading the keys instead of the shell.
 
 - Rejected: judging typing through approval aliases as the command its Enter runs, from a record of the terminal's line prepared before approval and checked at the run.

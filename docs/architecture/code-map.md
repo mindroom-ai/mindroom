@@ -516,7 +516,7 @@ Matrix sync callback
 | `terminal/client.py` | The primary's client for an agent's terminals, reached with the request its worker-routed shell toolkit would send |
 | `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, so `terminal_run` types only at an empty prompt |
 | `terminal/resolution.py` | The terminals of an agent's workspace as its turn for one requester resolves them |
-| `custom_tools/terminal.py` | The agent's terminal toolkit: open, run, type keys, read, and list, typing only while its shell commands never ask for approval |
+| `custom_tools/terminal.py` | The agent's terminal toolkit: open, run, type keys, read, and list, offering typing only while its shell commands never ask for approval |
 | `api/agent_terminals.py` | Chat clients' routes to the terminals of the agents they may use in a room, and the rechecked terminal stream |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits (durable checkpoints while live frames run), tool traces, reasoning, and the terminal write of a stream that finished; a stopped or failed stream raises for its span exit to end |
 | `live_frames/frames.py` | The `io.mindroom.live` frame format: snapshots and UTF-16 splice deltas of a reply's live documents, and the durable checkpoint watermark key |

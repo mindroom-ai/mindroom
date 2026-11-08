@@ -6,7 +6,8 @@ whose shell runs in the primary process, or offers no ``run_shell_command``, has
 
 🔒 An agent types into them only while its ``run_shell_command`` calls never ask for approval: what text typed into a
 persistent shell runs depends on what ran there before (aliases, functions, a program reading the keys, history, shell
-options), so no rule can judge it from the text. Any other agent's typing functions refuse; reading and listing stay.
+options), so no rule can judge it from the text. Any other agent is offered only reading and listing, so no path can
+call a typing function and no approval card can ask for one.
 """
 
 from __future__ import annotations
@@ -43,9 +44,13 @@ _OUTPUT_SECONDS = 0.5
 # The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
 _MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
-_RESTRICTED = (
-    "Error: this agent can't type in terminals, because its run_shell_command calls may ask for approval; run the "
-    "command with run_shell_command instead. terminal_read and terminal_list still work."
+_ABOUT = (
+    "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can "
+    "watch and type in from a chat client that shows terminals."
+)
+_READ_ONLY = (
+    f"{_ABOUT} You can't type in them, because your run_shell_command calls may ask for approval: run commands with "
+    "run_shell_command. terminal_read shows a terminal's recent output; terminal_list shows them all."
 )
 _NOT_AT_PROMPT = (
     "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, or its line holds "
@@ -128,12 +133,10 @@ class TerminalTools(Toolkit):
 
     name = "terminal"
     instructions = (
-        "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room "
-        "can watch and type in from a chat client that shows terminals. Use them for work that keeps state between "
-        "commands or that people should see: a dev server, a REPL, an interactive program, a long build. "
-        "terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types "
-        "keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read shows recent "
-        "output; terminal_list shows them all."
+        f"{_ABOUT} Use them for work that keeps state between commands or that people should see: a dev server, a "
+        "REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and "
+        "waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends "
+        "a terminal; terminal_read shows recent output; terminal_list shows them all."
     )
 
     def __init__(
@@ -149,9 +152,12 @@ class TerminalTools(Toolkit):
             if runtime_config is None or identity is None or agent_name is None
             else agent_terminals(agent_name, runtime_config, runtime_paths, identity, create=True)
         )
-        self._restricted = runtime_config is None or tool_may_require_approval(runtime_config, SHELL_FUNCTION)
-        functions = (self.terminal_open, self.terminal_run, self.terminal_send, self.terminal_read, self.terminal_list)
-        super().__init__(tools=functions if self._terminals is not None else ())
+        restricted = runtime_config is None or tool_may_require_approval(runtime_config, SHELL_FUNCTION)
+        typing = () if restricted else (self.terminal_open, self.terminal_run, self.terminal_send)
+        super().__init__(
+            tools=(*typing, self.terminal_read, self.terminal_list) if self._terminals is not None else (),
+            instructions=_READ_ONLY if restricted else None,
+        )
 
     @property
     def _workspace_terminals(self) -> WorkerTerminals:
@@ -168,8 +174,6 @@ class TerminalTools(Toolkit):
             The new terminal's session ID, or why it could not open.
 
         """
-        if self._restricted:
-            return _RESTRICTED
         try:
             info = await self._workspace_terminals.open(cols=_COLS, rows=_ROWS, cwd=cwd or None)
         except TerminalError as error:
@@ -197,8 +201,6 @@ class TerminalTools(Toolkit):
             The command's output and exit status, or what it printed so far while it still runs.
 
         """
-        if self._restricted:
-            return _RESTRICTED
         command = command.strip("\n")
         # One line of text, so the run ends at the prompt after it.
         if _KEYS.search(command):
@@ -243,8 +245,6 @@ class TerminalTools(Toolkit):
             What the terminal printed right after, or why the keys were not typed.
 
         """
-        if self._restricted:
-            return _RESTRICTED
         text = keys_to_text(keys)
         if "\x03" in text.rstrip("\x03"):
             return "Error: send <ctrl-c> on its own, then the keys after it; the terminal may drop keys typed with it."
