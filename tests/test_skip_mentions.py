@@ -14,7 +14,6 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.conversation_resolver import _should_skip_mentions
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
@@ -30,6 +29,7 @@ from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.thread_utils import get_all_mentioned_agents_in_thread, should_skip_mentions
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -37,6 +37,7 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     ignore_final_delivery_handoff,
     make_outbox_mock,
+    make_visible_message,
     message_origin,
     runtime_paths_for,
     sync_bot_runtime_state,
@@ -55,38 +56,46 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import SpanHandle
 
 
-def test_should_skip_mentions_with_metadata() -> None:
-    """Test that should_skip_mentions detects the metadata."""
-    # Event with skip_mentions metadata
-    event_source = {
-        "content": {
-            "body": "✅ Scheduled task. @email_agent will be mentioned",
-            SKIP_MENTIONS_KEY: True,
-        },
-    }
-    assert _should_skip_mentions(event_source) is True
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param({"body": "✅ Scheduled task. @email_agent", SKIP_MENTIONS_KEY: True}, True, id="marked"),
+        pytest.param({"body": "Regular message @email_agent"}, False, id="unmarked"),
+        pytest.param({"body": "Explicit false @email_agent", SKIP_MENTIONS_KEY: False}, False, id="explicit_false"),
+        pytest.param(
+            {"body": "* ✅ Scheduled task. @email_agent", "m.new_content": {"body": "✅", SKIP_MENTIONS_KEY: True}},
+            True,
+            id="edit_marked_in_new_content",
+        ),
+    ],
+)
+def test_should_skip_mentions(content: dict[str, object], *, expected: bool) -> None:
+    """Mentions are skipped when the content, or an edit's replacement content, carries the metadata."""
+    assert should_skip_mentions(content) is expected
 
 
-def test_should_skip_mentions_without_metadata() -> None:
-    """Test that should_skip_mentions returns False when no metadata."""
-    # Normal event without metadata
-    event_source = {
-        "content": {
-            "body": "Regular message @email_agent",
-        },
-    }
-    assert _should_skip_mentions(event_source) is False
+def test_skip_marked_message_does_not_count_its_agents_as_mentioned_earlier(tmp_path: Path) -> None:
+    """Agents a skip-marked message names do not count as mentioned earlier in its thread."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "research": AgentConfig(display_name="Research"),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    body = "❌ Scheduled task failed: @general and @research compare notes"
+    marked = make_visible_message(sender=ids["router"].full_id, content={"body": body, SKIP_MENTIONS_KEY: True})
+    unmarked = make_visible_message(sender="@user:localhost", content={"body": body})
 
-
-def test_should_skip_mentions_explicit_false() -> None:
-    """Test that should_skip_mentions returns False when metadata is False."""
-    event_source = {
-        "content": {
-            "body": "Message with explicit false @email_agent",
-            SKIP_MENTIONS_KEY: False,
-        },
-    }
-    assert _should_skip_mentions(event_source) is False
+    assert get_all_mentioned_agents_in_thread([marked], config, runtime_paths) == []
+    assert get_all_mentioned_agents_in_thread([marked, unmarked], config, runtime_paths) == [
+        ids["general"],
+        ids["research"],
+    ]
 
 
 def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:

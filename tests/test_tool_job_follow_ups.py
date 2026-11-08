@@ -535,7 +535,10 @@ async def test_a_teams_follow_up_runs_as_the_team(tmp_path: Path) -> None:
 
 
 async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collected(tmp_path: Path) -> None:
-    """Under the conversation lock the follow-up runs nothing once the reply before it collected the jobs."""
+    """Under the conversation lock the follow-up runs nothing once the reply before it collected the jobs.
+
+    A job cancelled meanwhile, which that reply did not collect, gets no model turn of its own either.
+    """
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
@@ -544,6 +547,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
     try:
         await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=owner)
         event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        await _ended(runtime, "dropped", BackgroundOutcome("cancelled"), owner=owner)
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", collected.claim)
         request = runner._job_follow_up_request(key, "job-follow-up:1")

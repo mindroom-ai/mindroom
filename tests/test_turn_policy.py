@@ -20,8 +20,9 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import MessageContext
+from mindroom.custom_tools.thread_move import _plan_thread_copy
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
@@ -29,6 +30,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamIntent, TeamOutcome
 from mindroom.teams.spec import TeamMode
+from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_responder_access
@@ -382,6 +384,58 @@ async def test_thread_with_two_participating_agents_forms_implicit_team_for_owne
     # Formation is pure: thread-history teams carry the COLLABORATE provisional mode.
     assert owner_plan.response_action.form_team.mode is TeamMode.COLLABORATE
     assert other_plan.kind == "ignore"
+
+
+@pytest.mark.asyncio
+async def test_untagged_follow_up_after_a_skip_marked_notice_stays_with_the_thread_agent(config: Config) -> None:
+    """Agents only a skip-marked notice names, here a failed scheduled task's, form no team on an untagged follow-up."""
+    general_id = _entity_id(config, "general").full_id
+    room = _room_with_members(_SENDER, general_id, _entity_id(config, "research").full_id)
+    notice = {
+        "msgtype": "m.text",
+        "body": "❌ Scheduled task failed: @general and @research compare notes\nError: timed out",
+        SKIP_MENTIONS_KEY: True,
+    }
+    history = [
+        make_visible_message(sender=_SENDER, body="please help", event_id="$thread:localhost"),
+        make_visible_message(sender=general_id, body="sure thing", event_id="$reply:localhost"),
+        make_visible_message(sender=_entity_id(config, ROUTER_AGENT_NAME).full_id, content=notice),
+    ]
+    context = _context(thread_id="$thread:localhost", thread_history=history)
+
+    general_plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))
+    research_plan = await _plan(_policy_for(config, "research"), room, _dispatch(context, agent_name="research"))
+
+    assert general_plan.kind == "respond"
+    assert general_plan.response_action.kind == "individual"
+    assert research_plan.kind == "ignore"
+
+
+@pytest.mark.asyncio
+async def test_untagged_follow_up_in_a_moved_team_thread_still_gets_the_team(config: Config) -> None:
+    """A thread moved after a person tagged two agents keeps their team, though only its owner posted there."""
+    general_id = _entity_id(config, "general").full_id
+    research_id = _entity_id(config, "research").full_id
+    room = _room_with_members(_SENDER, general_id, research_id)
+    tagged = {"msgtype": "m.text", "body": "@general @research compare notes"}
+    posters = {"general": general_id, ROUTER_AGENT_NAME: _entity_id(config, ROUTER_AGENT_NAME).full_id}
+    copies = _plan_thread_copy(
+        [make_visible_message(sender=_SENDER, content=tagged), make_visible_message(sender=general_id, body="agreed")],
+        entity_name_for_sender={general_id: "general"}.get,
+        target_posters=frozenset(posters),
+        display_names={},
+        mentioned_user_ids=lambda content: history_mentioned_user_ids(content, config, runtime_paths_for(config)),
+    )
+    history = [make_visible_message(sender=posters[copy.poster], content=copy.content) for copy in copies]
+    context = _context(thread_id="$moved:localhost", thread_history=history)
+
+    general_plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))
+    research_plan = await _plan(_policy_for(config, "research"), room, _dispatch(context, agent_name="research"))
+
+    assert general_plan.kind == "respond"
+    assert general_plan.response_action.kind == "team"
+    assert general_plan.response_action.form_team.intent is TeamIntent.IMPLICIT_THREAD_TEAM
+    assert research_plan.kind == "ignore"
 
 
 @pytest.mark.asyncio
