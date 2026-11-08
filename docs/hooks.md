@@ -427,7 +427,7 @@ A failing hook is invoked again on the next matching event, with no quarantine o
 
 ## Plugin state
 
-`ctx.state_root` is a per-plugin directory at `<storage root>/plugins/<plugin name>/` (by default `mindroom_data/plugins/<plugin name>/`), created on first access.
+`ctx.state_root` is a per-plugin directory at `<storage root>/plugins/<plugin name>/` (by default `mindroom_data/plugins/<plugin name>/`), created on first access and kept at mode 0700 so only MindRoom's user can read it.
 Organizing it per room or per user is up to the plugin.
 
 ```python
@@ -456,7 +456,7 @@ All contexts include these fields:
 | --- | --- | --- |
 | `event_name` | `str` | The event that triggered this hook |
 | `plugin_name` | `str` | Name of the plugin owning this hook |
-| `settings` | `dict[str, Any]` | Plugin `settings` from `config.yaml` |
+| `settings` | `dict[str, Any]` | Plugin `settings` from `config.yaml`, as this call's own copy, so no change reaches the config or another call |
 | `config` | `Config` | Current MindRoom config (read-only) |
 | `runtime_paths` | `RuntimePaths` | Storage paths and environment values |
 | `logger` | `BoundLogger` | Plugin-scoped structured logger |
