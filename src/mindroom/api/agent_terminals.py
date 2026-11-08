@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
@@ -125,16 +126,7 @@ async def _typing_workspace(room: RoomReader, agent_user_id: str) -> AgentWorksp
 
 
 def _terminal(workspace: AgentWorkspace, info: TerminalInfo) -> _Terminal:
-    return _Terminal(
-        agent_user_id=workspace.user_id,
-        id=info.id,
-        cols=info.cols,
-        rows=info.rows,
-        alive=info.alive,
-        exit_code=info.exit_code,
-        created_at=info.created_at,
-        writable=workspace.terminal == "type",
-    )
+    return _Terminal(agent_user_id=workspace.user_id, writable=workspace.terminal == "type", **asdict(info))
 
 
 @router.get("/terminals")
