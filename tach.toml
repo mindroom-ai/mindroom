@@ -4014,6 +4014,14 @@ depends_on = []
 visibility = ["mindroom.custom_tools.matrix_voice_message"]
 
 [[modules]]
+path = "mindroom.matrix.history_visibility"
+depends_on = []
+visibility = [
+    "mindroom.orchestration.plugin_http_runtime",
+    "mindroom.plugin_http",
+]
+
+[[modules]]
 path = "mindroom.matrix.room_reconciliation"
 depends_on = ["mindroom.matrix.room_power"]
 visibility = [
@@ -8269,6 +8277,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
+    "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_power",
     "mindroom.plugin_context",
     "mindroom.tool_system.plugins",
@@ -8296,6 +8305,7 @@ path = "mindroom.orchestration.plugin_http_runtime"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.constants",
+    "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
 ]

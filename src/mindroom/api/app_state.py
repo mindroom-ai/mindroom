@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.matrix.history_visibility import RoomHistory
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
@@ -95,10 +96,12 @@ class _MindroomAppState:
     computer_sessions: ComputerSessionStore | None = None
     client_sessions: ClientSessionStore | None = None
     # Bound while `mindroom run` serves this app; plugin routes read live room membership through it, each joined
-    # user with their display name in the room, and read a room's state and whether it is a direct message.
+    # user with their display name in the room, and read a room's state, whether it is a direct message, and where a
+    # member's view of its history begins, None once that member is not joined.
     room_members: Callable[[str], Awaitable[Mapping[str, str | None]]] | None = None
     room_state: Callable[[str], Awaitable[RoomStateSnapshot]] | None = None
     room_direct: Callable[[str], Awaitable[bool]] | None = None
+    room_history: Callable[[str, str], Awaitable[RoomHistory | None]] | None = None
     usage_export_runner: UsageExportRunner | None = None
 
     @property

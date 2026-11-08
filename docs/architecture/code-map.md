@@ -329,8 +329,9 @@ Matrix sync callback
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
 | `entity_directory.py` | `entity_directory`, the router and configured agents and teams with prepared Matrix accounts by user ID, with each one's kind, display name, and agent tool names, for plugins |
 | `plugin_context.py` | `PluginContext`, a plugin's own settings, state directory, and config for its routes and tools, which fails closed once a reload disables the plugin |
-| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks and room reads (`RoomReader`, `RoomPower`, `client_rooms`), administrator checks, and the route's `PluginContext` |
+| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks and room reads (`RoomReader`, `RoomPower`, `RoomHistory`, `client_rooms`), administrator checks, and the route's `PluginContext` |
 | `orchestration/plugin_http_runtime.py` | Live room reads for plugin HTTP routes: a running bot in the room answers each read, the router first, and concurrent membership callers for one room share a lookup |
+| `matrix/history_visibility.py` | Where a joined member's view of a room's history begins under its history visibility, walking back from their member event to the join or invite that began their membership |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |

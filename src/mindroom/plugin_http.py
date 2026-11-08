@@ -21,6 +21,7 @@ from mindroom.api.client_sessions import (
     presented_session,
 )
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
+from mindroom.matrix.history_visibility import RoomHistory
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = [
     "ClientUser",
+    "RoomHistory",
     "RoomPower",
     "RoomReader",
     "client_rooms",
@@ -50,6 +52,7 @@ __all__ = [
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
+_NOT_A_MEMBER = "Not a member of this room."
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,7 @@ class RoomReader:
     """Each joined user's display name in the room, None for one without; read by the check that proved membership."""
     _room_state: Callable[[], Awaitable[RoomStateSnapshot]] = field(repr=False)
     _room_direct: Callable[[], Awaitable[bool]] = field(repr=False)
+    _room_history: Callable[[], Awaitable[RoomHistory | None]] = field(repr=False)
 
     async def power(self) -> RoomPower:
         """Read the room's power levels now, answering 503 when they cannot be read."""
@@ -207,6 +211,17 @@ class RoomReader:
         """
         return await self._room_direct()
 
+    async def history(self) -> RoomHistory:
+        """Read the room's history visibility and where the caller's view of its history begins under it.
+
+        It reads the caller's membership again, answering 403 once they are no longer joined, and 503 when the read
+        fails or times out.
+        """
+        history = await self._room_history()
+        if history is None:
+            raise HTTPException(403, _NOT_A_MEMBER)
+        return history
+
 
 async def require_room_reader(request: Request, room_id: Annotated[str, Path()]) -> RoomReader:
     """Return what a route may read about ``room_id``, once the client session's user is joined to it.
@@ -222,6 +237,7 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
         members,
         partial(_bound(state.room_state), room_id),
         partial(_bound(state.room_direct), room_id),
+        partial(_bound(state.room_history), room_id, user.user_id),
     )
 
 
@@ -253,7 +269,7 @@ async def _require_joined(connection: HTTPConnection, user_id: str, room_id: str
     """Return the room's joined users with their display names, once ``user_id`` is one of them."""
     members = await _bound(ensure_app_state(connection.app).room_members)(room_id)
     if user_id not in members:
-        raise HTTPException(403, "Not a member of this room.")
+        raise HTTPException(403, _NOT_A_MEMBER)
     return members
 
 
