@@ -34,7 +34,7 @@ from mindroom.path_safety import resolve_base_dir_path, resolve_tool_base_dir, w
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-MAX_FILE_BYTES = 5 << 20
+_MAX_FILE_BYTES = 5 << 20
 _MAX_FOLDER_ENTRIES = 5000
 
 # What a shell keeps at the top of its HOME to sign in somewhere; a folder's place hides everything below it.
@@ -172,6 +172,10 @@ def _relative(raw: str) -> PurePosixPath:
     return path
 
 
+def _too_large() -> HTTPException:
+    return HTTPException(413, f"The file is over {_MAX_FILE_BYTES >> 20} MiB.")
+
+
 def _absent() -> HTTPException:
     return HTTPException(404, "No such file or folder.")
 
@@ -303,7 +307,7 @@ def list_folder(root: Path, raw_path: str) -> Folder:
 
 
 def _read(found: _Found) -> tuple[bytes, os.stat_result]:
-    """Read a regular file, refusing anything else before opening it, and one over ``MAX_FILE_BYTES`` with 413."""
+    """Read a regular file, refusing anything else before opening it, and one over ``_MAX_FILE_BYTES`` with 413."""
     if not found.relative.parts:
         raise HTTPException(400, _NOT_A_FILE)
     with _refusals(), open_directory_within_root(found.base, found.relative.parent) as directory:
@@ -312,9 +316,9 @@ def _read(found: _Found) -> tuple[bytes, os.stat_result]:
         descriptor = open_regular_file_at(directory, found.relative.name)
     with os.fdopen(descriptor, "rb") as file:
         status = os.fstat(file.fileno())
-        payload = b"" if status.st_size > MAX_FILE_BYTES else file.read(MAX_FILE_BYTES + 1)
-    if status.st_size > MAX_FILE_BYTES or len(payload) > MAX_FILE_BYTES:
-        raise HTTPException(413, f"The file is over {MAX_FILE_BYTES >> 20} MiB.")
+        payload = b"" if status.st_size > _MAX_FILE_BYTES else file.read(_MAX_FILE_BYTES + 1)
+    if status.st_size > _MAX_FILE_BYTES or len(payload) > _MAX_FILE_BYTES:
+        raise _too_large()
     return payload, status
 
 
@@ -334,6 +338,8 @@ def save_file(root: Path, raw_path: str, payload: bytes, etag: str | None) -> Sa
 
     Given ``etag``, it saves only while the file still has that version, else raises ``StaleEtagError``.
     """
+    if len(payload) > _MAX_FILE_BYTES:
+        raise _too_large()
     path = _relative(raw_path)
     _refuse_git(path)
     found = _find(root, path)

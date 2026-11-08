@@ -316,7 +316,7 @@ def test_text_reads_as_it_is_and_anything_else_as_base64_with_an_etag(root: Path
 
 def test_a_file_over_the_limit_answers_413(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A file over the size limit answers 413; one at the limit reads."""
-    monkeypatch.setattr(operations, "MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(operations, "_MAX_FILE_BYTES", 4)
 
     (root / "four.txt").write_text("1234")
 

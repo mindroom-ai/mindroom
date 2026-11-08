@@ -200,7 +200,7 @@ def test_files_travel_as_text_or_base64_both_ways(client: _Client) -> None:
 
 def test_a_save_over_the_limit_answers_413(client: _Client, monkeypatch: pytest.MonkeyPatch) -> None:
     """Content over the file size limit answers 413 before anything is written."""
-    monkeypatch.setattr(operations, "MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(operations, "_MAX_FILE_BYTES", 4)
     coder = client.room.ids["coder"]
 
     assert (

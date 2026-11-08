@@ -139,8 +139,6 @@ async def save_file(
         payload = body.content.encode() if body.encoding == "utf-8" else base64.b64decode(body.content, validate=True)
     except ValueError:  # Half of a surrogate pair, or text that is not base64.
         raise HTTPException(400, f"content is not valid {body.encoding}.") from None
-    if len(payload) > operations.MAX_FILE_BYTES:
-        raise HTTPException(413, f"The file is over {operations.MAX_FILE_BYTES >> 20} MiB.")
     root = await _made_root(request, room, room_id, agent_user_id)
     try:
         return await asyncio.to_thread(operations.save_file, root, body.path, payload, body.etag)
