@@ -457,6 +457,12 @@ _MEMBERS = {
         "is_direct": "(self)",
         "modes": "(self)",
         "set_modes": "(self, *, thread, reply)",
+        "history": "(self)",
+    },
+    "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
+    "mindroom.plugin_http.RoomMessenger": {
+        "notice": "(self, text, *, thread_id, content)",
+        "relay": "(self, text, *, mentions, thread_id, content)",
     },
     "mindroom.plugin_http.RoomPower": {
         "level": "(self, user_id)",
@@ -537,6 +543,8 @@ _MANIFEST = {
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "ClientUser",
+    "RoomHistory",
+    "RoomMessenger",
     "RoomModes",
     "RoomPower",
     "RoomReader",
@@ -546,6 +554,7 @@ _HTTP_EXPORTS = [
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
+    "require_room_messenger",
     "require_room_reader",
 ]
 _ELSEWHERE_SIGNATURES = {
@@ -555,6 +564,8 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.RoomHistory": "(visibility)",
+    "mindroom.plugin_http.RoomMessenger": "(user)",
     "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
@@ -564,11 +575,12 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
+    "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 10), "dfd25bf598764f37b9ecbdc1a495a5333ec71b8a0d1496ca7f7f9cd4ab806c9d")
+_PINNED_VERSION = ((1, 12), "05c9dfcbddcb986889f8078f8edf636eba16bebc72cb4068587a12e69dc6b5bf")
 
 
 def _is_enum(obj: object) -> bool:

@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from mindroom.api.app_state import ensure_app_state
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.matrix.history_visibility import read_room_history
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.rooms import is_dm_room
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from mindroom.bot import AgentBot
+    from mindroom.matrix.history_visibility import RoomHistory
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 
 logger = get_logger(__name__)
@@ -31,6 +33,7 @@ _NO_BOT_IN_ROOM = "No running MindRoom bot is in this room."
 _LOOKUP_FAILED = "Room membership lookup failed; try again."
 _STATE_READ_FAILED = "Room state read failed; try again."
 _DIRECT_LOOKUP_FAILED = "Direct message lookup failed; try again."
+_HISTORY_READ_FAILED = "Room history read failed; try again."
 # As long as the computers API waits for the same membership check.
 _LOOKUP_TIMEOUT_SECONDS = 20
 
@@ -71,7 +74,7 @@ async def _read_in_room[T](
 
 
 def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
-    """Publish readers of a room's joined users and their display names, its state, and whether it is a direct message.
+    """Publish readers of a room's joined users and names, its state and history, and whether it is a direct message.
 
     Each read is answered by a running bot in that room, the router first. ``bots`` must be the orchestrator's live
     mapping, read at each lookup, so a bot that stopped, left the room, or restarted with a new client counts as it is
@@ -108,6 +111,7 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
     state.room_members = room_members
     state.room_state = partial(_room_state, bots)
     state.room_direct = partial(_room_direct, bots)
+    state.room_history = partial(_room_history, bots)
 
 
 async def _room_state(bots: Mapping[str, AgentBot], room_id: str) -> RoomStateSnapshot:
@@ -121,9 +125,19 @@ async def _room_direct(bots: Mapping[str, AgentBot], room_id: str) -> bool:
     return await _read_in_room(bots, room_id, lambda client: is_dm_room(client, room_id), _DIRECT_LOOKUP_FAILED)
 
 
+async def _room_history(bots: Mapping[str, AgentBot], room_id: str, user_id: str) -> RoomHistory | None:
+    return await _read_in_room(
+        bots,
+        room_id,
+        lambda client: read_room_history(client, room_id, user_id),
+        _HISTORY_READ_FAILED,
+    )
+
+
 def unbind_room_members(app: FastAPI) -> None:
     """Withdraw the readers once the API stops serving."""
     state = ensure_app_state(app)
     state.room_members = None
     state.room_state = None
     state.room_direct = None
+    state.room_history = None
