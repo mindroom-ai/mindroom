@@ -9568,6 +9568,8 @@ The server sends:
 | `{"type": "loading", "loading": bool}` | Whether the shown page is loading, sent on connect and on each change. |
 | `{"type": "error", "detail": "..."}` | A malformed or unknown message from the client, or an address `navigate` refuses. |
 
+`url-changed` and `loading` carry the latest state, so a change undone before the stream sends it, such as a load that ends while a frame is still being sent, is skipped; do not wait for a particular transition.
+
 The client sends JSON text messages of at most 64 KiB; a binary message closes the stream:
 
 | Message | Effect |
