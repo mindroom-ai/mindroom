@@ -176,17 +176,17 @@ def _send(watch: _Watch, paths: set[str]) -> None:
             follower.add(paths)
 
 
-def _held(root: Path, new: Collection[str], watched: Collection[str]) -> tuple[set[str], bool]:
-    """Return the reported paths of what the ``new`` folders hold now, and whether one holds a folder not ``watched``."""
+def _held(root: Path, folders: Collection[str]) -> set[str]:
+    """Return the reported paths of what ``folders`` hold now."""
     paths: set[str] = set()
-    grown = False
-    for folder in new:
+    for folder in folders:
         with suppress(OSError):
-            for entry in Path(folder).iterdir():
-                if (path := _reported(root, watchfiles.Change.added, str(entry))) is not None:
-                    paths.add(path)
-                grown = grown or (str(entry) not in watched and _new_folder(root, str(entry)))
-    return paths, grown
+            paths |= {
+                path
+                for entry in Path(folder).iterdir()
+                if (path := _reported(root, watchfiles.Change.added, str(entry))) is not None
+            }
+    return paths
 
 
 async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown: asyncio.Event) -> None:
@@ -213,7 +213,8 @@ async def _run(watch: _Watch) -> None:
     # The folders watched last, empty while the root is missing, None before the first watch or after a failure.
     watched: list[str] | None = None
     stop_watching = asyncio.Event()
-    # Set by any watch, old or new, once a folder appears after the walk began, so the tree is walked again.
+    # Set by any watch, old or new, once a folder appears after the walk began, or by the walk that checks the watch,
+    # so the tree is walked again.
     grown = asyncio.Event()
     # A replaced watch keeps running until it sees its stop, so it is held until then.
     running: set[asyncio.Task[None]] = set()
@@ -237,11 +238,11 @@ async def _run(watch: _Watch) -> None:
             watch.following.set()
             if watched is not None:
                 # What a new folder, or a root that was missing, held before its watch began.
-                held, more = await asyncio.to_thread(_held, watch.root, set(folders).difference(watched), set(folders))
-                _send(watch, held)
-                if more:
-                    grown.set()
+                _send(watch, await asyncio.to_thread(_held, watch.root, set(folders).difference(watched)))
             watched = folders
+            # A folder made between the walk and the watch went unwatched: once watched, the tree is walked again.
+            if set(await asyncio.to_thread(_folders, watch.root)).difference(folders):
+                grown.set()
             waits = [asyncio.create_task(grown.wait()), asyncio.create_task(watch.stop.wait())]
             await asyncio.wait([following, *waits], return_when=asyncio.FIRST_COMPLETED)
             for waiting in waits:

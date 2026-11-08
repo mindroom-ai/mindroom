@@ -28,17 +28,19 @@ async def _until(next_changes: Callable[[], Awaitable[list[str]]], *paths: str) 
     return seen
 
 
-async def _settled(root: Path) -> None:
-    """Wait until the watcher follows ``root``: a probe file written now shows."""
+async def _settled(root: Path, folder: Path | None = None) -> None:
+    """Wait until the watcher of ``root`` follows ``folder``, the root unless given: a probe file written there shows."""
+    folder = folder or root
     async with workspace_changes(root) as next_changes:
         for attempt in range(50):
-            (root / f"probe{attempt}").write_text("x")
+            (folder / f"probe{attempt}").write_text("x")
             try:
                 async with asyncio.timeout(0.1):
-                    if await next_changes():
+                    if any(Path(path).parent == folder.relative_to(root) for path in await next_changes()):
                         return
             except TimeoutError:
                 continue
+    pytest.fail(f"{folder} was never followed")
 
 
 @pytest.mark.asyncio
@@ -374,7 +376,8 @@ async def test_a_folder_made_after_the_walk_is_watched_too(tmp_path: Path, monke
         await _settled(root)
         (root / "new").mkdir()
         await _until(next_changes, "new/sub")
-        await asyncio.sleep(1)
+        await _settled(root, root / "late")
+        await _settled(root, root / "new" / "sub")
         (root / "late" / "a.md").write_text("x")
         (root / "new" / "sub" / "b.md").write_text("x")
 
@@ -406,3 +409,29 @@ async def test_a_link_made_in_the_workspace_is_reported_even_when_it_leads_outsi
         (root / "out").symlink_to(tmp_path / "outside")
 
         assert "out" in await _until(next_changes, "out")
+
+
+@pytest.mark.asyncio
+async def test_a_folder_made_while_the_first_watch_starts_is_watched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tree is walked again once watched, so a folder made between the first walk and the watch is not missed."""
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    real_folders = watch._folders
+    calls = []
+
+    def first_walk_then_a_folder(path: Path) -> list[str]:
+        folders = real_folders(path)
+        calls.append(len(folders))
+        if len(calls) == 1:
+            (root / "src" / "generated").mkdir()
+        return folders
+
+    monkeypatch.setattr(watch, "_folders", first_walk_then_a_folder)
+    async with workspace_changes(root) as next_changes:
+        await _settled(root, root / "src" / "generated")
+        (root / "src" / "generated" / "out.md").write_text("x")
+
+        assert "src/generated/out.md" in await _until(next_changes, "src/generated/out.md")
