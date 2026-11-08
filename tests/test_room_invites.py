@@ -51,7 +51,7 @@ from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_summary import notices
 from mindroom.tool_system.worker_routing import agent_state_root_path
-from tests.access_schema_support import with_responder_access
+from tests.access_schema_support import joined_members_response, with_responder_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -190,6 +190,7 @@ def _router_room_lifecycle(
             send_response=AsyncMock(return_value=None),
             change_membership=change_membership,
             admit_response=MagicMock(),
+            refresh_memberships=AsyncMock(),
             on_configured_room_joined=AsyncMock(),
             on_room_joined=AsyncMock(),
             get_conversation_reader=MagicMock(),
@@ -2176,7 +2177,7 @@ async def test_router_invite_welcome_requires_current_reply_authorization(
             router=RouterConfig(
                 model="default",
                 accept_invites=True,
-                access=ResponderAccessConfig(users=[]),
+                access=ResponderAccessConfig(current_room_members=False),
             ),
         ),
         test_runtime_paths(tmp_path),
@@ -2255,6 +2256,75 @@ async def test_router_invite_welcome_waits_for_replacement_authorization(
         await welcome_task
 
     send_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize(
+    ("inviter_joined", "refresh_in_flight", "welcomed"),
+    [
+        pytest.param(True, False, True, id="member"),
+        pytest.param(False, False, False, id="not-a-member"),
+        pytest.param(True, True, True, id="member-behind-a-refresh-that-missed-the-join"),
+    ],
+)
+async def test_router_invite_welcome_reads_the_joined_rooms_members(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    inviter_joined: bool,
+    refresh_in_flight: bool,
+    welcomed: bool,
+) -> None:
+    """With default router access, the welcome follows whether the inviter is a member of the room the router joined."""
+    room_id = "!adhoc:localhost"
+    inviter = "@alice:localhost"
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
+    install_runtime_journal_support(bot)
+    joined_rooms: list[str] = []
+    listed, answer = asyncio.Event(), asyncio.Event()
+    answer.set()
+
+    async def list_joined_rooms() -> nio.JoinedRoomsResponse:
+        rooms = list(joined_rooms)
+        listed.set()
+        await answer.wait()
+        return nio.JoinedRoomsResponse(rooms)
+
+    async def check_history(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        answer.set()  # a refresh still in flight answers as the welcome reaches its decision
+        return nio.RoomMessagesResponse(room_id=room_id, chunk=[], start="", end=None)
+
+    async def join_room(_client: nio.AsyncClient, joined_room_id: str) -> RoomJoinOutcome:
+        joined_rooms.append(joined_room_id)
+        return RoomJoinOutcome.JOINED
+
+    members = (_router_user().user_id, inviter) if inviter_joined else (_router_user().user_id,)
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.invited_rooms = {}
+    bot.client.joined_rooms = AsyncMock(side_effect=list_joined_rooms)
+    bot.client.joined_members = AsyncMock(return_value=joined_members_response(room_id, *members))
+    bot.client.room_messages = AsyncMock(side_effect=check_history)
+    send_response = AsyncMock(return_value="$welcome")
+    install_send_response_mock(bot, send_response)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
+    # The router's view of its rooms before the invitation, which knows nothing of the room it is invited to.
+    await bot.orchestrator.refresh_agent_reply_memberships()
+    refresh = None
+    if refresh_in_flight:
+        answer.clear()
+        listed.clear()
+        bot.orchestrator.agent_reply_membership_sync.invalidate(config, reason="test")
+        refresh = asyncio.create_task(bot.orchestrator.refresh_agent_reply_memberships_when_needed())
+        await listed.wait()
+
+    await _handle_invite(bot, MagicMock(room_id=room_id, canonical_alias=None), MagicMock(sender=inviter))
+
+    if refresh is not None:
+        await refresh
+    assert send_response.await_count == int(welcomed)
+    assert bot._room_lifecycle.invited_room_ids() == {room_id}
 
 
 @pytest.mark.asyncio
