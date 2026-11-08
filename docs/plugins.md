@@ -1111,8 +1111,8 @@ Each call to `power()` reads again, and `members` is read anew for each request,
 `is_direct()` keeps its answer for a few minutes and counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
 
 `set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
-Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 503 with `The router is not running.` while the router is stopped.
-A thread mode change updates the room's `io.mindroom.thread_mode` state, which clients choose the room's view by, before `set_modes()` returns.
+Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 503 with `The router is not running in this room.` while the router is stopped or not in the room, as in a direct message with one agent.
+As with `!thread_mode`, the router then updates the room's [`io.mindroom.thread_mode`](configuration/threads.md#thread-mode-resolution) state, which clients choose the room's view by, before `set_modes()` returns.
 
 ```python
 from dataclasses import asdict

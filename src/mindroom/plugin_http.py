@@ -21,6 +21,7 @@ from mindroom.api.client_sessions import (
     presented_session,
 )
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
+from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
@@ -30,7 +31,10 @@ from mindroom.room_reply_modes import (
     resolve_room_reply_mode_override,
     set_room_reply_mode_override,
 )
-from mindroom.room_thread_modes import resolve_room_thread_mode_override
+from mindroom.room_thread_modes import (
+    RoomThreadMode,
+    resolve_room_thread_mode_override,
+)
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 
 if TYPE_CHECKING:
@@ -39,10 +43,8 @@ if TYPE_CHECKING:
 
     from mindroom.api.client_sessions import ClientSession
     from mindroom.bot import AgentBot
-    from mindroom.config.agent import RoomReplyMode
     from mindroom.config.main import Config
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
-    from mindroom.room_thread_modes import RoomThreadMode
 
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = [
@@ -63,7 +65,7 @@ __all__ = [
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
-_ROUTER_NOT_RUNNING = "The router is not running."
+_ROUTER_NOT_RUNNING = "The router is not running in this room."
 
 
 @dataclass(frozen=True)
@@ -256,12 +258,12 @@ class RoomReader:
         """Change the room's overrides as ``!thread_mode`` and ``!reply_mode`` do: None clears one, one left out stays.
 
         Before anything is written it answers 403 unless the caller holds room admin power by a ``power()`` read, 503
-        when that read fails, and 503 while the router, which republishes the thread mode, is not running.
+        when that read fails, and 503 unless the router, which republishes the thread mode, runs and is in the room.
         """
         if not (await self.power()).is_admin(self.user.user_id):
             raise HTTPException(403, "Only room admins change the room's modes.")
         router = self._router()
-        if router is None or not router.running or router.client is None:
+        if router is None or not router.running or router.client is None or self._room_id not in router.client.rooms:
             raise HTTPException(503, _ROUTER_NOT_RUNNING)
         if reply is None:
             clear_room_reply_mode_override(router.runtime_paths, self._room_id)

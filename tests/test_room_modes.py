@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
 import nio
 import pytest
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
 
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
@@ -186,8 +188,9 @@ async def test_an_admin_sets_and_clears_the_reply_mode_and_the_thread_mode_stays
     [
         ("member", (403, "Only room admins change the room's modes.")),
         ("unreadable", (503, "Room state read failed; try again.")),
-        ("router_stopped", (503, "The router is not running.")),
-        ("router_missing", (503, "The router is not running.")),
+        ("router_stopped", (503, "The router is not running in this room.")),
+        ("router_missing", (503, "The router is not running in this room.")),
+        ("router_absent", (503, "The router is not running in this room.")),
     ],
 )
 async def test_a_refused_change_writes_and_publishes_nothing(
@@ -195,7 +198,11 @@ async def test_a_refused_change_writes_and_publishes_nothing(
     case: str,
     expected: tuple[int, str],
 ) -> None:
-    """A member without admin power gets 403, and an unreadable power read or a stopped or missing router 503."""
+    """A member without admin power gets 403, and an unreadable power read or a router not running in the room 503.
+
+    A router that runs but is not in the room could not republish the thread mode, as in a direct message with one
+    agent, where that agent's bot still answers the membership and power reads.
+    """
     reader = await room.reader(BOB if case == "member" else ALICE)
     if case == "unreadable":
         room.client.room_get_state.side_effect = None
@@ -204,11 +211,32 @@ async def test_a_refused_change_writes_and_publishes_nothing(
         room.router.running = False
     if case == "router_missing":
         ensure_app_state(room.app).embedded = SimpleNamespace(agent_bot=lambda _name: None)  # type: ignore[assignment]
-        with pytest.raises(HTTPException, match=r"^503: The router is not running\.$"):
+        with pytest.raises(HTTPException, match=r"^503: The router is not running in this room\.$"):
             reader.modes()
+    if case == "router_absent":
+        room.router.client = AsyncMock(spec=nio.AsyncClient, rooms={})
     assert await _answer(reader.set_modes(thread="room", reply="mentions")) == expected
     assert room.stored() == (None, None)
     room.client.room_put_state.assert_not_awaited()
+
+
+def test_a_route_returns_the_modes_as_its_typed_response(room: _Room) -> None:
+    """A route annotated to return `RoomModes` answers them as JSON."""
+
+    @room.app.get("/rooms/{room_id}/modes")
+    async def modes(reader: Annotated[RoomReader, Depends(require_room_reader)]) -> RoomModes:
+        return reader.modes()
+
+    set_room_thread_mode_override(room.paths, room_id=ROOM_ID, mode="room")
+    token = client_session_store(room.app).create(BOB).token
+    response = TestClient(room.app).get(
+        f"/rooms/{quote(ROOM_ID, safe='')}/modes",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert (response.status_code, response.json()) == (
+        200,
+        {"thread": "room", "reply": None, "reply_in_effect": "auto"},
+    )
 
 
 @pytest.mark.asyncio
