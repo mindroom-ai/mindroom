@@ -460,6 +460,10 @@ _MEMBERS = {
         "history": "(self)",
     },
     "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
+    "mindroom.plugin_http.RoomMessenger": {
+        "notice": "(self, text, *, thread_id, content)",
+        "relay": "(self, text, *, mentions, thread_id, content)",
+    },
     "mindroom.plugin_http.RoomPower": {
         "level": "(self, user_id)",
         "is_admin": "(self, user_id)",
@@ -540,6 +544,7 @@ _MANIFEST = {
 _HTTP_EXPORTS = [
     "ClientUser",
     "RoomHistory",
+    "RoomMessenger",
     "RoomModes",
     "RoomPower",
     "RoomReader",
@@ -549,6 +554,7 @@ _HTTP_EXPORTS = [
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
+    "require_room_messenger",
     "require_room_reader",
 ]
 _ELSEWHERE_SIGNATURES = {
@@ -559,6 +565,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
     "mindroom.plugin_http.RoomHistory": "(visibility)",
+    "mindroom.plugin_http.RoomMessenger": "(user)",
     "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
@@ -568,11 +575,12 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
+    "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 11), "25baf46f52ac72859b3308cca2142369bff9528f3e07fc08733fc8afaf4a89f6")
+_PINNED_VERSION = ((1, 12), "05c9dfcbddcb986889f8078f8edf636eba16bebc72cb4068587a12e69dc6b5bf")
 
 
 def _is_enum(obj: object) -> bool:

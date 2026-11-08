@@ -444,7 +444,6 @@ _.tool_search  # Toolkit function its @tool mark offers (src/mindroom/custom_too
 _.validate_workflow  # Toolkit function its passthrough_tool mark offers (src/mindroom/custom_tools/dynamic_workflow.py)
 _.send_input  # Terminal client API for the primary's terminal surfaces (src/mindroom/terminal/client.py)
 _.is_on  # Trafilatura's crawl loop reads it to stop (src/mindroom/tools/agno_compat_trafilatura.py)
-_.may_send  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)
 _.is_direct  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)
 _.set_modes  # Plugin route API, called by plugins (src/mindroom/plugin_http.py)
 _.reply_in_effect  # Plugin route API, read by plugins (src/mindroom/plugin_http.py)
