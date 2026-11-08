@@ -1117,7 +1117,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
 
 @pytest.mark.parametrize("worker", [False, True], ids=["primary", "worker"])
 @pytest.mark.parametrize("first_load_fails", [False, True], ids=["loaded", "failed"])
-@pytest.mark.parametrize("helper_import", ["demo_pkg.helpers", ".helpers"])
+@pytest.mark.parametrize("helper_import", ["demo_pkg.helpers", ".helpers", "demo_pkg.sub"])
 def test_reloading_a_package_plugin_keeps_the_tools_its_helper_module_registers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1126,7 +1126,14 @@ def test_reloading_a_package_plugin_keeps_the_tools_its_helper_module_registers(
     helper_import: str,
 ) -> None:
     """A tools module edit reloads the helper module it imports, whether the plugin loaded before."""
-    tools_path = _write_package_helper_plugin(tmp_path, monkeypatch) / "tools.py"
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    # A subpackage that registers the helper's tool in its own ``__init__.py``.
+    (plugin_root / "sub").mkdir()
+    (plugin_root / "sub" / "__init__.py").write_text(
+        (plugin_root / "helpers.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
     healthy_source = f"from {helper_import} import helper_tools\n"
     tools_path.write_text(healthy_source, encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
@@ -1139,7 +1146,7 @@ def test_reloading_a_package_plugin_keeps_the_tools_its_helper_module_registers(
 
     with _forgetting_modules("demo_pkg"):
         assert ("helper_tool" in load().tools) is not first_load_fails
-        helpers_path = tools_path.with_name("helpers.py")
+        helpers_path = plugin_root / ("sub/__init__.py" if helper_import == "demo_pkg.sub" else "helpers.py")
         imported_helpers = [
             module for module in sys.modules.values() if getattr(module, "__file__", None) == str(helpers_path)
         ]
@@ -1169,6 +1176,51 @@ def test_a_worker_refresh_whose_edited_tools_module_fails_keeps_the_installed_he
         _bump_mtime(tools_path)
         assert "helper_tool" not in plugins_module.refresh_plugins(config, runtime_paths).tools
         assert sys.modules["demo_pkg.helpers"] is installed
+
+
+@pytest.mark.parametrize("worker", [False, True], ids=["primary", "worker"])
+def test_a_package_plugins_module_imported_after_its_load_follows_a_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker: bool,
+) -> None:
+    """A module the plugin imports by package name only when a tool runs uses the reloaded plugin's classes."""
+    plugin_root = tmp_path / "site-packages" / "demo_pkg"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-pkg", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "errors.py").write_text("class ApiError(Exception):\n    pass\n", encoding="utf-8")
+    (plugin_root / "client.py").write_text(
+        "from demo_pkg.errors import ApiError\n\n\ndef fetch():\n    raise ApiError('rate limited')\n",
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        "from demo_pkg.errors import ApiError\n\n\n"
+        "def run():\n"
+        "    from demo_pkg.client import fetch\n\n"
+        "    try:\n"
+        "        fetch()\n"
+        "    except ApiError:\n"
+        "        return 'handled'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(plugin_root.parent))
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("demo_pkg"):
+        for _ in range(2):
+            if worker:
+                plugins_module.refresh_plugins(config, runtime_paths)
+            else:
+                _load(config, runtime_paths)
+            assert cached_plugin_module(tools_path).run() == "handled"
+            tools_path.write_text(f"{tools_path.read_text(encoding='utf-8')}# edited\n", encoding="utf-8")
+            _bump_mtime(tools_path)
 
 
 def test_a_package_plugins_helper_module_follows_the_published_plugin_modules(
@@ -3032,7 +3084,7 @@ async def test_an_edit_waits_for_its_reload_which_cancels_the_edited_module_s_ta
         first_module._AUTO_POKE_TASK = task
         _set_hooks_version(hooks_path, 2)
 
-        assert config_plugins(config, runtime_paths).loaded_plugins[0].modules == (first_module,)
+        assert config_plugins(config, runtime_paths).generation.modules[first_module.__name__] is first_module
         assert cached_plugin_module(hooks_path) is first_module
 
         result = _publish(config, runtime_paths)

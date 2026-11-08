@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
-# Guards the canonical plugin modules in sys.modules, the module cache, the root modules, and the published generation.
+# Guards the canonical plugin modules in sys.modules, the module cache, the root packages, and the published generation.
 _PLUGIN_LOCK = threading.RLock()
 _CANDIDATE_NAMESPACES = itertools.count()
 
@@ -75,7 +75,7 @@ _CONFIGURED_PLUGIN_ROOT_CACHE: dict[_ConfiguredPluginRootCacheKey, tuple[Path, .
 
 @dataclass(frozen=True, eq=False)
 class _LoadedPlugin:
-    """One plugin a generation loaded: what its modules registered and discovered, and the modules themselves."""
+    """One plugin a generation loaded: what its modules registered and discovered."""
 
     name: str
     # The plugin API version it needs, as its manifest states it.
@@ -99,7 +99,6 @@ class _LoadedPlugin:
     lifespan: PluginLifespan | None
     # Why a staged load found no ``lifespan`` in the plugin's lifecycle module, which leaves the rest of it loaded.
     lifespan_error: plugin_imports.PluginValidationError | None
-    modules: tuple[ModuleType, ...]
 
 
 @dataclass(frozen=True, eq=False)
@@ -164,10 +163,9 @@ _PUBLISHED = PluginGeneration()
 
 # Each plugin's ``PluginLifecycle.process_state`` by plugin name, kept for the process, so it outlives reloads.
 _PROCESS_STATE: dict[str, dict[str, Any]] = {}
-# Each module a plugin load imported from the plugin's root under a name outside the canonical prefix, such as
-# ``demo_pkg.helpers``, with that root: one of the plugin's modules, so its next load imports it and registers its tools
-# again.
-_ROOT_MODULES: dict[str, Path] = {}
+# The package name a plugin load imported the plugin's root under, such as ``demo_pkg`` for ``demo_pkg.helpers``, with
+# that root. The modules under it, whenever imported, are the plugin's modules too, so its next load imports them again.
+_ROOT_PACKAGES: dict[str, Path] = {}
 
 # The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` sets it, and
 # ``mindroom.plugin_http.plugin_context`` reads it.
@@ -368,26 +366,26 @@ def _raise_if_host_control_exception(exc: BaseException) -> None:
 
 
 def _canonical_plugin_modules() -> dict[str, ModuleType]:
-    """Return the canonical plugin modules in sys.modules: those under the canonical prefix and the root modules."""
-    return {
-        module_name: module
-        for module_name, module in tuple(sys.modules.items())
-        if (module_name.startswith(PLUGIN_MODULE_PREFIX) or module_name in _ROOT_MODULES) and module is not None
-    }
+    """Return the canonical plugin modules in sys.modules: those under the canonical prefix and the root packages."""
+    packages = tuple(_ROOT_PACKAGES)
+    return _modules_named((PLUGIN_MODULE_PREFIX, *(f"{package}." for package in packages)), packages)
 
 
 def _plugin_modules(plugin: plugin_imports._PluginBase) -> dict[str, ModuleType]:
-    """Return one plugin's canonical modules: those under its package and those its loads imported from its root."""
-    package_name = plugin_imports._plugin_package_name(plugin.name, plugin.root)
-    modules = {
+    """Return one plugin's canonical modules: those under its package and under the package names of its root."""
+    packages = (
+        plugin_imports._plugin_package_name(plugin.name, plugin.root),
+        *(package for package, root in tuple(_ROOT_PACKAGES.items()) if root == plugin.root),
+    )
+    return _modules_named(tuple(f"{package}." for package in packages), packages)
+
+
+def _modules_named(prefixes: tuple[str, ...], names: tuple[str, ...]) -> dict[str, ModuleType]:
+    return {
         module_name: module
         for module_name, module in tuple(sys.modules.items())
-        if (module_name == package_name or module_name.startswith(f"{package_name}.")) and module is not None
+        if (module_name.startswith(prefixes) or module_name in names) and module is not None
     }
-    for module_name, root in tuple(_ROOT_MODULES.items()):
-        if root == plugin.root and (module := sys.modules.get(module_name)) is not None:
-            modules[module_name] = module
-    return modules
 
 
 def _evict_plugin_modules(plugin: plugin_imports._PluginBase) -> dict[str, ModuleType]:
@@ -412,6 +410,24 @@ def _imported_from_root(root: Path, loaded_before: set[str]) -> dict[str, Module
         and not module_name.startswith(PLUGIN_MODULE_PREFIX)
         and _module_within(module, root)
     }
+
+
+def _root_packages(root: Path, loaded_before: set[str]) -> set[str]:
+    """Return the package names the modules imported since ``loaded_before`` reached ``root`` under."""
+    packages: set[str] = set()
+    for module_name, module in _imported_from_root(root, loaded_before).items():
+        relative = Path(cast("str", module.__file__)).resolve().relative_to(root).with_suffix("").parts
+        if relative[-1:] == ("__init__",):
+            relative = relative[:-1]
+        parts = module_name.split(".")
+        # A candidate check running meanwhile imports under its own namespace; vendored packages map to no root package.
+        if (
+            len(parts) > len(relative)
+            and tuple(parts[len(parts) - len(relative) :]) == relative
+            and not module_name.startswith(CANDIDATE_PLUGIN_MODULE_PREFIX)
+        ):
+            packages.add(".".join(parts[: len(parts) - len(relative)]))
+    return packages
 
 
 def _install_canonical_modules(
@@ -572,7 +588,7 @@ def candidate_tool_registry(
     unavailable: dict[str, ToolMetadata] = {}
     for plugin_base, plugin_entry in plugin_bases:
         loaded = published.plugins.get(plugin_base.root)
-        if loaded is not None and loaded.name == plugin_base.name and loaded.source == _plugin_source(plugin_base):
+        if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
             tools: Mapping[str, ToolMetadata] = loaded.tools
         else:
             registrations: dict[str, ToolMetadata] = {}
@@ -675,6 +691,11 @@ def _add_plugin_tools(
         plugin_tools[tool_name] = (plugin_name, metadata)
 
 
+def _loaded_from_current_source(loaded: _LoadedPlugin, plugin: plugin_imports._PluginBase) -> bool:
+    """Return whether ``loaded`` executed ``plugin``'s current modules under its current name."""
+    return loaded.name == plugin.name and loaded.source == _plugin_source(plugin)
+
+
 def _plugin_source(plugin: plugin_imports._PluginBase) -> tuple[tuple[Path, float], ...] | None:
     """Return the paths and mtimes of one plugin's modules, or None when one cannot be read."""
     paths = dict.fromkeys(
@@ -768,7 +789,7 @@ def _materialize_plugin(
     *,
     primary_modules: bool,
 ) -> _LoadedPlugin:
-    if previous is not None and previous.name == plugin.name and previous.source == _plugin_source(plugin):
+    if previous is not None and _loaded_from_current_source(previous, plugin):
         # Its modules are unchanged and stay; only its manifest may have changed.
         if (
             previous.mindroom_plugin_api == plugin.mindroom_plugin_api
@@ -793,7 +814,6 @@ def _materialize_plugin(
         else _load_plugin_module(plugin.name, plugin.root, plugin.hooks_module_path, kind="hooks")
     )
     oauth_entry = _load_plugin_module(plugin.name, plugin.root, plugin.oauth_module_path, kind="oauth")
-    routes_entry: plugin_imports._ModuleCacheEntry | None = None
     routes_app: PluginRoutesApp | None = None
     routes_error: plugin_imports.PluginValidationError | None = None
     if primary_modules and plugin.routes_module_path is not None:
@@ -805,7 +825,6 @@ def _materialize_plugin(
         except plugin_imports.PluginValidationError as error:
             logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
             routes_error = error
-    lifecycle_entry: plugin_imports._ModuleCacheEntry | None = None
     lifespan: PluginLifespan | None = None
     lifespan_error: plugin_imports.PluginValidationError | None = None
     if primary_modules and plugin.lifecycle_module_path is not None:
@@ -827,8 +846,6 @@ def _materialize_plugin(
                 error=str(error),
             )
             lifespan_error = error
-    loaded = (tools_entry, hooks_entry, oauth_entry, routes_entry, lifecycle_entry)
-    modules = tuple(dict.fromkeys(entry.module for entry in loaded if entry is not None))
     # Candidate validation never imports a routes or lifecycle module, so ``source`` leaves them out.
     module_paths = (
         (plugin.tools_module_path, tools_entry),
@@ -853,7 +870,6 @@ def _materialize_plugin(
         routes_error=routes_error,
         lifespan=lifespan,
         lifespan_error=lifespan_error,
-        modules=modules,
     )
 
 
@@ -1121,7 +1137,7 @@ def _load_plugin_module(
         raise plugin_imports.PluginValidationError(msg) from exc
     finally:
         if canonical:
-            _ROOT_MODULES.update(dict.fromkeys(_imported_from_root(plugin_root, loaded_before), plugin_root))
+            _ROOT_PACKAGES.update(dict.fromkeys(_root_packages(plugin_root, loaded_before), plugin_root))
 
     entry = plugin_imports._ModuleCacheEntry(mtime=mtime, module=module, registrations=MappingProxyType(registrations))
     if canonical:
