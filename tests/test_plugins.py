@@ -1659,10 +1659,14 @@ def test_a_plugin_whose_package_name_another_module_holds_loads_its_own_modules(
     else:
         monkeypatch.setitem(sys.modules, name, ModuleType(name))
 
+    holders = {module_name: module for module_name, module in sys.modules.items() if module_name.startswith(name)}
+
     plugins = _load(Config(plugins=[str(plugin_root)]), _minimal_runtime_paths(tmp_path))
 
     assert "shadowed_tool" in plugins.tools
     assert cached_plugin_module(plugin_root.resolve() / "tools.py").demo_plugin_tools().__name__ == "DemoTool"
+    # The module that holds the name stays where it is.
+    assert all(sys.modules.get(module_name) is module for module_name, module in holders.items())
 
 
 def test_a_plugin_imports_a_zip_archive_inside_its_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
