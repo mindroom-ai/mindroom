@@ -227,7 +227,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     continuation_count: int,
 ) -> None:
-    """Recovery preserves knowledge, cancellation registration, typing and the remaining budget.
+    """Recovery preserves knowledge, cancellation registration and the remaining budget.
 
     The follow-up turn, built afresh after the switch, sends the approval receipt the runner binds and the resume's
     system enrichment.
@@ -317,12 +317,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         },
     )
     execution = _approval_execution(tmp_path, runtime, monkeypatch, knowledge)
-    typing_events = []
-
-    async def room_typing(_room, enabled, _timeout):
-        typing_events.append(enabled)
-
-    monkeypatch.setattr(execution.client(), "room_typing", room_typing)
     run_ids = []
     stream_agent_response = approval_execution.stream_agent_response
     monkeypatch.setattr(
@@ -341,7 +335,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             paused_answer=PausedAnswer(),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
             system_enrichment_items=(instruction,),
         )
@@ -361,7 +355,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         assert len(run_ids) == 1
         assert run_ids[0] != "saved-run"
     assert all(built.surface.mode == "minimal" for built in builds)
-    assert typing_events == [True, False]
 
 
 @pytest.mark.asyncio
@@ -449,7 +442,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             paused_answer=PausedAnswer(),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
             system_enrichment_items=(),
         )
@@ -1311,6 +1304,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             tool_context=runtime,
             progress=publish,
             system_enrichment_items=(),
+            quiet=False,
         )
 
     def stored_runs() -> list[dict]:
@@ -1461,7 +1455,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             paused_answer=PausedAnswer(),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
             system_enrichment_items=(),
         )
@@ -1578,7 +1572,7 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
             paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace if saved_trace else ()),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
             system_enrichment_items=(),
         )

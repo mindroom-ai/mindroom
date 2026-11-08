@@ -1101,9 +1101,18 @@ OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 
 
 def is_silent_schedule_no_report_response(response_text: str) -> bool:
-    """Return whether one silent-schedule final text explicitly reports nothing."""
-    normalized = response_text.strip()
-    return not normalized or normalized.casefold() == SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
+    """Return whether one silent-schedule final text reports nothing: it is blank, or its last non-blank line is the token.
+
+    The token matches in any case, and the line holds nothing else, so a report must not end with it.
+    """
+    lines = response_text.strip().splitlines()
+    return not lines or lines[-1].strip().casefold() == SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
+
+
+def without_no_report_lines(text: str) -> str:
+    """Return ``text`` without the lines that hold only the no-report token, which a reply never shows."""
+    token = SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
+    return "\n".join(line for line in text.splitlines() if line.strip().casefold() != token).rstrip()
 
 
 # Canonical mapping from provider name to the environment variable it requires.

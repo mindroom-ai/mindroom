@@ -19,6 +19,7 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.config.resolution import entity_timezone
+from mindroom.constants import is_silent_schedule_no_report_response, without_no_report_lines
 from mindroom.delegation.execution import drive_delegation_stream, resume_from_approval
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
@@ -49,6 +50,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.events import strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
@@ -243,6 +245,20 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     )
 
 
+def silent_team_answer(presentation: TeamStreamPresentation, record: TeamRunRecord) -> str | None:
+    """Return the leader's bare answer when a quiet turn's team reports nothing, else None for its document.
+
+    Only a team run whose leader reports nothing and whose members found nothing reports nothing; delivery withholds
+    that answer, as an agent's. A member's finding stays in the document, without the leader's no-report token.
+    """
+    if not is_silent_schedule_no_report_response(record.handover_content or ""):
+        return None
+    if not any(strip_visible_tool_markers(text).strip() for text in presentation.per_member.values()):
+        return (record.handover_content or "").strip()
+    presentation.consensus = without_no_report_lines(presentation.consensus)
+    return None
+
+
 async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
     """Build the members whose paused runs a saved approval's resume continues, before it checks its decisions.
 
@@ -280,13 +296,15 @@ async def continue_paused_team_run(
     tool_trace_collector: list[ToolTraceEntry],
     progress: ProgressPublisher | None,
     system_enrichment_items: tuple[EnrichmentItem, ...],
+    quiet: bool,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
     ``configured_team_name`` is the entity the approval was saved under: the configured team, or for an ad hoc team
     the member whose account handles it. ``progress``, when given, shows the resumed document live in the reply
     being continued; the terminal delivery stays with the caller. The resumed runs keep their stored system prompts,
-    and each member run the resume starts renders ``system_enrichment_items`` into its own.
+    and each member run the resume starts renders ``system_enrichment_items`` into its own. A ``quiet`` turn's team
+    that reports nothing answers as its turn would (``silent_team_answer``).
     """
     if not member_names:
         # Saved approvals name their members; without them no member could run the approved calls.
@@ -444,8 +462,12 @@ async def continue_paused_team_run(
             tool_trace_collector.extend(presentation.tool_trace)
         # The document already holds what each run wrote before the pause and handed over since, the leader's included,
         # so one that stays empty, every run's text blank, shows the no-reply note, as a new team turn's does.
-        response_text = presentation.render_body(finished=True) or (
-            format_team_header(members.display_names) + NO_TEAM_RESPONSE
+        silent_answer = silent_team_answer(presentation, continued) if quiet else None
+        response_text = (
+            silent_answer
+            if silent_answer is not None
+            else presentation.render_body(finished=True)
+            or (format_team_header(members.display_names) + NO_TEAM_RESPONSE)
         )
         return CompletedApprovalRun(
             response_text=response_text,
@@ -466,4 +488,5 @@ __all__ = [
     "continue_paused_team_run",
     "continued_team_pause",
     "drive_team_delegations",
+    "silent_team_answer",
 ]

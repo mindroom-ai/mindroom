@@ -18,7 +18,15 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import Cancelled, Failed, FailureCause, FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import (
+    Cancelled,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    StreamTransportOutcome,
+    Suppressed,
+    Suppression,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -1507,7 +1515,7 @@ async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_be
     *,
     settlement_began: bool,
 ) -> None:
-    """A judged turn that fails before its settlement began is declined quietly; once settlement began, it raises."""
+    """A judged turn that fails before its settlement began ends quietly as a failed check; after that, it raises."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1534,7 +1542,7 @@ async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_be
             new=AsyncMock(return_value=MagicMock(spec=_LockedTurn)) if settlement_began else fail,
         ),
         patch.object(coordinator, "_generate_and_settle", new=fail),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         turn = coordinator._run_locked_turn(
             request,
@@ -1548,3 +1556,6 @@ async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_be
         else:
             # No reply was claimed, so the declined turn's caller settles its sources.
             assert await turn == Unclaimed(UnclaimedReason.DECLINED)
+            # The check never decided, so the turn ends as a failed check, not a decline.
+            ending = effects.await_args.args[0].ending
+            assert ending == Suppressed(Suppression.PARTICIPATION_FAILED)

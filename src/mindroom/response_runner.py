@@ -1406,7 +1406,7 @@ class ResponseRunner:
             if participation is None or participation.decision is not None:
                 raise
             participation.decline("preparation_failed")
-            return await self._decline_unprepared_turn(request, error)
+            return await self._decline_unprepared_turn(request, error, participation)
         if not isinstance(prepared, _LockedTurn):
             return prepared
         await self._generate_and_settle(prepared)
@@ -1763,11 +1763,9 @@ class ResponseRunner:
                     response_identity=lifecycle.identity,
                     progress=progress,
                 )
-                participation = dispatched.runtime.participation
+                # Only a participation check that chose to stay silent ends a turn declined.
                 if (
-                    participation is not None
-                    and participation.is_declined
-                    and request.participation is not None
+                    request.participation is not None
                     and request.participation.decline_reaction is not None
                     and delivery.ending == DECLINED.ending
                 ):
@@ -2085,12 +2083,17 @@ class ResponseRunner:
             ),
         )
 
-    async def _decline_unprepared_turn(self, request: ResponseRequest, error: Exception) -> SourceFate:
-        """Quietly decline a turn whose preparation failed before its participation decision."""
+    async def _decline_unprepared_turn(
+        self,
+        request: ResponseRequest,
+        error: Exception,
+        participation: ParticipationGate,
+    ) -> SourceFate:
+        """Quietly end a turn whose preparation failed before its participation decision, as its failed check."""
         self.deps.logger.error("Response preparation skipped before participation", error=str(error), exc_info=error)
         claimed = await self._end_unanswered(
             request,
-            DECLINED,
+            participation_silence(participation),
             response_kind="ai",
             post_response_outcome=ResponseOutcome(run_succeeded=False),
         )

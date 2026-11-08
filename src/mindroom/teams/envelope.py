@@ -19,7 +19,6 @@ from uuid import uuid4
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content, with_prior_usage
 from mindroom.config.resolution import entity_timezone
-from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -73,7 +72,7 @@ from mindroom.teams.presentation import (
     TeamStreamPresentation,
     format_team_header,
 )
-from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
+from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations, silent_team_answer
 from mindroom.teams.runtime import leader_tool_specs, team_usage
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -562,25 +561,26 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
-        if self.silent_no_report(record):
-            # A quiet scheduled check that found nothing replies with the bare token, which delivery then suppresses,
-            # instead of a team document around it.
+        silent_answer = silent_team_answer(attempt.presentation, record) if self.ctx.allow_no_report_response else None
+        if silent_answer is not None:
+            # A quiet scheduled check that found nothing replies with the leader's bare answer, which delivery then
+            # suppresses, instead of a team document around it.
             # The document's trace stays, as the streamed reply keeps it.
-            shown = (record.handover_content or "").strip()
+            shown = silent_answer
             yield StructuredStreamChunk(content=shown, tool_trace=None)
         # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
         # when only members spoke.
         elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             shown = chunk.content
             yield chunk
-        yield AttemptResolved(self.resolve_completed(attempt, record, run.prior_usage, shown=shown is not None))
-
-    def silent_no_report(self, record: TeamRunRecord) -> bool:
-        """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
-        return (
-            self.ctx.allow_no_report_response
-            and is_silent_schedule_no_report_response(record.handover_content or "")
-            and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
+        yield AttemptResolved(
+            self.resolve_completed(
+                attempt,
+                record,
+                run.prior_usage,
+                shown=shown is not None,
+                silent_answer=silent_answer,
+            ),
         )
 
     def run_metadata_builder(
@@ -624,11 +624,12 @@ class _TeamTurn:
         prior_usage: tuple[RunMetrics, ...],
         *,
         shown: bool,
+        silent_answer: str | None,
     ) -> CompletedAttempt:
         """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
         ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
-        no-response line.
+        no-response line. ``silent_answer`` is the bare answer a quiet turn's team that reports nothing replies with.
         """
         tool_executions = run_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
@@ -640,8 +641,8 @@ class _TeamTurn:
         is_empty = is_empty_reply(record)
         rendered = header + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if has_visible_output else ""
-        if self.silent_no_report(record):
-            replayable_text = (record.handover_content or "").strip()
+        if silent_answer is not None:
+            replayable_text = silent_answer
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,

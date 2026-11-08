@@ -403,7 +403,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
                 paused_answer=paused_answer,
                 tool_context=tool_context,
                 tool_trace_collector=trace,
-                typing_log_context={},
+                quiet=False,
                 progress=None,
                 system_enrichment_items=(),
             )
@@ -567,6 +567,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         tool_context=turn_tool_context(config, paths, identity),
         progress=None,
         system_enrichment_items=(),
+        quiet=False,
     )
     assert isinstance(result, CompletedApprovalRun)
     expected = "Before approval.\n\n" + ("🔧 `inspect` [1]\n\n" if show_tool_calls else "") + "After approval."
@@ -618,6 +619,7 @@ async def test_approval_settlement_uses_typed_status(
         tool_context=turn_tool_context(config, paths, identity),
         progress=None,
         system_enrichment_items=(),
+        quiet=False,
     )
     if status is RunStatus.error:
         with pytest.raises(RuntimeError, match="Terminal response"):
@@ -748,7 +750,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         paused_answer=PausedAnswer(text=saved.response_text, tool_trace=tuple(saved.tool_trace)),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=progress,
         system_enrichment_items=(),
     )
@@ -847,7 +849,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -984,7 +986,7 @@ async def _approve_add(
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=system_enrichment_items,
     )
@@ -1051,7 +1053,7 @@ async def test_an_approved_run_rebuilds_from_the_plugins_its_turn_captured(
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=tool_context,
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -1279,7 +1281,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -1344,7 +1346,7 @@ async def test_an_approved_run_settles_its_job_claims_once_it_ends(
         paused_answer=PausedAnswer(),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -1404,6 +1406,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         tool_context=turn_tool_context(config, paths, identity),
         progress=progress,
         system_enrichment_items=(),
+        quiet=False,
     )
 
     assert isinstance(result, PausedAttempt)
@@ -1491,7 +1494,7 @@ async def test_a_call_made_before_an_approval_replays_whole_and_failed_when_the_
             paused_answer=PausedAnswer(text=segment.text, tool_trace=segment.tool_trace),
             tool_context=turn_tool_context(config, paths, identity),
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
             system_enrichment_items=(),
         )

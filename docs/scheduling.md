@@ -163,10 +163,12 @@ Add `silently` or `quietly` to a request when the trigger and routine no-report 
 ```
 
 A silent schedule does not show its trigger in the room.
-A successful run that returns nothing, whitespace, or only `NO_REPLY` (any case) posts no message.
+A successful run whose final response is empty, whitespace, or has `NO_REPLY` (any case) alone on its last non-blank line posts no message.
+A final `NO_REPLY` line means do not notify, so a report must not end with it.
 Findings, failures, and messages that tools send explicitly remain visible.
 Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
-When an agent's silent run pauses for a [tool approval](tool-approval.md), it shows a waiting message; when the run resumes after the decision with nothing to report, that message ends showing only the run's tool calls, or `Done.` when tool calls are hidden, and no new message is posted.
+When a silent run pauses for a [tool approval](tool-approval.md), it shows a waiting message; when the run continues after the decision with nothing to report, that message ends showing what it already showed, such as the run's text and tool calls, without the `NO_REPLY` line, or `Done.` when nothing else is left, and no new message is posted.
+A team's silent run that reports nothing ends its waiting message with `Done.`, while a team member's finding stays visible even when the team's leader answers `NO_REPLY`.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
 Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
 

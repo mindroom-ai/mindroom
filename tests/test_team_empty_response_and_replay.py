@@ -495,7 +495,10 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
     *,
     member_finding: str | None,
 ) -> None:
-    """The leader's acknowledgment reaches delivery without team chrome, but cannot hide a member's finding."""
+    """The leader's acknowledgment reaches delivery without team chrome, but cannot hide a member's finding.
+
+    A document with a finding drops the leader's token, so delivery shows it.
+    """
     leader = (
         [answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)]
         if member_finding is None
@@ -513,7 +516,10 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
     if member_finding is None:
         assert text == SILENT_SCHEDULE_NO_REPLY_TOKEN
     else:
-        assert text == f"{HEADER}**GeneralAgent**: {member_finding}\n\n\n**Team Consensus**:\n\nNO_REPLY"
+        assert (
+            text
+            == f"{HEADER}**GeneralAgent**: {member_finding}\n\n\n*No team consensus - showing individual responses only*"
+        )
     # The turn records what it delivered: the bare token, or the document that carries the finding.
     assert team.recorder.assistant_text == text
 

@@ -1326,7 +1326,6 @@ depends_on = [
     "mindroom.delegation.execution",
     "mindroom.history.session_context",
     "mindroom.llm",
-    "mindroom.matrix.typing",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_jobs.consumption",
