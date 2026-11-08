@@ -420,7 +420,10 @@ def test_an_edited_package_plugin_validates_without_the_tool_its_helper_module_d
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Before the edited plugin reloads, validation refuses a tool its helper module no longer registers."""
+    """Before the edited plugin reloads, validation refuses a tool its helper module no longer registers.
+
+    Repeated checks leave one import finder and no candidate package behind.
+    """
     plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
     (plugin_root / "helpers.py").write_text(_helpers_source("helper_tool", "dropped_tool"), encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
@@ -436,6 +439,8 @@ def test_an_edited_package_plugin_validates_without_the_tool_its_helper_module_d
             _validate_package_plugin_tools(tmp_path, ["dropped_tool"])
 
     assert validated.agents["code"].tool_names == ["helper_tool"]
+    assert sys.meta_path.count(plugins_module._CANDIDATE_MODULE_FINDER) == 1
+    assert not plugins_module._CANDIDATE_PACKAGES
 
 
 def test_a_nested_package_plugin_importing_its_helper_through_the_outer_package_still_validates(
