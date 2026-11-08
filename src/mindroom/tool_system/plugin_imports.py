@@ -21,7 +21,7 @@ from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, record_plugin_root
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
@@ -127,20 +127,11 @@ _PLUGIN_FILE_LOADERS = (
 class _PendingModuleFinder(abc.MetaPathFinder):
     """Find each module the plugin loader is importing now at its file, with the plugin source loader."""
 
-    def find_spec(
-        self,
-        fullname: str,
-        path: Sequence[str] | None,
-        target: ModuleType | None = None,
-    ) -> machinery.ModuleSpec | None:
+    def find_spec(self, fullname: str, path: object, target: object = None) -> machinery.ModuleSpec | None:
         del path, target
-        if (module := _PENDING_MODULES.get(fullname)) is None or module.__file__ is None:
+        if (module := _PENDING_MODULES.get(fullname)) is None or (file := module.__file__) is None:
             return None
-        return util.spec_from_file_location(
-            fullname,
-            module.__file__,
-            loader=_SourceFileLoader(fullname, module.__file__),
-        )
+        return util.spec_from_file_location(fullname, file, loader=_SourceFileLoader(fullname, file))
 
 
 def _plugin_path_hook(path: str) -> machinery.FileFinder:
