@@ -21,11 +21,7 @@ from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.store import contact_room_ids
-from mindroom.entity_resolution import (
-    MissingManagedEntityAccountError,
-    current_entity_id,
-    entity_identity_registry,
-)
+from mindroom.entity_resolution import MissingManagedEntityAccountError, current_entity_id
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_storage
@@ -117,6 +113,15 @@ def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[
         )
 
 
+def _agent_user_ids(room_id: str, config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return each configured agent's user ID by name, in config order, leaving out one without its account."""
+    user_ids: dict[str, str] = {}
+    for name in config.agents:
+        with _leaving_out(name, room_id, leave_out=True):
+            user_ids[name] = current_entity_id(name, runtime_paths).full_id
+    return user_ids
+
+
 async def _bring_memberships_current(
     requester_id: str,
     room_id: str,
@@ -154,12 +159,12 @@ async def admit_room_agent(
     ``joined_members`` returns the room's joined users; the check awaits it only once the agent is found.
     ``refresh_memberships`` refreshes ``memberships`` through the runtime's one refresh when they need it.
     """
-    try:
-        identities = entity_identity_registry(config, runtime_paths)
-    except MissingManagedEntityAccountError:
-        raise HTTPException(503, "Agent identities are not ready.") from None
-    name = identities.current_entity_name_for_user_id(agent_user_id, include_router=False)
-    if name is None or name not in config.agents:
+    agent_ids = _agent_user_ids(room_id, config, runtime_paths)
+    name = next((name for name, user_id in agent_ids.items() if user_id == agent_user_id), None)
+    if name is None:
+        # An agent without its account may be the one ``agent_user_id`` names.
+        if len(agent_ids) < len(config.agents):
+            raise HTTPException(503, "Agent identities are not ready.")
         raise HTTPException(403, "The selected user is not a current agent.")
     joined = await joined_members()
     if requester_id not in joined or agent_user_id not in joined:
@@ -185,12 +190,11 @@ async def _admitted_agents(
     It leaves out an agent without its account or whose own grant rooms are unresolved, and answers 503 while the
     router's rooms are unknown and an agent's access waits on them.
     """
-    joined_agents: list[tuple[str, str]] = []
-    for name in config.agents:
-        with _leaving_out(name, room_id, leave_out=True):
-            user_id = current_entity_id(name, runtime_paths).full_id
-            if user_id in joined:
-                joined_agents.append((name, user_id))
+    joined_agents = [
+        (name, user_id)
+        for name, user_id in _agent_user_ids(room_id, config, runtime_paths).items()
+        if user_id in joined
+    ]
     if not joined_agents:
         return []
     await _bring_memberships_current(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
