@@ -42,6 +42,7 @@ from .context import (
     ToolBeforeCallContext,
     ToolEnvironmentContext,
     TranscriptLine,
+    TurnLifecycleContext,
 )
 from .decorators import get_hook_metadata, hook, iter_module_hooks
 from .enrichment import render_enrichment_block, render_system_enrichment_block, render_transient_context
@@ -82,6 +83,10 @@ from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TURN_ENDED,
+    EVENT_TURN_PAUSED,
+    EVENT_TURN_RESUMED,
+    EVENT_TURN_STARTED,
     EnrichmentItem,
     HookCallback,
     HookMatrixAdmin,
@@ -89,6 +94,7 @@ from .types import (
     HookRoomStatePutter,
     HookRoomStateQuerier,
     RegisteredHook,
+    TurnOutcome,
     default_timeout_ms_for_event,
     validate_event_name,
 )
@@ -124,6 +130,10 @@ __all__ = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TURN_ENDED",
+    "EVENT_TURN_PAUSED",
+    "EVENT_TURN_RESUMED",
+    "EVENT_TURN_STARTED",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "AfterResponseContext",
     "AgentLifecycleContext",
@@ -169,7 +179,9 @@ __all__ = [
     "ToolEnvironmentContext",
     "TranscriptLine",
     "TurnIntent",
+    "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
     "build_hook_matrix_admin",
     "build_hook_message_sender",
