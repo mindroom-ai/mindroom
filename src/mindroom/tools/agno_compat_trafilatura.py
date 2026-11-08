@@ -154,7 +154,7 @@ class TimeLimitedTrafilaturaTools(TrafilaturaTools):
 
 
 def install_server_fetch_guard() -> None:
-    """Replace every downloader TrafilaturaTools reaches with the guarded fetchers, within the call's time limit."""
+    """Replace every downloader TrafilaturaTools reaches with the guarded fetchers, and the crawler's visits and pauses."""
     # AGNO_COMPAT: TrafilaturaTools extraction downloads through a fixed module-level fetcher.
     # Reason: Agno 3.0.9 extract_text, extract_metadata_only, extract_batch, and the
     # crawl_website content loop call the module-level trafilatura.fetch_url binding,

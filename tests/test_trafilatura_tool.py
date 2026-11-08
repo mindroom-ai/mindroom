@@ -232,12 +232,16 @@ def test_trafilatura_rejects_compressed_download(monkeypatch: pytest.MonkeyPatch
     assert result == f"Error: Could not fetch content from URL: {url}"
 
 
-def _crawl(monkeypatch: pytest.MonkeyPatch, docs_response: httpx.Response) -> tuple[str, list[str]]:
+def _crawl(
+    monkeypatch: pytest.MonkeyPatch,
+    docs_response: httpx.Response,
+    homepage_html: str = _ARTICLE_HTML,
+) -> tuple[str, list[str]]:
     homepage = "https://example.com/"
     requests = serve_routes(
         monkeypatch,
         {
-            homepage: httpx.Response(200, text=_ARTICLE_HTML),
+            homepage: httpx.Response(200, text=homepage_html),
             "https://example.com/docs": docs_response,
             "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
         },
@@ -272,22 +276,17 @@ def test_trafilatura_crawl_skips_a_discovered_link_it_refuses(
     refused_location: str,
 ) -> None:
     """A crawled link refused at a redirect hop is skipped, and the crawl goes on to the next link."""
-    homepage = "https://example.com/"
-    requests = serve_routes(
+    result, requested_urls = _crawl(
         monkeypatch,
-        {
-            homepage: httpx.Response(200, text=_HOMEPAGE_HTML),
-            "https://example.com/docs": httpx.Response(302, headers={"Location": refused_location}),
-            "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
-        },
+        httpx.Response(302, headers={"Location": refused_location}),
+        homepage_html=_HOMEPAGE_HTML,
     )
 
-    crawl = json.loads(trafilatura_tools()().crawl_website(homepage, extract_content=True))
-
+    crawl = json.loads(result)
     assert crawl["to_visit"] == []
     assert "Configure a bridge" in crawl["extracted_content"]["https://example.com/guide"]
     assert _DENIED in crawl["extracted_content"]["https://example.com/docs"]
-    assert all(str(request.url).startswith("https://example.com/") for request in requests)
+    assert all(url.startswith("https://example.com/") for url in requested_urls)
 
 
 def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.MonkeyPatch) -> None:
