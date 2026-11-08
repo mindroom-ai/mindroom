@@ -243,7 +243,8 @@ async def _continue_persisted_agent(
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),
-        replayable_text=presentation.final_text(),
+        # Text the run handed over whole is its answer too, which a quiet turn must not read as reporting nothing.
+        replayable_text=presentation.final_text() or collected.terminal_content,
         has_visible_content=collected.has_visible_content,
         run_id=response.run_id,
         attempt_run_id=response.run_id,

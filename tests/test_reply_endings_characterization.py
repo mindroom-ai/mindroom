@@ -56,9 +56,10 @@ from mindroom.hooks import (
     SessionHookContext,
     hook,
 )
-from mindroom.llm.messages import system_text
-from mindroom.llm.provider import TextDelta
+from mindroom.llm.messages import Message, system_text
+from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_presentation, render_body
 from mindroom.response_sources import Owned, SourceFate
@@ -1185,6 +1186,34 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
     assert turn.homeserver.bodies[-1] == ended
     assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
     assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+async def test_a_silent_schedule_s_resumed_finding_that_streamed_no_text_is_shown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins a silent schedule whose approved run hands its finding over whole, with no text delta, while calls are hidden.
+
+    The waiting message showed nothing of the run's text, yet the finding is the reply's answer, not a report of nothing.
+    """
+    whole = [
+        UsageReported(MessageMetrics()),
+        TurnCompleted(message=Message(role="assistant", content="Disk full."), stop_reason="end"),
+    ]
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=False,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), whole]},
+    )
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())))
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.bodies[-1] == "Disk full."
 
 
 @pytest.mark.usefixtures("echo_tool")
