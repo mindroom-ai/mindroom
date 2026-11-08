@@ -11,14 +11,13 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.authorization import is_platform_administrator
 from mindroom.constants import CONFIG_CONFIRMATION_REACTION_KEY
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
