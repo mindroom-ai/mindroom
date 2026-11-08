@@ -190,6 +190,19 @@ async def test_agents_lists_those_the_caller_may_use_in_config_order_with_what_t
 
 
 @pytest.mark.asyncio
+async def test_a_bridge_alias_opens_the_workspace_its_person_s_turns_use(tmp_path: Path) -> None:
+    """A caller signed in as a bridge alias of Alice gets the private root Alice's turns resolve, not one of its own."""
+    alias = "@telegram_alice:localhost"
+    config = Config(agents=_agents(), authorization={"aliases": {ALICE: [alias]}})
+    room = _Room(config, test_runtime_paths(tmp_path), ("coder", "notes"))
+    room.client.joined_members.return_value = joined_members_response(ROOM, alias, *room.ids.values())
+
+    (coder, notes) = await room.agents(alias)
+
+    assert (coder.name, notes.name, notes.root) == ("coder", "notes", _turn_root(room, "notes", ALICE))
+
+
+@pytest.mark.asyncio
 async def test_an_agent_not_joined_or_refusing_the_caller_is_left_out(tmp_path: Path) -> None:
     """Only joined agents whose access rules admit the caller are listed; the others answer 403 by name."""
     room = _room(tmp_path, _agents(), joined=("coder",))
