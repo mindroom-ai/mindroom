@@ -440,6 +440,22 @@ def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> 
     assert result.exception is not None
 
 
+def test_plugins_check_cli_prints_failure_with_a_long_path_on_one_line(tmp_path: Path) -> None:
+    """A failure naming a path longer than the terminal stays on one line, so logs show the path unbroken."""
+    plugin_root = _write_plugin(
+        tmp_path / ("long-directory-name-" * 5) / "plugin",
+        manifest={"name": "broken-import", "hooks_module": "hooks.py"},
+        modules={"hooks.py": "raise RuntimeError('plugin exploded')\n"},
+    )
+
+    result = runner.invoke(app, ["plugins", "check", str(plugin_root)], env={"COLUMNS": "80"})
+
+    assert result.exit_code == 1
+    assert (
+        f"Plugin check failed: Plugin hooks module execution failed for {plugin_root / 'hooks.py'}: plugin exploded\n"
+    ) in result.stdout
+
+
 @pytest.mark.usefixtures("wide_cli_consoles")
 def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None:
     """A missing plugin path fails the check, naming the path, without a traceback."""
