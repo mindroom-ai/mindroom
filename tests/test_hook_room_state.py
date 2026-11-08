@@ -268,15 +268,7 @@ def test_hook_context_state_root_rejects_invalid_plugin_name(tmp_path: Path) -> 
 
 def test_hook_context_state_root_is_private_under_a_permissive_umask(tmp_path: Path) -> None:
     """A hook-only plugin's state directory is made at mode 0700, as a plugin context's is."""
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    ctx = HookContext(
-        event_name=EVENT_MESSAGE_RECEIVED,
-        plugin_name="hook-only",
-        config=config,
-        runtime_paths=runtime_paths,
-        correlation_id="corr-room-state",
-    )
+    ctx = _hook_context(tmp_path)
 
     previous_umask = os.umask(0o022)
     try:
@@ -284,7 +276,7 @@ def test_hook_context_state_root_is_private_under_a_permissive_umask(tmp_path: P
     finally:
         os.umask(previous_umask)
 
-    assert state_root == runtime_paths.storage_root / "plugins" / "hook-only"
+    assert state_root == ctx.runtime_paths.storage_root / "plugins" / "test-plugin"
     assert state_root.stat().st_mode & 0o777 == 0o700
 
 

@@ -678,18 +678,7 @@ async def test_emit_gives_each_hook_its_plugin_name_settings_and_logger(tmp_path
     registry = HookRegistry.from_plugins(
         [audit_plugin, _plugin("notify-plugin", [notify], settings={"mode": "slow"})],
     )
-    config = _config(tmp_path)
-    context = CustomEventContext(
-        event_name="todo:item_added",
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        correlation_id="corr-custom",
-        payload={},
-        source_plugin="todo",
-        room_id="!room:localhost",
-        thread_id=None,
-        sender_id="@user:localhost",
-    )
+    context = _custom_event_context(tmp_path)
 
     with capture_logs() as logs:
         await emit(registry, "todo:item_added", context)

@@ -27,11 +27,7 @@ def plugin_state_root(storage_root: Path, plugin_name: str) -> Path:
     """Return the plugin's own state directory under ``storage_root``, created at mode 0700 on first use."""
     root = storage_root / "plugins" / validate_plugin_name(plugin_name)
     root.mkdir(parents=True, exist_ok=True)
-    # LEGACY_COMPAT: Plugin state directories readable by other local users
-    # Legacy format: `<storage root>/plugins/<plugin name>/` made by a hook's `ctx.state_root` at the umask's mode.
-    # Last legacy release: v2026.11.204 and every release before this change; replacement: unreleased, which makes
-    # every plugin state directory at mode 0700.
-    # Handling: each access sets the existing directory's mode to 0700, so its files are no longer reachable by others.
-    # Coverage: tests/test_plugin_context.py::test_state_root_is_one_private_directory_per_plugin_created_on_first_use
+    # chmod rather than mkdir's mode, so a directory that already exists, such as one an earlier release made for a
+    # hook at the umask's mode, becomes private too.
     root.chmod(0o700)
     return root
