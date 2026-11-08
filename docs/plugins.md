@@ -1531,6 +1531,7 @@ async def test_hook(plugin):
 
 `call_tool` and `fire` raise `TurnRefused` and run nothing unless `sender` is joined to `room` and `agent` would answer them there.
 A room never added is one no MindRoom bot is in, so routes answer 503 for it and turns there are refused.
+An agent's Matrix ID, to make it a room's member or a relay's mention, is its key in `entity_directory(plugin.config, plugin.runtime_paths)` from `mindroom.plugin_api`.
 Whether a room is a direct message is read once per room in each `load_plugin` block.
 
 The kit does not run agent turns, models, conversation history, workers, tool approval, OAuth flows, the plugin's `lifespan`, or more than one plugin at once.

@@ -1,6 +1,6 @@
 """A plugin's own tests load it with `mindroom.plugin_testing` and drive its routes, tools and hooks as MindRoom does.
 
-These tests import only the kit, pytest and the example plugin, as a plugin's tests would.
+These tests import only the kit, the plugin API, pytest and the example plugin, as a plugin's tests would.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.plugin_api import entity_directory
 from mindroom.plugin_testing import LoadedPlugin, TurnRefused, load_plugin
 
 if TYPE_CHECKING:
@@ -50,20 +51,26 @@ def test_route_answers_a_signed_in_member_only(plugin: LoadedPlugin) -> None:
 
 
 def test_a_route_posts_as_the_router_and_streams_to_a_member(tmp_path: Path) -> None:
-    """A `RoomMessenger` notice lands in the room's `sent`, a relay to a person is refused, and a member streams."""
+    """`RoomMessenger` posts land in the room's `sent`, a relay to a person is refused, and a member streams."""
     with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:
-        room = plugin.add_room(ROOM, members={ALICE: "Alice"})
+        (helper,) = (
+            user
+            for user, entity in entity_directory(plugin.config, plugin.runtime_paths).items()
+            if entity.name == "helper"
+        )
+        room = plugin.add_room(ROOM, members={ALICE: "Alice", helper: "Helper"})
         alice = plugin.client(ALICE)
 
         posted = alice.post(f"{ROUTES}/notice")
+        relayed = alice.post(f"{ROUTES}/relay", params={"mention": helper})
         relayed_to_a_person = alice.post(f"{ROUTES}/relay", params={"mention": ALICE})
         with alice.websocket_connect(f"{ROUTES}/stream") as stream:
             greeting = stream.receive_text()
 
-    assert posted.status_code == 200
-    assert relayed_to_a_person.status_code == 400
-    assert [(sent.text, sent.source, sent.content["msgtype"]) for sent in room.sent] == [
-        (f"{ALICE} says hello", "greeter:http", "m.notice"),
+    assert (posted.status_code, relayed.status_code, relayed_to_a_person.status_code) == (200, 200, 400)
+    assert [(sent.text, sent.source, sent.mentions) for sent in room.sent] == [
+        (f"{ALICE} says hello", "greeter:http", []),
+        (f"Sent for {ALICE}:\n\nhello", "greeter:http", [helper]),
     ]
     assert greeting == f"hello {ALICE}"
 
