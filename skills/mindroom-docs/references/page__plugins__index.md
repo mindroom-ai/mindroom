@@ -1138,7 +1138,7 @@ A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its mani
 | Member | Value |
 |--------|-------|
 | `plugin_name` | The plugin's manifest `name` |
-| `settings` | The `settings` of the plugin's entry in `config`, as a read-only mapping |
+| `settings` | The `settings` of the plugin's entry in `config`, as a read-only mapping whose nested values are the context's own copy, so no change reaches the config |
 | `config` | The config the request or tool call runs under |
 | `runtime_paths` | The runtime's paths |
 | `state_root` | The plugin's [state directory](https://docs.mindroom.chat/hooks/#plugin-state), the one its hooks get as `ctx.state_root`; reading it here sets its mode to 0700 |

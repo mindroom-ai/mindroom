@@ -21,8 +21,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 # Agents meet new rooms without limit, so once the set is full, rooms outside it warn on every refused write.
 _MAX_REFUSED_ROOMS = 4096
-# Tuwunel counts the replaced state's content toward the 65,535-byte event limit and keeps 10,240 bytes for the rest
-# of an event, so each write lists jobs in under half of what remains; a typical job takes about 300 bytes.
+# Tuwunel counts the replaced state's content toward the 65,535-byte event limit, so two contents share it with the rest
+# of the event. Allowing 10,240 bytes for that rest (the envelope reserve Tuwunel's admin responder uses for its own
+# messages), each write lists jobs in under half of what remains; a typical job takes about 300 bytes.
 _MAX_LISTED_BYTES = 27_000
 # Refusals the same content meets again: the room does not let the bot write this state, or the event is too large.
 _FINAL_REFUSALS = frozenset({"M_FORBIDDEN", "M_TOO_LARGE"})

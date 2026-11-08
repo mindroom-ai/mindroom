@@ -7,9 +7,10 @@ import os
 import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
@@ -405,20 +406,19 @@ async def test_background_flush_observes_and_logs_failure(
 ) -> None:
     """Scheduled flush errors are retrieved and reported instead of leaking task warnings."""
     transcript = _transcript(tmp_path)
-    logged = MagicMock()
 
     async def fail_flush() -> None:
         message = "disk full"
         raise OSError(message)
 
     monkeypatch.setattr(transcript, "_flush", fail_flush)
-    monkeypatch.setattr("mindroom.matrix_rtc.transcript.logger.warning", logged)
 
-    transcript.record("user", "keep me", time.time())
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    with capture_logs() as logs:
+        transcript.record("user", "keep me", time.time())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
 
-    logged.assert_called_once()
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["call_transcript_flush_failed"]
     assert transcript._pending
     assert transcript._flush_task is None
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -35,7 +36,7 @@ class PluginContext:
 
     @property
     def settings(self) -> Mapping[str, Any]:
-        """The plugin entry's ``settings`` in ``config``, read-only."""
+        """A read-only mapping of the plugin entry's ``settings`` in ``config``; nested values are this context's copy."""
         self._require_active()
         return self._settings
 
@@ -78,7 +79,9 @@ def build_plugin_context(
     entry = _entry(plugin_name, config, runtime_paths)
     if config is None or entry is None:
         raise PluginInactiveError(plugin_name)
-    return PluginContext(plugin_name, runtime_paths, config, MappingProxyType(entry.settings), current_config)
+    # A copy, so a write to a nested value reaches neither another context nor the config.
+    settings = MappingProxyType(copy.deepcopy(entry.settings))
+    return PluginContext(plugin_name, runtime_paths, config, settings, current_config)
 
 
 def current_plugin_context(plugin_name: str) -> PluginContext:
