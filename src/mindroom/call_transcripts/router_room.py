@@ -10,7 +10,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import nio
@@ -20,7 +20,7 @@ from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, send_message_result
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.room_power import privileged_creators, user_power_level
+from mindroom.matrix.room_power import privileged_creators, send_power_level, user_power_level
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -114,8 +114,8 @@ class RouterCallRoom:
             return None
         # Without power levels everyone is at level 0, which may post; room version 12 creators are never listed.
         power_levels = state.content("m.room.power_levels")
-        required = _send_power_level(power_levels, state.message_type())
-        return user_id in state.creators() or user_power_level(power_levels, user_id) >= required
+        required = send_power_level(power_levels, state.message_type())
+        return user_power_level(power_levels, user_id, state.creators()) >= required
 
     async def router_may_post(self, room_id: str) -> bool | None:
         """Return whether the room's power levels let the router send messages, as the room's message event type."""
@@ -279,16 +279,6 @@ async def _read_state(client: nio.AsyncClient, room_id: str) -> _RoomState | Non
             if isinstance(event_type := event.get("type"), str) and isinstance(state_key := event.get("state_key"), str)
         },
     )
-
-
-def _send_power_level(power_levels: Mapping[str, object], event_type: str) -> int:
-    """Return the power level sending ``event_type`` needs: its own entry, else ``events_default``, else 0."""
-    events = power_levels.get("events")
-    level = cast("Mapping[str, object]", events).get(event_type) if isinstance(events, dict) else None
-    if type(level) is int:
-        return level
-    default = power_levels.get("events_default")
-    return default if type(default) is int else 0
 
 
 def _display_name(member: Mapping[str, object]) -> str | None:

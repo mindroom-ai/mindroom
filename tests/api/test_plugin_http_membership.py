@@ -36,13 +36,11 @@ OTHER_ROOM = "!other:example.org"
 
 @pytest.fixture
 def main_app() -> Iterator[FastAPI]:
-    """The global API app, with whatever room-members reader it had put back afterwards, even after a failure."""
+    """The global API app, with whatever room readers it had put back afterwards, even after a failure."""
     state = ensure_app_state(main.app)
-    previous = state.room_members
-    try:
-        yield main.app
-    finally:
-        state.room_members = previous
+    previous = state.room_members, state.room_state, state.room_direct
+    yield main.app
+    state.room_members, state.room_state, state.room_direct = previous
 
 
 def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
@@ -372,11 +370,12 @@ async def test_restarted_bot_uses_its_new_client() -> None:
 
 
 def test_bind_then_unbind_clears() -> None:
-    """Unbinding removes the reader."""
+    """Unbinding removes every room reader."""
     app = _bound(_client())
-    assert ensure_app_state(app).room_members is not None
+    state = ensure_app_state(app)
+    assert None not in (state.room_members, state.room_state, state.room_direct)
     unbind_room_members(app)
-    assert ensure_app_state(app).room_members is None
+    assert (state.room_members, state.room_state, state.room_direct) == (None, None, None)
 
 
 def _orchestrator_config(tmp_path: Path, *, role: str = "Write code") -> Config:
