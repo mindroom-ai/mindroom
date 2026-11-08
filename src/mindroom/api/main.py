@@ -64,6 +64,7 @@ from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import maintain_leased_workers
 from mindroom.api.workers import router as workers_router
+from mindroom.api.workspace_files import router as workspace_files_router
 from mindroom.call_transcripts.routes import router as call_transcripts_router
 from mindroom.config.commit import ConfigCommit
 from mindroom.config.personal_agents import personal_agent_data
@@ -97,7 +98,13 @@ logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
 # Paths a Matrix web client calls from its own origin with a bearer token and no cookies, and the paths under them.
 _CALL_TRANSCRIPTS_PATH = "/api/call-transcripts"
-_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins", _CALL_TRANSCRIPTS_PATH)
+_CLIENT_ORIGIN_PATHS = (
+    "/api/computers",
+    "/api/client-sessions",
+    "/api/plugins",
+    _CALL_TRANSCRIPTS_PATH,
+    "/api/workspaces",
+)
 # The trailing slash keeps a sibling such as /api/pluginsX out.
 _CLIENT_ORIGIN_PREFIXES = tuple(f"{path}/" for path in _CLIENT_ORIGIN_PATHS)
 _IOS_APP_ORIGIN = "capacitor://localhost"
@@ -517,6 +524,7 @@ for integration_router in integration_routers():
 app.include_router(computers_router)
 app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
 app.include_router(call_transcripts_router)  # Authenticates client sessions; 404 while call transcripts are off.
+app.include_router(workspace_files_router)  # Authenticates client sessions.
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)
 # Each report admits the user who requested its run, administrator or not.
