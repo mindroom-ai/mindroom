@@ -85,6 +85,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.response_lifecycle import ResponseLifecycle
+    from mindroom.response_runner import _LockedTurn
 
 pytestmark = pytest.mark.asyncio
 
@@ -214,20 +215,32 @@ async def test_a_participation_check_that_fails_ends_the_turn_failed_and_one_tha
     assert turn.homeserver.writes == []
 
 
-async def test_an_error_before_the_participation_decision_ends_the_turn_failed(
+@pytest.mark.parametrize("approved", [False, True], ids=["before-decision", "after-approval"])
+async def test_a_delivery_error_fails_a_participation_turn_and_shows_only_after_its_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    approved: bool,
 ) -> None:
-    """A delivery that raises before the participation check decided stays quiet, and fails the turn."""
+    """A delivery that raises fails the turn: before the participation check decided it stays quiet, after an approval its error shows."""
     turn = await _turn(tmp_path, monkeypatch, streaming=False, scripts={"default": []})
     seen: _Seen = []
     _record_turn_events(turn.bot, seen, (*_TURN_EVENTS, EVENT_MESSAGE_CANCELLED))
 
-    with patch.object(turn.runner, "_deliver_turn", new=AsyncMock(side_effect=RuntimeError("delivery broke"))):
+    async def deliver(dispatched: _LockedTurn, **_kwargs: object) -> None:
+        if approved:
+            assert dispatched.runtime.participation is not None
+            dispatched.runtime.participation.approve_existing_response()
+        msg = "delivery broke"
+        raise RuntimeError(msg)
+
+    with patch.object(turn.runner, "_deliver_turn", new=AsyncMock(side_effect=deliver)):
         await turn.runner.generate_response(replace(_plain_request(_target()), participation=ParticipationConfig()))
 
-    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "failed")]
-    assert turn.homeserver.writes == []
+    assert _events(seen)[0] == (EVENT_TURN_STARTED, None)
+    assert _events(seen)[-1] == (EVENT_TURN_ENDED, "failed")
+    assert ["delivery broke" in str(write.get("body")) for write in turn.homeserver.writes] == (
+        [True] if approved else []
+    )
 
 
 async def test_a_stopped_reply_ends_its_turn_cancelled_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
