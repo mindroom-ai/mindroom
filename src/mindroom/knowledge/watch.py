@@ -213,13 +213,8 @@ def _changes_include_indexable_path(
     target: _WatchTarget,
     config: Config,
     changes: set[tuple[Change, str]],
-    folders: frozenset[Path],
 ) -> bool:
-    """Return whether a change touches an indexable file, or removes one of ``folders`` with the files it holds."""
-    return any(
-        _changed_path_is_indexable(target, config, Path(path)) or _is_removed_watched_folder(change, path, folders)
-        for change, path in changes
-    )
+    return any(_changed_path_is_indexable(target, config, Path(path)) for _change, path in changes)
 
 
 class KnowledgeSourceWatcher:
@@ -294,7 +289,7 @@ class KnowledgeSourceWatcher:
                 await self._watch_each_folder(target, config=config, runtime_paths=runtime_paths, stop_event=stop_event)
             else:
                 async for changes in awatch(target.path, stop_event=stop_event):
-                    if _changes_include_indexable_path(target, config, changes, frozenset()):
+                    if _changes_include_indexable_path(target, config, changes):
                         await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
         except Exception:
             logger.exception(
@@ -340,16 +335,30 @@ class KnowledgeSourceWatcher:
                     base_ids=list(target.base_ids),
                     watched_folders=len(folders),
                 )
-            # Once such a name ended a watch, something opens or changes it, so file names skip their folder from then on.
-            check_file_names |= await self._watch_folders(
-                target,
-                folders,
-                check_file_names=check_file_names,
-                refresh_pending=refresh_pending,
-                config=config,
-                runtime_paths=runtime_paths,
-                stop_event=stop_event,
-            )
+            try:
+                await self._watch_folders(
+                    target,
+                    folders,
+                    check_file_names=check_file_names,
+                    refresh_pending=refresh_pending,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    stop_event=stop_event,
+                )
+            except ExceptionGroup as group:
+                # Watchfiles ends a running watch with an error it exports no public name for, as at an event naming a
+                # path that is not valid UTF-8, so walk again. A failure to start the watch is not wrapped in a group,
+                # and still stops the watcher.
+                if group.split(WatchfilesRustInternalError)[1] is not None:
+                    raise
+                logger.info(
+                    "Knowledge filesystem watcher walks the base again after its watch ended",
+                    knowledge_path=str(target.path),
+                    base_ids=list(target.base_ids),
+                    error=str(group.exceptions[0]),
+                )
+                # Something opens or changes such names, so from now on a file name also skips its folder.
+                check_file_names = True
             # Changes made while the watcher restarts go unseen, so the first batch after a restart refreshes the base.
             refresh_pending = True
 
@@ -363,11 +372,8 @@ class KnowledgeSourceWatcher:
         config: Config,
         runtime_paths: RuntimePaths,
         stop_event: asyncio.Event,
-    ) -> bool:
-        """Watch ``folders`` until stopped or until the base must be walked again.
-
-        Returns whether a name that is not valid UTF-8 ended the watch.
-        """
+    ) -> None:
+        """Watch ``folders`` until stopped or until the base must be walked again."""
         watched = frozenset(folders)
         # Yielding on timeouts delivers a first batch within a second of the watch starting, even without a change.
         watcher = awatch(
@@ -392,29 +398,20 @@ class KnowledgeSourceWatcher:
                             check_file_names=check_file_names,
                         )
                         if set(walked) != watched:
-                            return False
+                            return
                     if any(_is_new_watched_folder(change, path) for change, path in changes):
-                        return False
-                    if refresh_pending or _changes_include_indexable_path(target, config, changes, watched):
+                        return
+                    if (
+                        refresh_pending
+                        or _changes_include_indexable_path(target, config, changes)
+                        or any(_is_removed_watched_folder(change, path, watched) for change, path in changes)
+                    ):
                         refresh_pending = False
                         await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
         except FileNotFoundError:
             # Before the first batch, a folder disappeared between the walk and the watch, so walk again.
             if checked:
                 raise
-        except ExceptionGroup as group:
-            # Watchfiles ends a running watch at an event naming a path that is not valid UTF-8, with an error it exports
-            # no public name for, so walk again, which skips the folder holding that name. A failure to start the watch
-            # is not wrapped in a group, and still stops the watcher.
-            if group.split(WatchfilesRustInternalError)[1] is not None:
-                raise
-            logger.info(
-                "Knowledge filesystem watcher walks the base again after its watch ended",
-                knowledge_path=str(target.path),
-                error=str(group.exceptions[0]),
-            )
-            return True
-        return False
 
     async def _poll_source(
         self,

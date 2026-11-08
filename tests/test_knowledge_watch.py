@@ -7,7 +7,7 @@ import os
 import sys
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -72,6 +72,17 @@ async def _write_until_seen(recorded: _RecordedWatch, path: Path) -> None:
                 await asyncio.sleep(0.2)
     except TimeoutError:
         pytest.fail(f"the watcher never reported {path}")
+
+
+def _skip_warnings(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in logs if entry["event"].startswith("Knowledge filesystem watcher skips")]
+
+
+async def _wait_until_stopped_after_failure(logs: list[dict[str, Any]]) -> None:
+    await _wait_until(
+        lambda: any(entry["event"] == "Knowledge filesystem watcher stopped after failure" for entry in logs),
+        "the watcher did not stop after the failure",
+    )
 
 
 @asynccontextmanager
@@ -264,15 +275,11 @@ async def test_watch_skips_a_folder_holding_a_name_that_is_not_utf8(
         _create_odd()
     scheduler = MagicMock()
     with capture_logs() as logs:
-
-        def _skipped() -> list[dict[str, object]]:
-            return [entry for entry in logs if entry["event"].startswith("Knowledge filesystem watcher skips")]
-
         async with _watching(tmp_path, docs, scheduler, recorded_watch):
             if created_while_watching:
                 await _wait_until(lambda: len(recorded_watch.batches) >= 2, "the watcher did not settle")
                 _create_odd()
-            await _wait_until(_skipped, "the watcher did not skip the folder")
+            await _wait_until(lambda: _skip_warnings(logs), "the watcher did not skip the folder")
             # A new folder makes the watcher walk the base again, which finds the skipped folder again.
             (docs / "later").mkdir()
             await _write_until_seen(recorded_watch, docs / "later" / "doc.md")
@@ -284,7 +291,7 @@ async def test_watch_skips_a_folder_holding_a_name_that_is_not_utf8(
 
     assert len(recorded_watch.starts) == starts
     assert str(notes) not in recorded_watch.starts[-1][0]
-    assert [entry["folder"] for entry in _skipped()] == [str(notes)]
+    assert [entry["folder"] for entry in _skip_warnings(logs)] == [str(notes)]
 
 
 @pytest.mark.asyncio
@@ -303,7 +310,7 @@ async def test_watch_keeps_a_folder_holding_a_file_name_that_is_not_utf8_until_i
             await _wait_until(lambda: scheduler.schedule_refresh.called, "a change beside the file did not refresh")
 
     assert str(notes) in recorded_watch.starts[0][0]
-    assert not [log for log in logs if log["event"].startswith("Knowledge filesystem watcher skips")]
+    assert not _skip_warnings(logs)
 
 
 @pytest.mark.asyncio
@@ -373,10 +380,7 @@ async def test_watch_stops_and_logs_when_watching_fails_for_another_reason(
     monkeypatch.setattr(knowledge_watch, "awatch", _failing_awatch)
     with capture_logs() as logs:
         async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
-            await _wait_until(
-                lambda: any(entry["event"] == "Knowledge filesystem watcher stopped after failure" for entry in logs),
-                "the watcher did not stop after the failure",
-            )
+            await _wait_until_stopped_after_failure(logs)
 
     assert len(recorded_watch.starts) == 1
 
@@ -393,10 +397,7 @@ async def test_watch_stops_and_logs_when_scheduling_a_refresh_fails(
     with capture_logs() as logs:
         async with _watching(tmp_path, docs, scheduler, recorded_watch):
             (docs / "notes" / "doc.md").write_text("changed", encoding="utf-8")
-            await _wait_until(
-                lambda: any(entry["event"] == "Knowledge filesystem watcher stopped after failure" for entry in logs),
-                "the watcher did not stop after the failure",
-            )
+            await _wait_until_stopped_after_failure(logs)
 
     assert len(recorded_watch.starts) == 1
 
