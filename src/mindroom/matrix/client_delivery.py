@@ -284,6 +284,7 @@ async def _prepare_matrix_message(
     room_encrypted: bool,
     operation: str,
     content_is_prepared: bool,
+    sidecar_required: bool = False,
 ) -> _PreparedMatrixMessage | MatrixDeliveryFailure:
     """Prepare one message, rebuilding once if encryption turns on while yielding."""
     rooms = client.rooms
@@ -297,6 +298,7 @@ async def _prepare_matrix_message(
                 room_id,
                 content,
                 room_encrypted=room_encrypted,
+                sidecar_required=sidecar_required,
             )
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
@@ -324,6 +326,7 @@ async def _prepare_matrix_message(
                         room_id,
                         content,
                         room_encrypted=True,
+                        sidecar_required=sidecar_required,
                     )
                 except MatrixEventTooLargeError as error:
                     return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
@@ -366,12 +369,14 @@ async def send_message_outcome(
     transaction_id: str | None = None,
     content_is_prepared: bool = False,
     write_allowed: Callable[[], bool] | None = None,
+    sidecar_required: bool = False,
 ) -> MatrixSendOutcome:
     """Send a message to a Matrix room and return the delivered payload or a typed failure.
 
     ``content_is_prepared`` is reserved for payloads already frozen in
     durable storage. Those bytes must reach Matrix verbatim so the durable record
-    remains an exact description of the wire event.
+    remains an exact description of the wire event. With ``sidecar_required`` a
+    message too large for one event is not sent when its sidecar cannot be uploaded.
     """
     room_encrypted = await resolve_room_encryption_outcome(client, room_id, operation=operation)
     if isinstance(room_encrypted, MatrixDeliveryFailure):
@@ -386,6 +391,7 @@ async def send_message_outcome(
         transaction_id=transaction_id,
         content_is_prepared=content_is_prepared,
         write_allowed=write_allowed,
+        sidecar_required=sidecar_required,
     )
 
 
@@ -400,6 +406,7 @@ async def _send_resolved_message(
     transaction_id: str | None = None,
     content_is_prepared: bool = False,
     write_allowed: Callable[[], bool] | None = None,
+    sidecar_required: bool = False,
 ) -> MatrixSendOutcome:
     """Prepare and send one message with the room encryption its caller resolved after any upload it references."""
     emit_timing_event(
@@ -415,6 +422,7 @@ async def _send_resolved_message(
         room_encrypted=room_encrypted,
         operation=operation,
         content_is_prepared=content_is_prepared,
+        sidecar_required=sidecar_required,
     )
     if isinstance(prepared, MatrixDeliveryFailure):
         return prepared
@@ -506,6 +514,7 @@ async def send_message_result(
     operation: str = "send_message",
     transaction_id: str | None = None,
     write_allowed: Callable[[], bool] | None = None,
+    sidecar_required: bool = False,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     outcome = await send_message_outcome(
@@ -516,6 +525,7 @@ async def send_message_result(
         operation=operation,
         transaction_id=transaction_id,
         write_allowed=write_allowed,
+        sidecar_required=sidecar_required,
     )
     return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 

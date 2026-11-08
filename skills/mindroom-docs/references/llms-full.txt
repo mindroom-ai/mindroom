@@ -5506,6 +5506,7 @@ The `openai`, `eleven_labs`, `cartesia`, and `groq` tools generate speech audio;
 
 MindRoom agents can join Element Call voice calls (MatrixRTC, also used by Element X and recent Cinny releases) in their rooms and talk with the caller in real time.
 Use this page to set up calls, choose a voice backend, and find out why an agent did or did not join a call.
+MindRoom can also transcribe calls between people; see [Call transcripts](#call-transcripts).
 Voice messages (recorded audio clips) are covered on [Voice Messages](https://docs.mindroom.chat/voice/).
 
 Each calls-enabled agent uses one of three backends:
@@ -5819,6 +5820,90 @@ The file, and the copy Mem0 stores, keep the order in which speech arrived, each
 | Requester-private, other memory | `calls/` in the requester-scoped state directory |
 
 When the call ends, file memory stores a reference to the transcript, Mem0 stores the transcript as recallable context, and `memory: none` keeps only the transcript file.
+
+## Call transcripts
+
+MindRoom transcribes calls between people in rooms where its router is a member, for people who call from MindRoom Chat.
+Each person's MindRoom Chat finds stretches of speech in the microphone it already sends to the call and uploads them to MindRoom, which turns them into text, so each line is under the right name and nobody extra joins the call.
+Calls with a MindRoom agent are not transcribed this way; the agent posts its own transcript, as described in [Calling an agent about a thread](#calling-an-agent-about-a-thread).
+
+```yaml
+calls:
+  transcripts:
+    enabled: true
+    notes_model: default
+    languages: [en]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `calls.transcripts.enabled` | bool | `false` | Transcribes calls between people. |
+| `calls.transcripts.notes_model` | string | none | Name of a top-level `models` entry that writes each call's notes; without one, a call gets no notes. |
+| `calls.transcripts.languages` | list of language codes | `[]` | Hints for speech-to-text; only the first is sent. |
+
+Speech-to-text uses the voice-message settings under [`voice.stt`](https://docs.mindroom.chat/voice/#configuration-reference), by default OpenAI's `gpt-transcribe` with the `openai` credential, whether or not `voice.enabled` is on.
+Changes to these settings apply to the next stretch of speech or call, without a restart.
+Turning `calls.transcripts.enabled` off stops all reading and posting in Matrix for calls at once and changes nothing else, except that a call not heard from for a day ends then, and a message still not posted a day after its call's end is dropped along with the call's lines.
+Turned back on within that day, calls carry on as usual: a call nobody checked in to for a minute, as nobody can while it is off, ends at its last check-in and posts its message.
+Configuration loading fails with `calls.transcripts.notes_model references unknown model: <name>` when the notes model is not in `models`.
+MindRoom Chat finds MindRoom as it does for [worker computers](https://docs.mindroom.chat/tools/worker-computer/) and signs in with a client session, so the homeserver must bind OpenID tokens to this deployment (see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)), and Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`; otherwise calls go on without transcripts.
+
+What people see in MindRoom Chat:
+
+- When a call starts, the router posts a `Call started` row in the room, which shows who is in the call, with Join and Transcript.
+- Transcript opens the live transcript: each person's words under their name as they speak, and a gap for a paused or untranscribed stretch.
+- Anyone in the call can pause transcription for everyone, and anyone in it can resume it; while paused, nothing anyone says is transcribed, and the transcript shows one gap for each pause.
+- When the call ends, the router edits the row to `Call ended · N min`.
+- About 20 seconds after the end, the router posts one message in the row's thread: the notes (what the call was about, decisions, action items with who will do them, and open questions) above the full transcript, or `Call · N min` above it without a notes model; the row then links to it.
+- The finished transcript holds only what was said and transcribed: it leaves out the gaps for pauses and the stretches that could not be transcribed.
+- The row and the message notify nobody and start no agent reply, and mentions in the notes ping nobody.
+
+The rules:
+
+- Starting or joining a call needs permission to post messages in the room; reading the live call needs room membership.
+- A person's app is in the call while it checks in at least every 60 seconds, which it does every 20 seconds; leaving takes it out at once.
+- A check-in from someone already in the call counts even while MindRoom cannot read the room and answers 503, so a router restart or a homeserver outage ends no call; someone who has left the room is out of the call at their first request once it can be read.
+- Leaving from one device takes the person out of the call; their other device in the call rejoins with its next check-in.
+- Only people whose MindRoom Chat takes part are in the call: people in it from other Matrix apps are neither listed nor transcribed.
+- A call ends when nobody is in it, checked when someone joins or leaves and every 15 seconds; after MindRoom starts, apps get a full minute to check in again.
+- A call's length runs to the last check-in or leave MindRoom recorded from anyone in it, not to when MindRoom notices it is empty, so a call that ended while MindRoom was down shows as shorter than it really was.
+- A pause lasts until someone in the call resumes it or the call ends, and a stretch said during any part of a pause is never transcribed.
+- A stretch of speech is a 16-bit PCM mono WAV of at most 30 seconds and 1 MB, sent by someone in the call; each person sends one stretch at a time, until it is transcribed, and at most 240 a minute.
+- A stretch that fails to transcribe shows as a `Not transcribed` gap, and the call goes on.
+- A stretch said before the call ended that arrives late is still added if it arrives within 20 seconds of the end, and refused after that, so the posted message and its notes cover everything that was added.
+- Notes that fail are tried once more a minute later; after that, the message is posted without notes.
+- A message that cannot be posted is tried again every minute for up to a day after the call, with any notes already written until MindRoom restarts; after a restart, new notes may be written, or the message posted without notes.
+- A call in which nobody spoke, or speech-to-text heard no words, posts no message; one without words but with a stretch that failed to transcribe posts `Call · N min. Nothing could be transcribed.` without a transcript.
+
+Privacy:
+
+- Each stretch of speech goes to the speech-to-text provider, in encrypted rooms too, and the transcript goes to the `notes_model` provider when notes are on.
+- MindRoom keeps a call's lines only until its message is posted; the finished transcript lives in the room as that message, encrypted where the room is, readable by whoever the room's history visibility allows, and removed by redacting it.
+- Redacting the message removes it from the room, but a transcript too large for one event leaves its sidecar file in the homeserver's media store until the homeserver's operator purges it, and clients may keep copies they already loaded.
+- A message that cannot be posted, because the router has left the room or may not post in it, or for a day after the call, is dropped along with the call's lines, also when MindRoom was down for longer than that.
+- Speech-to-text and notes count as internal AI work under `call_transcript` in [usage](https://docs.mindroom.chat/usage/#token-usage).
+
+### Routes for clients
+
+Clients reach the transcripts under `/api/call-transcripts/v1` with a client session, `Authorization: Bearer <session_token>` from `POST /api/client-sessions` (see [Plugin HTTP routes](https://docs.mindroom.chat/plugins/#http-routes)).
+
+| Route | Answer |
+|-------|--------|
+| `POST /rooms/{room_id}/calls.join` | `{"call": Call}`: the room's live call, started if there is none; also the heartbeat |
+| `POST /calls/{call_id}/leave` | `{}` |
+| `POST /calls/{call_id}/pause` with `{"paused": true}` or `{"paused": false}` | `{"call": Call}` |
+| `POST /calls/{call_id}/speech`, multipart form data with `audio` (WAV) and `startedAt` (ISO 8601 time with its time zone) | `{"line": Line or null}`: a line, a gap, or null when speech-to-text heard no words |
+| `GET /rooms/{room_id}/calls.live`, optionally with `?after=<line ID>` | `{"call": Call or null, "lines": [Line], "names": {user ID: display name or null}}`; `lines` are those added after `after`, or all without it |
+
+A `Call` has `id`, `roomId`, `rowEventId` (null until the row is posted), `startedAt`, `endedAt` (null while live), `members` (whose apps are in the call now), and `pausedBy` (who paused, or null while not paused), with times in ISO 8601 UTC.
+A `Line` has `id`, `callId`, `userId`, `saidAt`, `seconds`, `kind` (`speech` or `gap`), and either `text` or, for a gap, `reason` (`paused` or `not-transcribed`).
+Every route answers 404 while `calls.transcripts.enabled` is off.
+A call's routes take the room from the call and answer 404 to anyone not in that room.
+Refusals answer `{"error": "<sentence>", "code": "<code>"}` with 400 `invalid`, 403 `forbidden`, 404 `not-found`, 409 `paused`, 413 `too-large`, 429 `too-many-requests` with `Retry-After`, or 503 `unavailable` while the room cannot be checked.
+A missing, unknown, or expired session answers 401 with `{"detail": "<sentence>"}` instead, as other errors from outside these rules do.
+Clients poll `calls.live` for new lines and the paused state: `lines` come in the order they were added, so the last one's ID is the next `after`, and an `after` that is not one of the live call's lines answers all of them.
+The row's content is `io.mindroom.call: {"call_id"}`; its edits add `ended_at`, `duration_seconds`, and, once the message is posted, `transcript_event_id`.
+The message carries `io.mindroom.call_transcript` (see [Calling an agent about a thread](#calling-an-agent-about-a-thread)) and `io.mindroom.call_notes: {"call_id"}`.
 
 ## Server requirements
 
@@ -6790,7 +6875,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `knowledge_graph` | Fact extraction for the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `listening` | Silent turns of a [listening agent](https://docs.mindroom.chat/configuration/agents/#listening), which no requester asked for |
 | `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
-| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
+| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `call_transcript` is the speech-to-text and notes of transcribed calls between people |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
 `system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.
@@ -17272,7 +17357,7 @@ It answers with a random session token that lives only in the backend's memory a
 `DELETE /api/client-sessions` ends the session whose token its `Authorization: Bearer` header carries at once, as a client does at sign-out, and answers 401 for a missing, unknown, or expired token.
 Plugin routes check the session only when a request arrives, so a response already streaming outlives the session's expiry or revocation.
 The store keeps at most 8 sessions per user, evicting that user's oldest past it, and 10,000 in all, evicting the oldest of anyone's past that, so it never refuses a sign-in and, below 10,000 sessions, one user's sign-ins never sign another user out.
-A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user` or `require_room_member` is public; plugin code already runs with the primary's full trust.
+A plugin's `routes_module` router is served under `/api/plugins/<plugin>/` by the primary, which adds no authentication of its own, so a route that does not depend on `require_client_user`, `require_room_member`, or `require_platform_administrator` is public; plugin code already runs with the primary's full trust.
 Workers never import a routes module, as long as it is its own file that the plugin's tools and hooks modules do not import.
 Plugin routes share the dashboard's origin, so a route that returned `text/html` or other content a browser renders, built from untrusted input, could run script with the dashboard's signed-in session.
 MindRoom does not filter what plugin routes return, so they must answer with JSON; as a backstop, every response under `/api/plugins/` carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src 'none'`, replacing whatever the route set.
@@ -17280,8 +17365,10 @@ A plugin route that raises answers 500 without the error's detail, except that o
 Plugin routes under `/api/plugins/` call `require_client_user` from `mindroom.plugin_http`, which accepts `Authorization: Bearer <session_token>` and answers 401 for a missing, unknown, or expired token.
 `GET /api/plugins` checks the session the same way and answers any session, whatever its user's rooms, with this MindRoom's plugin API version and the manifest `name` and `mindroom_plugin_api` of each enabled plugin that loaded, never a plugin's path, settings, or load error.
 Routes that act on one room use `require_room_member` instead, which authenticates the caller the same way and checks the session's own user, never one a request parameter names, in the room the route's path names, never one from the query string; it reads live joined members through the client of the router bot if it is in the room, else of any running MindRoom bot in the room, answering 403 for a non-member and 503 when membership is unavailable (no running bot in the room, the Matrix call answered with an error, raised, or timed out, or the API runs without MindRoom's bots).
+Routes only administrators may use depend on `require_platform_administrator`, which authenticates the caller the same way and answers 403 unless the session's user, or the person it is a bridge alias of, is in `administrators` in the config the API serves when the request arrives.
 The session names a Matrix user and nothing more; a plugin route that serves room data must check that user's room membership itself.
-CORS for `/api/client-sessions`, `/api/plugins`, and `/api/plugins/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin routes too, and there is no separate list.
+The call transcript routes under `/api/call-transcripts/v1/` take the same sessions and check rooms themselves through the router: room membership to read a room's live call, permission to post messages to start or join a call, and for a call's own routes the room the call is in, never one the request names, answering 404 to anyone outside it.
+CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, and `/api/call-transcripts/` reuses `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the list that admits MindRoom Chat to worker computers, so an origin trusted for computers is trusted for plugin and call transcript routes too, and there is no separate list.
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
@@ -17745,7 +17832,7 @@ The argument takes every form a `plugins:` entry takes, as listed in [Path resol
 The check strictly validates the manifest, imports declared modules, validates tool, hook, automation, and OAuth registrations, rejects automation names that are built-in or registered twice, and verifies that declared skill directories exist.
 It prints the discovered tools, hooks, automations, and skill directories, and exits nonzero on failure.
 It also warns about each `import` statement of a `mindroom` module or name outside the [plugin API](#plugin-structure) in the plugin's Python files, with its file and line, even when the plugin fails to load.
-It leaves out the plugin's top-level `tests/` directory and any directory inside the plugin with its own manifest, which is a separate plugin.
+It leaves out the plugin's top-level `tests/` directory, the `conftest.py` and `test_*.py` files beside its manifest unless the manifest names one as a module, and any directory inside the plugin with its own manifest, which is a separate plugin.
 It also accepts `mindroom.script_sdk`, the client that [background scripts](https://docs.mindroom.chat/tools/background-scripts/#calling-agent-tools-from-a-script), such as a skill's scripts, call tools with.
 Pass `--strict` to make these warnings errors that fail the check, for example in CI.
 With `--json`, it prints only one JSON document on stdout and keeps the same exit codes: `status` is `compatible`, with `name` and the `tools`, `hooks`, `automations`, and `skills` lists, or `failed`, with the error in `detail`.
@@ -18595,7 +18682,7 @@ A request for a plugin that is not loaded or has no routes, or for a path its ro
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
-MindRoom adds no authentication of its own to these routes, so a route without `require_client_user` or `require_room_member` is public.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
 
 Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
@@ -18720,7 +18807,27 @@ Orderly shutdown stops each lifespan with `"shutdown"` after the agents have sto
 A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespan failed to start` or `Plugin lifespan failed to stop` with the plugin's name, and MindRoom cancels one that overran and carries on; a lifespan whose start failed never runs its stop code.
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
 Either failure costs the plugin only its lifespan: its tools, hooks, and routes keep working.
-A plugin with a lifecycle module states `"mindroom_plugin_api": "1.5"` in its manifest, so an older MindRoom skips it with a clear reason.
+A plugin with a lifecycle module states `"mindroom_plugin_api": "1.6"` in its manifest, so an older MindRoom skips it with a clear reason.
+
+## People, agents, and administrators
+
+These functions in `mindroom.plugin_api` tell people from MindRoom's own accounts and check administrators.
+Each takes a `config` and `runtime_paths`, such as a hook's `ctx.config` and `ctx.runtime_paths` or a `PluginContext`'s.
+They read the Matrix accounts MindRoom keeps in the primary's storage, so a tool that uses them sets [`requires_primary_runtime=True`](#decorator-fields).
+
+| Function | Returns |
+|----------|---------|
+| `entity_directory(config, runtime_paths)` | A mapping from the current Matrix user ID of the router and each configured agent and team to its `ManagedEntity` |
+| `is_human_user(user_id, config, runtime_paths)` | `False` for the router, an agent, a team, the [internal user](https://docs.mindroom.chat/matrix/#internal-user), and the [`bot_accounts`](https://docs.mindroom.chat/authorization/#bot-accounts), and `True` for anyone else |
+| `is_platform_administrator(user_id, config, runtime_paths)` | Whether the user is in `administrators` or is a person's [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) for one |
+
+A `ManagedEntity` has the entity's config `name`, its `kind` (`"router"`, `"agent"`, or `"team"`), its `display_name`, and, for an agent, the `tool_names` its config gives it: the toolkits its `tools` and the defaults it takes name, a preset replaced by its toolkits, with the toolkits those imply, less those its settings turn off, such as `memory` when its memory backend is `none`, and with those its settings add, such as `delegate` for `delegate_to`.
+The directory leaves out an entity whose Matrix account MindRoom has not created yet, such as one a config reload just added.
+A tool name grants nothing, so never decide what a caller may do from one.
+
+A route only administrators may use depends on `require_platform_administrator` from `mindroom.plugin_http`, which returns the same `ClientUser` as `require_client_user`.
+It answers 401 as `require_client_user` does, and 403 unless the caller is an administrator in the config MindRoom serves at that moment, so a config change that removes someone from `administrators` refuses their next request.
+A plugin that uses anything in this section states `"mindroom_plugin_api": "1.5"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 ## Plugin skills
 

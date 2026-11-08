@@ -109,6 +109,7 @@ from .bot import AgentBot, create_bot_for_entity
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.accounts import prepare_managed_accounts, validate_entity_accounts
+from .orchestration.call_transcripts_runtime import CallTranscriptsRuntimeCoordinator
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from .orchestration.config_updates import (
@@ -311,6 +312,7 @@ class _MultiAgentOrchestrator:
     )
     _computer_runtime: ComputerRuntimeCoordinator = field(init=False, repr=False)
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
+    _call_transcripts_runtime: CallTranscriptsRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
     _rooms: RoomSetup = field(init=False, repr=False)
@@ -362,6 +364,10 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
         )
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(api_enabled=self.api_enabled)
+        self._call_transcripts_runtime = CallTranscriptsRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+        )
         self._skill_reviews = SkillReviewRunner(self.runtime_paths, lambda agent_name: self.agent_bots.get(agent_name))
         self._automations = AutomationRunner(
             runtime_paths=self.runtime_paths,
@@ -782,6 +788,7 @@ class _MultiAgentOrchestrator:
         if ROUTER_AGENT_NAME in entity_names:
             # Fence room-backed grants before stopping their sole control client.
             self.agent_reply_membership_sync.invalidate(self.config, reason="router_replacement")
+            self._call_transcripts_runtime.unbind()
         await self.scheduled_tasks.release(entity_names)
 
     async def _reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
@@ -806,11 +813,12 @@ class _MultiAgentOrchestrator:
         )
 
     def _bind_trigger_runtimes(self) -> None:
-        """Bind external-trigger and computer delivery once their router and targets run, never after shutdown began."""
+        """Bind external-trigger, computer, and call-transcript work once their router and targets run, never after shutdown began."""
         if not self.running:
             return
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+        self._call_transcripts_runtime.bind_if_ready(self.config, self.agent_bots)
 
     async def _end_entity_replies(self, entity_names: set[str]) -> None:
         """End the journal replies of removed entities; no bot remains to finish them."""
@@ -1440,6 +1448,7 @@ class _MultiAgentOrchestrator:
             agent_cli_registry=self.agent_cli_registry,
             script_broker=self._script_runtime.broker,
             script_worker_keepalive=self._script_runtime.touch_live_workers,
+            call_transcripts=self._call_transcripts_runtime.service,
         )
 
     def event_journal_store(self) -> EventJournalStore:
@@ -1475,6 +1484,7 @@ class _MultiAgentOrchestrator:
         self._computer_runtime.unbind()
         # Runners borrow bots' clients, so they end before any bot stops.
         await run_shutdown_step("scheduled_tasks", self.scheduled_tasks.stop())
+        await run_shutdown_step("call_transcripts", self._call_transcripts_runtime.stop())
         try:
             await run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:

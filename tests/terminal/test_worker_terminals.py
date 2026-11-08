@@ -13,6 +13,8 @@ import aiohttp
 import pytest
 import pytest_asyncio
 import uvicorn
+from aiohttp import web
+from structlog.testing import capture_logs
 
 from mindroom.agents import build_agent_toolkit
 from mindroom.api import sandbox_runner
@@ -44,6 +46,8 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 _TOKEN = "runner-token"  # noqa: S105
+# Headers the runner refuses: no token, and a token that is not ASCII.
+_REFUSED_TOKEN_HEADERS = ({}, {"x-mindroom-sandbox-token": "runner-tökén"})
 _IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
 
 
@@ -291,11 +295,15 @@ async def test_a_terminal_answers_only_the_agent_and_workspace_it_serves(tmp_pat
 
 
 async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str) -> None:
-    """Without the runner token nothing answers; a terminal opens only from a shell call's request."""
+    """Without the runner token nothing answers; a terminal opens only from a shell call's request.
+
+    A token that is not ASCII is refused like any other wrong one.
+    """
     sessions = f"{runner}/api/sandbox-runner/terminal/sessions"
     async with aiohttp.ClientSession() as client:
-        async with client.get(sessions, params={"owner": "x"}) as response:
-            assert response.status == 401
+        for headers in _REFUSED_TOKEN_HEADERS:
+            async with client.get(sessions, params={"owner": "x"}, headers=headers) as response:
+                assert response.status == 401
         body = {"request": {"protocol": 1, "tool_name": "python", "function_name": "run_python_code"}}
         async with client.post(
             sessions,
@@ -316,9 +324,10 @@ async def test_a_terminal_s_stream_needs_the_runner_token_even_with_its_owner(tm
     stream = f"{call.api_root}/terminal/sessions/{info.id}/io"
     params = {"owner": client_module._owner(call.request)}
     async with aiohttp.ClientSession() as client:
-        with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
-            await client.ws_connect(stream, params=params)
-        assert refused.value.status == 403
+        for headers in _REFUSED_TOKEN_HEADERS:
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect(stream, params=params, headers=headers)
+            assert refused.value.status == 403
         async with client.ws_connect(stream, params=params, headers=call.headers) as websocket:
             assert (await websocket.receive()).type == aiohttp.WSMsgType.BINARY
 
@@ -341,31 +350,83 @@ async def test_a_stopping_runner_hangs_up_its_terminals(tmp_path: Path) -> None:
         os.kill(pid, 0)
 
 
+class _BackendApiError(Exception):
+    """An error of a worker backend's API client, which is neither a ``RuntimeError`` nor an ``OSError``."""
+
+
 async def test_an_attached_viewer_keeps_marking_the_worker_used(
     tmp_path: Path,
     runner: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """While a viewer watches, the client looks the worker up again and again, which marks a dedicated one used."""
+    """While a viewer watches, the client looks the worker up again and again, which marks a dedicated one used.
+
+    A lookup that fails, in whatever way the worker backend fails, is logged and does not stop the next ones.
+    """
     monkeypatch.setattr(client_module, "_KEEPALIVE_SECONDS", 0.01)
     lookups: list[bool] = []
     real_worker_call = client_module.worker_call
 
     def recorded(*args: Any, start: bool) -> object:  # noqa: ANN401
         lookups.append(start)
+        # The first keepalive's lookup, after opening's and attaching's.
+        if len(lookups) == 3:
+            raise _BackendApiError
         return real_worker_call(*args, start=start)
 
     monkeypatch.setattr(client_module, "worker_call", recorded)
     terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
     info = await terminals.open()
-    async with terminals.attach(info.id):
-        async with asyncio.timeout(10):
-            while lookups.count(False) < 3:  # noqa: ASYNC110 - lookups run in a thread with no event to await
-                await asyncio.sleep(0.01)
+    with capture_logs() as logs:
+        async with terminals.attach(info.id):
+            async with asyncio.timeout(10):
+                while lookups.count(False) < 4:  # noqa: ASYNC110 - lookups run in a thread with no event to await
+                    await asyncio.sleep(0.01)
 
     # Opening starts the worker; attaching and every keepalive only look it up.
     assert lookups[0] is True
     assert set(lookups[1:]) == {False}
+    failures = [
+        log["log_level"] for log in logs if log["event"] == "Terminal keepalive failed to look up the agent's worker"
+    ]
+    assert failures == ["warning"]
+
+
+async def test_a_viewer_whose_runner_goes_silent_is_told_to_attach_again(
+    tmp_path: Path,
+    runner: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner whose connection goes silent without closing, as a vanished one's does, ends the stream in a heartbeat."""
+
+    async def silent(request: web.Request) -> web.WebSocketResponse:
+        websocket = web.WebSocketResponse(autoping=False)
+        await websocket.prepare(request)
+        # Take every frame, pings included, and answer none.
+        async for _ in websocket:
+            pass
+        return websocket
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", silent)
+    server = web.AppRunner(app, access_log=None)
+    await server.setup()
+    real_worker_call = client_module.worker_call
+
+    def to_silent_peer(*args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+        return replace(real_worker_call(*args, **kwargs), api_root=f"http://127.0.0.1:{server.addresses[0][1]}")
+
+    monkeypatch.setattr(client_module, "worker_call", to_silent_peer)
+    monkeypatch.setattr(client_module, "_HEARTBEAT_SECONDS", 0.1)
+    terminals = _terminals(_shell(_primary_paths(tmp_path, runner)))
+    try:
+        await web.TCPSite(server, "127.0.0.1", 0).start()
+        async with terminals.attach("abc") as stream:
+            async with asyncio.timeout(10):
+                with pytest.raises(TerminalDetachedError):
+                    await stream.receive()
+    finally:
+        await server.cleanup()
 
 
 class _StoppedDedicatedWorkers:

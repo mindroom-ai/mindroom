@@ -64,6 +64,7 @@ from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import maintain_leased_workers
 from mindroom.api.workers import router as workers_router
+from mindroom.call_transcripts.routes import router as call_transcripts_router
 from mindroom.config.commit import ConfigCommit
 from mindroom.config.personal_agents import personal_agent_data
 from mindroom.embeddings.embedder_health import get_embedder_failure
@@ -95,7 +96,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
 # Paths a Matrix web client calls from its own origin with a bearer token and no cookies, and the paths under them.
-_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins")
+_CALL_TRANSCRIPTS_PATH = "/api/call-transcripts"
+_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins", _CALL_TRANSCRIPTS_PATH)
 # The trailing slash keeps a sibling such as /api/pluginsX out.
 _CLIENT_ORIGIN_PREFIXES = tuple(f"{path}/" for path in _CLIENT_ORIGIN_PATHS)
 _IOS_APP_ORIGIN = "capacitor://localhost"
@@ -117,6 +119,13 @@ _PLUGIN_RESPONSE_HEADERS = (
 
 def _is_client_origin_path(path: str) -> bool:
     return path in _CLIENT_ORIGIN_PATHS or path.startswith(_CLIENT_ORIGIN_PREFIXES)
+
+
+def _client_origin_expose_headers(path: str) -> tuple[str, ...]:
+    """Return the headers a client on another origin may read on ``path``: call transcripts say when to try again."""
+    if path.startswith(f"{_CALL_TRANSCRIPTS_PATH}/"):
+        return ("WWW-Authenticate", "Retry-After")
+    return ("WWW-Authenticate",)
 
 
 def _forced_response_headers(path: str) -> tuple[tuple[bytes, bytes], ...]:
@@ -182,7 +191,11 @@ class _RuntimeDashboardCorsMiddleware:
                 else gateway_cors_origins(paths, path)
             )
             settings = (
-                _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
+                _DashboardCorsSettings(
+                    origins,
+                    allow_credentials=False,
+                    expose_headers=_client_origin_expose_headers(path),
+                )
                 if origins is not None
                 else _dashboard_cors_settings(paths)
             )
@@ -503,6 +516,7 @@ for integration_router in integration_routers():
     app.include_router(integration_router)  # Each integration authenticates its own requests.
 app.include_router(computers_router)
 app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
+app.include_router(call_transcripts_router)  # Authenticates client sessions; 404 while call transcripts are off.
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)
 # Each report admits the user who requested its run, administrator or not.

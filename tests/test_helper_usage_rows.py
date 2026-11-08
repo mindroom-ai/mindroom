@@ -27,7 +27,11 @@ from openai.types import CompletionUsage
 
 from mindroom import routing, topic_generator
 from mindroom.agents import create_agent
+from mindroom.call_transcripts.notes import ModelNotesWriter
+from mindroom.call_transcripts.service import CallTranscript, _Turn
+from mindroom.call_transcripts.transcriber import SpeechTranscriber
 from mindroom.config.agent import AgentConfig
+from mindroom.config.calls import CallsConfig, CallTranscriptsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
@@ -204,9 +208,8 @@ async def _voice_normalization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     return paths.storage_root
 
 
-async def _voice_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    paths = test_runtime_paths(tmp_path)
-    config = Config(voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-key", model="gpt-transcribe")))
+def _transcription_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer speech-to-text with a transcript and its token usage."""
     client_type = httpx.AsyncClient
     reply = {
         "text": "transcript",
@@ -226,7 +229,39 @@ async def _voice_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             timeout=timeout,
         ),
     )
+
+
+async def _voice_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    paths = test_runtime_paths(tmp_path)
+    config = Config(voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-key", model="gpt-transcribe")))
+    _transcription_reply(monkeypatch)
     await voice_handler._transcribe_audio(b"audio", config, paths)
+    return paths.storage_root
+
+
+async def _call_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """One stretch of a call transcribed, then the call's notes written."""
+    paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            voice=VoiceConfig(stt=VoiceSTTConfig(api_key="test-key", model="gpt-transcribe")),
+            calls=CallsConfig(transcripts=CallTranscriptsConfig(enabled=True, notes_model="default")),
+        ),
+        paths,
+    )
+    _transcription_reply(monkeypatch)
+    await SpeechTranscriber(lambda: config, paths).transcribe(b"audio", call_id="call", user_id="@a:x", seconds=1.0)
+    notes = {"summary": "A call.", "decisions": [], "action_items": [], "open_questions": []}
+    _scripted(monkeypatch, json.dumps(notes))
+    transcript = CallTranscript(
+        call_id="call",
+        room_id="!room:x",
+        duration_seconds=60,
+        turns=(_Turn(sender="@a:x", text="transcript"),),
+        names={},
+    )
+    await ModelNotesWriter(lambda: config, paths).write_notes(transcript)
     return paths.storage_root
 
 
@@ -418,6 +453,7 @@ async def _realtime_voice(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> P
 
 
 _CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], Awaitable[Path]]] = {
+    "call_transcript": _call_transcript,
     "claude_agent": _claude_agent,
     "compaction_summary": _compaction_summary,
     "dynamic_workflow": _dynamic_workflow,
