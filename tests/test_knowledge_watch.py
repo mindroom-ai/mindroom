@@ -118,6 +118,35 @@ async def test_watch_never_follows_a_link_out_of_the_base(
 
 
 @pytest.mark.asyncio
+async def test_watch_ignores_a_link_created_while_watching(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+) -> None:
+    """A link to a folder, created in a watched base, is not watched like a new folder."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = docs / "linked"
+
+    async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
+        linked.symlink_to(outside, target_is_directory=True)
+        await _until(lambda: str(linked) in recorded_watch.changed_paths(), "the new link was not seen")
+        await _write_until_seen(recorded_watch, docs / "notes" / "after.md")
+
+    assert len(recorded_watch.starts) == 1
+
+
+def test_watched_folders_refuse_a_base_whose_folder_became_a_link(tmp_path: Path) -> None:
+    """Looking for folders again never walks a base folder that was replaced by a link."""
+    (tmp_path / "elsewhere" / "deep").mkdir(parents=True)
+    replaced = tmp_path.resolve() / "docs"
+    replaced.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    with pytest.raises(OSError, match=r"Too many levels of symbolic links|Not a directory"):
+        knowledge_watch._watched_folders(replaced)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("new_folder", ["new/nested", "drafts~"], ids=["nested", "name-watchfiles-filters"])
 async def test_watch_refreshes_for_changes_in_existing_and_new_folders(
     tmp_path: Path,
@@ -145,12 +174,16 @@ async def test_watch_refreshes_for_a_file_written_into_a_new_folder_at_once(
     docs: Path,
     recorded_watch: _RecordedWatch,
 ) -> None:
-    """A file written into a new folder before the watcher reaches that folder still schedules a refresh."""
+    """A file written into a new folder before the watcher reaches that folder still schedules one refresh."""
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
         (docs / "fresh").mkdir()
         (docs / "fresh" / "doc.md").write_text("fresh", encoding="utf-8")
         await _until(lambda: scheduler.schedule_refresh.called, "the file in the new folder did not refresh")
+        batches_after_refresh = len(recorded_watch.batches) + 2
+        await _until(lambda: len(recorded_watch.batches) >= batches_after_refresh, "the watcher stopped reporting")
+
+    assert scheduler.schedule_refresh.call_count == 1
 
 
 @pytest.mark.asyncio
