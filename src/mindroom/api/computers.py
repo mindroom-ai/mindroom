@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import allowed_client_origin, offered_subprotocols
+from mindroom.api.client_sessions import allowed_client_origin, offered_credential
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
@@ -353,11 +353,10 @@ async def _maintain(websocket: WebSocket, session: ComputerSession, stream: asyn
 def _stream_session(websocket: WebSocket, session_id: str, protocol: str) -> ComputerSession:
     if not allowed_client_origin(websocket):
         raise ComputerError(403, "Computer stream origin is not allowed.")
-    offered = offered_subprotocols(websocket)
-    tickets = [value.removeprefix("mindroom-ticket.") for value in offered if value.startswith("mindroom-ticket.")]
-    if protocol not in offered or len(tickets) != 1:
+    ticket = offered_credential(websocket, protocol, "mindroom-ticket.")
+    if ticket is None:
         raise ComputerError(401, "A computer stream ticket is required.")
-    return _store(websocket.app).consume_stream_ticket(session_id, tickets[0])
+    return _store(websocket.app).consume_stream_ticket(session_id, ticket)
 
 
 @router.websocket("/sessions/{session_id}/stream")

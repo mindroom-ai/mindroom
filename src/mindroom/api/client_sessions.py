@@ -128,10 +128,12 @@ def presented_session(request: Request) -> ClientSession:
     )
 
 
-def offered_subprotocols(websocket: WebSocket) -> list[str]:
-    """Return the subprotocols a websocket's client offers."""
+def offered_credential(websocket: WebSocket, protocol: str, prefix: str) -> str | None:
+    """Return the one ``<prefix><credential>`` subprotocol a websocket offers beside ``protocol``, else None."""
     # Uvicorn SansIO can expose comma-separated header values instead of tokens.
-    return [offer.strip() for value in websocket.scope.get("subprotocols", []) for offer in value.split(",")]
+    offered = [offer.strip() for value in websocket.scope.get("subprotocols", []) for offer in value.split(",")]
+    credentials = [offer.removeprefix(prefix) for offer in offered if offer.startswith(prefix)]
+    return credentials[0] if protocol in offered and len(credentials) == 1 else None
 
 
 def offered_session(websocket: WebSocket) -> ClientSession:
@@ -139,9 +141,7 @@ def offered_session(websocket: WebSocket) -> ClientSession:
 
     The client offers ``mindroom-session`` beside it, which the server accepts with, and no other token.
     """
-    offered = offered_subprotocols(websocket)
-    tokens = [offer.removeprefix(_SESSION_TOKEN_PREFIX) for offer in offered if offer.startswith(_SESSION_TOKEN_PREFIX)]
-    return _live_session(websocket.app, tokens[0] if SESSION_PROTOCOL in offered and len(tokens) == 1 else "")
+    return _live_session(websocket.app, offered_credential(websocket, SESSION_PROTOCOL, _SESSION_TOKEN_PREFIX) or "")
 
 
 def _live_session(app: FastAPI, token: str) -> ClientSession:

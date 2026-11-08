@@ -86,7 +86,7 @@ async def client_stream(websocket: WebSocket, room_id: str | None = None) -> Asy
     if room_id is not None:
         await _require_joined(websocket, session.user_id, room_id)
         # The session may have ended while membership was read.
-        session = offered_session(websocket)
+        offered_session(websocket)
     await websocket.accept(subprotocol=SESSION_PROTOCOL)
     stream = asyncio.timeout(None)
 
