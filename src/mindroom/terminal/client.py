@@ -58,6 +58,8 @@ _MAX_FRAME_BYTES = 4 * 1024 * 1024
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _INFO = TypeAdapter(TerminalInfo)
 _INFOS = TypeAdapter(list[TerminalInfo])
+# At most 4 bytes a character, so within the 64 KiB the runner takes at once.
+_MAX_INPUT_CHARS = 16384
 
 
 class TerminalDetachedError(Exception):
@@ -156,6 +158,8 @@ class TerminalStream:
         Given ``judged``, only while the line is still the one it describes, and with ``empty_line`` only while the
         shell waits at its prompt with nothing typed; otherwise it types nothing and raises ``TerminalError`` (409).
         """
+        if len(data) > _MAX_INPUT_CHARS:
+            raise TerminalError(413, f"Type at most {_MAX_INPUT_CHARS} characters at once; send a long text in parts.")
         async with self.line.lock:
             websocket = await _inputs[self.line].open(self._connect, self.line)
             if (judged is not None and not self.line.unchanged(judged)) or (empty_line and not self.line.empty):

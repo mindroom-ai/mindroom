@@ -138,6 +138,8 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     assert await _call(functions["terminal_list"]) == f"- {session_id}: running"
     refused = await _call(functions["terminal_send"], session_id=session_id, keys="<ctrl-c>echo hi<enter>")
     assert refused.startswith("Error: send <ctrl-c> on its own")
+    too_long = await _call(functions["terminal_send"], session_id=session_id, keys="x" * 16385)
+    assert too_long == "Error: Type at most 16384 characters at once; send a long text in parts."
     for command in ("ls\x01", "\x03ls", "cd /tmp\nls"):
         refused = await _call(functions["terminal_run"], session_id=session_id, command=command)
         assert refused.startswith("Error: a command is one line of plain text;")

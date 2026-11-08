@@ -52,7 +52,7 @@ _NOT_AT_PROMPT = (
     "typing); nothing was typed. Read the terminal, and send keys such as <ctrl-c> with terminal_send."
 )
 _EXITED = "Error: the terminal's shell has exited; open another with terminal_open."
-_DETACHED = "Error: the connection to the terminal ended, and keys sent may or may not have arrived. Read it again."
+_DETACHED = "Error: the connection to the terminal ended; read it again before typing more."
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OTHER_ESCAPE = re.compile(r"\x1b[P^_X][^\x1b]*(?:\x1b\\)?|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\-_=>78]?")
@@ -205,7 +205,7 @@ class TerminalTools(Toolkit):
         """
         text = run_text(command)
         # One line, so the run ends at the prompt after it; text, so its judgment is what it runs.
-        if "\n" in text or "\r" in text[:-1] or "\x03" in text or entered_command("", text) is None:
+        if "\n" in text or "\r" in text[:-1] or entered_command("", text) is None:
             return (
                 "Error: a command is one line of plain text; join commands with && or ;, and type keys such as "
                 "<ctrl-c> or <tab> with terminal_send."
