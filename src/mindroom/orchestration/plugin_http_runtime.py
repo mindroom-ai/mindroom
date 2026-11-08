@@ -51,23 +51,27 @@ def _client_in_room(bots: Mapping[str, AgentBot], room_id: str) -> nio.AsyncClie
 async def _read_in_room[T](
     bots: Mapping[str, AgentBot],
     room_id: str,
-    read: Callable[[nio.AsyncClient], Awaitable[T]],
+    read: Callable[[nio.AsyncClient], Awaitable[T | None]],
     failed: str,
 ) -> T:
     """Return ``read`` made through the client ``_client_in_room`` picks, else answer 503 with ``failed``.
 
-    It answers 503 too when no running bot is in the room, or when ``read`` raises or outlasts the lookup timeout.
+    It answers 503 too when no running bot is in the room, or when ``read`` answers None, raises, or outlasts the
+    lookup timeout.
     """
     client = _client_in_room(bots, room_id)
     if client is None:
         raise HTTPException(503, _NO_BOT_IN_ROOM)
     try:
         async with asyncio.timeout(_LOOKUP_TIMEOUT_SECONDS):
-            return await read(client)
+            answer = await read(client)
     except Exception as error:
         # A failed or timed-out read leaves the answer unknown, which must never pass for a yes or a no.
         logger.warning("Room read failed", room_id=room_id, detail=failed, error_type=type(error).__name__)
         raise HTTPException(503, failed) from None
+    if answer is None:
+        raise HTTPException(503, failed)
+    return answer
 
 
 def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
@@ -111,17 +115,11 @@ def bind_room_members(app: FastAPI, bots: Mapping[str, AgentBot]) -> None:
 
 
 async def _room_state(bots: Mapping[str, AgentBot], room_id: str) -> RoomStateSnapshot:
-    state = await _read_in_room(bots, room_id, lambda client: read_room_state(client, room_id), _STATE_READ_FAILED)
-    if state is None:
-        raise HTTPException(503, _STATE_READ_FAILED)
-    return state
+    return await _read_in_room(bots, room_id, lambda client: read_room_state(client, room_id), _STATE_READ_FAILED)
 
 
 async def _room_direct(bots: Mapping[str, AgentBot], room_id: str) -> bool:
-    direct = await _read_in_room(bots, room_id, lambda client: is_dm_room(client, room_id), _DIRECT_LOOKUP_FAILED)
-    if direct is None:
-        raise HTTPException(503, _DIRECT_LOOKUP_FAILED)
-    return direct
+    return await _read_in_room(bots, room_id, lambda client: is_dm_room(client, room_id), _DIRECT_LOOKUP_FAILED)
 
 
 def unbind_room_members(app: FastAPI) -> None:

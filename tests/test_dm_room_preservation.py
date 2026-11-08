@@ -12,7 +12,6 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -190,8 +189,9 @@ class TestDMPreservationDuringCleanup:
             assert "!unconfigured1:server" in leave_calls
             assert "!unconfigured2:server" in leave_calls
 
-    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:
-        """Orphaned bot cleanup leaves DM rooms untouched."""
+    @pytest.mark.parametrize("is_dm", [True, None], ids=["dm", "dm-status-unknown"])
+    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path, is_dm: bool | None) -> None:
+        """Orphaned bot cleanup leaves DM rooms, and rooms whose DM status is unknown, untouched."""
         client = AsyncMock()
         config = _config_with_runtime_paths(
             tmp_path,
@@ -203,7 +203,7 @@ class TestDMPreservationDuringCleanup:
             },
         )
         with (
-            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=True),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=is_dm),
             patch("mindroom.matrix.room_cleanup.get_room_members") as get_room_members,
         ):
             kicked_bots = await _cleanup_orphaned_bots_in_room(
@@ -212,31 +212,6 @@ class TestDMPreservationDuringCleanup:
                 config,
                 runtime_paths_for(config),
             )
-
-        assert kicked_bots == []
-        get_room_members.assert_not_called()
-        assert not client.room_kick.called
-
-    async def test_orphaned_bot_cleanup_skips_room_after_failed_m_direct_read(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A failed m.direct read leaves a room the state does not mark as direct for the next cleanup pass."""
-        monkeypatch.setattr(matrix_rooms, "_DM_ROOM_CACHE", {})
-        monkeypatch.setattr(matrix_rooms, "_DIRECT_ROOMS_CACHE", {})
-        client = AsyncMock()
-        client.user_id = "@mindroom_router:server"
-        client.rooms = {}
-        client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN")
-        client.room_get_state.return_value = nio.RoomGetStateResponse(
-            [{"type": "m.room.member", "content": {"membership": "join"}}],
-            "!dm:server",
-        )
-        config = _config_with_runtime_paths(tmp_path)
-
-        with patch("mindroom.matrix.room_cleanup.get_room_members") as get_room_members:
-            kicked_bots = await _cleanup_orphaned_bots_in_room(client, "!dm:server", config, runtime_paths_for(config))
 
         assert kicked_bots == []
         get_room_members.assert_not_called()

@@ -24,8 +24,11 @@ def _non_dm_state() -> nio.RoomGetStateResponse:
     return nio.RoomGetStateResponse([{"type": "m.room.member", "content": {"membership": "join"}}], "!room:server")
 
 
+_M_DIRECT_READ_FAILED = nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN")
+
+
 def _failing_m_direct_client(
-    failed_read: nio.DirectRoomsResponse | nio.DirectRoomsErrorResponse,
+    failed_read: nio.DirectRoomsResponse | nio.DirectRoomsErrorResponse = _M_DIRECT_READ_FAILED,
     room_id: str = "!room:server",
 ) -> AsyncMock:
     """Build a client whose first m.direct read fails and whose next lists *room_id*, which its state does not mark."""
@@ -204,7 +207,7 @@ class TestDMDetection:
     @pytest.mark.parametrize(
         "failed_read",
         [
-            pytest.param(nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN"), id="error-response"),
+            pytest.param(_M_DIRECT_READ_FAILED, id="error-response"),
             # nio parses a non-JSON error body, such as a proxy's 502 page, as an empty m.direct list.
             pytest.param(_direct_rooms({}, status=502), id="non-json-error-body"),
         ],
@@ -243,7 +246,7 @@ class TestDMDetection:
         expected: bool | None,
     ) -> None:
         """Test that after a failed m.direct read only an is_direct marker in the state gives a definite answer."""
-        client = _failing_m_direct_client(nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN"))
+        client = _failing_m_direct_client()
         client.room_get_state.return_value = state_reply
 
         assert await is_dm_room(client, "!room:server") is expected
@@ -288,10 +291,7 @@ class TestDMDetection:
 
     async def test_leave_non_dm_rooms_keeps_room_whose_m_direct_read_failed(self) -> None:
         """Test a failed m.direct read keeps its room, a clean read lets a non-DM go, and a later pass keeps the DM."""
-        client = _failing_m_direct_client(
-            nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN"),
-            room_id="!dm:server",
-        )
+        client = _failing_m_direct_client(room_id="!dm:server")
         leave = AsyncMock(return_value=True)
 
         await rooms.leave_non_dm_rooms(client, ["!dm:server", "!group:server"], leave_room_action=leave)
