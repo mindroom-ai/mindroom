@@ -1137,7 +1137,7 @@ async def greeting(ctx: Annotated[PluginContext, Depends(plugin_context)]) -> di
     return {"greeting": ctx.settings.get("greeting", "hello")}
 ```
 
-Each call returns the context of the config MindRoom serves at that moment, so a long-lived websocket calls `plugin_context(websocket)` again to see a later reload's settings.
+Each call returns the context of the config MindRoom serves at that moment, so a long-lived websocket calls `plugin_context(websocket)` again to see a later config reload; a reload that changes `plugins:`, such as this plugin's `settings`, closes the websocket instead, and the reconnected client reads the new settings.
 
 A tool calls `current_plugin_context(plugin_name)` from `mindroom.plugin_api` with its plugin's manifest `name`, during a tool call in a Matrix conversation or in an OpenAI-compatible API request whose API key is [mapped to a user](openai-api.md#requester-identities-and-delegation).
 Anywhere else, such as in the MCP gateway or a worker, it raises `RuntimeError`, so a tool that uses it sets [`requires_primary_runtime=True`](#decorator-fields).
@@ -1154,7 +1154,7 @@ A plugin that uses its context states `"mindroom_plugin_api": "1.4"` in its mani
 
 A context keeps the settings of the config it was made under, and a tool's context has its turn's or request's config.
 Once a config reload disables or removes the plugin, `is_active()` returns `False` and `settings`, `config`, and `state_root` raise an error.
-A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket closes with code 1013 and that reason.
+A route that meets that error answers 503 with `Plugin '<name>' is not active: the current config does not load it.`, and a websocket that meets it closes with code 1013 and that reason, though the reload that disables the plugin closes its websockets with 1012 first.
 
 ## Plugin lifecycle
 
@@ -1206,7 +1206,7 @@ The new lifespan starts while the old one still runs, so hand over what only one
 The plugin's new tools, hooks, and routes are live while its new lifespan starts, so code that uses what the lifespan sets up handles it not being there yet.
 A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespan failed to start` or `Plugin lifespan failed to stop` with the plugin's name, and MindRoom cancels one that overran and carries on; a lifespan whose start failed never runs its stop code.
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
-Either failure costs the plugin only its lifespan: its tools, hooks, and routes keep working.
+Either failure costs the plugin only its lifespan: its tools, hooks, and routes keep working, unless they import the lifecycle module, which then fails them too.
 A plugin with a lifecycle module states `"mindroom_plugin_api": "1.7"` in its manifest, so an older MindRoom skips it with a clear reason.
 
 ## People, agents, and administrators
