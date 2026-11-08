@@ -203,7 +203,7 @@ A shell started inside a terminal, such as `bash` or `nix-shell`, keeps `termina
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
 An agent types in terminals only while its `run_shell_command` calls never ask for approval: no [approval rule](https://docs.mindroom.chat/tool-approval/) that matches `run_shell_command` may ask, including an approval script, and neither may `tool_approval.default` when no rule matches.
-Otherwise `terminal_open`, `terminal_run`, and `terminal_send` refuse, however the agent calls them, and the agent runs its commands with `run_shell_command`; `terminal_read` and `terminal_list` still work, and people still type in the terminals.
+Otherwise the agent is offered only `terminal_read` and `terminal_list`, and its instructions tell it to run commands with `run_shell_command`; people still type in the terminals.
 The rules can't judge typing into a terminal, because what a line runs there depends on what ran in it before, such as aliases, functions, shell options, and programs reading the keys.
 
 ```yaml
