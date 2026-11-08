@@ -75,19 +75,19 @@ def _until_set(event: Event, process: BaseProcess) -> bool:
     return True
 
 
-def _lock_refused(monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
-    """Return an event that is set once a lock the store asks for from now on is refused."""
-    refused = asyncio.Event()
+def _lock_refusals(monkeypatch: pytest.MonkeyPatch) -> asyncio.Queue[None]:
+    """Return a queue that receives an item each time the store is refused a lock it asks for from now on."""
+    refusals: asyncio.Queue[None] = asyncio.Queue()
     lock_error = credential_store_module._sqlite_lock_error
 
     def observed(error: sqlite3.OperationalError) -> bool:
         if lock_error(error):
-            refused.set()
+            refusals.put_nowait(None)
             return True
         return False
 
     monkeypatch.setattr(credential_store_module, "_sqlite_lock_error", observed)
-    return refused
+    return refusals
 
 
 def _commit_sqlite_generation(database_path: str, committing: Event, committed: Event) -> None:
@@ -964,7 +964,7 @@ async def test_cross_process_writer_wait_is_cancellable_without_leaking_transact
     """A second process owns the same SQLite lock and a cancelled waiter leaves no lock behind."""
     context = _context(tmp_path)
     await _publish(context, "initial")
-    refused = _lock_refused(monkeypatch)
+    refusals = _lock_refusals(monkeypatch)
     process_context = multiprocessing.get_context("spawn")
     ready = process_context.Event()
     release = process_context.Event()
@@ -982,8 +982,9 @@ async def test_cross_process_writer_wait_is_cancellable_without_leaking_transact
                 await transaction.commit()
 
         waiter = asyncio.create_task(wait_for_store())
-        # The holder's lock refuses the waiter, which then waits for it.
-        await refused.wait()
+        # The holder's lock refuses the waiter, which asks again instead of failing.
+        await refusals.get()
+        await refusals.get()
         assert not waiter.done()
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1005,7 +1006,7 @@ async def test_reader_blocked_commit_retries_same_transaction(
     """A reader-blocked COMMIT retries without rolling back or republishing."""
     context = _context(tmp_path)
     await _publish(context, "initial")
-    refused = _lock_refused(monkeypatch)
+    refusals = _lock_refusals(monkeypatch)
     process_context = multiprocessing.get_context("spawn")
     ready = process_context.Event()
     release = process_context.Event()
@@ -1025,7 +1026,7 @@ async def test_reader_blocked_commit_retries_same_transaction(
 
         publication = asyncio.create_task(publish_once())
         # The reader's lock refuses only the COMMIT.
-        await refused.wait()
+        await refusals.get()
         assert not publication.done()
         release.set()
         await publication
@@ -1085,10 +1086,10 @@ async def test_reader_retries_while_writer_crosses_commit_window(
         assert await asyncio.to_thread(_until_set, writer_committing, writer)
         await _wait_for_sqlite_pending_commit(database_path, writer)
 
-        refused = _lock_refused(monkeypatch)
+        refusals = _lock_refusals(monkeypatch)
         enter_reader.set()
         # The pending COMMIT refuses the reader's shared lock, so the reader waits for it.
-        await refused.wait()
+        await refusals.get()
         assert not pending_read.done()
         release_reader.set()
         assert await pending_read == "committed-generation"
