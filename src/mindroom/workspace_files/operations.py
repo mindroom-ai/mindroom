@@ -68,7 +68,6 @@ _KINDS: dict[int, Literal["file", "folder", "link"]] = {
     stat.S_IFDIR: "folder",
     stat.S_IFLNK: "link",
 }
-_ABSENT = "No such file or folder."
 _NOT_A_FILE = "That path is not a regular file."
 # Saves through this process check the etag and write one at a time, so two saves of one version never both land.
 _SAVES = threading.Lock()
@@ -132,11 +131,7 @@ class StaleEtagError(Exception):
 def is_hidden(path: PurePath) -> bool:
     """Return whether a workspace-relative path is, or lies in, a credential a chat client never sees.
 
-    These are what a shell keeps at the top of its ``HOME`` (``.ssh``, ``.gnupg``, ``.aws``, ``.azure``, ``.kube``,
-    ``.docker``, ``.password-store``, ``.mindroom``, ``.config/gh``, ``.config/gcloud``, ``.config/hub``,
-    ``.config/git/credentials``, ``.claude/.credentials.json`` and ``.codex/auth.json``); in any folder ``.netrc``,
-    ``.git-credentials``, ``.pgpass``, ``.pypirc``, ``.npmrc``, every name starting with ``.env``, and SSH keys; and
-    below a ``.git`` folder its ``config``, ``credentials`` and ``*.credentials``. Names match in any case.
+    Names match in any case; docs/workspace-files.md lists them for users.
     """
     parts = tuple(part.casefold() for part in path.parts)
     if any(parts[: len(place)] == place for place in _HOME_CREDENTIALS):
@@ -165,7 +160,7 @@ def _relative(raw: str) -> PurePosixPath:
 
 
 def _absent() -> HTTPException:
-    return HTTPException(404, _ABSENT)
+    return HTTPException(404, "No such file or folder.")
 
 
 @dataclass(frozen=True)

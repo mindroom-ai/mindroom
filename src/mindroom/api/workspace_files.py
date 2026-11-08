@@ -85,16 +85,8 @@ async def _made_root(request: Request, room: RoomReader, room_id: str, agent_use
     paths = bind_current_request_snapshot(request).runtime_paths
     requester_id = resolve_human_requester_alias(room.user.user_id, workspace.config, paths)
     identity = room_execution_identity(workspace.name, requester_id, room_id, paths)
-    runtime = await asyncio.to_thread(
-        resolve_agent_runtime,
-        workspace.name,
-        workspace.config,
-        paths,
-        identity,
-        create=True,
-    )
-    if runtime.workspace.root != workspace.root:
-        raise HTTPException(409, "The agent's workspace moved; try again.")
+    # The same config, paths and identity the room's check resolved this root from.
+    await asyncio.to_thread(resolve_agent_runtime, workspace.name, workspace.config, paths, identity, create=True)
     return workspace.root
 
 
@@ -135,6 +127,8 @@ async def save_file(
     """Save a file; given ``etag``, only while the file has it, else 409 with the file's current etag."""
     try:
         payload = body.content.encode() if body.encoding == "utf-8" else base64.b64decode(body.content, validate=True)
+    except UnicodeEncodeError:
+        raise HTTPException(400, "content is not valid Unicode text.") from None
     except binascii.Error:
         raise HTTPException(400, "content is not valid base64.") from None
     if len(payload) > operations.MAX_FILE_BYTES:

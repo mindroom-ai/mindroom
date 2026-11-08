@@ -219,3 +219,17 @@ def test_mindroom_serves_the_routes_to_chat_clients_on_other_origins(tmp_path: P
     assert response.status_code == 401
     assert response.headers["access-control-allow-origin"] == chat
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_text_that_is_not_unicode_answers_400(client: _Client) -> None:
+    """JSON may escape half of a surrogate pair, which no UTF-8 file can hold."""
+    coder = client.room.ids["coder"]
+    headers = {"Authorization": f"Bearer {client_session_store(client.room.app).create(ALICE).token}"}
+
+    response = client.http.put(
+        f"{BASE}/{coder}/file",
+        content='{"path": "half.txt", "content": "a\\ud800b"}',
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 400

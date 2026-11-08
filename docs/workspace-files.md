@@ -1,3 +1,7 @@
+---
+icon: lucide/folder-open
+---
+
 # Workspace Files
 
 A chat client such as MindRoom Chat can browse and edit the files of an agent's workspace, the folder its file, coding, and shell tools work in, and follow changes to them live.
