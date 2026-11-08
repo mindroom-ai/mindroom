@@ -269,10 +269,13 @@ def _bound_computer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     joined_rooms: list[str],
+    *,
+    unprepared: str | None = None,
 ) -> tuple[ComputerRuntime, AsyncMock, str, RuntimePaths]:
     """Bind the runtime's Computer authorization with Alice, her bridge alias, and a writer Alice may use in ``ROOM``.
 
-    Return it, the router's client, the writer's user ID, and the runtime's paths.
+    Return it, the router's client, the writer's user ID, and the runtime's paths. An ``unprepared`` agent is
+    configured too, without its account.
     """
     writer = AgentConfig(
         display_name="Writer",
@@ -293,6 +296,9 @@ def _bound_computer(
     )
     persist_entity_accounts(config, paths)
     agent_id = entity_ids(config, paths)["writer"].full_id
+    if unprepared is not None:
+        agents = {"writer": writer, unprepared: AgentConfig(display_name="Unprepared")}
+        config = Config(agents=agents, authorization=config.authorization)
     client = AsyncMock(spec=nio.AsyncClient)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=joined_rooms)
     client.joined_members.return_value = joined_members_response(ROOM, ALICE, ALIAS, agent_id)
@@ -355,3 +361,19 @@ async def test_a_bridge_alias_opens_the_computer_its_person_s_turns_use(
     )
     assert alias.requester_id == ALIAS
     assert alias.spec.worker_key == person.spec.worker_key == turn.worker_key
+
+
+@pytest.mark.asyncio
+async def test_an_agent_without_its_account_leaves_a_ready_agent_s_computer_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While another agent's account is not prepared, the ready writer's Computer opens; another user ID answers 503."""
+    computer, _client, agent_id, _paths = _bound_computer(tmp_path, monkeypatch, [ROOM], unprepared="idle")
+
+    target = await computer.authorize(ALICE, ROOM, agent_id)
+
+    assert target.spec.worker_key == f"v1:default:user_agent:~{ALICE}:writer"
+    with pytest.raises(ComputerError) as error:
+        await computer.authorize(ALICE, ROOM, "@mindroom_idle:example.org")
+    assert (error.value.status_code, error.value.detail) == (503, "Agent identities are not ready.")

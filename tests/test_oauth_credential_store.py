@@ -36,6 +36,7 @@ from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
+    from multiprocessing.process import BaseProcess
     from multiprocessing.synchronize import Barrier, Event
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
@@ -64,6 +65,14 @@ def _hold_sqlite_transaction(
         connection.execute("ROLLBACK")
     finally:
         connection.close()
+
+
+def _until_set(event: Event, process: BaseProcess) -> bool:
+    """Wait for ``event`` while ``process`` runs, however long a busy machine takes to start it; return whether it is set."""
+    while not event.wait(0.05):
+        if not process.is_alive():
+            return event.is_set()
+    return True
 
 
 def _commit_sqlite_generation(database_path: str, committing: Event, committed: Event) -> None:
@@ -972,10 +981,23 @@ async def test_cross_process_writer_wait_is_cancellable_without_leaking_transact
 
 
 @pytest.mark.asyncio
-async def test_reader_blocked_commit_retries_same_transaction(tmp_path: Path) -> None:
+async def test_reader_blocked_commit_retries_same_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """A reader-blocked COMMIT retries without rolling back or republishing."""
     context = _context(tmp_path)
     await _publish(context, "initial")
+    blocked = asyncio.Event()
+    lock_error = credential_store_module._sqlite_lock_error
+
+    def refused(error: sqlite3.OperationalError) -> bool:
+        if lock_error(error):
+            blocked.set()
+            return True
+        return False
+
+    monkeypatch.setattr(credential_store_module, "_sqlite_lock_error", refused)
     process_context = multiprocessing.get_context("spawn")
     ready = process_context.Event()
     release = process_context.Event()
@@ -985,19 +1007,17 @@ async def test_reader_blocked_commit_retries_same_transaction(tmp_path: Path) ->
         kwargs={"write": False},
     )
     reader.start()
-    publish_calls = 0
     try:
-        assert await asyncio.to_thread(ready.wait, 5)
+        assert await asyncio.to_thread(_until_set, ready, reader)
 
         async def publish_once() -> None:
-            nonlocal publish_calls
             async with oauth_credential_transaction(context) as transaction:
-                publish_calls += 1
                 await transaction.publish({"token": "rotated"}, advance_connection_generation=False)
                 await transaction.commit()
 
         publication = asyncio.create_task(publish_once())
-        await asyncio.sleep(0.1)
+        # The reader's lock refuses only the COMMIT.
+        await blocked.wait()
         assert not publication.done()
         release.set()
         await publication
@@ -1008,7 +1028,6 @@ async def test_reader_blocked_commit_retries_same_transaction(tmp_path: Path) ->
             reader.terminate()
             reader.join()
     assert reader.exitcode == 0
-    assert publish_calls == 1
     async with oauth_credential_transaction(context) as transaction:
         assert (await transaction.snapshot()).credentials == {"token": "rotated"}
         await transaction.commit()

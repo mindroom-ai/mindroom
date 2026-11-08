@@ -113,13 +113,35 @@ async def test_joined_members_error_503() -> None:
 
 
 @pytest.mark.asyncio
-async def test_joined_members_raising_503() -> None:
-    """A Matrix call that raises is 503 like an error response, never a pass and never a bare 500."""
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("homeserver timed out"), nio.LocalProtocolError("durable sync session is closed")],
+)
+async def test_joined_members_raising_503(error: Exception) -> None:
+    """A Matrix call that raises is 503 like an error response, never a pass, never a bare 500, and never read again."""
     client = _client()
-    client.joined_members = AsyncMock(side_effect=TimeoutError("homeserver timed out"))
+    client.joined_members = AsyncMock(side_effect=error)
     with pytest.raises(HTTPException) as caught:
         await require_room_member(_request(_bound(client)), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership lookup failed; try again.")
+    client.joined_members.assert_awaited_once_with(ROOM)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("refusals", "status"), [(1, 200), (2, 200), (3, 503)])
+async def test_a_member_list_the_client_refuses_for_a_membership_change_is_read_again(
+    refusals: int,
+    status: int,
+) -> None:
+    """A join applied while the member list is read makes the client refuse it; the lookup reads it again, 3 times at most."""
+    client = _client("@alice:example.org")
+    answer = client.joined_members.return_value
+    client.joined_members.side_effect = [
+        *(nio.LocalProtocolError("room membership changed during lookup") for _ in range(refusals)),
+        answer,
+    ]
+    assert await _membership_status(_bound(client)) == status
+    assert client.joined_members.await_count == min(refusals + 1, 3)
 
 
 @pytest.mark.asyncio

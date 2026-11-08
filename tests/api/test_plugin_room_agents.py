@@ -608,6 +608,7 @@ async def test_one_agent_that_cannot_be_resolved_is_left_out_and_the_rest_are_li
 
     assert _access(listed) == [("coder", "write", "type"), ("notes", "read", "none")]
     assert [log["agent_name"] for log in logs if log["event"] == "room_agent_left_out"] == ["broken"]
+    assert await room.agent(ALICE, room.ids["coder"]) == listed[0]
     if isinstance(error, tuple):
         assert await _status(room.agent(ALICE, broken)) == error
     else:

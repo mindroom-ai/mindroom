@@ -24,8 +24,7 @@ PROMPT_COMMAND = (
     '__mindroom_status=$?; __mindroom_prompt=$((__mindroom_prompt + 1)); printf "\\033]133;D;%s;mindroom=%s\\007" '
     '"$__mindroom_status" "$__mindroom_prompt"'
 )
-PROMPT_MARK_START = b"\x1b]133;D;"
-_PROMPT_MARK = re.compile(re.escape(PROMPT_MARK_START) + rb"(\d{1,3});mindroom=(\d{1,18})\x07")
+_PROMPT_MARK = re.compile(rb"\x1b\]133;D;(\d{1,3});mindroom=(\d{1,18})\x07")
 # Longer than any prompt mark, so an unfinished one waits for the frame that ends it.
 _MAX_MARK_BYTES = 64
 _INTERRUPT = "\x03"
@@ -170,13 +169,21 @@ class PromptMarks:
     def __init__(self) -> None:
         self._tail = b""
 
-    def feed(self, chunk: bytes) -> list[tuple[int, int]]:
-        """Return the ``(number, status)`` of each mark that ``chunk`` completes."""
+    def feed(self, chunk: bytes) -> list[int]:
+        """Return the number of each mark that ``chunk`` completes."""
         data = self._tail + chunk
         start = data.rfind(b"\x1b")
         unfinished = start != -1 and len(data) - start < _MAX_MARK_BYTES and b"\x07" not in data[start:]
         self._tail = data[start:] if unfinished else b""
-        return [(int(number), int(status)) for status, number in _PROMPT_MARK.findall(data)]
+        return [int(number) for _, number in _PROMPT_MARK.findall(data)]
+
+
+def prompt_after(data: bytes, number: int) -> tuple[int, int] | None:
+    """Return where in ``data`` the first prompt mark numbered above ``number`` starts, and the exit status it reports."""
+    for mark in _PROMPT_MARK.finditer(data):
+        if int(mark[2]) > number:
+            return mark.start(), int(mark[1])
+    return None
 
 
 _lines: OrderedDict[tuple[object, str], TerminalLine] = OrderedDict()
