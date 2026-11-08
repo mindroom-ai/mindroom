@@ -1043,7 +1043,7 @@ def _seed_git_remote(tmp_path: Path, files: Mapping[str, str]) -> Path:
 async def test_git_refresh_publishes_a_checkout_tracking_a_file_whose_name_is_not_utf8(tmp_path: Path) -> None:
     """A tracked file whose name is not valid UTF-8 is left out, and the rest of the checkout is indexed and published.
 
-    A forced reindex of a checkout already at the remote revision lists the tracked files without syncing first.
+    A forced reindex of a checkout already at the remote revision lists the tracked files itself: its sync finds nothing new and lists none.
     """
     remote_bare = _seed_git_remote(tmp_path, {"guide.md": "plain guide", os.fsdecode(b"odd-\xff.md"): "odd guide"})
     docs_path = tmp_path / "checkout"
@@ -9050,8 +9050,6 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
     Earlier releases ran Git in such a checkout, which let whoever could write
     the pointer choose the repository whose config and hooks Git executed.
     """
-    remote_work = tmp_path / "remote-work"
-    remote_work.mkdir()
 
     async def _git(cwd: Path, *args: str) -> None:
         await asyncio.to_thread(
@@ -9063,20 +9061,7 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
             text=True,
         )
 
-    await _git(remote_work, "init", "-b", "main")
-    await _git(remote_work, "config", "user.email", "tests@example.com")
-    await _git(remote_work, "config", "user.name", "MindRoom Tests")
-    (remote_work / "doc.md").write_text("worktree checkout content", encoding="utf-8")
-    await _git(remote_work, "add", "doc.md")
-    await _git(remote_work, "commit", "-m", "main")
-    remote_bare = tmp_path / "remote.git"
-    await asyncio.to_thread(
-        subprocess.run,
-        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    remote_bare = _seed_git_remote(tmp_path, {"doc.md": "worktree checkout content"})
     seed_checkout = tmp_path / "seed-checkout"
     await asyncio.to_thread(
         subprocess.run,

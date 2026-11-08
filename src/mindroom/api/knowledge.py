@@ -559,7 +559,7 @@ async def _write_uploads(
         with pinned_canonical_directory(root) as root_fd:
             staged_uploads: list[_StagedUpload] = []
             try:
-                # One at a time, so a failure still removes every upload staged before it.
+                # Record each upload as soon as it is staged, so a failure still removes every one staged before it.
                 for target in upload_targets:
                     staged_uploads.append(await _stage_upload(root_fd, target))  # noqa: PERF401
                 cancelled_after_source_changed = await before_commit() if before_commit else False
