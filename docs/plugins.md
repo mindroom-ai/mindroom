@@ -1106,8 +1106,8 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 `RoomPower` also carries the `power_levels` content it read, the room's `creators`, and whether it is `encrypted`.
 
 `RoomHistory.visibility` is the room's `m.room.history_visibility`, `shared` when it has none.
-`since(recorded_under=None)` returns where the caller's view of the room's history begins, in milliseconds since the epoch, or `None` when they may see all of it, as Matrix shows a room's messages: `None` under `shared` or `world_readable`, the invite their current membership came from (else their join) under `invited`, and their join under `joined` or any value Matrix does not define.
-A route that shows records it kept of a room, such as notes, keeps with each one the `visibility` the room had then and passes it as `recorded_under`, so that the stricter of it and the visibility now applies, as Matrix applies to each message the visibility it was sent under:
+`since(recorded_under=None)` returns where the caller's view of the room's history begins, in milliseconds since the epoch, or `None` when they may see all of it: `None` under `shared` or `world_readable`, the invite their current membership came from (else their join) under `invited`, and their join under `joined` or any value Matrix does not define.
+A route that shows records it kept of a room, such as notes, keeps with each one the `visibility` the room had then and passes it as `recorded_under`, and the stricter of it and the visibility now applies, so making a room's history stricter also hides the records kept before, unlike its messages:
 
 ```python
 @router.get("/rooms/{room_id}/notes")
@@ -1116,13 +1116,13 @@ async def notes(room_id: str, reader: Annotated[RoomReader, Depends(require_room
     return [
         note
         for note in NOTES.get(room_id, [])
-        if (since := history.since(note["visibility"])) is None or note["at_ms"] >= since
+        if (since := history.since(note["visibility"])) is None or note["at_ms"] > since
     ]
 ```
 
 The start is that of the caller's current membership: a display name or avatar change keeps it, but leaving and joining again starts it anew.
-Each member's homeserver sets the time of their join, so a member of another homeserver sets their own start.
-When MindRoom's bot cannot read back to the caller's join, as when it joined the room after them and they changed their profile since, the start falls at the earliest change it can read, so the caller sees less, never more.
+The homeserver that sends a join or an invite sets its time, so a member of another homeserver, or one invited from there, starts where that homeserver says.
+The start falls later, so the caller sees less, never more, when MindRoom cannot read back to their join: past 20 profile changes, or when its bot joined the room after them and they changed their profile since.
 
 Each call to `power()` or `history()` reads again, and `members` is read anew for each request, so a changed name, power level, or history visibility shows on the next one.
 `power()`, `is_direct()`, and `history()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.

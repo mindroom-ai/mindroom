@@ -326,7 +326,7 @@ def test_a_route_shows_each_member_the_notes_their_view_allows() -> None:
         return [
             str(note["text"])
             for note in notes
-            if (since := history.since(str(note["visibility"]))) is None or int(str(note["at"])) >= since
+            if (since := history.since(str(note["visibility"]))) is None or int(str(note["at"])) > since
         ]
 
     http = TestClient(app)
