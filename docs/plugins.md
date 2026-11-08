@@ -1079,7 +1079,7 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
-A route that shows a room's people or checks their power depends on `require_room_reader` instead.
+A route that shows a room's people, checks their power, or reads or changes the room's modes depends on `require_room_reader` instead.
 It checks the caller exactly as `require_room_member` does, with the same answers, before it reads anything else of the room, and then returns a `RoomReader`:
 
 ```python
@@ -1104,6 +1104,8 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
+| `modes()` | A `RoomModes` with the room's [thread mode](configuration/threads.md#thread_mode) override `thread` and [reply mode](configuration/threads.md#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 
 `RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
@@ -1113,6 +1115,34 @@ Each call to `power()` reads again, and `members` is read anew for each request,
 `power()` and `is_direct()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
 `is_direct()` keeps its answer for a few minutes, but when the homeserver fails the lookup with an error it may count a direct room as not direct and does not keep that answer; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
+
+`set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
+Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 503 with `The router is not running in this room.` while the router is stopped or not in the room, as in a direct message with one agent.
+As with `!thread_mode`, the router then updates the room's [`io.mindroom.thread_mode`](configuration/threads.md#thread-mode-resolution) state, which clients choose the room's view by, before `set_modes()` returns.
+When it cannot, as without permission to send state events in the room, `set_modes()` answers 503 with `The modes were saved, but the room's thread mode is not published yet; try again.`: the change stays saved, and calling it again retries the update.
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel
+
+from mindroom.plugin_http import RoomModes
+
+
+class ModesChange(BaseModel):
+    thread: Literal["thread", "room"] | None = None
+    reply: Literal["auto", "mentions"] | None = None
+
+
+@router.put("/rooms/{room_id}/modes")
+async def change_modes(
+    change: ModesChange,
+    reader: Annotated[RoomReader, Depends(require_room_reader)],
+) -> RoomModes:
+    # A field the request leaves out stays as it is; one sent as null clears that override.
+    await reader.set_modes(**change.model_dump(exclude_unset=True))
+    return reader.modes()
+```
 
 `agents()` and `agent()` check what the [worker Computer](tools/worker-computer.md) checks before it opens: the agent is a current agent, it and the caller are both joined to the room, and its [access rules](authorization.md#responder-access) let the caller use it there.
 `agents()` leaves out each agent that fails, and `agent()` answers 403 with `The selected user is not a current agent.`, `Requester and agent must both be joined to this room.`, or `Requester cannot use this agent.`.
@@ -1133,7 +1163,7 @@ MindRoom resolves `root` itself, never from the request; a route that opens file
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, and one that uses `agents()` or `agent()` states `"1.9"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, and one that uses `agents()` or `agent()` states `"1.10"`.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:

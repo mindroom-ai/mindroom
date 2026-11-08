@@ -4601,6 +4601,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.room_modes"
+depends_on = [
+    "mindroom.matrix.room_thread_mode",
+    "mindroom.room_thread_modes",
+]
+
+[[modules]]
 path = "mindroom.matrix.thread_membership"
 depends_on = [
     "mindroom.matrix.event_info",
@@ -5184,8 +5191,8 @@ visibility = ["mindroom.commands.handler"]
 [[modules]]
 path = "mindroom.commands.thread_mode_commands"
 depends_on = [
-    "mindroom.matrix.room_thread_mode",
     "mindroom.matrix.client_room_admin",
+    "mindroom.room_modes",
     "mindroom.room_thread_modes",
 ]
 visibility = ["mindroom.commands.handler"]
@@ -8264,7 +8271,7 @@ depends_on = [
 visibility = ["mindroom.api.main"]
 
 # Public: plugin routes import it to require a signed-in Matrix client, live room membership, or a platform
-# administrator, and for their plugin context.
+# administrator, to read and change a room's modes, and for their plugin context.
 [[modules]]
 path = "mindroom.plugin_http"
 depends_on = [
@@ -8272,9 +8279,13 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
+    "mindroom.constants",
     "mindroom.matrix.room_power",
     "mindroom.plugin_context",
     "mindroom.room_agent_access",
+    "mindroom.room_modes",
+    "mindroom.room_reply_modes",
+    "mindroom.room_thread_modes",
     "mindroom.tool_system.plugins",
 ]
 
