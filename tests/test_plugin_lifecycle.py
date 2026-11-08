@@ -357,23 +357,29 @@ async def test_the_runtime_runs_each_plugins_lifespan_from_startup_through_reloa
 
 @pytest.mark.asyncio
 async def test_a_reload_cancels_no_task_the_plugin_keeps_in_its_process_state(tmp_path: Path) -> None:
-    """A task in process_state outlives a reload even when module globals also hold it or the state; others end."""
+    """A task in process_state outlives a reload even when module globals also hold it, its container, or the state.
+
+    Tasks the module keeps anywhere else end.
+    """
     lifecycle = """
 import asyncio
 from contextlib import asynccontextmanager
 
 STATE = {{}}
 TICKER = None
+WORKERS = set()
 OTHER = {{}}
 
 
 @asynccontextmanager
 async def lifespan(lifecycle):
-    global STATE, TICKER
+    global STATE, TICKER, WORKERS
     STATE = lifecycle.process_state
     if "ticker" not in STATE:
         STATE["ticker"] = asyncio.create_task(asyncio.Event().wait())
+        STATE["workers"] = {{asyncio.create_task(asyncio.Event().wait())}}
     TICKER = STATE["ticker"]
+    WORKERS = STATE["workers"]
     OTHER["task"] = asyncio.create_task(asyncio.Event().wait())
     yield
 """
@@ -385,15 +391,17 @@ async def lifespan(lifecycle):
 
     await _publish(lifespans, config, runtime_paths)
     module = cached_plugin_module((root / "lifecycle.py").resolve())
-    ticker, other = module.STATE["ticker"], module.OTHER["task"]
+    ticker, [worker], other = module.STATE["ticker"], module.WORKERS, module.OTHER["task"]
     try:
         await _publish(lifespans, config, runtime_paths)
         await asyncio.sleep(0)
 
         assert other.cancelled()
         assert not ticker.done()
+        assert not worker.done()
     finally:
         ticker.cancel()
+        worker.cancel()
         await lifespans.stop()
 
 

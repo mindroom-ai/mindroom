@@ -989,9 +989,15 @@ def _clear_configured_plugin_roots_cache() -> None:
 def _cancel_module_tasks(modules: Iterable[ModuleType]) -> int:
     """Best-effort cancel the unfinished tasks the given plugin modules hold, each task once.
 
-    A task a plugin keeps in its process state outlives reloads, whichever module global also holds it.
+    A task a plugin keeps in its process state, or one level inside it as module globals are scanned, outlives reloads,
+    whichever module global also holds it or its container.
     """
-    kept = {id(task) for state in tuple(_PROCESS_STATE.values()) for task in _iter_module_tasks(state)}
+    kept = {
+        id(task)
+        for state in tuple(_PROCESS_STATE.values())
+        for value in tuple(state.values())
+        for task in _iter_module_tasks(value)
+    }
     cancelled: dict[int, asyncio.Task[Any]] = {}
     for module in modules:
         for task in _module_tasks(module):

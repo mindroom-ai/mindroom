@@ -160,7 +160,13 @@ def _root_tests(plugin_root: Path) -> set[Path]:
     except Exception:
         # `check_plugin` fails on this manifest, and the scan still lists the imports of every other file.
         return candidates
-    named_modules = {base.tools_module_path, base.hooks_module_path, base.oauth_module_path, base.routes_module_path}
+    named_modules = {
+        base.tools_module_path,
+        base.hooks_module_path,
+        base.oauth_module_path,
+        base.routes_module_path,
+        base.lifecycle_module_path,
+    }
     return {path for path in candidates if path.resolve() not in named_modules}
 
 
