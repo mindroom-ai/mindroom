@@ -4200,6 +4200,12 @@ class TestDoctor:
     """Tests for `mindroom doctor`."""
 
     @pytest.fixture(autouse=True)
+    def _no_exported_anthropic_route(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Clear an Anthropic endpoint, token, or key exported in the shell; an endpoint makes doctor skip the key check."""
+        for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.fixture(autouse=True)
     def _healthy_embedder_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Keep the real-embedding probe off the network; specific tests override it."""
         monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)
