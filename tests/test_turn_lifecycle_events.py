@@ -236,8 +236,8 @@ async def test_a_delivery_error_fails_a_participation_turn_and_shows_only_after_
     with patch.object(turn.runner, "_deliver_turn", new=AsyncMock(side_effect=deliver)):
         await turn.runner.generate_response(replace(_plain_request(_target()), participation=ParticipationConfig()))
 
-    assert _events(seen)[0] == (EVENT_TURN_STARTED, None)
-    assert _events(seen)[-1] == (EVENT_TURN_ENDED, "failed")
+    shown = [(EVENT_MESSAGE_CANCELLED, None)] if approved else []
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), *shown, (EVENT_TURN_ENDED, "failed")]
     assert ["delivery broke" in str(write.get("body")) for write in turn.homeserver.writes] == (
         [True] if approved else []
     )
