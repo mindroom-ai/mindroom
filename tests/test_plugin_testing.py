@@ -182,16 +182,16 @@ async def test_message_fires_the_hook_whose_send_lands_in_the_room(tmp_path: Pat
     In the agent's default thread mode the message roots a thread, which the answer joins; in room mode it stays at
     the room's level.
     """
-    rooms = []
+    rooms, messages = [], []
     for thread_mode in ("thread", "room"):
         config = {"agents": {"helper": {**CONFIG["agents"]["helper"], "thread_mode": thread_mode}}}
         with load_plugin(EXAMPLE, tmp_path / thread_mode, config=config, settings=SETTINGS) as plugin:
             rooms.append(plugin.add_room(ROOM, members={ALICE: "Alice"}))
-            await plugin.fire("message:received", agent="helper", sender=ALICE, room=ROOM, body="hi")
+            messages.append(await plugin.fire("message:received", agent="helper", sender=ALICE, room=ROOM, body="hi"))
 
     threaded, room_level = (room.sent for room in rooms)
     assert [(sent.text, sent.source) for sent in threaded] == [("Got: hi (shared)", "greeter:message:received")]
-    assert threaded[0].thread_id is not None
+    assert threaded[0].thread_id == messages[0].envelope.source_event_id
     assert [sent.thread_id for sent in room_level] == [None]
 
 
@@ -250,6 +250,30 @@ async def test_a_sender_the_agent_does_not_admit_is_refused_and_nothing_runs(plu
 
     assert room.sent == []
     assert greeted.value == "Howdy, Ann! (greeting 1)"
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_alias_is_its_person_and_an_agent_sends_nothing(tmp_path: Path) -> None:
+    """A sender's bridge alias reaches hooks as the person it stands for, and an agent's account cannot be a sender."""
+    telegram = "@telegram_42:example.org"
+    config = {**CONFIG, "authorization": {"aliases": {ALICE: [telegram]}}}
+    with load_plugin(EXAMPLE, tmp_path, config=config, settings=SETTINGS) as plugin:
+        directory = entity_directory(plugin.config, plugin.runtime_paths)
+        (helper,) = (user for user, entity in directory.items() if entity.name == "helper")
+        plugin.add_room(ROOM, members={telegram: "Alice on Telegram", helper: "Helper"})
+        fire = {"agent": "helper", "room": ROOM, "body": "hi"}
+
+        items = await plugin.fire(
+            "message:enrich",
+            sender=telegram,
+            **fire,
+            target_entity_name="helper",
+            target_member_names=None,
+        )
+        with pytest.raises(ValueError, match="from people"):
+            await plugin.fire("message:received", sender=helper, **fire)
+
+    assert [item.text for item in items] == [f"Greet {ALICE} with Howdy."]
 
 
 def test_the_block_restores_the_published_plugins_and_their_modules(tmp_path: Path) -> None:

@@ -70,6 +70,7 @@ from mindroom.mcp_gateway.toolkits import run_toolkit_operation
 from mindroom.mcp_gateway.tools import may_need_approval
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function
@@ -305,7 +306,7 @@ class LoadedPlugin:
             raise LookupError(msg)
         gateway = AgentToolContext(
             agent,
-            sender,
+            context.requester_id,
             self.config,
             self.runtime_paths,
             context.execution_identity,
@@ -324,7 +325,7 @@ class LoadedPlugin:
             call_context = ToolCallContext(
                 run_id=f"plugin-testing:{uuid4().hex}",
                 session_id=context.session_id,
-                user_id=sender,
+                user_id=context.requester_id,
             )
             return await run_tool_call(
                 replace(target, registered_toolkit=tool),
@@ -363,7 +364,7 @@ class LoadedPlugin:
         )
         origin = classify_turn_origin(
             transport_sender_id=sender,
-            requester_id=sender,
+            requester_id=context.requester_id,
             sender_entity_name=None,
             requester_entity_name=None,
             source_kind=MESSAGE_SOURCE_KIND,
@@ -397,8 +398,12 @@ class LoadedPlugin:
     async def _turn_context(self, agent: str, sender: str, room_id: str, event_id: str) -> ToolRuntimeContext:
         """Return the conversation of ``sender`` with ``agent`` in ``room_id``, once the agent would answer them there.
 
-        A turn decides as live ones do, from the membership the rooms show now, and the sender must be joined.
+        A turn decides as live ones do, from the membership the rooms show now, and the sender must be joined. Its
+        requester is the person the sender is, through any bridge alias of theirs.
         """
+        if not is_human_requester_id(sender, self.config, self.runtime_paths):
+            msg = f"mindroom.plugin_testing sends messages from people, not from {sender}"
+            raise ValueError(msg)
         await self._memberships.refresh(self.config, self.runtime_paths, self._client)
         room = self._rooms.get(room_id)
         if (
@@ -422,7 +427,7 @@ class LoadedPlugin:
             # The sender's message ``event_id`` starts the turn and, in the agent's thread mode, roots its thread.
             target=MessageTarget.resolve(room_id, None, event_id, event_id, room_mode=room_mode),
             correlation_id=event_id,
-            requester_id=sender,
+            requester_id=resolve_human_requester_alias(sender, self.config, self.runtime_paths),
             client=self._client,
             config=self.config,
             runtime_paths=self.runtime_paths,
