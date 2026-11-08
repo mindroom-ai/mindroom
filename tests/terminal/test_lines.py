@@ -20,8 +20,8 @@ def _mark(number: int, status: int = 0) -> bytes:
         ("", "rm -rf ", []),
         ("anything", "<ctrl-c>", []),
         (None, "<ctrl-c>", []),
-        ("rm -rf ", "<ctrl-c>ls<enter>", [{"args": "ls"}]),
-        # The line is unknown while a command runs, which may keep the keys after its Ctrl-C.
+        # The terminal may drop part of the keys typed right after a Ctrl-C.
+        ("rm -rf ", "<ctrl-c>ls<enter>", None),
         (None, "<ctrl-c>ls<enter>", None),
         ("", "make<enter>echo done<enter>more", [{"args": "make\necho done"}]),
         (None, "ls<enter>", None),
@@ -74,6 +74,20 @@ def test_a_prompt_counts_once_and_a_lost_send_leaves_the_next_prompt_unknown() -
     line.lost()
     line.prompted(3)
     assert line.state() == LineState(2, None)
+
+
+def test_keys_sent_with_a_ctrl_c_at_the_prompt_leave_the_line_unknown_until_a_ctrl_c_alone() -> None:
+    """The terminal may drop part of them, and the shell then prints no prompt for that Ctrl-C."""
+    line = TerminalLine(opened=True)
+    line.prompted(1)
+    line.type("abc\x03Xrm -rf tmp")
+    assert line.state() == LineState(1, None)
+    line.type("\x03")
+    line.prompted(2)
+    assert line.state() == LineState(2, "")
+    line.type("abc\x03echo hi\r")
+    line.prompted(3)
+    assert line.state() == LineState(3, None)
 
 
 def test_ctrl_c_drops_what_a_running_command_left_unread() -> None:

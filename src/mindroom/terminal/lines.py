@@ -74,16 +74,14 @@ def entered_command(typed: str | None, text: str) -> list[dict[str, object]] | N
     """Return the ``run_shell_command`` call that typing ``text`` onto a line holding ``typed`` amounts to.
 
     Its ``args`` is what the Enters in ``text`` run, as one script, the line's earlier text included: an empty list
-    when ``text`` enters nothing, and None when the line or the keys can't tell. Ctrl-C first empties a known line;
-    on an unknown one, such as while a command runs, it may reach a program that keeps the keys after it.
+    when ``text`` enters nothing, and None when the line or the keys can't tell, as for keys after a Ctrl-C: the
+    terminal drops unread typing when it interrupts, so it may drop part of them.
     """
     rest = text.lstrip(_INTERRUPT)
     if not rest:
         return []
-    if typed is None or _EDITING.search(rest):
+    if rest != text or typed is None or _EDITING.search(rest):
         return None
-    if rest != text:
-        typed = ""
     end = max(rest.rfind("\r"), rest.rfind("\n"))
     if end == -1:
         return []
@@ -136,10 +134,14 @@ class TerminalLine:
     def type(self, text: str) -> None:
         """Record ``text`` as sent to the terminal."""
         self.revision += 1
-        for char in text:
+        for index, char in enumerate(text):
             if self._busy:
                 # Ctrl-C interrupts the command, and the terminal drops the typing it has not read yet.
                 self._ahead = char != _INTERRUPT
+            elif char == _INTERRUPT and text[index + 1 :].strip(_INTERRUPT):
+                # The terminal may drop part of what follows it, and the shell then prints no prompt for the Ctrl-C.
+                self._busy = self._ahead = True
+                return
             elif char == _INTERRUPT:
                 self.typed = ""
                 self._owed += 1

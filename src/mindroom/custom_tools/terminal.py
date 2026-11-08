@@ -229,7 +229,8 @@ class TerminalTools(Toolkit):
         """Type keys into a terminal without waiting for a command: an answer to a prompt, or keys such as <ctrl-c>.
 
         Text is typed as written; <enter>, <tab>, <esc>, <backspace>, <up>, <down>, <left>, <right>, <home>, <end>,
-        <delete> and <ctrl-c> (any <ctrl-letter>) are keys, so "y<enter>" answers a yes/no prompt.
+        <delete> and <ctrl-c> (any <ctrl-letter>) are keys, so "y<enter>" answers a yes/no prompt. Send <ctrl-c> on its
+        own: the terminal may drop keys typed right after it.
 
         Args:
             session_id: The terminal, from terminal_open or terminal_list.
@@ -240,10 +241,13 @@ class TerminalTools(Toolkit):
             What the terminal printed right after, or why the keys were not typed.
 
         """
+        text = keys_to_text(keys)
+        if "\x03" in text.rstrip("\x03"):
+            return "Error: send <ctrl-c> on its own, then the keys after it; the terminal may drop keys typed with it."
         try:
             async with self._workspace_terminals.attach(session_id) as stream:
                 await _scrollback(stream)
-                await stream.send_input(keys_to_text(keys), judged=line)
+                await stream.send_input(text, judged=line)
                 output, _, _ = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
             return _LINE_CHANGED if error.status_code == 409 else _refused(error, session_id)

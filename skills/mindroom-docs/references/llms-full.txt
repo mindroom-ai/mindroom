@@ -10369,7 +10369,7 @@ Use it for work people should see or that keeps state between commands, such as 
 
 - `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
 - `terminal_run(session_id, command, timeout_s)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30) for its next prompt, and returns the output and exit status; a command still running then keeps running.
-- `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command.
+- `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command; `<ctrl-c>` goes on its own, since the terminal may drop keys typed right after it.
 - `terminal_read(session_id)` returns the terminal's recent output as text.
 - `terminal_list()` lists the workspace's terminals, including the ones people opened.
 
