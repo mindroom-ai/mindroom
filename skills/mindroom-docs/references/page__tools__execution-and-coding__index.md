@@ -199,7 +199,7 @@ An agent has terminals only when it also has [`shell`] with `run_shell_command` 
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
 People who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
-A shell started inside a terminal, such as `bash` or `nix-shell`, keeps `terminal_run` refusing until it exits, so the agent types into it with `terminal_send`.
+After keys typed while a command runs, such as an answer to its prompt, `terminal_run` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_send`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
 An agent types in terminals only while its `run_shell_command` calls never ask for approval: no [approval rule](https://docs.mindroom.chat/tool-approval/) that matches `run_shell_command` may ask, including an approval script, and neither may `tool_approval.default` when no rule matches.

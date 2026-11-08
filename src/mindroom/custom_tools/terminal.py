@@ -53,9 +53,9 @@ _READ_ONLY = (
     "run_shell_command. terminal_read shows a terminal's recent output; terminal_list shows them all."
 )
 _NOT_AT_PROMPT = (
-    "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, or its line holds "
-    "typing); nothing was typed. Read the terminal, send keys such as <ctrl-c> with terminal_send if needed, then run "
-    "it again."
+    "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, its line holds typing, "
+    "or keys typed while a command ran may be queued); nothing was typed. Send <ctrl-c> with terminal_send, which an "
+    "idle prompt needs too after such keys, then run it again."
 )
 # Keys that edit the line, complete, interrupt or end input, which a command line never holds.
 _KEYS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -222,9 +222,10 @@ class TerminalTools(Toolkit):
     ) -> str:
         """Type one command line into a terminal, wait for its prompt, and return what it printed and its exit status.
 
-        It types only while the shell waits at an empty prompt. A command still running at the timeout keeps running:
-        read on with terminal_read, or stop it with terminal_send("<ctrl-c>"). Start servers and watchers here and
-        leave them running; a terminal nobody types in or watches ends 30 minutes after its last input.
+        It types only while the shell waits at an empty prompt; after keys typed while a command ran, such as an answer
+        to its prompt, send <ctrl-c> first. A command still running at the timeout keeps running: read on with
+        terminal_read, or stop it with terminal_send("<ctrl-c>"). Start servers and watchers here and leave them
+        running; a terminal nobody types in or watches ends 30 minutes after its last input.
 
         Args:
             session_id: The terminal, from terminal_open or terminal_list.
