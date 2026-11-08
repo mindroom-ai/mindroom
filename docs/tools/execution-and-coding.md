@@ -208,8 +208,8 @@ A terminal ends 30 minutes after its last input while nobody watches, and when i
 
 The [approval rules](../tool-approval.md) for `run_shell_command` also judge what the agent types.
 `terminal_open` asks whenever those rules may ask, `terminal_run` is judged as its command, and `terminal_send` as the command its Enter runs, including what anyone typed on that line before.
-When the line can't be known, such as after arrow keys, Tab, or keys typed while a command runs, or when the agent types through `mindroom-agent` in [minimal mode](agent-cli.md), the rules ask whenever they may.
-Keys approved against a line that someone changed before they were typed are not typed, and the agent reads the terminal and tries again.
+When the line can't be known, such as after arrow keys, Tab, or keys typed while a command runs, for keys that go on after an Enter, or when the agent types through `mindroom-agent` in [minimal mode](agent-cli.md), the rules ask whenever they may.
+Keys or a command approved before someone typed in the terminal are not typed, and the agent reads the terminal and tries again.
 
 ```yaml
 agents:

@@ -72,9 +72,9 @@ def run_text(command: str) -> str:
 def entered_command(typed: str | None, text: str) -> list[dict[str, object]] | None:
     """Return the ``run_shell_command`` call that typing ``text`` onto a line holding ``typed`` amounts to.
 
-    Its ``args`` is what the Enters in ``text`` run, as one script, the line's earlier text included: an empty list
-    when ``text`` enters nothing, and None when the line or the keys can't tell, as for keys after a Ctrl-C: the
-    terminal drops unread typing when it interrupts, so it may drop part of them.
+    Its ``args`` is what the Enter ending ``text`` runs, the line's earlier text included: an empty list when ``text``
+    enters nothing, and None when the line or the keys can't tell, as for keys after a Ctrl-C, which the terminal may
+    drop part of when it interrupts, or after an Enter, which what that Enter runs may read.
     """
     rest = text.lstrip(_INTERRUPT)
     if not rest:
@@ -84,7 +84,9 @@ def entered_command(typed: str | None, text: str) -> list[dict[str, object]] | N
     end = max(rest.rfind("\r"), rest.rfind("\n"))
     if end == -1:
         return []
-    return [{"args": (typed + rest[:end]).replace("\r", "\n")}]
+    if end != len(rest) - 1 or "\r" in rest[:end] or "\n" in rest[:end]:
+        return None
+    return [{"args": typed + rest[:end]}]
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,10 @@ def _mark(number: int, status: int = 0) -> bytes:
         # The terminal may drop part of the keys typed right after a Ctrl-C.
         ("rm -rf ", "<ctrl-c>ls<enter>", None),
         (None, "<ctrl-c>ls<enter>", None),
-        ("", "make<enter>echo done<enter>more", [{"args": "make\necho done"}]),
+        # What the first Enter runs may read the keys after it, as `read -n 6` reads six.
+        ("", "make<enter>echo done<enter>more", None),
+        ("", "read -n 6 v<enter>echo Xtouch x<enter>", None),
+        ("", "ls<enter>ls", None),
         (None, "ls<enter>", None),
         ("", "<up><enter>", None),
         ("", "rm<tab><enter>", None),

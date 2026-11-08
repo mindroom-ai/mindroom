@@ -48,8 +48,9 @@ _LINE_CHANGED = (
     "was typed. Read the terminal, then send them again."
 )
 _NOT_AT_PROMPT = (
-    "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, or its line holds "
-    "typing); nothing was typed. Read the terminal, and send keys such as <ctrl-c> with terminal_send."
+    "Error: the terminal changed after this command was checked, or its shell is not waiting at an empty prompt (a "
+    "command is still running, or its line holds typing); nothing was typed. Read the terminal, send keys such as "
+    "<ctrl-c> with terminal_send if needed, then run it again."
 )
 _EXITED = "Error: the terminal's shell has exited; open another with terminal_open."
 _DETACHED = "Error: the connection to the terminal ended; read it again before typing more."
@@ -150,18 +151,19 @@ class TerminalTools(Toolkit):
         super().__init__(tools=functions if self._terminals is not None else ())
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Hide ``terminal_send``'s ``line`` from the model, which only preparation before its approval fills."""
-        if function.name != "terminal_send":
+        """Hide a typing function's ``line`` from the model, which only preparation before its approval fills."""
+        if function.name not in ("terminal_run", "terminal_send"):
             return function
         properties = {name: schema for name, schema in function.parameters["properties"].items() if name != "line"}
+        entrypoint = self.terminal_run if function.name == "terminal_run" else self.terminal_send
         return replace(
             function,
-            parameters=closed_parameters(self.terminal_send, {**function.parameters, "properties": properties}),
+            parameters=closed_parameters(entrypoint, {**function.parameters, "properties": properties}),
             prepare_approval=self._with_line,
         )
 
     def _with_line(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Return ``arguments`` with the terminal's line as the keys are judged and then typed against."""
+        """Return ``arguments`` with the terminal's line as the call is judged and then typed against."""
         session_id = arguments.get("session_id")
         state = line_state(self._workspace_terminals.scope, session_id) if isinstance(session_id, str) else None
         return {**arguments, "line": None if state is None else asdict(state)}
@@ -187,7 +189,13 @@ class TerminalTools(Toolkit):
             return _refused(error)
         return f"Opened terminal {info.id}."
 
-    async def terminal_run(self, session_id: str, command: str, timeout_s: float = _DEFAULT_TIMEOUT_SECONDS) -> str:
+    async def terminal_run(
+        self,
+        session_id: str,
+        command: str,
+        timeout_s: float = _DEFAULT_TIMEOUT_SECONDS,
+        line: LineState | None = None,
+    ) -> str:
         """Type one command line into a terminal, wait for its prompt, and return what it printed and its exit status.
 
         It types only while the shell waits at an empty prompt. A command still running at the timeout keeps running:
@@ -198,6 +206,7 @@ class TerminalTools(Toolkit):
             session_id: The terminal, from terminal_open or terminal_list.
             command: One command line; join several with && or ;.
             timeout_s: Seconds to wait for the prompt, 30 by default.
+            line: Filled by MindRoom, never by the caller.
 
         Returns:
             The command's output and exit status, or what it printed so far while it still runs.
@@ -215,7 +224,7 @@ class TerminalTools(Toolkit):
             async with self._workspace_terminals.attach(session_id) as stream:
                 if await _ended(stream):
                     return _EXITED
-                before = await stream.send_input(text, empty_line=True)
+                before = await stream.send_input(text, judged=line, empty_line=True)
                 output, cut, finished, exit_status = await _output(stream, timeout, after=before)
         except TerminalError as error:
             return _NOT_AT_PROMPT if error.status_code == 409 else _refused(error, session_id)

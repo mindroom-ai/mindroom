@@ -223,9 +223,25 @@ async def test_keys_judged_before_someone_typed_on_the_line_are_not_typed(tmp_pa
     assert (await send.entrypoint(**judged)).startswith(_LINE_CHANGED)
     # A run types only at an empty prompt, so the command never joins the person's line.
     ran = await _call(functions["terminal_run"], session_id=session_id, command="ls")
-    assert ran.startswith("Error: the terminal's shell is not waiting at an empty prompt")
+    assert ran.startswith("Error: the terminal changed after this command was checked, or its shell is not waiting")
     assert (await _call(functions["terminal_read"], session_id=session_id)).endswith("rm -rf tmp")
     assert kept.is_dir()
+
+
+async def test_a_command_judged_before_someone_ran_another_is_not_run(tmp_path: Path, runner: str) -> None:
+    """A command approved for a terminal runs only if nobody typed in it since, as a `cd` would change what it does."""
+    paths = primary_paths(tmp_path, runner)
+    config = _config(paths, ["shell", "terminal"], ask_for_rm=True)
+    functions = _functions(config, paths)
+    run = functions["terminal_run"]
+    session_id = await _open(functions)
+    judged = _planned(run, {"session_id": session_id, "command": "pwd"})
+    async with _terminals(config, paths).attach(session_id) as person:
+        await person.send_input("cd /\r")
+
+    refused = await run.entrypoint(**judged)
+    assert refused.startswith("Error: the terminal changed after this command was checked")
+    assert "\n/\n" not in await _call(functions["terminal_read"], session_id=session_id) + "\n"
 
 
 async def test_a_line_from_outside_the_turn_s_preparation_is_checked_and_without_one_the_rules_ask(
@@ -378,7 +394,9 @@ async def test_typing_reaches_the_shell_in_the_order_it_was_recorded(
             for _ in range(5):
                 await _call(functions["terminal_send"], session_id=session_id, keys="<ctrl-c>")
                 ran = await _call(functions["terminal_run"], session_id=session_id, command="m -rf tmp")
-                if not ran.startswith("Error: the terminal's shell is not waiting at an empty prompt"):
+                if not ran.startswith(
+                    "Error: the terminal changed after this command was checked, or its shell is not waiting",
+                ):
                     break
 
     assert kept.is_dir()

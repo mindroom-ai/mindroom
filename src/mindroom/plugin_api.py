@@ -94,6 +94,7 @@ from mindroom.plugin_context import PluginContext, current_plugin_context
 from mindroom.plugin_lifecycle import PluginLifecycle
 from mindroom.providers.registry import build_model_provider
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
+from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_human_requester_id as is_human_user
 from mindroom.requester_identity import is_platform_administrator
 from mindroom.tool_system.atlassian_connections import (
@@ -259,6 +260,7 @@ __all__ = [
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
     "read_regular_file_within_root",
+    "redact_sensitive_text",
     "register_atlassian_connection_tools",
     "register_google_workspace_tools",
     "register_tool_with_metadata",

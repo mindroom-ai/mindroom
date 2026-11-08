@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from contextlib import closing
@@ -22,7 +23,7 @@ from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding
 from mindroom.knowledge.registry import published_index_storage_path
 from mindroom.knowledge.vector_store import CollectionMeta, StoredRow
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -210,3 +211,13 @@ def _config(
         ),
         runtime_paths,
     )
+
+
+async def _wait_until(condition: Callable[[], object], failure: str) -> None:
+    """Poll `condition` until it holds, and fail with `failure` if the settle deadline passes first."""
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not condition():  # noqa: ASYNC110 - the states polled here are plain attributes
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        pytest.fail(failure)

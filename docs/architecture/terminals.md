@@ -29,9 +29,9 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 
 ## How typing is judged
 
-`run_shell_command`'s approval rules judge the toolkit's typing through approval aliases: `terminal_open` as a shell no argument describes, `terminal_run` as its command, which it types only on an empty line at the shell's prompt, so the command is all it runs, and `terminal_send` as the command its Enters run, joined to what the terminal's line held before.
+`run_shell_command`'s approval rules judge the toolkit's typing through approval aliases: `terminal_open` as a shell no argument describes, `terminal_run` as its command, which it types only on an empty line at the shell's prompt, so the command is all it runs, and `terminal_send` as the command its final Enter runs, joined to what the terminal's line held before; keys after an Enter make the judgment unknown, because what that Enter runs may read them, as `read -n` does.
 An alias's judge reads only the call's arguments, so the line comes from trusted preparation before approval (`ToolFunction.prepare_approval`, applied where the model loop plans a gated call), which adds the line's revision and text to the stored arguments that the approval card shows and the run receives.
-The run types only while the line still has that revision and text, so keys approved for one line never land on another, and a path that skips the preparation and claims a line it does not have is refused.
+The run types only while the line still has that revision and text, so keys approved for one line never land on another, a command approved before someone typed in the terminal, such as a `cd`, does not run after it, and a path that skips the preparation and claims a line it does not have is refused.
 Without a line, as through the agent CLI, a script, or a scheduled call, which resume or run the call with the arguments it was sent with, the judge cannot tell what an Enter runs, so the rules ask whenever they may.
 
 - The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`; the line is what was typed since its last Enter or Ctrl-C.

@@ -91,7 +91,15 @@ def test_full_mindroom_runtime_image_bundles_browser_runtime_packages() -> None:
     text = (_REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
     packages = _apt_install_packages(text.split(" AS final", maxsplit=1)[1])
 
-    assert {"chromium", "ffmpeg", "fonts-liberation", "fonts-noto-cjk", "fonts-noto-color-emoji", "nodejs"} <= packages
+    assert {
+        "chromium",
+        "ffmpeg",
+        "fonts-dejavu-core",
+        "fonts-liberation",
+        "fonts-noto-cjk",
+        "fonts-noto-color-emoji",
+        "nodejs",
+    } <= packages
 
 
 def test_mindroom_runtime_images_keep_git_ssh_support_when_disabling_recommends() -> None:
