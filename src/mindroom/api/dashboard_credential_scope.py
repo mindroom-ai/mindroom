@@ -10,13 +10,12 @@ from fastapi import HTTPException, Request
 from mindroom.api import config_lifecycle
 from mindroom.api.auth_user import request_auth_user
 from mindroom.authorization import (
-    is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_oauth_connection,
 )
 from mindroom.config.resolution import agent_policy
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, build_requester_execution_identity
 
 if TYPE_CHECKING:

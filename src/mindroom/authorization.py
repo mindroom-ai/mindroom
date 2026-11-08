@@ -273,12 +273,6 @@ def is_sender_allowed_for_agent_oauth_connection(
     )
 
 
-def is_platform_administrator(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Return whether a requester has platform-wide administrative authority."""
-    resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
-    return resolved_sender in config.administrators
-
-
 def filter_responders_by_sender_permissions(
     responders: Sequence[MatrixID],
     sender_id: str,

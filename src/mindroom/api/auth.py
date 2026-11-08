@@ -29,13 +29,13 @@ from mindroom.api.auth_user import (
 )
 from mindroom.api.connections_session_cookie import connections_session_cookie, read_connections_session
 from mindroom.api.open_access import open_access_rejection
-from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
 from mindroom.origins import connections_chat_origin, dashboard_origin, deployment_origin, normalized_origin
+from mindroom.requester_identity import is_platform_administrator
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,

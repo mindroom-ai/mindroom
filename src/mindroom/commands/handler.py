@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.authorization import (
-    is_platform_administrator,
     is_sender_allowed_for_entity_replies_in_room,
     responder_candidate_entities_with_membership_refresh,
 )
@@ -36,7 +35,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.tasks import (
     SchedulingRuntime,

@@ -11,8 +11,9 @@ from fastapi import HTTPException, Path, Request
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
 
 from mindroom.api.app_state import ensure_app_state
+from mindroom.api.auth import is_administrator
 from mindroom.api.client_sessions import presented_session
-from mindroom.api.config_lifecycle import require_api_state
+from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
@@ -31,6 +32,7 @@ __all__ = [
     "client_rooms",
     "plugin_context",
     "require_client_user",
+    "require_platform_administrator",
     "require_room_member",
     "require_room_reader",
 ]
@@ -164,6 +166,14 @@ async def _require_joined(connection: HTTPConnection, user_id: str, room_id: str
     if user_id not in members:
         raise HTTPException(403, "Not a member of this room.")
     return members
+
+
+async def require_platform_administrator(request: Request) -> ClientUser:
+    """Return the client session's user once they administer the config the API serves now, else answer 401 or 403."""
+    user = await require_client_user(request)
+    if not is_administrator(user.user_id, bind_current_request_snapshot(request)):
+        raise HTTPException(403, "Not a platform administrator.")
+    return user
 
 
 def plugin_context(connection: HTTPConnection) -> PluginContext:
