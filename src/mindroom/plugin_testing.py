@@ -495,7 +495,8 @@ class LoadedPlugin:
             list_direct_rooms=self._no_direct_rooms,
             room_get_state=self._room_get_state,
         )
-        return await is_dm_room(cast("nio.AsyncClient", client), room_id)
+        # A failed `m.direct` read is the only unknown answer, and this client's never fails.
+        return await is_dm_room(cast("nio.AsyncClient", client), room_id) is True
 
     async def _no_direct_rooms(self) -> nio.DirectRoomsErrorResponse:
         return nio.DirectRoomsErrorResponse("No m.direct account data", "M_NOT_FOUND")

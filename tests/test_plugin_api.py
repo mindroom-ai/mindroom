@@ -584,7 +584,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
-    "mindroom.plugin_http.client_stream": "(websocket, room_id)",
+    "mindroom.plugin_http.client_stream": "(websocket, room_id, *, admit)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
@@ -598,7 +598,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 14), "6810ad3456312977c00c7013fa24e15c91de914724c9e1514f947edc50e7965e")
+_PINNED_VERSION = ((1, 15), "6a53847bf427fd9e448ad06ec053738e99c49f1bf49c8c200cd6a5ff8f627c03")
 
 
 def _is_enum(obj: object) -> bool:

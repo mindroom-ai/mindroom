@@ -53,7 +53,11 @@ async def _cleanup_orphaned_bots_in_room(
         logger.debug("orphaned_bot_cleanup_skipped_root_space", room_id=room_id)
         return []
 
-    if await is_dm_room(client, room_id):
+    is_dm = await is_dm_room(client, room_id)
+    if is_dm is None:
+        logger.warning("orphaned_bot_cleanup_skipped_dm_status_unknown", room_id=room_id)
+        return []
+    if is_dm:
         logger.debug("orphaned_bot_cleanup_skipped_dm_room", room_id=room_id)
         return []
 
