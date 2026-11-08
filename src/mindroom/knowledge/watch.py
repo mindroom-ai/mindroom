@@ -142,7 +142,8 @@ def _shared_poll_targets(
     return targets
 
 
-def _has_utf8_name(name: str) -> bool:
+def _is_utf8(name: str) -> bool:
+    """Return whether a name read from the filesystem is valid UTF-8; Python escapes the bytes of one that is not."""
     try:
         name.encode()
     except UnicodeEncodeError:
@@ -150,22 +151,21 @@ def _has_utf8_name(name: str) -> bool:
     return True
 
 
-def _watched_folders(root: Path, unnamed: set[str]) -> list[Path]:
+def _watched_folders(root: Path, skipped: set[Path]) -> list[Path]:
     """Return the base folder and the folders below it, reached without a link, up to the cap.
 
-    Watchfiles takes only paths that are valid UTF-8, so a folder whose name is not is left out with everything below
-    it, and its printable path is added to ``unnamed``.
+    Watchfiles ends a watch at any event naming a path that is not valid UTF-8, even one that only opens it, as every
+    listing of the base does. So a folder holding such a name is added to ``skipped`` instead, and the walk does not
+    enter that name.
     """
     folders: list[Path] = []
     with pinned_canonical_directory(root) as root_fd:
-        for folder, subfolders, _files, _folder_fd in os.fwalk(".", dir_fd=root_fd):
-            unnamed.update(
-                os.fsencode(root / folder / name).decode(errors="backslashreplace")
-                for name in subfolders
-                if not _has_utf8_name(name)
-            )
-            subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES and _has_utf8_name(name)]
-            folders.append(root / folder)
+        for folder, subfolders, files, _folder_fd in os.fwalk(".", dir_fd=root_fd):
+            if all(map(_is_utf8, [*subfolders, *files])):
+                folders.append(root / folder)
+            else:
+                skipped.add(root / folder)
+            subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES and _is_utf8(name)]
             if len(folders) == _MAX_WATCHED_FOLDERS:
                 break
     return folders
@@ -319,18 +319,18 @@ class KnowledgeSourceWatcher:
         """Watch every real folder of the base on its own, walking the base again whenever a folder appears."""
         refresh_pending = False
         warned_cap = False
-        unnamed: set[str] = set()
+        warned_skipped: set[Path] = set()
         while not stop_event.is_set():
-            skipped: set[str] = set()
+            skipped: set[Path] = set()
             folders = await asyncio.to_thread(_watched_folders, target.path, skipped)
-            for folder in sorted(skipped - unnamed):
+            for folder in sorted(skipped - warned_skipped):
                 logger.warning(
-                    "Knowledge filesystem watcher skips a folder whose name is not valid UTF-8; changes in it refresh on search",
+                    "Knowledge filesystem watcher skips a folder holding a name that is not valid UTF-8; changes there refresh on search",
                     knowledge_path=str(target.path),
                     base_ids=list(target.base_ids),
-                    folder=folder,
+                    folder=str(folder),
                 )
-            unnamed |= skipped
+            warned_skipped |= skipped
             if len(folders) == _MAX_WATCHED_FOLDERS and not warned_cap:
                 warned_cap = True
                 logger.warning(
@@ -391,8 +391,9 @@ class KnowledgeSourceWatcher:
             if checked:
                 raise
         except ExceptionGroup as group:
-            # Watchfiles ends a running watch when a name in a watched folder is not valid UTF-8, so walk again, which
-            # skips such folders. A failure to start the watch is not wrapped in a group, and still stops the watcher.
+            # Watchfiles ends a running watch at an event naming a path that is not valid UTF-8, such as one created in a
+            # watched folder, so walk again, which skips that folder. A failure to start the watch is not wrapped in a
+            # group, and still stops the watcher.
             if group.split(WatchfilesRustInternalError)[1] is not None:
                 raise
 

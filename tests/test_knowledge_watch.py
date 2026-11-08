@@ -235,17 +235,33 @@ async def test_watch_refreshes_when_a_folder_leaves_the_base(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("created_while_watching", [False, True], ids=["at-start", "while-watching"])
-async def test_watch_skips_a_folder_whose_name_is_not_utf8(
+@pytest.mark.parametrize(
+    ("name", "created_while_watching"),
+    [(b"drafts\xff", False), (b"drafts\xff", True), (b"draft\xff.md", True)],
+    ids=["folder-at-start", "folder-while-watching", "file-while-watching"],
+)
+async def test_watch_skips_a_folder_holding_a_name_that_is_not_utf8(
     tmp_path: Path,
     docs: Path,
     recorded_watch: _RecordedWatch,
+    name: bytes,
     created_while_watching: bool,
 ) -> None:
-    """A folder whose name is not valid UTF-8 is left unwatched with one warning, and the rest of the base stays watched."""
-    unnamed = docs / os.fsdecode(b"drafts\xff")
+    """A folder holding a name that is not valid UTF-8 is left unwatched with one warning, and the rest stays watched.
+
+    Watchfiles ends a watch at any event naming such a path, even one that only opens it, as every listing does.
+    """
+    notes = docs / "notes"
+    entry = notes / os.fsdecode(name)
+
+    def _create_entry() -> None:
+        if entry.suffix:
+            entry.write_text("draft", encoding="utf-8")
+        else:
+            entry.mkdir()
+
     if not created_while_watching:
-        unnamed.mkdir()
+        _create_entry()
     scheduler = MagicMock()
     with capture_logs() as logs:
 
@@ -255,14 +271,20 @@ async def test_watch_skips_a_folder_whose_name_is_not_utf8(
         async with _watching(tmp_path, docs, scheduler, recorded_watch):
             if created_while_watching:
                 await _wait_until(lambda: len(recorded_watch.batches) >= 2, "the watcher did not settle")
-                unnamed.mkdir()
+                _create_entry()
             await _wait_until(_skipped, "the watcher did not skip the folder")
             # A new folder makes the watcher walk the base again, which finds the skipped folder again.
             (docs / "later").mkdir()
             await _write_until_seen(recorded_watch, docs / "later" / "doc.md")
             await _wait_until(lambda: scheduler.schedule_refresh.called, "a change beside the folder did not refresh")
+            starts = len(recorded_watch.starts)
+            # Every listing of the base opens the entry, which must not end the watch again.
+            os.close(os.open(entry, os.O_RDONLY))
+            await _write_until_seen(recorded_watch, docs / "later" / "other.md")
 
-    assert [entry["folder"] for entry in _skipped()] == [str(docs / "drafts\\xff")]
+    assert len(recorded_watch.starts) == starts
+    assert str(notes) not in recorded_watch.starts[-1][0]
+    assert [entry["folder"] for entry in _skipped()] == [str(notes)]
 
 
 @pytest.mark.asyncio
@@ -301,9 +323,9 @@ async def test_watch_keeps_watching_when_a_folder_disappears_before_its_watch_st
     real_watched_folders = knowledge_watch._watched_folders
     walks: list[Path] = []
 
-    def _first_walk_finds_a_deleted_folder(root: Path, unnamed: set[str]) -> list[Path]:
+    def _first_walk_finds_a_deleted_folder(root: Path, skipped: set[Path]) -> list[Path]:
         walks.append(root)
-        folders = real_watched_folders(root, unnamed)
+        folders = real_watched_folders(root, skipped)
         return [*folders, root / "deleted"] if len(walks) == 1 else folders
 
     monkeypatch.setattr(knowledge_watch, "_watched_folders", _first_walk_finds_a_deleted_folder)
@@ -371,8 +393,8 @@ async def test_watch_covers_a_folder_created_while_its_watch_starts(
     real_watched_folders = knowledge_watch._watched_folders
     late = docs / "notes" / "late"
 
-    def _folder_appears_after_the_walk(root: Path, unnamed: set[str]) -> list[Path]:
-        folders = real_watched_folders(root, unnamed)
+    def _folder_appears_after_the_walk(root: Path, skipped: set[Path]) -> list[Path]:
+        folders = real_watched_folders(root, skipped)
         late.mkdir(exist_ok=True)
         return folders
 
