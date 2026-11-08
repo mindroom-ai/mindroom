@@ -391,10 +391,10 @@ def _cut(
 
     ``runs`` are the scope's top-level runs as read in the caller's transaction. A run goes whole (``_expanded``). Every
     deleted run and the running run of every deleted fold row count as removed, which also fences a running run whose
-    row is gone.
+    row is gone; such a run's member rows go too, as a member saved after its team run's row went may hold one.
     """
     expanded = _expanded(rows, runs, cut)
-    removed = delete_runs_in_transaction(connection, names, expanded.run_ids, session_id=session_id)
+    removed = delete_runs_in_transaction(connection, names, expanded.owners, session_id=session_id)
     _record_removed(connection, names, session_id, expanded.owners | removed)
     connection.execute(
         f"DELETE FROM {quote_identifier(names.log_summaries)} "  # noqa: S608
@@ -405,10 +405,9 @@ def _cut(
 
 @dataclass(frozen=True, slots=True)
 class _Expanded:
-    """Where a cut starts once it takes every run whole, and the top-level runs, rows, and running runs it removes."""
+    """Where a cut starts once it takes every run whole, and the rows, top-level runs, and running runs it removes."""
 
     start: _Key
-    run_ids: set[str]
     rows: list[_SummaryRow]
     owners: set[str]
 
@@ -425,7 +424,7 @@ def _expanded(rows: Sequence[_SummaryRow], runs: Sequence[tuple[str, int]], cut:
         owners = top_level | {row.fold_run_id for row in deleted_rows if row.fold_run_id is not None}
         earlier = [row.key for row in rows if row.fold_run_id in owners and row.key < cut]
         if not earlier:
-            return _Expanded(cut, top_level, deleted_rows, owners)
+            return _Expanded(cut, deleted_rows, owners)
         cut = min(earlier)
 
 

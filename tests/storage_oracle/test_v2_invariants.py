@@ -545,3 +545,18 @@ def test_a_late_copy_of_a_crashed_cli_turns_live_record_writes_nothing() -> None
         ),
     )
     assert outcomes[6] == {"run_id": "r1", "saved": "running-copy"}
+
+
+def test_a_cut_at_a_fold_row_takes_the_late_member_of_its_run_that_ended_as_no_turn() -> None:
+    """A team turn folds and ends as no turn, and one of its members then saves late; an edit then cuts the fold row.
+
+    The no-turn save deleted the team run's row and its members' rows but kept the fold's row, so the late save stored
+    the member again without its team run. The edit of what the turn answered cuts that fold row and fences its running
+    run, so the member's row goes with it (I8).
+    """
+    _drive(
+        Scenario(
+            "team",
+            (Action("fold_first_turn"), Action("discard", index=1), Action("member_late"), Action("edit")),
+        ),
+    )
