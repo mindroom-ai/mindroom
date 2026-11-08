@@ -859,6 +859,7 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
         "rg 'api_key:' src",
         'read -rsp "Password: " pw && echo done',
         'grep -rn "token=" src | grep -v test',
+        'grep -rn "password=" "src/" | grep "x"',
     ],
 )
 def test_a_quote_closing_the_string_that_holds_a_secret_name_keeps_the_command_readable(command: str) -> None:
@@ -873,6 +874,8 @@ def test_a_quote_closing_the_string_that_holds_a_secret_name_keeps_the_command_r
         ('{"password": "hunter2', f'{{"password": "{REDACTED}'),
         ('password="hunter2\nmode=safe', f'password="{REDACTED}'),
         ('password: "\n  hunter2"\nmode=safe', f'password: "\n  {REDACTED}'),
+        ('curl -d "password="hunter2 https://example.test', f'curl -d "password="{REDACTED} https://example.test'),
+        ("echo 'TOKEN='\"abc 123\" > .env", f"echo 'TOKEN='\"{REDACTED}\" > .env"),
     ],
 )
 def test_an_unclosed_quoted_secret_hides_the_rest_of_the_text(text: str, expected: str) -> None:
@@ -928,6 +931,8 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ('mysqldump -p"my pw" app > dump.sql', f"mysqldump -p{REDACTED} app > dump.sql"),
         ("/usr/bin/mariadb -u root \\\n  -ppw app", f"/usr/bin/mariadb -u root \\\n  -p{REDACTED} app"),
         ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
+        ("mysql -u root -p'ab&c;d|e' app", f"mysql -u root -p{REDACTED} app"),
+        ('mysql -e "select 1; select 2" -ppw app', f'mysql -e "select 1; select 2" -p{REDACTED} app'),
         ("docker exec -it db mysql -uroot -ppw app", f"docker exec -it db mysql -uroot -p{REDACTED} app"),
         (
             "cd /srv && curl -u admin:pw https://example.test/x",

@@ -87,8 +87,10 @@ _QUOTED_VALUE_PATTERNS = {
     quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
     for quote in ("'", '"')
 }
-# One command and its arguments run to a line break or a shell operator; a backslash continues them on the next line.
-_COMMAND_PATTERN = re.compile(r"(?:[^\\\r\n;&|(`]|\\(?:\r\n|[\s\S]))++")
+# One command and its arguments run to a line break or a shell operator outside quotes; a backslash continues them.
+_COMMAND_PATTERN = re.compile(
+    r"(?:'[^'\r\n]*+'?|\"(?:[^\"\\\r\n]|\\[\s\S])*+\"?|[^\\\r\n;&|(`'\"]|\\(?:\r\n|[\s\S]))++",
+)
 # Programs that take a password as an option: curl takes `user:password` after `-u` or `--user`, and mysql and its
 # tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other
 # things, such as `docker run --user 1000:0` or `mkdir -pv`.
@@ -435,15 +437,12 @@ def _rest_of_text_span(value: str, start: int) -> tuple[int, int, int] | None:
     return (start, len(value), len(value)) if start < len(value) else None
 
 
-def _quoted_value_span(value: str, quote_start: int, *, key_quote: str) -> tuple[int, int, int] | None:
-    quote = value[quote_start]
-    quoted = _QUOTED_VALUE_PATTERNS[quote].match(value, quote_start)
+def _quoted_value_span(value: str, quote_start: int) -> tuple[int, int, int] | None:
+    quoted = _QUOTED_VALUE_PATTERNS[value[quote_start]].match(value, quote_start)
     assert quoted is not None
     body_start, body_end = quoted.span("body")
     if quoted.group("close"):
         return body_start, body_end, body_end + 1
-    if quote == key_quote:
-        return None
     return _rest_of_text_span(value, body_start)
 
 
@@ -458,15 +457,21 @@ def _assignment_value_span(
     """Return the start and end of one assigned value and where the scan resumes, or None when nothing is assigned.
 
     ``key_quote`` is the quote that opened a string holding the key, as in ``grep "password=" .``, so the same quote
-    right after the key closes that string instead of opening a value.
+    right after the key closes that string instead of opening a value; a value can still follow it directly, as the
+    shell reads ``"password="hunter2``.
     """
+    if value_start < len(value) and value[value_start] == key_quote:
+        value_start += 1
+        if value_start < len(value) and value[value_start].isspace():
+            return None
+        shell_word = True
     if value_start >= len(value):
         return None
     # A key that ends its line can have its value on any later line, as in YAML or in a message that follows.
     if value[value_start] in "\r\n":
         return _rest_of_text_span(value, value_start)
     if value[value_start] in {"'", '"'}:
-        return _quoted_value_span(value, value_start, key_quote=key_quote)
+        return _quoted_value_span(value, value_start)
     if shell_word:
         word = _SHELL_WORD_PATTERN.match(value, value_start)
         assert word is not None
