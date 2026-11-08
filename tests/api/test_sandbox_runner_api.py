@@ -1360,8 +1360,6 @@ def test_execute_request_subprocess_sync_lets_a_call_with_its_own_time_limit_run
     expected_timeout: float,
 ) -> None:
     """A worker call that stops itself at a longer time limit than the runner's keeps running until it answers."""
-    _set_sandbox_token(monkeypatch)
-    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
@@ -1383,8 +1381,6 @@ def test_execute_request_subprocess_sync_lets_a_call_with_its_own_time_limit_run
     sandbox_runner_module._execute_request_subprocess_sync(
         execute_call(
             runtime_paths,
-            sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-            runner_token=SANDBOX_TOKEN,
             tool_name=tool_name,
             function_name=function_name,
             args=[],

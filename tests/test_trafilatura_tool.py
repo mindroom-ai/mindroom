@@ -13,14 +13,13 @@ from typing import TYPE_CHECKING
 import agno.tools.trafilatura as agno_trafilatura
 import httpx
 import pytest
-from courlan import UrlStore
 from trafilatura import spider
 from trafilatura.downloads import USER_AGENT
 
 import mindroom.tools.agno_compat_trafilatura as compat
 from mindroom import public_fetch
 from mindroom.tools.trafilatura import trafilatura_tools
-from tests.public_fetch_helpers import TrickleBody, serve, serve_routes
+from tests.public_fetch_helpers import TrickleBody, public_dns, serve, serve_routes
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -57,14 +56,10 @@ _DOCS_HTML = """
 """
 
 
-def _public_getaddrinfo(_host: str | bytes, port: int, *_args: object, **_kwargs: object) -> list[object]:
-    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
-
-
 @pytest.fixture(autouse=True)
 def _isolate_trafilatura(monkeypatch: pytest.MonkeyPatch) -> None:
     """Use public test DNS and no crawler politeness delay."""
-    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", _public_getaddrinfo)
+    public_dns(monkeypatch)
     monkeypatch.setitem(spider.DEFAULT_CONFIG["DEFAULT"], "SLEEP_TIME", "0")
 
 
@@ -343,7 +338,7 @@ def test_trafilatura_crawler_called_outside_the_toolkit_keeps_crawling_with_its_
 ) -> None:
     """Code that calls Trafilatura's crawler directly, not through the toolkit, still crawls with the crawler's store."""
     trafilatura_tools()
-    monkeypatch.setattr(compat, "_process_url_store", UrlStore(compressed=False, strict=False))
+    monkeypatch.setattr(compat, "_process_url_store", compat._new_url_store())
     serve_routes(
         monkeypatch,
         {

@@ -297,7 +297,6 @@ async def test_a_page_read_in_time_is_returned_when_closing_the_connection_outla
 ) -> None:
     """The deadline bounds the request, so a page read before it is returned however long closing the client takes."""
     monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 0.2)
-    public_dns(monkeypatch)
     serve(monkeypatch, lambda _request: _page(200, b"page"))
 
     async def close_slowly(_transport: httpx.AsyncHTTPTransport, *_exc_info: object) -> None:
