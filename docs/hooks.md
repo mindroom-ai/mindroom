@@ -226,7 +226,7 @@ async def keep_prices_private(ctx):
 | `turn:started` | Observer | `TurnLifecycleContext` | When an agent or team turn starts running, after its enrichment hooks | None | 2000 |
 | `turn:paused` | Observer | `TurnLifecycleContext` | When the turn's reply pauses for a tool approval | None | 3000 |
 | `turn:resumed` | Observer | `TurnLifecycleContext` | When the decided approval resumes the paused turn | None | 2000 |
-| `turn:ended` | Observer | `TurnLifecycleContext` | Once per turn, after its `message:after_response` or `message:cancelled`, with how it ended | None | 3000 |
+| `turn:ended` | Observer | `TurnLifecycleContext` | Once per turn, after its reply's other hooks, with how it ended | None | 3000 |
 
 Custom events default to 1000 ms.
 
@@ -239,11 +239,13 @@ Custom events default to 1000 ms.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, `empty_prompt`, or `contact_turn` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
 - **Turns**: `turn:started`, `turn:paused`, `turn:resumed`, and `turn:ended` carry the turn's `ctx.turn_id`, so a plugin can keep per-turn state, such as a status message or a timer, from start to end.
+  They fire for agent and team replies; a delegated subagent's turn, a listening turn, and a voice call's transcripts fire none.
   Every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is `"completed"`, `"cancelled"`, or `"failed"`.
-  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and `failed` includes a run whose error became its reply's text.
+  `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
   A reply that [pauses for a tool approval](tool-approval.md#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
-  A call that asks for approval from its [background job](tools/agent-orchestration.md#approvals) does not pause the turn, which keeps running while its reply waits for the decision.
-  A request that runs nothing, such as an empty message, starts no turn, and a turn that MindRoom's shutdown cuts short fires no `turn:ended`; after the restart its reply continues as a new turn.
+  A call that asks for approval from its [background job](tools/agent-orchestration.md#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
+  A request that runs nothing, such as an empty message, starts no turn.
+  A turn paused for approval keeps its `turn_id` across a restart, while a running turn that MindRoom's shutdown cuts short, or a paused one whose agent is removed, fires no `turn:ended`; after the restart its reply continues as a new turn.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -406,7 +408,7 @@ await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
 ```
 
 - Event names must match `^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$`, so they need at least one colon.
-- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`, and `contact` are reserved.
+- The namespaces `message`, `system`, `agent`, `bot`, `compaction`, `schedule`, `reaction`, `room`, `config`, `session`, `tool`, `contact`, and `turn` are reserved.
 - Custom events run as observers.
 - Only code running during a tool call in the primary MindRoom process can emit them, which includes `tool:before_call` and `tool:after_call` hooks and custom-event hooks triggered by that call.
 - Hooks running outside a tool call and tools running in workers cannot emit them.

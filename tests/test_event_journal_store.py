@@ -6570,8 +6570,8 @@ class TestApprovalContinuations:
         assert restored is not None
         assert restored.origin == replace(continuation.origin, acts_for_requester=False)
 
-    async def test_continuation_without_a_turn_id_loads_with_none(self, alice: PrincipalStore) -> None:
-        """A continuation keeps its paused turn's ID; one stored before continuations kept it reads as having none."""
+    async def test_continuation_without_a_turn_id_loads_with_its_approval_id(self, alice: PrincipalStore) -> None:
+        """A continuation keeps its paused turn's ID; one stored before continuations kept it reads its approval's ID."""
         await self.admit_sources(alice)
         continuation = replace(self.continuation(), turn_id="turn-paused")
         await paused_for_approval(alice, continuation)
@@ -6592,7 +6592,7 @@ class TestApprovalContinuations:
                 (json.dumps(stored), "approval-1"),
             ),
         )
-        assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, turn_id=None)
+        assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, turn_id="approval-1")
 
     async def test_continuation_loads_the_execution_identity_its_run_paused_under(
         self,

@@ -31,9 +31,11 @@ from mindroom.llm.provider import TextDelta
 from mindroom.logging_config import get_logger
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_turn import CompletedApprovalRun
-from tests.conftest import publish_hook_plugin, unwrap_extracted_collaborator
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from tests.approval_continuation_helpers import dispatch_approval
+from tests.conftest import patch_response_runner_module, publish_hook_plugin, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import Await, answer, calls, tool_call
-from tests.response_runner_helpers import _plain_request, _target
+from tests.response_runner_helpers import _noop_typing, _plain_request, _target
 from tests.test_cancelled_response_hook import _lifecycle_with, _response_hook_service
 from tests.test_reply_endings_characterization import (  # noqa: F401 - echo_tool is a pytest fixture
     _ECHO_TOOL,
@@ -55,7 +57,7 @@ from tests.test_reply_records_approvals import (
     _resume_until_cancelled,
     _run_approval_wakes,
 )
-from tests.test_reply_records_turns import _stop
+from tests.test_reply_records_turns import _model_stream, _stop
 from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
@@ -166,6 +168,31 @@ async def test_a_stopped_reply_ends_its_turn_cancelled_once(tmp_path: Path, monk
         (EVENT_MESSAGE_CANCELLED, None),
         (EVENT_TURN_ENDED, "cancelled"),
     ]
+
+
+async def test_a_cancellation_while_turn_started_hooks_run_settles_the_turn_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn cancelled as it starts settles as any cancelled turn does, with message:cancelled before its end."""
+    turn = await _turn(tmp_path, monkeypatch, streaming=False, scripts={"default": [answer("Never shown.")]})
+    seen: _Seen = []
+
+    @hook(EVENT_TURN_STARTED, name="cancelling_start")
+    async def cancelling_start(_ctx: TurnLifecycleContext) -> None:
+        raise asyncio.CancelledError
+
+    turn.bot.orchestrator.hook_registry_state.registry = publish_hook_plugin(
+        turn.bot.config,
+        turn.bot.runtime_paths,
+        "turn-events",
+        [cancelling_start, *_recorders(seen, (EVENT_TURN_ENDED, EVENT_MESSAGE_CANCELLED))],
+    ).hooks
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn.runner.generate_response(_plain_request(_target()))
+
+    assert _events(seen) == [(EVENT_MESSAGE_CANCELLED, None), (EVENT_TURN_ENDED, "cancelled")]
 
 
 async def test_a_process_shutdown_mid_turn_ends_no_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -328,6 +355,52 @@ async def test_a_stop_on_a_paused_reply_ends_its_turn_cancelled(tmp_path: Path) 
     ]
 
 
+async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(tmp_path: Path) -> None:
+    """A run that waits in place for an approval keeps its turn running; the settlement after it ends the turn no more."""
+    seen: _Seen = []
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        _record_turn_events(bot, seen)
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+
+        async def wait_in_place(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.cli_approval_handler is not None
+            cli_call = {"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"}
+            await context.cli_approval_handler(replace(_paused(), cli_call=cli_call))
+            return "Never answered."
+
+        published = asyncio.Event()
+        publish_generation = runner.approvals._publish_generation
+
+        async def publish_then_wait(*args: object, **kwargs: object) -> object:
+            result = await publish_generation(*args, **kwargs)
+            published.set()
+            return result
+
+        with (
+            patch_response_runner_module(
+                stream_agent_response=_model_stream(AsyncMock(side_effect=wait_in_place)),
+                should_use_streaming=AsyncMock(return_value=False),
+                typing_indicator=_noop_typing,
+            ),
+            patch.object(runner.approvals, "_publish_generation", new=publish_then_wait),
+        ):
+            response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+            await asyncio.wait_for(published.wait(), timeout=5)
+            request_task_cancel(response, cancel_source="sync_restart")
+            await asyncio.wait({response}, timeout=5)
+            assert response.done()
+        # The cut-short wait fenced its approval for the restart; the source worker settles it.
+        failing = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
+        assert failing is not None
+        assert failing.state == "failing"
+        await dispatch_approval(runner.approvals, failing, target=_target())
+        assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
+
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "cancelled")]
+
+
 async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(tmp_path: Path) -> None:
     """An approval that can no longer resume for its requester fails the paused turn."""
     seen: _Seen = []
@@ -342,7 +415,7 @@ async def test_a_paused_reply_whose_requester_lost_access_ends_its_turn_failed(t
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_ENDED, "failed")]
 
 
-def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:
+async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:
     """Hooks on the reply's start and resume answer sooner than those on its pause and end."""
     assert set(_TURN_EVENTS) <= BUILTIN_EVENT_NAMES
     assert [validate_event_name(event_name) for event_name in _TURN_EVENTS] == list(_TURN_EVENTS)
@@ -381,8 +454,7 @@ async def test_a_hook_scoped_to_agents_or_rooms_sees_only_their_turns(tmp_path: 
         recorder("other_room", rooms=["!other:localhost"]),
     ]
 
-    async with _lifecycle(tmp_path, [], hooks=hooks).turn(resumed=False):
-        pass
+    await _lifecycle(tmp_path, [], hooks=hooks).start_turn(resumed=False)
 
     assert seen == ["this_agent", "this_room"]
 
@@ -410,10 +482,10 @@ async def test_a_settlement_that_raises_before_finalizing_still_ends_its_turn(
     lifecycle = _lifecycle(tmp_path, seen)
 
     with pytest.raises(type(raised)):
-        async with lifecycle.turn(resumed=False):
+        async with lifecycle.turn():
             raise raised
 
-    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, outcome)]
+    assert _events(seen) == [(EVENT_TURN_ENDED, outcome)]
 
 
 async def test_a_cancellation_during_finalization_ends_the_turn_once_as_finally_settled(tmp_path: Path) -> None:
@@ -422,7 +494,8 @@ async def test_a_cancellation_during_finalization_ends_the_turn_once_as_finally_
     lifecycle = _lifecycle(tmp_path, seen)
 
     async def finalized_twice_then_cancelled() -> None:
-        async with lifecycle.turn(resumed=True):
+        async with lifecycle.turn():
+            await lifecycle.start_turn(resumed=True)
             await _finalize(lifecycle, FinalDeliveryOutcome(ending=Completed()))
             await _finalize(lifecycle, FinalDeliveryOutcome(ending=Cancelled("user_stop")))
             raise asyncio.CancelledError
@@ -433,23 +506,32 @@ async def test_a_cancellation_during_finalization_ends_the_turn_once_as_finally_
     assert _events(seen) == [(EVENT_TURN_RESUMED, None), (EVENT_TURN_ENDED, "cancelled")]
 
 
-async def test_a_cancelled_turn_ended_hook_leaves_the_others_to_see_the_end(tmp_path: Path) -> None:
-    """One cancelled observer of a turn's end does not keep the next from seeing it."""
-    seen: list[str | None] = []
+@pytest.mark.parametrize(
+    ("event_name", "ending"),
+    [(EVENT_TURN_PAUSED, AwaitingApproval()), (EVENT_TURN_ENDED, Completed())],
+    ids=["paused", "ended"],
+)
+async def test_a_cancelled_observer_of_a_pause_or_end_leaves_the_others_to_see_it(
+    tmp_path: Path,
+    event_name: str,
+    ending: AwaitingApproval | Completed,
+) -> None:
+    """One cancelled observer of how a turn settled does not keep the next from seeing it, nor raise out of the turn."""
+    seen: list[str] = []
 
-    @hook(EVENT_TURN_ENDED, name="cancelled_observer")
+    @hook(event_name, name="cancelled_observer")
     async def cancelled_observer(_ctx: TurnLifecycleContext) -> None:
         raise asyncio.CancelledError
 
-    @hook(EVENT_TURN_ENDED, name="later_observer")
+    @hook(event_name, name="later_observer")
     async def later_observer(ctx: TurnLifecycleContext) -> None:
-        seen.append(ctx.outcome)
+        seen.append(ctx.event_name)
 
     lifecycle = _lifecycle(tmp_path, [], hooks=[cancelled_observer, later_observer])
-    async with lifecycle.turn(resumed=False):
-        await _finalize(lifecycle, FinalDeliveryOutcome(ending=Completed()))
+    async with lifecycle.turn():
+        await _finalize(lifecycle, FinalDeliveryOutcome(ending=ending))
 
-    assert seen == ["completed"]
+    assert seen == [event_name]
 
 
 async def test_a_pause_at_process_shutdown_reports_nothing_more(tmp_path: Path) -> None:
@@ -457,7 +539,8 @@ async def test_a_pause_at_process_shutdown_reports_nothing_more(tmp_path: Path) 
     seen: _Seen = []
     lifecycle = _lifecycle(tmp_path, seen, shutdown=True)
 
-    async with lifecycle.turn(resumed=False):
+    async with lifecycle.turn():
+        await lifecycle.start_turn(resumed=False)
         await _finalize(lifecycle, FinalDeliveryOutcome(ending=AwaitingApproval()))
 
     assert _events(seen) == [(EVENT_TURN_STARTED, None)]

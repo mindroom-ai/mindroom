@@ -146,6 +146,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
             final_delivery_id="$later",
             calls=(ApprovalCall("call", "tool", "general", 2**62, decision=ApprovalDecision.APPROVED),),
             state="ready",
+            turn_id="turn-paused",
         )
         assert await paused_for_approval(principal, continuation) is not None
     try:

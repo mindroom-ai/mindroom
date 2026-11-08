@@ -109,6 +109,7 @@ class _Observer:
     lifecycle: MagicMock = field(
         default_factory=lambda: MagicMock(
             finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome),
+            start_turn=AsyncMock(),
             end_turn=AsyncMock(),
         ),
     )

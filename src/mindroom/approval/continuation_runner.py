@@ -1067,7 +1067,7 @@ class ApprovalContinuationRunner:
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,
             correlation_id=continuation.correlation_id,
-            turn_id=continuation.turn_id or uuid4().hex,
+            turn_id=continuation.turn_id,
             participating_agent_names=continuation.team_member_names or (continuation.entity_name,),
         )
 
@@ -1302,11 +1302,15 @@ class ApprovalContinuationRunner:
     async def _run_paused_step(self, paused: ApprovalContinuation, step: Step, *, target: MessageTarget) -> None:
         """Run one step of a paused reply's approval; a settlement that ends a reply no resume claimed ends its turn.
 
-        A claimed continuation's resume ends the turn itself.
+        Only a reply whose span paused left its turn paused: a claimed continuation's resume, or a response that waited
+        in place for the decision, ends the turn itself.
         """
         if not await self._run_step(paused, step, target=target) or not isinstance(step, Settle):
             return
-        if paused.claim_span_id is None:
+        if paused.claim_span_id is not None or paused.span_id is None:
+            return
+        span = await self.deps.replies.store.replies.span(paused.span_id)
+        if span is not None and span.outcome is rl.SpanOutcome.PAUSED:
             request = self.approval_response_request(paused, target=target)
             lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(paused))
             await lifecycle.end_turn("failed" if step.failure.kind is ApprovalFailureKind.ERROR else "cancelled")

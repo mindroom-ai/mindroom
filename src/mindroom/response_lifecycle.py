@@ -790,16 +790,16 @@ class ResponseHookService:
             envelope=identity.response_envelope,
             outcome=outcome,
         )
-        # The turn has ended: one cancelled observer does not keep the rest from seeing it.
+        # How the turn settled is decided: one cancelled observer of its pause or end does not keep the rest from it.
         await emit(
             self.hook_context.registry,
             event_name,
             context,
-            continue_on_cancelled=event_name == EVENT_TURN_ENDED,
+            continue_on_cancelled=event_name in {EVENT_TURN_PAUSED, EVENT_TURN_ENDED},
         )
 
 
-def _turn_end(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | Literal["paused"]:
+def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | Literal["paused"]:
     """Return how a settled turn ends for its hooks: paused for approval, or the outcome ``turn:ended`` reports.
 
     A run that failed but answered with its error completed its reply, not its turn; an answer withheld on purpose, or
@@ -876,20 +876,22 @@ class ResponseLifecycle:
         # How the last finalization settled the turn; None until one ran.
         self._turn_end: TurnOutcome | Literal["paused"] | None = None
 
-    @asynccontextmanager
-    async def turn(self, *, resumed: bool) -> AsyncIterator[None]:
-        """Run one settlement of the turn between its start and exactly one ``turn:paused`` or ``turn:ended``.
+    async def start_turn(self, *, resumed: bool) -> None:
+        """Emit ``turn:started``, or ``turn:resumed`` when the turn's approval resumes it."""
+        await self.deps.response_hooks._emit_turn_event(
+            EVENT_TURN_RESUMED if resumed else EVENT_TURN_STARTED,
+            self.identity,
+        )
 
-        The turn starts with ``turn:started``, or with ``turn:resumed`` when its approval resumes it. How the block's
-        finalization settled the turn decides the event it ends with; a block that raised before any finalization ends
-        it cancelled for a cancellation and failed for an error.
+    @asynccontextmanager
+    async def turn(self) -> AsyncIterator[None]:
+        """Run one settlement of the turn, then emit exactly one ``turn:paused`` or ``turn:ended``.
+
+        How the block's finalization settled the turn decides the event; a block that raised before any finalization
+        ends the turn cancelled for a cancellation and failed for an error.
         """
         cancelled = False
         try:
-            await self.deps.response_hooks._emit_turn_event(
-                EVENT_TURN_RESUMED if resumed else EVENT_TURN_STARTED,
-                self.identity,
-            )
             yield
         except asyncio.CancelledError:
             cancelled = True
@@ -935,7 +937,7 @@ class ResponseLifecycle:
         post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
-        self._turn_end = _turn_end(
+        self._turn_end = _turn_end_for(
             final_delivery_outcome.ending,
             run_succeeded=build_post_response_outcome(final_delivery_outcome).run_succeeded,
         )

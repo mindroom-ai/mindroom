@@ -470,12 +470,15 @@ class LockedTurns:
         """
         cancelled: asyncio.CancelledError | None = None
         handle = current_span()
-        async with lifecycle.turn(resumed=handle is not None and handle.span.kind is rl.SpanKind.APPROVAL_RESUME):
+        async with lifecycle.turn():
             async with session_started_on_creation(
                 reply_session,
                 correlation_id=lifecycle.identity.correlation_id,
             ):
                 try:
+                    await lifecycle.start_turn(
+                        resumed=handle is not None and handle.span.kind is rl.SpanKind.APPROVAL_RESUME,
+                    )
                     outcome = await self._attempt_outcome(
                         request,
                         target=target,
