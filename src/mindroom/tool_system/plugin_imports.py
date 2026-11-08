@@ -79,7 +79,6 @@ class _PluginCacheEntry:
 
 @dataclass(frozen=True, eq=False)
 class _ModuleCacheEntry:
-    mtime: float
     module: ModuleType
     # The tools the module registered while it executed.
     registrations: Mapping[str, ToolMetadata]
