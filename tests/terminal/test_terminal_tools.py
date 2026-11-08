@@ -211,3 +211,21 @@ async def test_a_line_from_outside_the_turn_s_preparation_is_checked_and_without
     assert not await _asks_for(config, paths, "terminal_send", forged)
     assert (await send.entrypoint(**forged)).startswith(_LINE_CHANGED)
     assert await _asks_for(config, paths, "terminal_send", {"session_id": session_id, "keys": "ls<enter>"})
+
+
+async def test_a_judged_line_runs_only_as_written(tmp_path: Path, runner: str) -> None:
+    """The shell expands no ``!`` history and reads neither key bindings nor history that worker code wrote."""
+    paths = primary_paths(tmp_path, runner)
+    functions = _functions(_config(paths, ["shell", "terminal"]), paths)
+    home = agent_workspace_root_path(tmp_path / "storage", "code")
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".inputrc").write_text('"q": "echo planted-$((3*3))\\n"\n', encoding="utf-8")
+    (home / ".bash_history").write_text("echo from-history-$((4*4))\n", encoding="utf-8")
+    session_id = await _open(functions)
+    run, send = functions["terminal_run"], functions["terminal_send"]
+
+    assert await _call(run, session_id=session_id, command="echo $HOME") == f"{home.resolve()}\n[Exit status 0.]"
+    assert await _call(run, session_id=session_id, command="echo a!!b") == "a!!b\n[Exit status 0.]"
+    assert "from-history-16" not in await _call(run, session_id=session_id, command="fc -s")
+    await _call(send, session_id=session_id, keys="q<ctrl-c>")
+    assert "planted-9" not in await _call(functions["terminal_read"], session_id=session_id)
