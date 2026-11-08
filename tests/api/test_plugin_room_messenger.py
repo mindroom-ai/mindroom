@@ -460,6 +460,7 @@ def _post(messenger: RoomMessenger, kind: str, content: dict[str, Any] | None = 
         {"org.matrix.msc1767.text": "forged"},
         {"com.example.cards.card": {"approved": True}},
         {"com.example.asker.card": {"com.example.cards.card": {"approved": True}}},
+        {"com.example.asker.card": {"chat.mindroom.call_failure": {"version": 1}}},
     ],
     ids=[
         "original-sender",
@@ -473,6 +474,7 @@ def _post(messenger: RoomMessenger, kind: str, content: dict[str, Any] | None = 
         "unstable",
         "another-plugins-key",
         "another-plugins-key-nested",
+        "chat-client-key-nested",
     ],
 )
 async def test_content_holds_only_the_plugins_own_keys(world: _World, kind: str, content: dict[str, Any]) -> None:

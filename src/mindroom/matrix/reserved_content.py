@@ -1,8 +1,9 @@
-"""The namespaces MindRoom's runtime reserves for its own metadata in Matrix content keys and event types."""
+"""The namespaces MindRoom's runtime and its chat client reserve for their own metadata in Matrix content and event types."""
 
 from __future__ import annotations
 
-MINDROOM_RESERVED_PREFIXES = ("com.mindroom.", "io.mindroom.")
+# MindRoom Chat trusts its `chat.mindroom.` keys on an agent account's notice, such as the call-failure notice.
+MINDROOM_RESERVED_PREFIXES = ("com.mindroom.", "io.mindroom.", "chat.mindroom.")
 
 
 def reserved_content_keys(value: object, prefixes: tuple[str, ...]) -> list[str]:

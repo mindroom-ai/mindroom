@@ -282,6 +282,10 @@ async def test_matrix_api_send_event_happy_path() -> None:
             id="nested-edit",
         ),
         pytest.param({"body": "hello", STREAM_STATUS_KEY: "completed"}, id="io-namespace"),
+        pytest.param(
+            {"body": "* Call failed", "m.new_content": {"body": "Call failed", "chat.mindroom.call_failure": {}}},
+            id="chat-client-namespace",
+        ),
     ],
 )
 async def test_matrix_api_rejects_model_authored_reserved_metadata(
