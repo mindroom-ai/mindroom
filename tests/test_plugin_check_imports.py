@@ -134,7 +134,7 @@ def test_imports_outside_plugin_api_reads_a_root_test_file_the_manifest_names(tm
         manifest={"name": "imports-demo", field: "./test_module.py"},
         modules={"test_module.py": "import mindroom.constants\n", "conftest.py": "import mindroom.constants\n"},
     )
-    # Reached through a symlink, as a plugin in a linked environment is, while the manifest's module paths resolve.
+    # Through a symlink, so the scan's paths differ from the manifest's resolved module paths.
     plugin_link = tmp_path / "plugin-link"
     plugin_link.symlink_to(tmp_path / "plugin")
 
