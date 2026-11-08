@@ -1121,8 +1121,8 @@ async def notes(room_id: str, reader: Annotated[RoomReader, Depends(require_room
 ```
 
 The start is that of the caller's current membership: a display name or avatar change keeps it, but leaving and joining again starts it anew.
-The homeserver that sends a join or an invite sets its time, so a member of another homeserver, or one invited from there, starts where that homeserver says.
-The start falls later, so the caller sees less, never more, when MindRoom cannot read back to their join: past 20 profile changes, or when its bot joined the room after them and they changed their profile since.
+An invite sent from another homeserver carries that homeserver's clock, so under `invited` it counts no further than the join.
+The start falls later, so the caller sees less, never more, when MindRoom cannot read back to their join or invite: after about 20 profile changes, or past an event from before its bot joined the room.
 
 Each call to `power()` or `history()` reads again, and `members` is read anew for each request, so a changed name, power level, or history visibility shows on the next one.
 `power()`, `is_direct()`, and `history()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.

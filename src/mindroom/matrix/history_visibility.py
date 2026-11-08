@@ -73,6 +73,8 @@ async def _membership_start(client: nio.AsyncClient, room_id: str, member: Mappi
 
     Profile changes are joins that replace a join, so the walk passes over them, and on over the invites before it.
     """
+    # The homeserver that sends an event sets its time, so only times the member's own homeserver set count.
+    home = member["state_key"].partition(":")[2]
     joined_at = invited_at = member["origin_server_ts"]
     event = member
     for _ in range(_WALK_STEPS):
@@ -88,7 +90,7 @@ async def _membership_start(client: nio.AsyncClient, room_id: str, member: Mappi
         event = response.event.source
         membership = event["content"].get("membership")
         # Matrix lets no one be invited while joined, so the joins come first and the invites before them.
-        if membership not in {"join", "invite"}:
+        if membership not in {"join", "invite"} or event["sender"].partition(":")[2] != home:
             break
         if membership == "join":
             joined_at = event["origin_server_ts"]

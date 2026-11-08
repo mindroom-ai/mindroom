@@ -51,7 +51,7 @@ def _chain(user_id: str, *steps: tuple[str, int, dict[str, str]]) -> list[dict[s
         event: dict[str, object] = {
             "type": "m.room.member",
             "state_key": user_id,
-            "sender": user_id,
+            "sender": ALICE if membership == "invite" else user_id,
             "event_id": f"${user_id}-{index}",
             "origin_server_ts": timestamp,
             "content": {"membership": membership, **profile},
@@ -191,6 +191,15 @@ async def test_the_start_is_the_current_membership(
     """The join that began the caller's current membership, and under `invited` the invite it came from, else the join."""
     history = await _history(_client("invited", _chain(BOB, *steps)))
     assert (history.since("joined"), history.since()) == (joined_at, invited_at)
+
+
+@pytest.mark.asyncio
+async def test_an_invite_from_another_homeserver_counts_no_further_than_the_join() -> None:
+    """The homeserver that sends an invite sets its time and may claim any, so only the join counts after it."""
+    chain = _chain(BOB, ("invite", 1, {}), ("join", JOINED_AT, {}))
+    chain[0]["sender"] = "@mallory:elsewhere.example"
+    history = await _history(_client("invited", chain))
+    assert (history.since(), history.since("joined")) == (JOINED_AT, JOINED_AT)
 
 
 @pytest.mark.asyncio
