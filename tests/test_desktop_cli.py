@@ -981,7 +981,7 @@ def test_desktop_login_prints_the_session_and_errors_whole_on_one_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Login prints its session path, an IPv6 user ID, and each error as written, whole on one line."""
+    """Login prints its session path and IPv6 user ID, and each error on stderr, as written and whole on one line."""
     text = str(narrow_runtime)
     session_path = narrow_runtime / "desktop_bridge" / "matrix_session.json"
     session = DesktopMatrixSession("https://matrix.example.org", "@laptop:[fe80::1]", "LAPTOP", "saved-token")
@@ -994,8 +994,8 @@ def test_desktop_login_prints_the_session_and_errors_whole_on_one_line(
     monkeypatch.setenv("MINDROOM_DESKTOP_MATRIX_PASSWORD", "test-password")
     login = ["login", "--user-id", "@laptop:example.org", "--homeserver", "https://matrix.example.org"]
 
-    existing = runner.invoke(desktop_app, login).output.splitlines()
-    failed = runner.invoke(desktop_app, [*login, "--login-method", "password", "--replace"]).output.splitlines()
+    existing = runner.invoke(desktop_app, login).stderr.splitlines()
+    failed = runner.invoke(desktop_app, [*login, "--login-method", "password", "--replace"]).stderr.splitlines()
     desktop_cli._print_device_identity(session, fingerprint="fingerprint", session_path=session_path)
 
     assert f"Error: Session already exists at {session_path}. Use --replace explicitly." in existing
@@ -1017,23 +1017,23 @@ def test_desktop_pair_setup_and_access_print_their_errors_whole_on_one_line(
     saved = SimpleNamespace(homeserver="https://matrix.example.org", cloudflare_access=False)
     with patch("mindroom.desktop.session.load_desktop_session", return_value=saved):
         monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(side_effect=ValueError(f"Cannot pair {text}")))
-        paired = runner.invoke(desktop_app, ["pair", *_PAIRING_ARGS]).output.splitlines()
-    unreadable = runner.invoke(desktop_app, _SETUP_ARGS).output.splitlines()
+        paired = runner.invoke(desktop_app, ["pair", *_PAIRING_ARGS]).stderr.splitlines()
+    unreadable = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
     other_homeserver = f"https://matrix.example.org{text}"
     save_desktop_session(session_path, DesktopMatrixSession(other_homeserver, "@alice:example.org", "DESKTOP", "token"))
-    mismatched = runner.invoke(desktop_app, _SETUP_ARGS).output.splitlines()
+    mismatched = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
     save_desktop_session(
         session_path,
         DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "token"),
     )
     monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock(side_effect=ValueError(f"Cannot save {text}")))
-    unsaved = runner.invoke(desktop_app, _SETUP_ARGS).output.splitlines()
+    unsaved = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
     monkeypatch.setattr(
         desktop_cli,
         "_saved_enabled_config",
         MagicMock(side_effect=NativeConfigError("invalid_config", f"Bad {text}")),
     )
-    access = runner.invoke(desktop_app, ["access", "--shell"]).output.splitlines()
+    access = runner.invoke(desktop_app, ["access", "--shell"]).stderr.splitlines()
 
     assert f"Desktop pairing failed: Cannot pair {text}" in paired
     assert any(line.startswith("Desktop setup failed: ") and str(session_path) in line for line in unreadable)
@@ -1056,7 +1056,7 @@ def test_desktop_run_prints_its_errors_whole_on_one_line(
     _stub_run_command(monkeypatch, narrow_markup_dir)
     monkeypatch.setattr(desktop_cli, "_run_bridge", AsyncMock(side_effect=ValueError(f"Cannot read {text}")))
 
-    failed = runner.invoke(desktop_app, _RUN_ARGS).output.splitlines()
+    failed = runner.invoke(desktop_app, _RUN_ARGS).stderr.splitlines()
     for executable, profile in ((narrow_markup_dir / "browser", None), (None, narrow_markup_dir / "profile")):
         with pytest.raises(typer.Exit):
             desktop_cli._validate_browser_options(enabled=True, executable_path=executable, user_data_dir=profile)

@@ -1302,7 +1302,7 @@ def test_service_commands_print_paths_errors_and_logs_whole_on_one_line(
     narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each service line with a path, error, log line, or log command prints it as written, whole on one line."""
+    """Each service line with a path, log line, or log command, and each error on stderr, prints whole on one line."""
     text = str(narrow_markup_dir)
     config_path = narrow_markup_dir / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
@@ -1320,30 +1320,35 @@ def test_service_commands_print_paths_errors_and_logs_whole_on_one_line(
     manager.stop_service.return_value = ServiceActionResult(success=False, message=f"Cannot stop {text}")
     manager.uninstall_service.return_value = UninstallResult(success=False, message=f"Cannot remove {text}")
 
-    def lines(*args: str) -> list[str]:
+    def run(*args: str) -> tuple[list[str], list[str]]:
         with patch("mindroom.cli.service._get_service_manager", return_value=manager):
-            return runner.invoke(app, ["service", *args]).output.splitlines()
+            result = runner.invoke(app, ["service", *args])
+        return result.stdout.splitlines(), result.stderr.splitlines()
 
-    installed = lines("install", "-y")
-    stopped = lines("stop")
-    uninstalled = lines("uninstall", "-y")
-    status = lines("status")
+    installed, install_failed = run("install", "-y")
+    _, stop_failed = run("stop")
+    _, uninstall_failed = run("uninstall", "-y")
+    status, _ = run("status")
     with patch("mindroom.cli.service.subprocess.run", side_effect=FileNotFoundError(2, "Not found", f"{text}/tail")):
-        followed = lines("logs")
+        _, follow_failed = run("logs")
+    dashboard_url = f"http://admin.example.org{text}"
+    (narrow_markup_dir / ".env").write_text(f"MINDROOM_DASHBOARD_URL={dashboard_url}\n", encoding="utf-8")
+    _, refused = run("install", "-y")
     manager.check_uv_installed.return_value = (False, None)
     manager.install_uv.return_value = (False, f"Failed to install uv: {text}")
-    without_uv = lines("install", "-y")
+    _, uv_failed = run("install", "-y")
     with patch("mindroom.cli.service._get_service_manager", side_effect=RuntimeError(f"No service manager for {text}")):
-        unsupported = runner.invoke(app, ["service", "status"]).output.splitlines()
+        unsupported = runner.invoke(app, ["service", "status"]).stderr.splitlines()
 
     assert f"  uv installed: {uv_path}" in installed
-    assert f"Error: Failed to start service: {text}" in installed
-    assert f"Error: Cannot stop {text}" in stopped
-    assert f"Error: Cannot remove {text}" in uninstalled
+    assert f"Error: Failed to start service: {text}" in install_failed
+    assert f"Error: Cannot stop {text}" in stop_failed
+    assert f"Error: Cannot remove {text}" in uninstall_failed
     assert f"  {log_line[:120]}..." in status
     assert f"Full logs: tail -f {text}/stdout.log" in status
-    assert f"Error: Failed to run log command: [Errno 2] Not found: '{text}/tail'" in followed
-    assert f"Error: Failed to install uv: {text}" in without_uv
+    assert f"Error: Failed to run log command: [Errno 2] Not found: '{text}/tail'" in follow_failed
+    assert any(line.startswith("Error: ") and f"'{dashboard_url}'" in line for line in refused), refused
+    assert f"Error: Failed to install uv: {text}" in uv_failed
     assert f"Error: No service manager for {text}" in unsupported
 
 
