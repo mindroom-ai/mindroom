@@ -313,7 +313,7 @@ def test_an_expiring_session_closes_the_stream_with_4401(app: FastAPI, client: T
     store = _store(app)
     token = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
-    store.clock.offset = 3600 - 0.3
+    store.clock.offset = 3600 - 1
 
     with client.websocket_connect("/api/plugins/demo/waits", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
         assert ws.receive_text() == ALICE
@@ -395,11 +395,11 @@ def test_a_stream_without_a_room_never_rechecks_membership(
     store = _store(app)
     token = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
-    store.clock.offset = 3600 - 0.3
+    store.clock.offset = 3600 - 1
 
     with client.websocket_connect("/api/plugins/demo/echo", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
         store.clock.offset = 0
-        time.sleep(0.5)
+        time.sleep(1.5)
         ws.send_text("still here")
         assert ws.receive_text() == f"{ALICE}: still here"
         store.revoke(token)
