@@ -2,23 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import HTTPException, Path, Request
+from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
 
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import presented_session
+from mindroom.api.client_sessions import (
+    SESSION_PROTOCOL,
+    allowed_client_origin,
+    client_session_store,
+    offered_session,
+    presented_session,
+)
 from mindroom.api.config_lifecycle import require_api_state
 from mindroom.plugin_context import PluginContext, build_plugin_context
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from mindroom.api.client_sessions import ClientSession
     from mindroom.config.main import Config
 
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
-__all__ = ["ClientUser", "plugin_context", "require_client_user", "require_room_member"]
+__all__ = ["ClientUser", "client_stream", "plugin_context", "require_client_user", "require_room_member"]
+
+# A stream in a room rechecks its user's membership this long after each check, and gives a check this long.
+_MEMBERSHIP_RECHECK_SECONDS = 60.0
+_MEMBERSHIP_RECHECK_TIMEOUT_SECONDS = 15.0
+# The websocket counterpart of HTTP 401, in the range for applications: the client signs in again.
+_SESSION_ENDED_CLOSE_CODE = 4401
 
 
 @dataclass(frozen=True)
@@ -41,12 +58,77 @@ async def require_room_member(request: Request, room_id: Annotated[str, Path()])
     without a ``{room_id}`` answers 422 rather than check a room the query string names.
     """
     user = await require_client_user(request)
-    room_members = ensure_app_state(request.app).room_members
+    await _require_joined(request, user.user_id, room_id)
+    return user
+
+
+async def _require_joined(connection: HTTPConnection, user_id: str, room_id: str) -> None:
+    room_members = ensure_app_state(connection.app).room_members
     if room_members is None:
         raise HTTPException(503, "Room membership is unavailable.")
-    if user.user_id not in await room_members(room_id):
+    if user_id not in await room_members(room_id):
         raise HTTPException(403, "Not a member of this room.")
-    return user
+
+
+@asynccontextmanager
+async def client_stream(websocket: WebSocket, room_id: str | None = None) -> AsyncIterator[ClientUser]:
+    """Sign a websocket's caller in with their client session, accept it, and yield their user while it stays signed in.
+
+    The client offers the subprotocols ``mindroom-session`` and ``mindroom-session.<session_token>``, from an origin
+    ``MINDROOM_COMPUTER_ALLOWED_ORIGINS`` lists, and given ``room_id`` its user must be joined to that room. Before
+    accepting, a refusal raises ``HTTPException``, which the handshake answers: 401 for no live session, 403 for
+    another origin or a non-member, 503 when membership is unavailable. Once accepted with ``mindroom-session``, the
+    block is cancelled where it waits and the websocket closed with 4401 when the session expires or is revoked, and
+    given ``room_id``, with 1008 when a recheck finds the user gone or 1013 when one fails; code after the block runs.
+    """
+    if not allowed_client_origin(websocket):
+        raise HTTPException(403, "Origin is not allowed.")
+    session = offered_session(websocket)
+    if room_id is not None:
+        await _require_joined(websocket, session.user_id, room_id)
+    await websocket.accept(subprotocol=SESSION_PROTOCOL)
+    stream = asyncio.timeout(None)
+
+    async def watch() -> tuple[int, str]:
+        end = await _stream_end(websocket, session, room_id)
+        # Cancels the block where it waits.
+        stream.reschedule(asyncio.get_running_loop().time())
+        return end
+
+    watcher = asyncio.create_task(watch())
+    try:
+        async with stream:
+            yield ClientUser(session.user_id)
+    except TimeoutError:
+        if not stream.expired():
+            raise
+        # The client may be gone already.
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await websocket.close(*watcher.result())
+    finally:
+        watcher.cancel()
+
+
+async def _stream_end(websocket: WebSocket, session: ClientSession, room_id: str | None) -> tuple[int, str]:
+    """Wait until the session ends or, given ``room_id``, a membership recheck fails; return the close code and reason."""
+    store = client_session_store(websocket.app)
+    while True:
+        wait = session.expires_at - store.clock()
+        with suppress(TimeoutError):
+            async with asyncio.timeout(wait if room_id is None else min(wait, _MEMBERSHIP_RECHECK_SECONDS)):
+                await session.revoked.wait()
+        if store.lookup(session.token) is None:
+            return _SESSION_ENDED_CLOSE_CODE, "Client session ended; sign in again."
+        if room_id is None:
+            continue
+        try:
+            async with asyncio.timeout(_MEMBERSHIP_RECHECK_TIMEOUT_SECONDS):
+                await _require_joined(websocket, session.user_id, room_id)
+        except TimeoutError:
+            return status.WS_1013_TRY_AGAIN_LATER, "Room membership lookup timed out; try again."
+        except HTTPException as error:
+            gone = error.status_code == status.HTTP_403_FORBIDDEN
+            return status.WS_1008_POLICY_VIOLATION if gone else status.WS_1013_TRY_AGAIN_LATER, error.detail
 
 
 def plugin_context(connection: HTTPConnection) -> PluginContext:

@@ -500,7 +500,7 @@ _MANIFEST = {
 
 # What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
-_HTTP_EXPORTS = ["ClientUser", "plugin_context", "require_client_user", "require_room_member"]
+_HTTP_EXPORTS = ["ClientUser", "client_stream", "plugin_context", "require_client_user", "require_room_member"]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
         "(*, name, tools, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs)"
@@ -508,13 +508,14 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.client_stream": "(websocket, room_id)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 4), "05d3c98f2c3f2513f39334844b44fc9e868198287953b1cc977278d8d5cd9837")
+_PINNED_VERSION = ((1, 5), "61e1d3a1acfdb7f93bd6d590e87ccb963f1b412e205b591517ee036e7b4023ed")
 
 
 def _is_enum(obj: object) -> bool:

@@ -16,7 +16,7 @@ from starlette.testclient import WebSocketDenialResponse
 
 from mindroom.api import config_lifecycle, main
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import ClientSessionStore, _client_session_store
+from mindroom.api.client_sessions import ClientSessionStore, client_session_store
 from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
@@ -246,7 +246,7 @@ def test_unknown_plugin_404(tmp_path: Path) -> None:
 
 
 def _signed_in(app: FastAPI, user_id: str = ALICE) -> dict[str, str]:
-    return {"Authorization": f"Bearer {_client_session_store(app).create(user_id).token}"}
+    return {"Authorization": f"Bearer {client_session_store(app).create(user_id).token}"}
 
 
 def _server_plugin_api() -> str:

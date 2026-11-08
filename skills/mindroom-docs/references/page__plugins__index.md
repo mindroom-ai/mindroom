@@ -1060,7 +1060,7 @@ The client signs in by posting a Matrix OpenID token to `POST /api/client-sessio
 Sign-in needs a homeserver that binds OpenID tokens to this deployment, MindRoom's Tuwunel fork with `mindroom_openid_audience` on (see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)); on any other homeserver `POST /api/client-sessions` answers 403, with no setting to allow it, because another backend the user opens could replay their token here.
 Sessions last one hour, and the route answers 401 for a missing, unknown, or expired token; the client then signs in again.
 To end its session at once, as at sign-out, the client sends `DELETE /api/client-sessions` with the same header, which answers 204; from then on that token answers 401 like an expired one.
-A response a route is already streaming continues after its session expires or is revoked.
+A response a route is already streaming continues after its session expires or is revoked; a [websocket](#websocket-routes) instead closes.
 Browser origins that may call these routes and `/api/client-sessions` come from `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, the same list that lets MindRoom Chat open [worker computers](https://docs.mindroom.chat/tools/worker-computer/); there is no separate setting for plugin routes.
 Every response under `/api/plugins/` carries `Cache-Control: no-store`, whatever the route sets, besides the two headers above, and of the headers beyond those every browser lets pages read, such as `Content-Type`, other origins can read only `WWW-Authenticate`, so a client on another origin cannot read `ETag`, `Content-Disposition`, or `Retry-After`.
 A route that acts on one room depends on `require_room_member` instead, as in the example above: `user: ClientUser = Depends(require_room_member)`.
@@ -1077,6 +1077,35 @@ The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugi
 ```json
 {"plugin_api_version": "1.0", "plugins": [{"name": "my-plugin", "mindroom_plugin_api": "1.0"}]}
 ```
+
+### Websocket routes
+
+A browser cannot set a websocket's `Authorization` header, so a websocket route signs its caller in with `client_stream` from `mindroom.plugin_http` instead:
+
+```python
+# routes.py
+from fastapi import APIRouter, WebSocket
+
+from mindroom.plugin_http import client_stream
+
+router = APIRouter()
+
+
+@router.websocket("/rooms/{room_id}/echo")
+async def echo(websocket: WebSocket, room_id: str) -> None:
+    async with client_stream(websocket, room_id) as user:
+        async for text in websocket.iter_text():
+            await websocket.send_text(f"{user.user_id}: {text}")
+```
+
+The client offers two subprotocols, `mindroom-session` and `mindroom-session.<session_token>`, as in `new WebSocket(url, ["mindroom-session", "mindroom-session." + sessionToken])`, and the server accepts with `mindroom-session`, never echoing the token.
+`client_stream` accepts the websocket only from an origin `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists, for a live session, and, given `room_id`, for a user joined to that room, checked as `require_room_member` checks it; leave `room_id` out for a stream that serves no room.
+It refuses any other handshake with an HTTP answer before accepting, as `require_room_member` answers: 401 for a missing, unknown, or expired session, 403 for an unlisted origin or a non-member, and 503 when membership is unavailable; a browser reports only a failed connection.
+Once accepted, the websocket closes with code 4401 as soon as its session expires or the client revokes it, after which the client signs in again.
+Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when a check fails or takes over 15 seconds, which the client may retry.
+Closing cancels the `async with` block where it waits, and the route runs on after the block.
+A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.5"` in its manifest.
+Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 ## Plugin context
 
