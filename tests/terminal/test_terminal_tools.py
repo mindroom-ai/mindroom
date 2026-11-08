@@ -238,6 +238,11 @@ async def test_a_shell_started_in_a_terminal_keeps_runs_out_until_it_exits(tmp_p
     assert await _call(run, session_id=session_id, command="echo back-$((2*3))") == "back-6\n[Exit status 0.]"
 
 
+async def test_named_keys_are_keys_and_other_text_is_typed_as_written() -> None:
+    """A key name it does not know, or a key without its brackets, is text."""
+    assert terminal_tools._keys_to_text("y<Enter><ctrl-d><ctrl-->< up><left>") == "y\r\x04<ctrl-->< up>\x1b[D"
+
+
 async def test_output_reads_as_the_screen_shows_it() -> None:
     """Escapes go, and backspaces take effect, as readline's own erasing of a typed character shows."""
     assert terminal_tools._plain_text(b"abc\x08\x1b[K\r\nx\x08\x08y") == "ab\ny"

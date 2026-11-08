@@ -1,17 +1,12 @@
-"""A terminal's line as the primary records it, the shell's prompts it counts, and the keys typing sends."""
+"""A terminal's line as the primary records it, and the shell's prompts it counts."""
 
 from __future__ import annotations
 
-from mindroom.terminal.lines import PromptMarks, TerminalLine, keys_to_text
+from mindroom.terminal.lines import PromptMarks, TerminalLine
 
 
 def _mark(number: int, status: int = 0) -> bytes:
     return f"\x1b]133;D;{status};mindroom={number}\x07".encode()
-
-
-def test_named_keys_are_keys_and_other_text_is_typed_as_written() -> None:
-    """A key name it does not know, or a key without its brackets, is text."""
-    assert keys_to_text("y<Enter><ctrl-d><ctrl-->< up><left>") == "y\r\x04<ctrl-->< up>\x1b[D"
 
 
 def test_the_line_is_empty_only_at_a_prompt_with_nothing_typed_since() -> None:

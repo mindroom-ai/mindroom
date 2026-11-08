@@ -22,7 +22,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.terminal.client import TerminalDetachedError
-from mindroom.terminal.lines import keys_to_text, prompt_after
+from mindroom.terminal.lines import prompt_after
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.authoring import Toolkit
@@ -64,12 +64,27 @@ _DETACHED = "Error: the connection to the terminal ended; read it again before t
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OTHER_ESCAPE = re.compile(r"\x1b[P^_X][^\x1b]*(?:\x1b\\)?|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\-_=>78]?")
+_NAMED_KEYS = {
+    "enter": "\r",
+    "tab": "\t",
+    "esc": "\x1b",
+    "backspace": "\x7f",
+    "space": " ",
+    "up": "\x1b[A",
+    "down": "\x1b[B",
+    "right": "\x1b[C",
+    "left": "\x1b[D",
+    "home": "\x1b[H",
+    "end": "\x1b[F",
+    "delete": "\x1b[3~",
+}
+_KEY = re.compile(r"<([A-Za-z-]+)>")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BACKSPACED = re.compile(r"[^\x08\n]\x08")
 
 
 def _plain_text(data: bytes) -> str:
-    """Return terminal output as a person reads it on screen: escapes removed, carriage returns and backspaces applied."""
+    """Return terminal output as a person reads it: escapes removed, carriage returns and backspaces applied."""
     text = data.decode("utf-8", errors="replace")
     for pattern in (_OSC, _CSI, _OTHER_ESCAPE):
         text = pattern.sub("", text)
@@ -77,6 +92,21 @@ def _plain_text(data: bytes) -> str:
     while (erased := _BACKSPACED.sub("", text)) != text:
         text = erased
     return _CONTROL.sub("", text)
+
+
+def _keys_to_text(keys: str) -> str:
+    """Return what typing ``keys`` sends: text as written, with ``<enter>``, ``<up>``, ``<ctrl-c>`` and the like as keys."""
+
+    def key(match: re.Match[str]) -> str:
+        name = match.group(1).lower()
+        if name in _NAMED_KEYS:
+            return _NAMED_KEYS[name]
+        letter = name.removeprefix("ctrl-")
+        if letter != name and len(letter) == 1 and letter.isalpha():
+            return chr(ord(letter) - ord("a") + 1)
+        return match.group(0)
+
+    return _KEY.sub(key, keys)
 
 
 async def _ended(stream: TerminalStream) -> bool:
@@ -248,7 +278,7 @@ class TerminalTools(Toolkit):
             What the terminal printed right after, or why the keys were not typed.
 
         """
-        text = keys_to_text(keys)
+        text = _keys_to_text(keys)
         if "\x03" in text.rstrip("\x03"):
             return "Error: send <ctrl-c> on its own, then the keys after it; the terminal may drop keys typed with it."
         try:
