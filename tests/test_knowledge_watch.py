@@ -161,6 +161,10 @@ async def test_watch_keeps_one_recursive_watch_where_the_backend_never_follows_l
     monkeypatch.setattr(knowledge_watch, "_WATCH_EACH_FOLDER", False)
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
+        await _write_until_seen(recorded_watch, docs / "notes" / "image.bin")
+        # The watcher takes its next batch only after handling the last one.
+        await _write_until_seen(recorded_watch, docs / "notes" / "other.bin")
+        assert not scheduler.schedule_refresh.called
         await _write_until_seen(recorded_watch, docs / "notes" / "doc.md")
         await _until(lambda: scheduler.schedule_refresh.called, "a change in the base did not refresh")
 
@@ -198,6 +202,8 @@ async def test_watch_refreshes_for_a_file_written_into_a_new_folder_at_once(
     """A file written into a new folder before the watcher reaches that folder still schedules one refresh."""
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
+        # A second batch means the watcher has checked its first folders, so only the new folder's event finds "fresh".
+        await _until(lambda: len(recorded_watch.batches) >= 2, "the watcher did not settle")
         (docs / "fresh").mkdir()
         (docs / "fresh" / "doc.md").write_text("fresh", encoding="utf-8")
         await _until(lambda: scheduler.schedule_refresh.called, "the file in the new folder did not refresh")
