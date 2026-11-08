@@ -431,8 +431,8 @@ async def test_a_resume_cut_short_before_its_run_starts_ends_the_turn_once(
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_PAUSED, None), (EVENT_TURN_ENDED, outcome)]
 
 
-async def test_a_resume_a_shutdown_hands_to_replay_ends_no_turn(tmp_path: Path) -> None:
-    """A resume released to replay ends nothing: its sources answer again."""
+async def test_a_resume_released_to_replay_at_shutdown_ends_no_turn(tmp_path: Path) -> None:
+    """A resume a shutdown releases to replay ends nothing: its sources answer again on the next start."""
     seen: _Seen = []
     async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
         resuming = asyncio.Event()
