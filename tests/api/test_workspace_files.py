@@ -411,8 +411,38 @@ async def test_the_change_stream_of_an_agent_whose_tools_reach_no_files_closes(t
     room = _room(tmp_path, {"chat": chat}, MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
     async with _served(room) as (client, base):
         stream = await _changes(client, room, f"{base}/agents/{room.ids['chat']}/workspace/changes", ALICE)
+        # Before the first recheck: the stream never opens.
+        async with asyncio.timeout(5):
+            message = await stream.receive()
 
-        assert ((await stream.receive()).type, stream.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
+    assert (message.type, stream.close_code, message.extra) == (
+        aiohttp.WSMsgType.CLOSE,
+        1008,
+        "This agent's tools reach no files.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_change_stream_closes_once_the_agent_s_tools_no_longer_reach_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alice may still use the agent, but once a config save takes its tools away there are no files to follow."""
+    monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
+    room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
+    async with _served(room) as (client, base):
+        stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
+        agents = _agents()
+        agents["coder"].tools = []
+        room.serve(Config(agents=agents))
+        async with asyncio.timeout(10):
+            message = await stream.receive()
+
+    assert (message.type, stream.close_code, message.extra) == (
+        aiohttp.WSMsgType.CLOSE,
+        1008,
+        "This agent's tools reach no files.",
+    )
 
 
 @pytest.mark.asyncio
@@ -423,14 +453,27 @@ async def test_the_change_stream_closes_with_1013_while_access_cannot_be_told(
     """A recheck that can't finish in time closes the stream for the client to try again."""
     monkeypatch.setattr(workspace_files, "_RECHECK_SECONDS", 0.05)
     room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
+    root = _turn_root(room, "coder", ALICE)
+    root.mkdir(parents=True)
     async with _served(room) as (client, base):
         stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
+        # Admitted and following, so only a recheck reads the room from here on.
+        await _settled(stream, root)
         stalled = asyncio.Event()
-        room.client.joined_members.side_effect = lambda *_args, **_kwargs: stalled.wait()
+
+        async def stall(*_args: object, **_kwargs: object) -> None:
+            await stalled.wait()
+
+        room.client.joined_members.side_effect = stall
         async with asyncio.timeout(10):
             message = await stream.receive()
+        stalled.set()
 
-    assert (message.type, stream.close_code) == (aiohttp.WSMsgType.CLOSE, 1013)
+    assert (message.type, stream.close_code, message.extra) == (
+        aiohttp.WSMsgType.CLOSE,
+        1013,
+        "Agent access is unavailable; try again.",
+    )
 
 
 @pytest.mark.asyncio
