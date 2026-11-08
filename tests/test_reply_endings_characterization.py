@@ -1128,17 +1128,26 @@ async def test_a_silent_schedule_s_waiting_message_keeps_its_narration_without_t
 
 @pytest.mark.usefixtures("echo_tool")
 @pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
-@pytest.mark.parametrize("finding", ["", "Writer found a leak."], ids=["nothing-found", "member-finding"])
+@pytest.mark.parametrize(
+    ("finding", "checker_answer"),
+    [
+        pytest.param("", "NO_REPLY", id="nothing-found"),
+        pytest.param("Writer found a leak.", "NO_REPLY", id="member-finding"),
+        # The checker reported before the writer's call paused, so its run ended before the resume.
+        pytest.param("NO_REPLY", "Checker found a leak.", id="finding-before-the-pause"),
+    ],
+)
 async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     show_tool_calls: bool,
     finding: str,
+    checker_answer: str,
 ) -> None:
     """Pins a silent schedule's team whose leader answers the no-report token after a member's approved call.
 
-    The other member answers the token too. With nothing found, the waiting message ends with the nothing-to-show note;
-    a member's finding stays shown, without any token.
+    With nothing found, the waiting message ends with the nothing-to-show note; a member's finding stays shown, even one
+    reported before the pause, without any token.
     """
     turn = await _turn(
         tmp_path,
@@ -1148,7 +1157,7 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
         scripts={
             "default": [calls(tool_call("delegate_task_to_members", "call-all", task="Check")), answer("NO_REPLY")],
             "writer-model": [calls(tool_call("echo", "call-1", text="hi")), answer(finding)],
-            "checker-model": [answer("NO_REPLY")],
+            "checker-model": [answer(checker_answer)],
         },
     )
     turn.bot.config.agents["writer"].tools = [_ECHO_TOOL]
@@ -1160,6 +1169,15 @@ async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_ap
     assert turn.bot.client.room_typing.await_args_list == []
     if not finding:
         ended = "Done."
+    elif checker_answer != "NO_REPLY" and show_tool_calls:
+        ended = (
+            f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1]\n\n**Checker**: {checker_answer}"
+            "\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [2]"
+        )
+    elif checker_answer != "NO_REPLY":
+        ended = (
+            f"{_TEAM_HEADER}**Checker**: {checker_answer}\n\n\n*No team consensus - showing individual responses only*"
+        )
     elif show_tool_calls:
         ended = (
             f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1]\n\n{finding}"

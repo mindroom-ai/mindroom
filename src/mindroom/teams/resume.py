@@ -50,12 +50,11 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.events import strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.approval.resume import ResumeDecisions
@@ -67,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
-    from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
@@ -245,17 +244,20 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     )
 
 
-def silent_team_answer(presentation: TeamStreamPresentation, record: TeamRunRecord) -> str | None:
-    """Return the leader's bare answer when a quiet turn's team reports nothing, else None, editing the document it keeps.
+def settle_quiet_team_answer(
+    presentation: TeamStreamPresentation,
+    record: TeamRunRecord,
+    member_runs: Iterable[AnyRunRecord],
+) -> str | None:
+    """Settle a quiet turn's team answer: the leader's bare answer when the team reports nothing, else None.
 
-    The team reports nothing when its leader does and so does each member's slot without its tool markers, as an
-    answer does; delivery withholds that answer, as an agent's. A document that stays keeps every finding but loses
-    its slots' no-report lines, which this removes from ``presentation``.
+    The team reports nothing when its leader does and so does each of its ``member_runs``, as an answer does; delivery
+    withholds that answer, as an agent's. A document that stays keeps every finding but loses its slots' no-report
+    lines, which this removes from ``presentation``.
     """
     answer = (record.handover_content or "").strip()
     if is_silent_schedule_no_report_response(answer) and all(
-        is_silent_schedule_no_report_response(strip_visible_tool_markers(text))
-        for text in presentation.per_member.values()
+        is_silent_schedule_no_report_response(run.handover_content or "") for run in member_runs
     ):
         return answer
     presentation.consensus = without_no_report_lines(presentation.consensus)
@@ -310,7 +312,7 @@ async def continue_paused_team_run(
     the member whose account handles it. ``progress``, when given, shows the resumed document live in the reply
     being continued; the terminal delivery stays with the caller. The resumed runs keep their stored system prompts,
     and each member run the resume starts renders ``system_enrichment_items`` into its own. A ``quiet`` turn's team
-    that reports nothing answers as its turn would (``silent_team_answer``).
+    that reports nothing answers as its turn would (``settle_quiet_team_answer``).
     """
     if not member_names:
         # Saved approvals name their members; without them no member could run the approved calls.
@@ -468,7 +470,16 @@ async def continue_paused_team_run(
             tool_trace_collector.extend(presentation.tool_trace)
         # The document already holds what each run wrote before the pause and handed over since, the leader's included,
         # so one that stays empty, every run's text blank, shows the no-reply note, as a new team turn's does.
-        silent_answer = silent_team_answer(presentation, continued) if quiet else None
+        # The member runs that ended before the pause are stored rows of this team run; the resume ended the rest.
+        member_runs = (
+            *continued.ended_member_runs,
+            *(
+                row
+                for row in storage.session.runs
+                if row.parent_run_id == run_id and row.status is not RunStatus.paused
+            ),
+        )
+        silent_answer = settle_quiet_team_answer(presentation, continued, member_runs) if quiet else None
         response_text = (
             silent_answer
             if silent_answer is not None
@@ -494,5 +505,5 @@ __all__ = [
     "continue_paused_team_run",
     "continued_team_pause",
     "drive_team_delegations",
-    "silent_team_answer",
+    "settle_quiet_team_answer",
 ]

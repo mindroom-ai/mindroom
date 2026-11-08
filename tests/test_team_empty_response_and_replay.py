@@ -488,7 +488,11 @@ async def test_a_quiet_scheduled_team_reply_that_only_ran_tools_reports_nothing(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("member_finding", [None, SILENT_SCHEDULE_NO_REPLY_TOKEN, "Queue depth is elevated."])
+@pytest.mark.parametrize(
+    "member_finding",
+    # A finding shaped like a tool marker is the member's own text: its calls are hidden, so no marker is chrome.
+    [None, SILENT_SCHEDULE_NO_REPLY_TOKEN, "Queue depth is elevated.", "🔧 `reported_finding` [1]"],
+)
 async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_member_found_something(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -517,12 +521,44 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
     if member_finding in {None, SILENT_SCHEDULE_NO_REPLY_TOKEN}:
         assert text == SILENT_SCHEDULE_NO_REPLY_TOKEN
     else:
+        # A contribution that opens with a marker-shaped line starts its own paragraph.
+        separator = "\n\n" if member_finding.startswith("🔧") else " "
         assert (
-            text
-            == f"{HEADER}**GeneralAgent**: {member_finding}\n\n\n*No team consensus - showing individual responses only*"
+            text == f"{HEADER}**GeneralAgent**:{separator}{member_finding}"
+            "\n\n\n*No team consensus - showing individual responses only*"
         )
     # The turn records what it delivered: the bare token, or the document that carries the finding.
     assert team.recorder.assistant_text == text
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_team_member_s_earlier_finding_stays_after_its_later_run_reports_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member asked twice reports in one run and answers the token in the next: its finding stays, without the token."""
+    leader = [
+        delegate("call-1", "general", "Check the disk"),
+        delegate("call-2", "general", "Check the queue"),
+        answer(SILENT_SCHEDULE_NO_REPLY_TOKEN),
+    ]
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=leader,
+        general=[answer("Disk almost full."), answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)],
+    )
+
+    text = await team.respond(
+        ctx=team.ctx(allow_no_report_response=True),
+        message="Check for updates.",
+        show_tool_calls=False,
+    )
+
+    assert (
+        text
+        == f"{HEADER}**GeneralAgent**: Disk almost full.\n\n\n*No team consensus - showing individual responses only*"
+    )
 
 
 @pytest.mark.asyncio

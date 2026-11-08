@@ -72,7 +72,7 @@ from mindroom.teams.presentation import (
     TeamStreamPresentation,
     format_team_header,
 )
-from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations, silent_team_answer
+from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations, settle_quiet_team_answer
 from mindroom.teams.runtime import leader_tool_specs, team_usage
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -561,7 +561,11 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
-        silent_answer = silent_team_answer(attempt.presentation, record) if self.ctx.allow_no_report_response else None
+        silent_answer = (
+            settle_quiet_team_answer(attempt.presentation, record, record.ended_member_runs)
+            if self.ctx.allow_no_report_response
+            else None
+        )
         if silent_answer is not None:
             # A quiet scheduled check that found nothing replies with the leader's bare answer, which delivery then
             # suppresses, instead of a team document around it.
@@ -635,7 +639,8 @@ class _TeamTurn:
         header = format_team_header(attempt.members.display_names)
         # The text records the document the attempt's events built and its failed runs' reasons, in the configured
         # member order, without tool markers: the chunks show the trace. The "No team response generated." fallback is
-        # display chrome, not replayable assistant text. A quiet scheduled reply records the bare token.
+        # display chrome, not replayable assistant text. A quiet scheduled reply that reports nothing records the
+        # leader's bare answer.
         body_text = attempt.presentation.text_without_tool_markers(finished=True)
         has_visible_output = bool(body_text)
         is_empty = is_empty_reply(record)
