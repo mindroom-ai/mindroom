@@ -908,6 +908,7 @@ def test_a_value_assigned_in_a_shell_command_ends_with_its_shell_word(command: s
         ("HOME=/root\nPASSWORD=correct horse battery staple", f"HOME=/root\nPASSWORD={REDACTED}"),
         ("AUTHORIZATION=Basic dXNlcjpwdw==", f"AUTHORIZATION={REDACTED}"),
         ('"Env": ["DB_PASSWORD=correct horse battery"]', f'"Env": ["DB_PASSWORD={REDACTED}"]'),
+        ('psql "host=db password=correct horse"', f'psql "host=db password={REDACTED}"'),
     ],
 )
 def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected: str) -> None:
@@ -926,6 +927,12 @@ def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected
         ("mysql -uroot -ppw app", f"mysql -uroot -p{REDACTED} app"),
         ('mysqldump -p"my pw" app > dump.sql', f"mysqldump -p{REDACTED} app > dump.sql"),
         ("/usr/bin/mariadb -u root \\\n  -ppw app", f"/usr/bin/mariadb -u root \\\n  -p{REDACTED} app"),
+        ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
+        ("docker exec -it db mysql -uroot -ppw app", f"docker exec -it db mysql -uroot -p{REDACTED} app"),
+        (
+            "cd /srv && curl -u admin:pw https://example.test/x",
+            f"cd /srv && curl -u admin:{REDACTED} https://example.test/x",
+        ),
     ],
 )
 def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: str) -> None:
@@ -941,6 +948,11 @@ def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: 
         "ssh -p2222 host",
         "git push -u origin main",
         "docker run --user 1000:0 alpine id",
+        "date -u +%H:%M:%S",
+        "rsync -u host:/srv/data ./data",
+        "docker run --name mysql -p3306:3306 -d mysql:8",
+        "find /var/lib/mysql -perm 644 -print",
+        "which curl && git push -u origin main:main",
         "mysql -u root -p app && mkdir -pv backup",
     ],
 )
@@ -974,8 +986,8 @@ def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote
 
 @pytest.mark.parametrize(
     "unit",
-    ['grep "token=" .\n', "token:\n", "TOKEN=a ", "mysql -p", "-u a:b ", 'password="\n', "echo sk-a\\\n"],
-    ids=["closing-quotes", "line-ends", "shell-words", "mysql", "user-options", "unclosed-quotes", "continuations"],
+    ['grep "token=" .\n', "token:\n", "x TOKEN=a ", "mysql -p", "curl -u a:b;", 'password="\n', "echo sk-a\\\n"],
+    ids=["closing-quotes", "line-ends", "shell-words", "mysql", "curl", "unclosed-quotes", "continuations"],
 )
 def test_redaction_stays_linear_over_many_command_patterns(unit: str) -> None:
     """Each pattern a command can repeat is read once, however often it repeats."""

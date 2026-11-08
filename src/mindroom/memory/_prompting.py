@@ -23,8 +23,8 @@ def redact_memory_text(text: str) -> str:
     """Remove credential-like values, on a best-effort basis, from conversation text kept in memory automatically.
 
     Private keys, which span several lines, are removed whole first. Then each line is redacted on its own and a line
-    redaction cannot read safely, such as one with an unclosed quote, is dropped, so it does not cost the rest of the
-    message; a value on the line after its key is not recognized.
+    redaction cannot read, one over 64 KiB, is dropped, so it does not cost the rest of the message; a value on the line
+    after its key is not recognized.
     """
     lines = (redact_sensitive_text(line) for line in redact_private_keys(text).splitlines())
     return "\n".join(line for line in lines if line != REDACTION_FAILED)

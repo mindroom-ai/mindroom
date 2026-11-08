@@ -30,3 +30,8 @@ def test_output_hides_what_follows_a_secret_name_that_ends_its_line() -> None:
     assert "db-credentials" not in shown
     assert shown.startswith("env:\n  - name: DB_PASSWORD")
     assert shown != REDACTION_FAILED
+
+
+def test_shown_output_is_what_a_live_reply_shows() -> None:
+    """A call's shown output is the latest thousand characters, which a live reply's frame carries whole."""
+    assert shown_progress("w" * 3000 + "x" * 1000) == "x" * 1000
