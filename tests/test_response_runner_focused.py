@@ -4563,7 +4563,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         )
         raise asyncio.CancelledError
 
-    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    lifecycle = MagicMock(start_turn=AsyncMock(), finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
     async with resumed_approval(bot, continuation) as claimed:
         with (
             patch.object(runner.approvals, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
@@ -4876,7 +4876,7 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
                 cli_approval_handler=None,
             )
 
-    # The resumed reply is a turn of its own, whose tools run under its request's turn ID.
+    # The resumed reply's tools run under the turn ID its request carries, the paused turn's.
     assert observed == [("correlation-original", request.turn_id)]
     assert forwarded_progress == [progress]
     assert receipts == [

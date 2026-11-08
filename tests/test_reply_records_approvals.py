@@ -556,39 +556,46 @@ async def _reply_in(bot: AgentBot, state: rl.ReplyState) -> rl.Reply:
     return await asyncio.wait_for(reached(), timeout=5)
 
 
+@asynccontextmanager
+async def _responding_in_place(bot: AgentBot) -> AsyncIterator[asyncio.Task[object]]:
+    """Start a response whose run waits in place for its CLI call's approval; yield it once the cards are out."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    async def wait_in_place(*_args: object, **_kwargs: object) -> str:
+        # An agent CLI call inside the run asks for approval and waits for it here.
+        context = get_tool_runtime_context()
+        assert context is not None
+        assert context.cli_approval_handler is not None
+        cli_call = {"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"}
+        await context.cli_approval_handler(replace(_paused(), cli_call=cli_call))
+        return "Never answered."
+
+    published = asyncio.Event()
+    publish_generation = runner.approvals._publish_generation
+
+    async def publish_then_signal(*args: object, **kwargs: object) -> None:
+        await publish_generation(*args, **kwargs)
+        published.set()
+
+    with (
+        patch_response_runner_module(
+            stream_agent_response=_model_stream(AsyncMock(side_effect=wait_in_place)),
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+        patch.object(runner.approvals, "_publish_generation", new=publish_then_signal),
+    ):
+        response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
+        # The cards are out and the run waits for the decision.
+        await asyncio.wait_for(published.wait(), timeout=5)
+        yield response
+
+
 async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_approval(tmp_path: Path) -> None:
     """A Stop during a response-local approval wait cancels the waiting span; the approval's settlement ends the reply."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         runner = unwrap_extracted_collaborator(bot._response_runner)
-
-        async def wait_in_place(*_args: object, **_kwargs: object) -> str:
-            # An agent CLI call inside the run asks for approval and waits for it here.
-            context = get_tool_runtime_context()
-            assert context is not None
-            assert context.cli_approval_handler is not None
-            cli_call = {"kind": "agent_cli", "call_id": "inner", "parent_bash_call_id": "bash"}
-            await context.cli_approval_handler(replace(_paused(), cli_call=cli_call))
-            return "Never answered."
-
-        published = asyncio.Event()
-        publish_generation = runner.approvals._publish_generation
-
-        async def publish_then_wait(*args: object, **kwargs: object) -> object:
-            result = await publish_generation(*args, **kwargs)
-            published.set()
-            return result
-
-        with (
-            patch_response_runner_module(
-                stream_agent_response=_model_stream(AsyncMock(side_effect=wait_in_place)),
-                should_use_streaming=AsyncMock(return_value=False),
-                typing_indicator=_noop_typing,
-            ),
-            patch.object(runner.approvals, "_publish_generation", new=publish_then_wait),
-        ):
-            response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
-            # The cards are out and the run waits for the decision.
-            await asyncio.wait_for(published.wait(), timeout=5)
+        async with _responding_in_place(bot) as response:
             waiting = await _reply_in(bot, rl.ReplyState.PAUSED)
             # The wait keeps its span, and with it the Stop button.
             assert waiting.current_span_id is not None
