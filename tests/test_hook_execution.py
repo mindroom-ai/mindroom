@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -656,24 +657,26 @@ async def test_emit_recursion_guard_drops_nested_custom_events_after_depth_three
 
 @pytest.mark.asyncio
 async def test_emit_gives_each_hook_its_plugin_name_settings_and_logger(tmp_path: Path) -> None:
-    """Each hook gets its plugin's name, a copy of its settings, and a logger naming its plugin and hook."""
+    """Each hook gets its plugin's name, its own copy of its settings, and a logger naming its plugin and hook.
+
+    A hook's write to a setting, nested or not, reaches neither the plugin's config entry nor a later call.
+    """
     seen: list[tuple[str, dict[str, object]]] = []
 
     @hook("todo:item_added", priority=10)
     async def audit(ctx: CustomEventContext) -> None:
-        seen.append((ctx.plugin_name, dict(ctx.settings)))
+        seen.append((ctx.plugin_name, deepcopy(ctx.settings)))
         ctx.settings["mode"] = "changed"
+        ctx.settings["nested"]["rooms"].append("!changed")
         ctx.logger.info("audited")
 
     @hook("todo:item_added", priority=20)
     async def notify(ctx: CustomEventContext) -> None:
-        seen.append((ctx.plugin_name, dict(ctx.settings)))
+        seen.append((ctx.plugin_name, deepcopy(ctx.settings)))
 
+    audit_plugin = _plugin("audit-plugin", [audit], settings={"mode": "fast", "nested": {"rooms": ["!a"]}})
     registry = HookRegistry.from_plugins(
-        [
-            _plugin("audit-plugin", [audit], settings={"mode": "fast"}),
-            _plugin("notify-plugin", [notify], settings={"mode": "slow"}),
-        ],
+        [audit_plugin, _plugin("notify-plugin", [notify], settings={"mode": "slow"})],
     )
     config = _config(tmp_path)
     context = CustomEventContext(
@@ -692,7 +695,9 @@ async def test_emit_gives_each_hook_its_plugin_name_settings_and_logger(tmp_path
         await emit(registry, "todo:item_added", context)
         await emit(registry, "todo:item_added", context)
 
-    assert seen == [("audit-plugin", {"mode": "fast"}), ("notify-plugin", {"mode": "slow"})] * 2
+    audit_settings = {"mode": "fast", "nested": {"rooms": ["!a"]}}
+    assert seen == [("audit-plugin", audit_settings), ("notify-plugin", {"mode": "slow"})] * 2
+    assert audit_plugin.entry_config.settings == audit_settings
     audited = [entry for entry in logs if entry["event"] == "audited"]
     assert [(entry["plugin_name"], entry["hook_name"], entry["event_name"]) for entry in audited] == [
         ("audit-plugin", "audit", "todo:item_added"),
