@@ -208,6 +208,7 @@ def _screencast_viewer(
 
     return ScreencastViewer(
         computer.agent_page,
+        computer.agent_allows_private_networks,
         partial(computer.allows_input, session_id, lease),
         websocket.send_text,
         websocket.send_bytes,

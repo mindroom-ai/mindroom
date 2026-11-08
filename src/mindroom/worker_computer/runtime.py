@@ -117,6 +117,10 @@ class WorkerComputerRuntime:
             return None
         return self._browser.page()
 
+    def agent_allows_private_networks(self) -> bool:
+        """Return whether the agent's browser may reach private networks, which its page's viewers then may too."""
+        return self._browser is not None and self._browser.allow_private_networks
+
     async def take_control(self, session_id: str, *, generation: str | None = None) -> ComputerStatus:
         """Wait for an active action, then grant exclusive control to a live viewer."""
         self._check_generation(generation)

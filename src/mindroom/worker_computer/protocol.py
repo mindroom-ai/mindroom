@@ -50,8 +50,10 @@ class BrowserSession:
 
     ``page`` returns the page a screencast shows while the browser runs in this process; a browser in another
     process, such as ``browser_mcp``'s, has none.
+    ``allow_private_networks`` is that browser's own setting, which addresses a screencast viewer opens also follow.
     """
 
     execute: Callable[..., Awaitable[object]]
     close: Callable[[], Awaitable[None]]
     page: Callable[[], "Page | None"] = _no_page
+    allow_private_networks: bool = False

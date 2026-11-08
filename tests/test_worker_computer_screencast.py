@@ -1,4 +1,4 @@
-"""A viewer's screencast of the agent's browser page, and the input it may send while it holds control."""
+"""A viewer's screencast of the agent's browser page, and the input and navigation it may send while it holds control."""
 
 from __future__ import annotations
 
@@ -7,20 +7,26 @@ import base64
 import json
 import os
 import shutil
-from contextlib import asynccontextmanager
+from collections import Counter
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import pytest_asyncio
+from aiohttp import web
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from playwright.async_api import async_playwright
 from starlette.websockets import WebSocketDisconnect
 
+from mindroom.api.computer_browser_binding import select_browser_provider
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.api.worker_computer import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.browser import BrowserTools
+from mindroom.tools.browser import browser_tools
 from mindroom.worker_computer.protocol import (
     MAX_SCREENCAST_MESSAGE_BYTES,
     MAX_WORKER_STREAM_MESSAGE_BYTES,
@@ -32,10 +38,11 @@ from mindroom.worker_computer.screencast import ScreencastViewer
 from tests.test_worker_computer_runtime import FakeDisplay, unused
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from playwright.async_api import Page
+    from starlette.testclient import WebSocketTestSession
 
 RUNNER_TOKEN = "test-runner-token"  # noqa: S105 - isolated test credential
 _TIMEOUT = 10
@@ -74,6 +81,11 @@ class _Viewer:
                 self.arrived.clear()
                 await self.arrived.wait()
 
+    async def reaches(self, expected: dict[str, Any]) -> None:
+        """Take messages of the expected type until one equals it, as a state the viewer passes through settles."""
+        while await self.message(expected["type"]) != expected:
+            pass
+
     async def frame(self) -> bytes:
         async with asyncio.timeout(_TIMEOUT):
             return await self.frames.get()
@@ -108,6 +120,49 @@ async def page() -> AsyncIterator[Page]:
             await browser.close()
 
 
+@dataclass
+class _Site:
+    """A local web server whose held responses wait until the test releases them."""
+
+    origin: str = ""
+    hits: Counter[str] = field(default_factory=Counter)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def url(self, path: str) -> str:
+        return self.origin + path
+
+
+@pytest_asyncio.fixture
+async def site() -> AsyncIterator[_Site]:
+    """Pages named by their path, a page held until released, and a page whose image is held until released."""
+    served = _Site()
+
+    async def named(request: web.Request) -> web.Response:
+        served.hits[request.path] += 1
+        return web.Response(text=f"<title>{request.match_info['name']}</title>", content_type="text/html")
+
+    async def held(_request: web.Request) -> web.Response:
+        await served.release.wait()
+        return web.Response(text="<title>Held</title>", content_type="text/html", headers={"Cache-Control": "no-store"})
+
+    async def with_held_image(_request: web.Request) -> web.Response:
+        return web.Response(text="<title>Image</title><img src=/held>", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/page/{name}", named)
+    app.router.add_get("/held", held)
+    app.router.add_get("/image", with_held_image)
+    runner = web.AppRunner(app, access_log=None, shutdown_timeout=0)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    served.origin = f"http://127.0.0.1:{runner.addresses[0][1]}"
+    try:
+        yield served
+    finally:
+        served.release.set()
+        await runner.cleanup()
+
+
 async def _click(viewer: ScreencastViewer, page: Page, selector: str) -> None:
     box = await page.locator(selector).bounding_box()
     assert box is not None
@@ -131,9 +186,22 @@ async def test_screencast_shows_the_page_and_applies_input_only_while_the_viewer
     """Frames, the page's address, and input that reaches the page only under control, released when it leaves."""
     controls = False
     sent = _Viewer()
-    viewer = ScreencastViewer(lambda: page, lambda: controls, sent.send_text, sent.send_bytes, poll_seconds=0.05)
+    viewer = ScreencastViewer(
+        lambda: page,
+        lambda: False,
+        lambda: controls,
+        sent.send_text,
+        sent.send_bytes,
+        poll_seconds=0.05,
+    )
     async with _watching(viewer):
-        assert await sent.message("url-changed") == {"type": "url-changed", "url": "about:blank", "title": "Form"}
+        assert await sent.message("url-changed") == {
+            "type": "url-changed",
+            "url": "about:blank",
+            "title": "Form",
+            "canGoBack": False,
+            "canGoForward": False,
+        }
         assert await sent.message("viewport") == {"type": "viewport", "width": 800, "height": 600}
         assert (await sent.frame()).startswith(b"\xff\xd8")
 
@@ -196,7 +264,14 @@ async def test_screencast_follows_the_agent_to_another_page_and_to_none(page: Pa
     await second.set_content("<title>Second</title><p>second page</p>")
     shown: Page | None = page
     sent = _Viewer()
-    viewer = ScreencastViewer(lambda: shown, lambda: True, sent.send_text, sent.send_bytes, poll_seconds=0.05)
+    viewer = ScreencastViewer(
+        lambda: shown,
+        lambda: False,
+        lambda: True,
+        sent.send_text,
+        sent.send_bytes,
+        poll_seconds=0.05,
+    )
     async with _watching(viewer):
         assert (await sent.message("url-changed"))["title"] == "Form"
         assert await sent.message("viewport") == {"type": "viewport", "width": 800, "height": 600}
@@ -206,7 +281,8 @@ async def test_screencast_follows_the_agent_to_another_page_and_to_none(page: Pa
         assert (await sent.message("url-changed"))["title"] == "Second"
         assert await sent.message("viewport") == {"type": "viewport", "width": 640, "height": 480}
         shown = None
-        assert await sent.message("url-changed") == {"type": "url-changed", "url": "", "title": ""}
+        blank = {"type": "url-changed", "url": "", "title": "", "canGoBack": False, "canGoForward": False}
+        assert await sent.message("url-changed") == blank
         await _click(viewer, second, "p")
         while not sent.frames.empty():
             sent.frames.get_nowait()
@@ -215,12 +291,98 @@ async def test_screencast_follows_the_agent_to_another_page_and_to_none(page: Pa
         assert sent.frames.empty()
 
 
+def _location(url: str, title: str, *, back: bool, forward: bool) -> dict[str, Any]:
+    return {"type": "url-changed", "url": url, "title": title, "canGoBack": back, "canGoForward": forward}
+
+
+_LOADING = {"type": "loading", "loading": True}
+_LOADED = {"type": "loading", "loading": False}
+_REFUSED = {"type": "error", "detail": "This address cannot be opened."}
+
+
+@pytest.mark.asyncio
+async def test_controlling_viewer_navigates_and_sees_the_history_and_loading(page: Page, site: _Site) -> None:
+    """Navigation, history, reload and stop act only under control, and the viewer sees where the page is."""
+    controls = False
+    sent = _Viewer()
+    viewer = ScreencastViewer(
+        lambda: page,
+        lambda: False,
+        lambda: controls,
+        sent.send_text,
+        sent.send_bytes,
+        poll_seconds=0.05,
+    )
+    one, two = site.url("/page/One"), site.url("/page/Two")
+    async with _watching(viewer):
+        assert await sent.message("url-changed") == _location("about:blank", "Form", back=False, forward=False)
+        assert await sent.message("loading") == _LOADED
+        for message in ({"type": "navigate", "url": one}, {"type": "reload"}, {"type": "navigate", "url": "file:///"}):
+            await viewer.receive(json.dumps(message))
+
+        controls = True
+        await viewer.receive(json.dumps({"type": "navigate", "url": one}))
+        await sent.reaches(_location(one, "One", back=True, forward=False))
+        await viewer.receive(json.dumps({"type": "navigate", "url": two}))
+        await sent.reaches(_location(two, "Two", back=True, forward=False))
+        # The navigation and reload sent without control never reached the page.
+        assert site.hits == {"/page/One": 1, "/page/Two": 1}
+        assert await page.evaluate("history.length") == 3
+        assert not [message for message in sent.messages if message["type"] == "error"]
+        await viewer.receive(json.dumps({"type": "back"}))
+        await sent.reaches(_location(one, "One", back=True, forward=True))
+        await viewer.receive(json.dumps({"type": "forward"}))
+        await sent.reaches(_location(two, "Two", back=True, forward=False))
+        await viewer.receive(json.dumps({"type": "forward"}))
+        await page.evaluate("window.before = true")
+        await viewer.receive(json.dumps({"type": "reload"}))
+        await page.wait_for_function("window.before === undefined", timeout=_TIMEOUT * 1000)
+        assert site.hits["/page/Two"] == 2
+
+        # A server that has not answered holds the navigation only up to the input bound, and stop abandons it.
+        await asyncio.wait_for(viewer.receive(json.dumps({"type": "navigate", "url": site.url("/held")})), _TIMEOUT)
+        await sent.reaches(_LOADING)
+        await viewer.receive(json.dumps({"type": "stop"}))
+        await sent.reaches(_LOADED)
+        assert page.url == two
+        assert await page.evaluate("history.length") == 3
+
+        for refused in (
+            "file:///etc/passwd",
+            "chrome://version",
+            "view-source:" + two,
+            "javascript:document.title = 'ran'",
+            "data:text/html,<title>data</title>",
+            "http://10.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/",
+        ):
+            await viewer.receive(json.dumps({"type": "navigate", "url": refused}))
+            assert await sent.message("error") == _REFUSED
+        assert page.url == two
+        assert await page.title() == "Two"
+        await viewer.receive(json.dumps({"type": "navigate", "url": "about:blank"}))
+        await page.wait_for_url("about:blank", timeout=_TIMEOUT * 1000)
+
+
+@pytest.mark.asyncio
+async def test_viewer_connecting_while_the_page_loads_is_told_so(page: Page, site: _Site) -> None:
+    """A page still loading when the viewer arrives shows as loading until it finishes."""
+    await page.goto(site.url("/image"), wait_until="domcontentloaded")
+    sent = _Viewer()
+    viewer = ScreencastViewer(lambda: page, lambda: False, lambda: False, sent.send_text, sent.send_bytes)
+    async with _watching(viewer):
+        assert await sent.message("loading") == _LOADING
+        site.release.set()
+        assert await sent.message("loading") == _LOADED
+
+
 class _FakeSession:
     """A CDP session whose frames the test delivers by hand."""
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, dict[str, Any] | None]] = []
-        self.on_frame: Any = None
+        self.handlers: dict[str, Any] = {}
         self.screencasting = asyncio.Event()
         self.acknowledged: asyncio.Queue[int] = asyncio.Queue()
         # A frame Chromium had in flight when the viewer detached, delivered during the detach.
@@ -229,8 +391,7 @@ class _FakeSession:
         self.frozen = False
 
     def on(self, event: str, handler: object) -> None:
-        assert event == "Page.screencastFrame"
-        self.on_frame = handler
+        self.handlers[event] = handler
 
     async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         self.sent.append((method, params))
@@ -242,7 +403,11 @@ class _FakeSession:
             assert params is not None
             await self.acknowledged.put(params["sessionId"])
         if method == "Target.getTargetInfo":
-            return {"targetInfo": {"url": "https://example.org/", "title": "Example"}}
+            return {"targetInfo": {"targetId": "page", "url": "https://example.org/", "title": "Example"}}
+        if method == "Page.getNavigationHistory":
+            return {"currentIndex": 0, "entries": [{"id": 1, "url": "https://example.org/", "title": "Example"}]}
+        if method == "Runtime.evaluate":
+            return {"result": {"type": "string", "value": "complete"}}
         return {}
 
     async def detach(self) -> None:
@@ -253,7 +418,8 @@ class _FakeSession:
     async def frame(self, frame_id: int, data: bytes) -> None:
         metadata = {"deviceWidth": 1280, "deviceHeight": 800}
         # Playwright runs an async event handler as a task; awaiting it here delivers the frame at a known point.
-        await self.on_frame({"data": base64.b64encode(data).decode(), "metadata": metadata, "sessionId": frame_id})
+        frame = {"data": base64.b64encode(data).decode(), "metadata": metadata, "sessionId": frame_id}
+        await self.handlers["Page.screencastFrame"](frame)
 
 
 class _FakePage:
@@ -287,7 +453,7 @@ async def test_slow_viewer_gets_the_newest_frame_and_chromium_every_acknowledgem
     async def ignore(_text: str) -> None:
         return None
 
-    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: True, ignore, over_a_slow_link)
+    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: False, lambda: True, ignore, over_a_slow_link)
 
     async def acknowledged() -> int:
         return await asyncio.wait_for(fake.session.acknowledged.get(), _TIMEOUT)
@@ -324,6 +490,7 @@ async def test_leaving_a_page_detaches_from_it_and_never_shows_its_late_frame() 
     sent = _Viewer()
     viewer = ScreencastViewer(
         lambda: cast("Page", shown),
+        lambda: False,
         lambda: True,
         sent.send_text,
         sent.send_bytes,
@@ -346,7 +513,7 @@ async def test_a_page_frozen_by_its_script_holds_neither_input_nor_a_leaving_vie
     monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
     fake = _FakePage()
     sent = _Viewer()
-    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: True, sent.send_text, sent.send_bytes)
+    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: False, lambda: True, sent.send_text, sent.send_bytes)
     follow = asyncio.create_task(viewer.follow())
     await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
     fake.session.frozen = True
@@ -359,14 +526,23 @@ async def test_a_page_frozen_by_its_script_holds_neither_input_nor_a_leaving_vie
     assert fake.session.sent[-1] == ("detach", None)
 
 
-def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control_lease(tmp_path: Path) -> None:
-    """The worker serves the screencast like the desktop stream: runner token, stream lease, and control lease."""
-    fake = _FakePage()
+_HEADERS = {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}
+_EXAMPLE = {
+    "type": "url-changed",
+    "url": "https://example.org/",
+    "title": "Example",
+    "canGoBack": False,
+    "canGoForward": False,
+}
+
+
+@contextmanager
+def _worker(tmp_path: Path, session: BrowserSession) -> Iterator[tuple[TestClient, WorkerComputerRuntime, str]]:
+    """A worker app whose Computer runs the agent's browser session, its client, and the viewer's screencast URL."""
     runtime = WorkerComputerRuntime(FakeDisplay())
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        session = BrowserSession(execute=unused, close=unused, page=lambda: cast("Page", fake))
         await runtime.run_browser_call("binding", lambda _display: session, [], {})
         yield
         await runtime.close()
@@ -376,25 +552,36 @@ def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control
     initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
     app.state.worker_computer = runtime
     app.include_router(router)
-    headers = {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}
-    key = json.dumps({"type": "key", "event": "down", "key": "a", "code": "KeyA", "keyCode": 65})
     with TestClient(app) as client:
-        generation = client.get("/computer", headers=headers).json()["generation"]
-        url = f"/computer/screencast?session_id=viewer&generation={generation}"
+        generation = client.get("/computer", headers=_HEADERS).json()["generation"]
+        yield client, runtime, f"/computer/screencast?session_id=viewer&generation={generation}"
+
+
+def _connected(websocket: WebSocketTestSession) -> None:
+    """Take the page's location and loading state, which the viewer is sent on connect."""
+    assert json.loads(websocket.receive_text()) == _EXAMPLE
+    assert json.loads(websocket.receive_text()) == {"type": "loading", "loading": False}
+
+
+def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control_lease(tmp_path: Path) -> None:
+    """The worker serves the screencast like the desktop stream: runner token, stream lease, and control lease."""
+    fake = _FakePage()
+    session = BrowserSession(execute=unused, close=unused, page=lambda: cast("Page", fake))
+    key = json.dumps({"type": "key", "event": "down", "key": "a", "code": "KeyA", "keyCode": 65})
+    with _worker(tmp_path, session) as (client, runtime, url):
         with pytest.raises(WebSocketDisconnect), client.websocket_connect(url, subprotocols=[SCREENCAST_PROTOCOL]):
             pass
-        with client.websocket_connect(url, headers=dict(headers), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
+        with client.websocket_connect(url, headers=dict(_HEADERS), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
             assert websocket.accepted_subprotocol == SCREENCAST_PROTOCOL
-            message = {"type": "url-changed", "url": "https://example.org/", "title": "Example"}
-            assert json.loads(websocket.receive_text()) == message
+            _connected(websocket)
             websocket.send_text(key)
             control = {"session_id": "viewer", "action": "take"}
-            assert client.post("/computer/control", headers=headers, json=control).status_code == 200
+            assert client.post("/computer/control", headers=_HEADERS, json=control).status_code == 200
             websocket.send_text(key)
             websocket.send_text("{}")
             assert json.loads(websocket.receive_text())["type"] == "error"
             release = {"session_id": "viewer", "action": "release"}
-            assert client.post("/computer/control", headers=headers, json=release).status_code == 200
+            assert client.post("/computer/control", headers=_HEADERS, json=release).status_code == 200
             with pytest.raises(WebSocketDisconnect):
                 websocket.receive_text()
         keys = [
@@ -405,13 +592,37 @@ def test_worker_route_requires_the_runner_and_takes_input_only_under_the_control
         assert keys == [("keyDown", "a"), ("keyUp", "a")]
         assert fake.session.sent[-1] == ("detach", None)
         assert runtime.status()["controller_session_id"] is None
-        with client.websocket_connect(url, headers=dict(headers), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
-            websocket.receive_text()
+        with client.websocket_connect(url, headers=dict(_HEADERS), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
+            _connected(websocket)
             websocket.send_bytes(b"binary input")
             with pytest.raises(WebSocketDisconnect):
                 websocket.receive_text()
-        with client.websocket_connect(url, headers=dict(headers), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
-            websocket.receive_text()
+        with client.websocket_connect(url, headers=dict(_HEADERS), subprotocols=[SCREENCAST_PROTOCOL]) as websocket:
+            _connected(websocket)
             websocket.send_text(" " * (MAX_SCREENCAST_MESSAGE_BYTES + 1))
             with pytest.raises(WebSocketDisconnect):
                 websocket.receive_text()
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_viewer_opens_a_private_address_only_when_the_agents_browser_may(tmp_path: Path, allowed: bool) -> None:
+    """A viewer's navigate follows the agent's browser tool setting, which reaches it through the worker's binding."""
+    provider = select_browser_provider("browser", "browser_control", browser_tools, json.dumps)
+    toolkit = BrowserTools(resolve_runtime_paths(storage_path=tmp_path), allow_private_networks=allowed)
+    _key, bound = provider.bind(toolkit, ":99", tmp_path / "workspace", unused)
+    fake = _FakePage()
+    session = replace(bound, execute=unused, page=lambda: cast("Page", fake))
+    private = {"type": "navigate", "url": "http://10.0.0.1/"}
+    with (
+        _worker(tmp_path, session) as (client, _runtime, url),
+        client.websocket_connect(url, headers=dict(_HEADERS), subprotocols=[SCREENCAST_PROTOCOL]) as websocket,
+    ):
+        _connected(websocket)
+        control = {"session_id": "viewer", "action": "take"}
+        assert client.post("/computer/control", headers=_HEADERS, json=control).status_code == 200
+        websocket.send_text(json.dumps(private))
+        websocket.send_text("{}")
+        if not allowed:
+            assert json.loads(websocket.receive_text()) == _REFUSED
+        assert json.loads(websocket.receive_text()) == {"type": "error", "detail": "Invalid screencast message."}
+    assert (("Page.navigate", {"url": "http://10.0.0.1/"}) in fake.session.sent) is allowed

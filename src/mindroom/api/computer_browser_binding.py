@@ -74,7 +74,12 @@ class _ComputerBrowserProvider:
 
         if isinstance(toolkit, BrowserTools):
             # The browser tool runs its browser in this process, so a screencast can show its page.
-            return key, BrowserSession(execute=execute, close=toolkit.aclose, page=toolkit.worker_active_page)
+            return key, BrowserSession(
+                execute=execute,
+                close=toolkit.aclose,
+                page=toolkit.worker_active_page,
+                allow_private_networks=toolkit.allow_private_networks,
+            )
         return key, BrowserSession(execute=execute, close=toolkit.aclose)
 
 

@@ -1674,7 +1674,7 @@ def test_stored_boolean_tool_config_reaches_constructor_as_boolean(
         tools=builtin_tool_registry(),
     )
 
-    assert tool._allow_private_networks is expected
+    assert tool.allow_private_networks is expected
 
 
 @pytest.mark.parametrize("stored", ["maybe", "", "False", " true", "1", "no", 1, 0.0, ["true"]])

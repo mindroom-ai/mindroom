@@ -175,7 +175,7 @@ Until the agent's browser starts, and after it closes, the stream has no page an
 A tab or window that a page opens itself, such as a sign-in popup, appears in the stream only once the agent switches to it; until then, use the desktop stream to work in it.
 The browser's own menus and pickers, such as the open list of a `<select>` element, a right-click menu, or a file chooser, do not show in the stream either; choose a `<select>` option with the arrow keys and Enter, or use the desktop stream.
 `browser_mcp` runs its browser in another process, so its page cannot be streamed; use the desktop stream with it.
-Watching needs no control; input needs **Take control**, which pauses the agent's browser calls as it does for the desktop, and input sent without it is dropped.
+Watching needs no control; input and navigation need **Take control**, which pauses the agent's browser calls as it does for the desktop, and input or navigation sent without it is dropped.
 
 Open the WebSocket `GET /api/computers/sessions/{session_id}/screencast` with the subprotocols `mindroom-screencast` and `mindroom-ticket.<ticket>`, where the ticket comes from `POST /api/computers/sessions/{session_id}/stream-ticket`.
 As for the desktop stream, the `Origin` must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS`, each ticket opens one stream, and room access is rechecked while it runs.
@@ -189,8 +189,9 @@ The server sends:
 | --- | --- |
 | binary | One JPEG frame of the page, scaled to fit 1920×1200 pixels. |
 | `{"type": "viewport", "width": w, "height": h}` | The page's size in CSS pixels, sent before the first frame and whenever it changes. Map pointer positions from the frame to these coordinates. |
-| `{"type": "url-changed", "url": "...", "title": "..."}` | The shown page's address and title, sent on connect and on each change; both are empty while there is no page. |
-| `{"type": "error", "detail": "..."}` | A malformed or unknown message from the client. |
+| `{"type": "url-changed", "url": "...", "title": "...", "canGoBack": bool, "canGoForward": bool}` | The shown page's address and title, and whether it can go back or forward, sent on connect and on each change, in-page navigation included; address and title are empty and both flags `false` while there is no page. |
+| `{"type": "loading", "loading": bool}` | Whether the shown page is loading, sent on connect and on each change. |
+| `{"type": "error", "detail": "..."}` | A malformed or unknown message from the client, or an address `navigate` refuses. |
 
 The client sends JSON text messages of at most 64 KiB; a binary message closes the stream:
 
@@ -200,9 +201,12 @@ The client sends JSON text messages of at most 64 KiB; a binary message closes t
 | `{"type": "wheel", "x", "y", "dx", "dy", "modifiers"}` | Scrolls by `dx`, `dy` CSS pixels. |
 | `{"type": "key", "event": "down" \| "up", "key", "code", "keyCode", "modifiers", "repeat", "location"}` | A key event with the DOM `KeyboardEvent` fields. Printable keys and Enter type their text unless Control or Meta is held; send any other character, such as one typed with AltGr, which browsers report with Control held, as a `text` message. |
 | `{"type": "text", "text"}` | Inserts text, such as a paste or an IME composition. |
+| `{"type": "navigate", "url"}` | Opens an `http` or `https` address, or `about:blank`, in the shown page. Any other scheme, and any address the agent's `browser` tool refuses, such as a private-network address without [`allow_private_networks`](web-scraping-and-browser.md#browser-configuration), answers an `error` and leaves the page as it is. |
+| `{"type": "back" \| "forward" \| "reload" \| "stop"}` | Goes back or forward one history entry, reloads the shown page, or stops it loading. |
 
 `modifiers` is a bitmask: Alt 1, Control 2, Meta 4, Shift 8.
 Each input waits for the page to handle it, so send pointer moves at most once per animation frame, or input falls behind the pointer.
+`navigate` waits up to two seconds for the server to answer before later messages apply; the page keeps loading after that until it finishes or `stop` ends it.
 The browser runs on Linux, so editing shortcuts use Control; a client on macOS sends Control for Command.
 When a viewer disconnects, buttons and keys it still held are released.
 

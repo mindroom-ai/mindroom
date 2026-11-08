@@ -649,7 +649,7 @@ class BrowserTools(Toolkit):
         # resolved state root, which is requester-scoped for private agents. Worker runtimes own their storage root.
         self._agent_state_root = agent_state_root
         self._profiles_root = ((agent_state_root or runtime_paths.storage_root) / "browser-profiles").resolve()
-        self._allow_private_networks = allow_private_networks
+        self.allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
         self._desktop_target = self._configured_desktop_target(
             device_user_id=device_user_id,
@@ -744,7 +744,7 @@ class BrowserTools(Toolkit):
         return json.dumps(
             {
                 "output_dir": str(output_dir),
-                "allow_private_networks": self._allow_private_networks,
+                "allow_private_networks": self.allow_private_networks,
                 "allow_loopback": self._worker_display is not None,
                 "default_target": self._default_target,
                 "timeout_seconds": self._timeout_seconds,
@@ -984,7 +984,7 @@ class BrowserTools(Toolkit):
                 target_url = await run_browser_tool_url_check(
                     validate_server_fetch_url,
                     target_url,
-                    allow_private_networks=self._allow_private_networks,
+                    allow_private_networks=self.allow_private_networks,
                     allow_loopback=self._worker_display is not None,
                 )
                 return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
@@ -1034,7 +1034,7 @@ class BrowserTools(Toolkit):
                 target_url = await run_browser_tool_url_check(
                     validate_server_fetch_url,
                     target_url,
-                    allow_private_networks=self._allow_private_networks,
+                    allow_private_networks=self.allow_private_networks,
                     allow_loopback=self._worker_display is not None,
                 )
                 return json.dumps(
@@ -1170,7 +1170,7 @@ class BrowserTools(Toolkit):
             element=element,
             image_type=image_type,
             level=level,
-            allow_private_networks=self._allow_private_networks,
+            allow_private_networks=self.allow_private_networks,
         )
         now_ms = round(time.time() * 1000)
         command = DesktopCommand(
@@ -1758,7 +1758,7 @@ class BrowserTools(Toolkit):
                 egress_control=self._worker_workspace is not None
                 or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
             )
-            settings = _LaunchSettings(launch_kwargs, egress, self._allow_private_networks)
+            settings = _LaunchSettings(launch_kwargs, egress, self.allow_private_networks)
             self._launch_settings_by_profile[profile_name] = settings
         return settings
 
