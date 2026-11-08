@@ -23,10 +23,11 @@ from mindroom.api.client_sessions import (
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
+from mindroom.room_messenger import post_notice, post_relay
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 
     from mindroom.api.client_sessions import ClientSession
     from mindroom.config.main import Config
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.
 __all__ = [
     "ClientUser",
+    "RoomMessenger",
     "RoomPower",
     "RoomReader",
     "client_rooms",
@@ -43,6 +45,7 @@ __all__ = [
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
+    "require_room_messenger",
     "require_room_reader",
 ]
 
@@ -225,6 +228,85 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
     )
 
 
+@dataclass(frozen=True)
+class RoomMessenger:
+    """Posts to one room as the router for a route whose caller is joined to it, never from or as any person's account.
+
+    Each message carries its plugin's name as its hook source.
+    """
+
+    user: ClientUser
+    """The session's user, joined to the room."""
+    _request: Request = field(repr=False)
+    _room_id: str = field(repr=False)
+    _plugin_name: str = field(repr=False)
+
+    async def notice(
+        self,
+        text: str,
+        *,
+        thread_id: str | None = None,
+        content: Mapping[str, object] | None = None,
+    ) -> str:
+        """Post ``text`` as the router's ``m.notice``, which mentions no one and wakes no agent; return its event ID.
+
+        ``content`` adds the plugin's own keys, and one under ``com.mindroom.`` or ``io.mindroom.``, at any depth,
+        answers 400 before anything is sent. It answers 503 when the router is not running or the send fails.
+        """
+        return await post_notice(
+            self._request.app,
+            self._plugin_name,
+            self._room_id,
+            text,
+            thread_id=thread_id,
+            content=content,
+        )
+
+    async def relay(
+        self,
+        text: str,
+        *,
+        mentions: Sequence[str],
+        thread_id: str | None = None,
+        content: Mapping[str, object] | None = None,
+    ) -> str:
+        """Post ``text`` as the router for the caller, waking exactly the agents and teams ``mentions`` names.
+
+        It names the caller as the message's original sender, so each agent it wakes answers and authorizes them, and
+        its text says it is sent for them. ``mentions`` must name at least one agent or team, and only agents and teams
+        joined to the room, else it answers 400. Just before sending it checks again that the session is live (401),
+        that the caller is joined (403) and may send ``m.room.message`` (403), answering 503 when either cannot be read.
+        ``content`` and the other answers are as for ``notice()``. It returns the message's event ID.
+        """
+        room = await require_room_reader(self._request, self._room_id)
+        if not (await room.power()).may_send(room.user.user_id, "m.room.message"):
+            raise HTTPException(403, "Not allowed to send messages in this room.")
+        # The session may have ended while the room was read.
+        await require_client_user(self._request)
+        return await post_relay(
+            self._request.app,
+            self._plugin_name,
+            self._room_id,
+            text,
+            thread_id=thread_id,
+            content=content,
+            user_id=room.user.user_id,
+            members=room.members,
+            mentions=mentions,
+        )
+
+
+async def require_room_messenger(request: Request, room_id: Annotated[str, Path()]) -> RoomMessenger:
+    """Return a ``RoomMessenger`` for ``room_id``, once the client session's user is joined to it.
+
+    It checks the caller exactly as ``require_room_member`` does, answering 401, 403 or 503, and serves only a
+    plugin's own routes.
+    """
+    plugin_name = _route_plugin_name(request, "require_room_messenger")
+    user = await require_room_member(request, room_id)
+    return RoomMessenger(user, request, room_id, plugin_name)
+
+
 async def client_rooms(request: Request, candidates: Iterable[str]) -> list[str]:
     """Return those of ``candidates`` the client session's user is joined to now, in their order.
 
@@ -271,10 +353,7 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
     Called again, as by a websocket after a config reload, it returns the newer config's context. It raises
     ``PluginInactiveError``, which the route answers with 503, when that config no longer loads the plugin.
     """
-    plugin_name = connection.scope.get(PLUGIN_NAME_SCOPE_KEY)
-    if plugin_name is None:
-        msg = "plugin_context() serves only a plugin's own routes"
-        raise RuntimeError(msg)
+    plugin_name = _route_plugin_name(connection, "plugin_context")
     state = require_api_state(connection.app)
     snapshot = state.snapshot
 
@@ -283,3 +362,12 @@ def plugin_context(connection: HTTPConnection) -> PluginContext:
         return latest.runtime_config if latest.runtime_paths == snapshot.runtime_paths else None
 
     return build_plugin_context(plugin_name, snapshot.runtime_config, snapshot.runtime_paths, current_config)
+
+
+def _route_plugin_name(connection: HTTPConnection, helper: str) -> str:
+    """Return the name of the plugin whose route serves ``connection``; ``helper`` serves no other route."""
+    plugin_name = connection.scope.get(PLUGIN_NAME_SCOPE_KEY)
+    if plugin_name is None:
+        msg = f"{helper}() serves only a plugin's own routes"
+        raise RuntimeError(msg)
+    return plugin_name

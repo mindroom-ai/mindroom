@@ -1,0 +1,477 @@
+"""Plugin routes post to a room as the router: a notice that wakes no agent, or a relay for the signed-in user.
+
+A relay names its user as the original sender, so each agent it mentions answers that user under its access rules, and
+it checks the user again just before it sends. Nothing is ever posted from the user's account.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
+
+import nio
+import pytest
+from fastapi import FastAPI, HTTPException, Request
+
+from mindroom.api.app_state import ensure_app_state
+from mindroom.api.client_sessions import client_session_store
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.constants import (
+    EXACT_MENTIONS_KEY,
+    HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
+)
+from mindroom.event_journal.models import EventClass
+from mindroom.hooks import HookContextSupport, HookRegistry
+from mindroom.hooks.registry import HookRegistryState
+from mindroom.logging_config import get_logger
+from mindroom.matrix.journal_ingress import ingestion_timeline_views
+from mindroom.matrix.users import AgentMatrixUser
+from mindroom.orchestration.plugin_http_runtime import bind_room_members
+from mindroom.plugin_http import RoomMessenger, require_room_messenger
+from mindroom.thread_utils import check_agent_mentioned
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY
+from tests.api.test_plugin_room_readers import ALICE, BOB, CAROL, ROOM, _joined, _state
+from tests.bot_helpers import make_test_agent_bot
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    delivered_matrix_side_effect,
+    make_conversation_reader_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+from tests.identity_helpers import persist_entity_accounts
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
+    from pathlib import Path
+
+    from mindroom.bot import AgentBot
+
+PLUGIN = "asker"
+ROUTER = "@mindroom_router:localhost"
+OPEN = "@mindroom_open:localhost"
+ALICES = "@mindroom_alices:localhost"
+ELSEWHERE = "@mindroom_elsewhere:localhost"
+DAVE = "@dave:example.org"
+# Alice administers the room; posting a message takes level 50, which Carol has and Bob lacks.
+POWER = {"users": {ALICE: 100, CAROL: 50, ROUTER: 100}, "events": {"m.room.message": 50}}
+
+
+def _config(tmp_path: Path) -> Config:
+    """Agents ``open``, which answers anyone, and ``alices``, which answers only Alice, in the room; one outside it."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "open": AgentConfig(
+                    display_name="Open",
+                    rooms=[ROOM],
+                    access=ResponderAccessConfig(users=["*"]),
+                ),
+                "alices": AgentConfig(
+                    display_name="Alices",
+                    rooms=[ROOM],
+                    access=ResponderAccessConfig(current_room_members=False, members_of_rooms=[], users=[ALICE]),
+                ),
+                "elsewhere": AgentConfig(display_name="Elsewhere", rooms=["!other:example.org"]),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    persist_entity_accounts(config, runtime_paths_for(config))
+    return config
+
+
+def _reader_client(members: tuple[str, ...], power_levels: dict[str, object]) -> SimpleNamespace:
+    """The router's client as room reads see it: joined to the room with ``members`` and ``power_levels``."""
+    return SimpleNamespace(
+        user_id=ROUTER,
+        rooms={ROOM: nio.MatrixRoom(ROOM, ROUTER)},
+        joined_members=AsyncMock(return_value=_joined(ROOM, dict.fromkeys(members))),
+        room_get_state=AsyncMock(return_value=_state(power_levels=power_levels)),
+    )
+
+
+def _router(config: Config, client: SimpleNamespace) -> SimpleNamespace:
+    """A running router bot whose hook sender sends through ``client``."""
+    runtime_paths = runtime_paths_for(config)
+    support = HookContextSupport(
+        runtime=SimpleNamespace(client=client, config=config),
+        runtime_paths=runtime_paths,
+        agent_name=ROUTER_AGENT_NAME,
+        hook_registry_state=HookRegistryState(HookRegistry.empty()),
+        conversation_reader=make_conversation_reader_mock(),
+        logger=get_logger("tests.plugin_room_messenger"),
+    )
+    return SimpleNamespace(
+        client=client,
+        running=True,
+        config=config,
+        runtime_paths=runtime_paths,
+        hook_context=support,
+    )
+
+
+@dataclass
+class _World:
+    """A room with Alice, Carol and Bob, the router, and agents ``open`` and ``alices``, served by one API app."""
+
+    config: Config
+    app: FastAPI
+    client: SimpleNamespace
+    bots: dict[str, SimpleNamespace]
+    tokens: list[str]
+
+    def request(self, user_id: str) -> Request:
+        """A request to the plugin's route, signed in with a client session of ``user_id``."""
+        token = client_session_store(self.app).create(user_id).token
+        self.tokens.append(token)
+        return Request(
+            {
+                "type": "http",
+                "app": self.app,
+                "headers": [(b"authorization", f"Bearer {token}".encode())],
+                PLUGIN_NAME_SCOPE_KEY: PLUGIN,
+            },
+        )
+
+    async def messenger(self, user_id: str) -> RoomMessenger:
+        return await require_room_messenger(self.request(user_id), ROOM)
+
+
+@pytest.fixture
+def world(tmp_path: Path) -> _World:
+    """The room, its router and agents, and the API app whose routes post there."""
+    config = _config(tmp_path)
+    client = _reader_client((ALICE, CAROL, BOB, ROUTER, OPEN, ALICES), POWER)
+    # Agent ``open``'s bot reads the room too, so reads still answer while the router is down.
+    bots = {ROUTER_AGENT_NAME: _router(config, client), "open": SimpleNamespace(client=client, running=True)}
+    app = FastAPI()
+    bind_room_members(app, bots)  # type: ignore[arg-type]
+    ensure_app_state(app).embedded = SimpleNamespace(agent_bot=bots.get)  # type: ignore[assignment]
+    return _World(config, app, client, bots, [])
+
+
+@contextmanager
+def _transport(event_id: str | None = "$sent") -> Iterator[AsyncMock]:
+    """Capture what the router's hook sender sends; it delivers as ``event_id``, or fails when that is None."""
+    transport = AsyncMock(side_effect=delivered_matrix_side_effect(event_id) if event_id else None, return_value=None)
+    with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
+        yield transport
+
+
+def _sent(transport: AsyncMock, client: object) -> dict[str, Any]:
+    """The content of the one message the router sent, through ``client`` into the room."""
+    transport.assert_awaited_once()
+    sent_client, room_id, content = transport.await_args.args
+    assert (sent_client, room_id) == (client, ROOM)
+    return content
+
+
+def _agent(config: Config, user_id: str) -> AgentBot:
+    """The bot of the agent with ``user_id``, as it reads the room's messages."""
+    name = user_id.removeprefix("@mindroom_").split(":")[0]
+    bot = make_test_agent_bot(
+        AgentMatrixUser(agent_name=name, user_id=user_id, display_name=name.title(), password=TEST_PASSWORD),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = user_id
+    bot.client.rooms = {}
+    return bot
+
+
+def _event(content: dict[str, Any]) -> nio.RoomMessageText:
+    return nio.Event.parse_event(
+        {
+            "type": "m.room.message",
+            "content": content,
+            "sender": ROUTER,
+            "event_id": "$sent",
+            "room_id": ROOM,
+            "origin_server_ts": 1,
+        },
+    )
+
+
+def _room() -> nio.MatrixRoom:
+    room = nio.MatrixRoom(ROOM, ROUTER)
+    for user_id in (ALICE, CAROL, BOB, ROUTER, OPEN, ALICES):
+        room.add_member(user_id, None, None)
+    room.members_synced = True
+    return room
+
+
+def _event_class(agent_id: str, content: dict[str, Any]) -> EventClass:
+    """Whether an agent takes the message as work, or only as context, as it arrives live."""
+    views = ingestion_timeline_views(
+        room_id=ROOM,
+        source=_event(content).source,
+        self_sender=agent_id,
+        provenance=nio.TimelineEventProvenance.LIVE,
+    )
+    assert views is not None
+    return views[0].event_class
+
+
+def _answers(config: Config, agent_id: str, content: dict[str, Any]) -> tuple[str, bool]:
+    """Who the agent's turn for the message runs as, and whether the agent's access rules let it answer them here."""
+    bot = _agent(config, agent_id)
+    requester = bot._ingress_validator.classify(_event(content), room_id=ROOM).run_requester_id
+    return requester, bot._turn_policy.can_reply_to_sender_in_room(requester, ROOM)
+
+
+@pytest.mark.asyncio
+async def test_notice_is_the_routers_and_wakes_no_agent(world: _World) -> None:
+    """A notice is the router's own `m.notice`: it mentions no one, claims no requester, and no agent takes it as work.
+
+    The room has the default `auto` reply mode, where a person's message with no mention reaches an agent.
+    """
+    messenger = await world.messenger(CAROL)
+
+    with _transport() as transport:
+        event_id = await messenger.notice("Build 12 finished", content={"com.example.card": {"build": 12}})
+
+    assert event_id == "$sent"
+    content = _sent(transport, world.client)
+    assert content["msgtype"] == "m.notice"
+    assert content["body"] == "Build 12 finished"
+    assert content["m.mentions"] == {"user_ids": []}
+    assert content[EXACT_MENTIONS_KEY] is True
+    assert content[SOURCE_KIND_KEY] == "hook"
+    assert content[HOOK_SOURCE_KEY] == f"{PLUGIN}:http"
+    assert content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] == 1
+    assert ORIGINAL_SENDER_KEY not in content
+    assert content["com.example.card"] == {"build": 12}
+    assert world.config.get_room_reply_mode(runtime_paths_for(world.config), ROOM) == "auto"
+    assert _event_class(OPEN, content) is EventClass.CONTEXT_ONLY
+    assert _answers(world.config, OPEN, content)[0] == ROUTER
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_relay_runs_as_its_user_for_exactly_the_agent_it_mentions(world: _World) -> None:
+    """Carol's relay names her and wakes ``open`` for her; ``alices`` refuses her, and answers Alice's own relay."""
+    messenger = await world.messenger(CAROL)
+
+    with _transport() as transport:
+        event_id = await messenger.relay("@open what changed?", mentions=[OPEN], content={"com.example.ask": {"n": 1}})
+
+    assert event_id == "$sent"
+    content = _sent(transport, world.client)
+    assert content["msgtype"] == "m.text"
+    assert content["body"] == f"Sent for {CAROL}: {OPEN} what changed?"
+    assert content[ORIGINAL_SENDER_KEY] == CAROL
+    assert content["m.mentions"] == {"user_ids": [OPEN]}
+    assert content[EXACT_MENTIONS_KEY] is True
+    assert content[SOURCE_KIND_KEY] == "hook"
+    assert content[HOOK_SOURCE_KEY] == f"{PLUGIN}:http"
+    assert content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] == 1
+    assert content["com.example.ask"] == {"n": 1}
+    assert _event_class(OPEN, content) is EventClass.ACTIONABLE
+    mentioned, _, _ = check_agent_mentioned(
+        {"content": content},
+        None,
+        world.config,
+        runtime_paths_for(world.config),
+        room=_room(),
+    )
+    assert [agent.full_id for agent in mentioned] == [OPEN]
+    assert _answers(world.config, OPEN, content) == (CAROL, True)
+    assert _answers(world.config, ALICES, content) == (CAROL, False)
+
+    alices_messenger = await world.messenger(ALICE)
+    with _transport() as transport:
+        await alices_messenger.relay("@alices what changed?", mentions=[ALICES])
+    assert _answers(world.config, ALICES, _sent(transport, world.client)) == (ALICE, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mentions",
+    [[], [ALICE], [ELSEWHERE], [ROUTER], [OPEN, DAVE]],
+    ids=["nobody", "a-person", "an-agent-outside-the-room", "the-router", "an-agent-and-a-stranger"],
+)
+async def test_relay_mentions_only_agents_and_teams_in_the_room(world: _World, mentions: list[str]) -> None:
+    """A relay that would mention a person, an agent outside the room or the router, or no one, sends nothing."""
+    messenger = await world.messenger(CAROL)
+
+    with _transport() as transport, pytest.raises(HTTPException) as refused:
+        await messenger.relay("hello", mentions=mentions)
+
+    assert refused.value.status_code == 400
+    transport.assert_not_awaited()
+
+
+def _expire(world: _World) -> None:
+    store = client_session_store(world.app)
+    store.clock = lambda: float("inf")
+
+
+def _revoke(world: _World) -> None:
+    for token in world.tokens:
+        client_session_store(world.app).revoke(token)
+
+
+def _leave(world: _World) -> None:
+    world.client.joined_members.return_value = _joined(ROOM, dict.fromkeys((ALICE, BOB, ROUTER, OPEN)))
+
+
+def _demote(world: _World) -> None:
+    world.client.room_get_state.return_value = _state(power_levels={**POWER, "users": {ALICE: 100, ROUTER: 100}})
+
+
+def _lose_membership_read(world: _World) -> None:
+    world.client.joined_members.side_effect = RuntimeError("homeserver down")
+
+
+def _lose_power_read(world: _World) -> None:
+    world.client.room_get_state.side_effect = RuntimeError("homeserver down")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "status"),
+    [
+        (_expire, 401),
+        (_revoke, 401),
+        (_leave, 403),
+        (_demote, 403),
+        (_lose_membership_read, 503),
+        (_lose_power_read, 503),
+    ],
+    ids=[
+        "session-expired",
+        "session-revoked",
+        "left-the-room",
+        "lost-power-to-post",
+        "membership-unreadable",
+        "power-unreadable",
+    ],
+)
+async def test_relay_checks_its_user_again_before_it_sends(
+    world: _World,
+    change: Callable[[_World], None],
+    status: int,
+) -> None:
+    """Between the route's check and the relay, an ended session, a departure or lost power stops the relay."""
+    messenger = await world.messenger(CAROL)
+    change(world)
+
+    with _transport() as transport, pytest.raises(HTTPException) as refused:
+        await messenger.relay("@open what changed?", mentions=[OPEN])
+
+    assert refused.value.status_code == status
+    transport.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_relay_for_a_member_who_may_not_post_is_refused(world: _World) -> None:
+    """Bob is joined, so the route serves him and may post notices, but the room's power levels keep him from relaying."""
+    messenger = await world.messenger(BOB)
+
+    with _transport() as transport, pytest.raises(HTTPException) as refused:
+        await messenger.relay("@open what changed?", mentions=[OPEN])
+
+    assert refused.value.status_code == 403
+    transport.assert_not_awaited()
+
+
+def _post(messenger: RoomMessenger, kind: str, content: dict[str, Any] | None = None) -> Awaitable[str]:
+    """Post a notice, or a relay that mentions ``open``, with ``content``."""
+    if kind == "notice":
+        return messenger.notice("hello", content=content)
+    return messenger.relay("@open hello", mentions=[OPEN], content=content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["notice", "relay"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        {ORIGINAL_SENDER_KEY: ALICE},
+        {"io.mindroom.exact_mentions": False},
+        {"com.example.card": {"m.new_content": {ORIGINAL_SENDER_KEY: ALICE}}},
+        {"com.example.cards": [{"io.mindroom.wake_mentioned": False}]},
+    ],
+    ids=["original-sender", "io-key", "nested", "in-a-list"],
+)
+async def test_content_never_sets_mindroom_keys(world: _World, kind: str, content: dict[str, Any]) -> None:
+    """A key under `com.mindroom.` or `io.mindroom.`, at any depth, is refused before anything is sent."""
+    messenger = await world.messenger(CAROL)
+
+    with _transport() as transport, pytest.raises(HTTPException) as refused:
+        await _post(messenger, kind, content)
+
+    assert refused.value.status_code == 400
+    transport.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_member_gets_no_messenger(world: _World) -> None:
+    """The route's dependency refuses a caller who is not joined to the room, as `require_room_member` does."""
+    with pytest.raises(HTTPException) as refused:
+        await world.messenger(DAVE)
+
+    assert refused.value.status_code == 403
+
+
+def _stop_router(world: _World) -> None:
+    world.bots[ROUTER_AGENT_NAME].running = False
+
+
+def _remove_router(world: _World) -> None:
+    del world.bots[ROUTER_AGENT_NAME]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["notice", "relay"])
+@pytest.mark.parametrize("change", [_stop_router, _remove_router], ids=["router-stopped", "router-gone"])
+async def test_messages_need_a_running_router(world: _World, kind: str, change: Callable[[_World], None]) -> None:
+    """With no running router, a notice or a relay answers 503 and sends nothing."""
+    messenger = await world.messenger(CAROL)
+    change(world)
+
+    with _transport() as transport, pytest.raises(HTTPException) as refused:
+        await _post(messenger, kind)
+
+    assert refused.value.status_code == 503
+    transport.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["notice", "relay"])
+async def test_failed_send_answers_503(world: _World, kind: str) -> None:
+    """A send Matrix does not deliver answers 503 rather than an event ID."""
+    messenger = await world.messenger(CAROL)
+
+    with _transport(None) as transport, pytest.raises(HTTPException) as refused:
+        await _post(messenger, kind)
+
+    assert refused.value.status_code == 503
+    transport.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_messages_go_through_the_router_running_when_they_are_sent(world: _World) -> None:
+    """A router restarted after the route's check, as by a reload, sends with its new client; nothing keeps the old."""
+    messenger = await world.messenger(CAROL)
+    new_client = _reader_client((ALICE, CAROL, BOB, ROUTER, OPEN, ALICES), POWER)
+    world.bots[ROUTER_AGENT_NAME] = _router(world.config, new_client)
+
+    with _transport() as transport:
+        await messenger.notice("hello")
+
+    _sent(transport, new_client)

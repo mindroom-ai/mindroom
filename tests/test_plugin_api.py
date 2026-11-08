@@ -442,6 +442,10 @@ _MEMBERS = {
         ),
     },
     "mindroom.plugin_http.RoomReader": {"power": "(self)", "is_direct": "(self)"},
+    "mindroom.plugin_http.RoomMessenger": {
+        "notice": "(self, text, *, thread_id, content)",
+        "relay": "(self, text, *, mentions, thread_id, content)",
+    },
     "mindroom.plugin_http.RoomPower": {
         "level": "(self, user_id)",
         "is_admin": "(self, user_id)",
@@ -516,6 +520,7 @@ _MANIFEST = {
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "ClientUser",
+    "RoomMessenger",
     "RoomPower",
     "RoomReader",
     "client_rooms",
@@ -524,6 +529,7 @@ _HTTP_EXPORTS = [
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
+    "require_room_messenger",
     "require_room_reader",
 ]
 _ELSEWHERE_SIGNATURES = {
@@ -533,6 +539,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.RoomMessenger": "(user)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
@@ -541,11 +548,12 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
+    "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 7), "064a08b8af22e6960af3e4c4656c63515ee5bb2d561333de21fad547e9c729d4")
+_PINNED_VERSION = ((1, 8), "e0c0436e47a287038f5eb87123a46e7ca387671d1a429e624dd055144d6b0084")
 
 
 def _is_enum(obj: object) -> bool:

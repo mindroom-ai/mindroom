@@ -1045,7 +1045,7 @@ A request for a plugin that is not loaded or has no routes, or for a path its ro
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
-MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, `require_room_reader`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, `require_room_reader`, `require_room_messenger`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
 
 Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
@@ -1107,6 +1107,38 @@ Each call to `power()` reads again, and `members` is read anew for each request,
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
 A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest.
+
+A route that posts to a room depends on `require_room_messenger`.
+It checks the caller exactly as `require_room_member` does, with the same answers, and returns a `RoomMessenger`, which posts as the router, never from the caller's account:
+
+```python
+from pydantic import BaseModel
+
+from mindroom.plugin_http import RoomMessenger, require_room_messenger
+
+
+class Ask(BaseModel):
+    agent_id: str
+    question: str
+
+
+@router.post("/rooms/{room_id}/ask")
+async def ask(body: Ask, messenger: Annotated[RoomMessenger, Depends(require_room_messenger)]) -> dict[str, str]:
+    return {"event_id": await messenger.relay(body.question, mentions=[body.agent_id])}
+```
+
+| Member | Value |
+|--------|-------|
+| `user` | The caller's `ClientUser` |
+| `await notice(text, *, thread_id=None, content=None)` | Posts `text` as the router's `m.notice`, which mentions no one, acts for no one, and no agent answers |
+| `await relay(text, *, mentions, thread_id=None, content=None)` | Posts `text` as the router for the caller, prefixed with `Sent for <their Matrix ID>:`, mentioning exactly the agents and teams whose Matrix IDs `mentions` lists; each one answers the caller as it would their own message, and only if its access rules admit the caller |
+
+Both return the message's event ID, and post in the thread `thread_id` names, else in the room's timeline.
+`content` adds keys of the plugin's own to the message, such as a card under one of its [reserved namespaces](#reserved-namespaces); a key under `com.mindroom.` or `io.mindroom.` anywhere in it answers 400 and sends nothing, so a route may pass a client's content through without letting it claim to be someone else.
+`relay()` answers 400 unless `mentions` names at least one agent or team and only agents and teams joined to the room, never a person or the router.
+Just before it sends, `relay()` checks the caller again, with the answers of `require_room_member` and `power()`: 401 once their session has ended, 403 once they have left the room or may no longer send `m.room.message` there, and 503 when either cannot be read.
+Both answer 503 with `MindRoom's router is not running; try again.` while the router is down, and with `The message could not be sent; try again.` when Matrix refuses the message.
+A plugin that uses `require_room_messenger` states `"mindroom_plugin_api": "1.8"` in its manifest.
 
 A signed-in client asks which plugins the server serves with `GET /api/plugins`, with the same `Authorization` header and from the same browser origins, and a missing, unknown, or expired session answers 401.
 The answer's `plugin_api_version` is this MindRoom's [plugin API version](#plugin-api-versions) as `"MAJOR.MINOR"`, and `plugins` lists each enabled plugin that loaded, in config order, with its manifest `name` and `mindroom_plugin_api`, which is `null` when the manifest leaves it out:
