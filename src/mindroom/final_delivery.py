@@ -27,6 +27,8 @@ class Suppression(StrEnum):
 
     # Fires no hook: the turn chose not to take part.
     PARTICIPATION_DECLINED = "participation_declined"
+    # Fires no hook: the turn could not decide whether to take part, so it stays quiet and fails.
+    PARTICIPATION_FAILED = "participation_failed"
     HOOK = "suppressed_by_hook"
     SILENT_NO_REPORT = "silent_no_report"
     EMPTY_PROMPT = "empty_prompt"
@@ -110,7 +112,7 @@ def hook_failure_reason(ending: TurnEnding) -> str | None:
     match ending:
         case Cancelled(source=source):
             return cancel_failure_reason(source)
-        case Suppressed(reason=Suppression.PARTICIPATION_DECLINED):
+        case Suppressed(reason=Suppression.PARTICIPATION_DECLINED | Suppression.PARTICIPATION_FAILED):
             return None
         case Suppressed(reason=reason):
             return reason.value
