@@ -420,9 +420,6 @@ def _root_packages(root: Path, loaded_before: set[str]) -> set[str]:
     """Return the package names the modules imported since ``loaded_before`` reached ``root`` under."""
     packages: set[str] = set()
     for module_name, module in _imported_from_root(root, loaded_before).items():
-        # A candidate check running meanwhile imports under its own namespace.
-        if module_name.startswith(CANDIDATE_PLUGIN_MODULE_PREFIX):
-            continue
         relative = Path(cast("str", module.__file__)).resolve().relative_to(root).with_suffix("").parts
         if relative[-1:] == ("__init__",):
             relative = relative[:-1]
@@ -603,39 +600,41 @@ def candidate_tool_registry(
     """Return the tools a candidate config can build and the plugins that failed to load, changing nothing live.
 
     A plugin the published generation loaded from unchanged source is not executed again. A new or changed one
-    executes under a separate module namespace, which is removed afterwards with any task it started.
+    executes under a separate module namespace, which is removed afterwards with any task it started. The check holds
+    the plugin lock, so no live load publishes plugins or imports their modules meanwhile.
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
-    plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
-    published = _PUBLISHED
-    unresolved = {plugin.path for plugin in skipped}
-    plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
-    unavailable: dict[str, ToolMetadata] = {}
-    for plugin_base, plugin_entry in plugin_bases:
-        loaded = published.plugins.get(plugin_base.root)
-        if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
-            tools: Mapping[str, ToolMetadata] = loaded.tools
-        else:
-            registrations: dict[str, ToolMetadata] = {}
-            completed: list[str] = []
-            try:
-                _execute_candidate_plugin(plugin_base, registrations, completed)
-            except (Exception, SystemExit) as exc:
-                skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
-                if plugin_base.tools_module_path is not None and "tools" not in completed:
-                    unresolved.add(plugin_base.name)
-                unavailable.update(_declared_tools(plugin_base))
-                unavailable.update(registrations)
-                continue
-            tools = registrations
-        _add_plugin_tools(plugin_tools, plugin_base.name, tools)
-    registry = compose_tool_registry(
-        {name: metadata for name, (_, metadata) in plugin_tools.items()},
-        _mcp_tool_entries(config.mcp_servers),
-        unavailable=unavailable,
-        unresolved_plugin_sources=frozenset(unresolved),
-    )
+    with _PLUGIN_LOCK:
+        plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
+        published = _PUBLISHED
+        unresolved = {plugin.path for plugin in skipped}
+        plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
+        unavailable: dict[str, ToolMetadata] = {}
+        for plugin_base, plugin_entry in plugin_bases:
+            loaded = published.plugins.get(plugin_base.root)
+            if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
+                tools: Mapping[str, ToolMetadata] = loaded.tools
+            else:
+                registrations: dict[str, ToolMetadata] = {}
+                completed: list[str] = []
+                try:
+                    _execute_candidate_plugin(plugin_base, registrations, completed)
+                except (Exception, SystemExit) as exc:
+                    skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
+                    if plugin_base.tools_module_path is not None and "tools" not in completed:
+                        unresolved.add(plugin_base.name)
+                    unavailable.update(_declared_tools(plugin_base))
+                    unavailable.update(registrations)
+                    continue
+                tools = registrations
+            _add_plugin_tools(plugin_tools, plugin_base.name, tools)
+        registry = compose_tool_registry(
+            {name: metadata for name, (_, metadata) in plugin_tools.items()},
+            _mcp_tool_entries(config.mcp_servers),
+            unavailable=unavailable,
+            unresolved_plugin_sources=frozenset(unresolved),
+        )
     return registry, tuple(skipped)
 
 
@@ -648,30 +647,29 @@ def _execute_candidate_plugin(
 
     Afterwards the namespace is removed, with any module from the plugin's root they imported by absolute name, so
     the plugin's next load imports and registers those again. Modules under the canonical prefix that another thread
-    imports meanwhile stay. The check holds the plugin lock, so no live load imports from the plugin's root meanwhile.
+    imports meanwhile stay.
     """
     prefix = f"{CANDIDATE_PLUGIN_MODULE_PREFIX}{next(_CANDIDATE_NAMESPACES)}_"
-    with _PLUGIN_LOCK:
-        loaded_before = set(sys.modules)
-        try:
-            # A file that serves several kinds executes once, and each kind it serves is checked on that module.
-            for kind, module_path in (
-                ("tools", plugin.tools_module_path),
-                ("hooks", plugin.hooks_module_path),
-                ("oauth", plugin.oauth_module_path),
-            ):
-                entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
-                if entry is None:
-                    continue
-                if kind == "tools":
-                    registrations.update(entry.registrations)
-                elif kind == "oauth":
-                    _oauth_provider_callback(entry.module)
-                completed.append(kind)
-        finally:
-            candidate_modules = {**_modules_named((), prefix), **_imported_from_root(plugin.root, loaded_before)}
-            _remove_modules(candidate_modules)
-            _cancel_module_tasks(candidate_modules.values())
+    loaded_before = set(sys.modules)
+    try:
+        # A file that serves several kinds executes once, and each kind it serves is checked on that module.
+        for kind, module_path in (
+            ("tools", plugin.tools_module_path),
+            ("hooks", plugin.hooks_module_path),
+            ("oauth", plugin.oauth_module_path),
+        ):
+            entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
+            if entry is None:
+                continue
+            if kind == "tools":
+                registrations.update(entry.registrations)
+            elif kind == "oauth":
+                _oauth_provider_callback(entry.module)
+            completed.append(kind)
+    finally:
+        candidate_modules = {**_modules_named((), prefix), **_imported_from_root(plugin.root, loaded_before)}
+        _remove_modules(candidate_modules)
+        _cancel_module_tasks(candidate_modules.values())
 
 
 def _module_within(module: ModuleType, root: Path) -> bool:

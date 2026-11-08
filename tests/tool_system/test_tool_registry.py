@@ -287,7 +287,7 @@ def test_a_candidate_check_and_a_live_load_of_a_package_plugin_never_interleave(
 ) -> None:
     """Whichever starts first, the live load keeps the helper module the plugin's tools module imports by absolute name.
 
-    A check that runs first also reports the tools that helper module registers.
+    The check reports the tools that helper module registers.
     """
     plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
     tools_path = plugin_root / "tools.py"
@@ -338,6 +338,4 @@ def test_a_candidate_check_and_a_live_load_of_a_package_plugin_never_interleave(
     [(tools, skipped)] = checks
     assert installed_helpers is plugins_module._PUBLISHED.modules["demo_pkg.helpers"]
     assert not skipped
-    if first == "check":
-        # A check that runs second executes the plugin against the helper module the load installed, registering nothing.
-        assert "helper_tool" in tools
+    assert "helper_tool" in tools
