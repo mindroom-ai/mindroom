@@ -65,7 +65,7 @@ from mindroom.event_journal import (
     sqlite_backend,
     turn_rows,
 )
-from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
+from mindroom.event_journal.approval_signals import ApprovalSignals, EndedApproval, PausedReply
 from mindroom.event_journal.identity import agent_of_principal
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.offloading import ThreadOffload, settled
@@ -79,7 +79,7 @@ from mindroom.event_journal.schema import (
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.interactive_models import InteractivePrompt
-from mindroom.reply_lifecycle import ApprovalFailureKind
+from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord
 from tests.approval_card_helpers import card_is_terminal, pending_card, resolve_card_event, terminal_edit
@@ -6239,6 +6239,28 @@ class TestApprovalContinuations:
         assert saved.continuation_count == advanced.continuation_count
 
     @staticmethod
+    async def stored_context(store: PrincipalStore) -> dict[str, Any]:
+        """Return the context continuation ``approval-1`` stores beside its routing facts."""
+        row = await store._backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            ),
+        )
+        assert row is not None
+        return json.loads(str(row["context_json"]))
+
+    @staticmethod
+    async def store_context(store: PrincipalStore, context: dict[str, Any]) -> None:
+        """Replace the context continuation ``approval-1`` stores, as an earlier release could have written it."""
+        await store._backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(context), "approval-1"),
+            ),
+        )
+
+    @staticmethod
     def continuation(*, state: str = "ready") -> ApprovalContinuation:
         """Return one exact paused-run owner."""
         return approval_continuation(
@@ -6526,18 +6548,11 @@ class TestApprovalContinuations:
 
         await paused_for_approval(alice, continuation)
         restored = await alice.approvals.approval_continuation("approval-1")
-        row = await alice._backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            ),
-        )
+        stored = await self.stored_context(alice)
 
         assert restored == continuation
         assert restored is not None
         assert restored.show_tool_calls is False
-        assert row is not None
-        stored = json.loads(str(row["context_json"]))
         assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
     async def test_continuation_origin_without_the_acts_for_requester_flag_loads_with_it_unset(
@@ -6551,24 +6566,24 @@ class TestApprovalContinuations:
         await paused_for_approval(alice, continuation)
         assert await alice.approvals.approval_continuation("approval-1") == continuation
 
-        row = await alice._backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            ),
-        )
-        assert row is not None
-        stored = json.loads(str(row["context_json"]))
+        stored = await self.stored_context(alice)
         del stored["origin"]["acts_for_requester"]
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(stored), "approval-1"),
-            ),
-        )
+        await self.store_context(alice, stored)
         restored = await alice.approvals.approval_continuation("approval-1")
         assert restored is not None
         assert restored.origin == replace(continuation.origin, acts_for_requester=False)
+
+    async def test_continuation_without_a_turn_id_loads_with_its_approval_id(self, alice: PrincipalStore) -> None:
+        """A continuation keeps its paused turn's ID; one stored before continuations kept it reads its approval's ID."""
+        await self.admit_sources(alice)
+        continuation = self.continuation()
+        await paused_for_approval(alice, continuation)
+        assert await alice.approvals.approval_continuation("approval-1") == continuation
+
+        stored = await self.stored_context(alice)
+        del stored["turn_id"]
+        await self.store_context(alice, stored)
+        assert await alice.approvals.approval_continuation("approval-1") == replace(continuation, turn_id="approval-1")
 
     async def test_continuation_loads_the_execution_identity_its_run_paused_under(
         self,
@@ -6582,21 +6597,9 @@ class TestApprovalContinuations:
         assert restored is not None
         assert restored.execution_identity == continuation.execution_identity
 
-        row = await alice._backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
-                ("approval-1",),
-            ),
-        )
-        assert row is not None
-        stored = json.loads(str(row["context_json"]))
+        stored = await self.stored_context(alice)
         stored["execution_identity"]["agent_name"] = ""
-        await alice._backend.write(
-            lambda transaction: transaction.execute(
-                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
-                (json.dumps(stored), "approval-1"),
-            ),
-        )
+        await self.store_context(alice, stored)
         with pytest.raises(
             TypeError,
             match=r"^Approval continuation execution_identity\.agent_name must be a non-empty string$",
@@ -7954,7 +7957,9 @@ class TestApprovalContinuations:
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """Permanent-unavailability cleanup requires its durable terminal notice, and answers nothing."""
+        """Permanent-unavailability cleanup requires its durable terminal notice, answers nothing, and ends the turn."""
+        ended: list[EndedApproval] = []
+        stop = journal_store.approval_signals.follow_ended_approvals(ended.append)
         await self.admit_sources(alice)
         pending = TurnRecord.create(["$source-1", "$source-2"], completed=False)
         await journal_store.backend.write(
@@ -8017,6 +8022,12 @@ class TestApprovalContinuations:
         record = await journal_store.backend.read(lambda tx: turn_rows.get_turn_record(tx, "agent", "$source-1"))
         assert record is not None
         assert not record.completed
+        # The approval's end names the paused turn and the state the discard left its reply in.
+        await asyncio.sleep(0)
+        stop()
+        assert [(approval.continuation.turn_id, approval.reply_state) for approval in ended] == [
+            ("turn-paused", ReplyState.FAILED),
+        ]
 
     async def test_unavailable_cleanup_and_router_departure_share_membership_first_lock_order(
         self,

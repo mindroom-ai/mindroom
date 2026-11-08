@@ -149,6 +149,7 @@ if TYPE_CHECKING:
 
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
+    from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.hooks import HookContextSupport
 
     from .config.main import Config
@@ -1427,6 +1428,14 @@ class _MultiAgentOrchestrator:
         self._journal_held = True
         # Every bot follows the paused replies of its principal from these on.
         await store.load_approval_signals()
+        # Each paused turn ends as its approval does: the approval's end is the one place every paused turn ends.
+        store.approval_signals.follow_ended_approvals(self._end_paused_turn)
+
+    def _end_paused_turn(self, ended: EndedApproval) -> None:
+        """End a paused turn through the bot of its entity, or through the router's for an entity now gone."""
+        bot = self.agent_bots.get(ended.continuation.entity_name) or self.agent_bots.get(ROUTER_AGENT_NAME)
+        if bot is not None:
+            bot.end_paused_turn(ended)
 
     async def event_journal_still_usable(self) -> bool:
         """Return whether this runtime still holds the journal it claimed and can still use it; true before it claims one."""

@@ -437,7 +437,10 @@ async def test_a_runtime_refuses_a_journal_another_runtime_holds(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follows_them(tmp_path: Path) -> None:
-    """The runtime that holds the journal loads its approval signals as it binds, before it creates a bot."""
+    """The runtime that holds the journal loads its approval signals as it binds, before it creates a bot.
+
+    It also follows every ended approval from then on, so each paused turn ends as its approval does.
+    """
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
@@ -453,6 +456,7 @@ async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follo
         await orchestrator._bind_event_journal()
 
     journal.load_approval_signals.assert_awaited_once_with()
+    journal.approval_signals.follow_ended_approvals.assert_called_once_with(orchestrator._end_paused_turn)
     assert orchestrator.agent_bots == {}
 
 

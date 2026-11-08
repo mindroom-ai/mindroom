@@ -11,6 +11,9 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
@@ -24,6 +27,7 @@ from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.room_thread_modes import clear_room_thread_mode_override, set_room_thread_mode_override
 from mindroom.router.duties import RouterDuties, RouterDutiesDeps
+from mindroom.runtime_shutdown import ShutdownBudget
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1152,3 +1156,64 @@ async def test_command_reports_a_failed_publication(room_state: RoomState, comma
         )
         assert reply.startswith("⚠️")
         assert "failed" in reply
+
+
+async def _hang_a_room_state_retry(duties: RouterDuties, state: RoomState) -> None:
+    """Fail one trigger's reconcile, so it schedules a retry, and hang that retry on its first write."""
+    _, _, ids, _, client = state
+    trigger_done = False
+
+    async def refuse_then_hang(*_args: object, **_kwargs: object) -> nio.RoomPutStateError:
+        if trigger_done:
+            await asyncio.Future()
+        return nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+
+    client.room_put_state.side_effect = refuse_then_hang
+    await duties.member_event(client.rooms[ROOM_ID], _membership_event(ids["agent2"].full_id, "join", "leave"))
+    trigger_done = True
+
+
+async def _hang_a_membership_refresh(duties: RouterDuties, orchestrator: Any) -> asyncio.Task[None]:  # noqa: ANN401
+    """Start a membership refresh that never finishes and return the sync frame waiting for it."""
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = True
+    orchestrator.agent_reply_membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+    started = asyncio.Event()
+
+    async def hung_refresh() -> None:
+        started.set()
+        await asyncio.Future()
+
+    orchestrator.refresh_agent_reply_memberships = hung_refresh
+    frame = asyncio.create_task(duties.refresh_memberships_if_needed())
+    await started.wait()
+    return frame
+
+
+@pytest.mark.asyncio
+async def test_the_router_owns_its_refresh_and_room_state_retry(room_state: RoomState) -> None:
+    """The router's runtime owns both background tasks, so its shutdown drain covers them."""
+    duties = _router_duties(room_state)
+    router = duties.deps.runtime
+    await _hang_a_room_state_retry(duties, room_state)
+    assert not await wait_for_background_tasks(timeout=0, owner=router)
+    frame = await _hang_a_membership_refresh(duties, router.orchestrator)
+    assert not await wait_for_background_tasks(timeout=0, owner=router)
+    assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_router_stop_cancels_its_refresh_and_room_state_retry_without_waiting(room_state: RoomState) -> None:
+    """A stopping router discards both, so they leave its stop budget to the replies it drains."""
+    config, paths, ids, _, client = room_state
+    user = AgentMatrixUser(ROUTER_AGENT_NAME, ids[ROUTER_AGENT_NAME].full_id, "Router", TEST_PASSWORD)
+    bot = install_runtime_journal_support(make_test_agent_bot(user, config=config, runtime_paths=paths))
+    bot.client = client
+    duties = bot._router
+    assert duties is not None
+    await _hang_a_room_state_retry(duties, room_state)
+    frame = await _hang_a_membership_refresh(duties, bot.orchestrator)
+    budget = bot._sync_shutdown_budget = ShutdownBudget.start(5.0)
+    await bot.prepare_for_sync_shutdown()
+    assert budget.remaining_seconds() > 4
+    assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)

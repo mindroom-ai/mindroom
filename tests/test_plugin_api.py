@@ -48,6 +48,10 @@ _EXPORTS = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TURN_ENDED",
+    "EVENT_TURN_PAUSED",
+    "EVENT_TURN_RESUMED",
+    "EVENT_TURN_STARTED",
     "PLUGIN_API_VERSION",
     "ROUTER_AGENT_NAME",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
@@ -117,7 +121,9 @@ _EXPORTS = [
     "Toolkit",
     "TranscriptLine",
     "TurnIntent",
+    "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
     "atlassian_connection_oauth_provider",
     "automation",
@@ -282,6 +288,7 @@ _SIGNATURES = {
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
     "TranscriptLine": "(role, sender, display_name, text)",
+    "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, *, {_HOOK_HELPERS})",
     "TurnOrigin": (
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
         "intent, source_kind, trust, acts_for_requester)"
@@ -383,6 +390,7 @@ _ENUM_MEMBERS = {
         "TRUSTED_INTERNAL_RELAY",
         "JOB_FOLLOW_UP",
     ],
+    "TurnOutcome": ["COMPLETED", "CANCELLED", "FAILED"],
     "TurnTrust": ["EXTERNAL", "TRUSTED_INTERNAL", "TRUSTED_USER_RELAY"],
 }
 
@@ -504,6 +512,10 @@ _CONSTANTS = {
     "EVENT_TOOL_AFTER_CALL": "tool:after_call",
     "EVENT_TOOL_BEFORE_CALL": "tool:before_call",
     "EVENT_TOOL_ENVIRONMENT": "tool:environment",
+    "EVENT_TURN_ENDED": "turn:ended",
+    "EVENT_TURN_PAUSED": "turn:paused",
+    "EVENT_TURN_RESUMED": "turn:resumed",
+    "EVENT_TURN_STARTED": "turn:started",
     "ROUTER_AGENT_NAME": "router",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND": "trusted_internal_relay",
     "VOICE_PREFIX": "🎤 ",
@@ -560,7 +572,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 10), "8745629c4e4bec5898fcc8306fdcbb5e52d2da4c5ccd157bd03782c821417469")
+_PINNED_VERSION = ((1, 11), "c8c428d1324142acf9ea6e137fec491c9465395975190c4472a30ac8b3968ba8")
 
 
 def _is_enum(obj: object) -> bool:

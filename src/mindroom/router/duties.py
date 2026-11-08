@@ -81,6 +81,15 @@ class RouterDuties:
         except Exception as e:
             self.deps.logger.warning("orphaned_bot_cleanup_failed", error=str(e))
 
+    def stopping(self) -> None:
+        """Cancel the membership refresh and room state retries, which a stopping router discards, without waiting.
+
+        The next router redoes both, and waiting for them would spend the stop budget its replies need to finish.
+        """
+        self._membership_sync.cancel_refresh()
+        for task in self._room_state_retries.values():
+            task.cancel()
+
     async def room_joined(self, room_id: str) -> None:
         """Restore pending config confirmations in a room the router joined, then welcome an empty room."""
         client = self.deps.runtime.client
@@ -123,7 +132,7 @@ class RouterDuties:
             self._room_state_reruns.add(room_id)
 
     async def _retry_room_state(self, room_id: str) -> None:
-        """Reconcile once, and once more for each trigger that failed meanwhile; the retry's own failure ends it."""
+        """Reconcile once, and once more if any trigger failed meanwhile; the retry's own failure ends it."""
         while True:
             self._room_state_reruns.discard(room_id)
             await self._reconcile_room_state(room_id)
