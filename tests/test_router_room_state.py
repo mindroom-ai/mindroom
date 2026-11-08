@@ -895,6 +895,10 @@ async def test_router_invite_join_after_agent_publishes_on_next_frame(room_state
     await bot._on_ingestion_frame_completion()
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
     assert _accounts(room_state) == sorted([router_id, ids["agent1"].full_id])
+    # The frame publishes a join once; later frames reconcile nothing until another join.
+    client.room_get_state_event.reset_mock()
+    await bot._on_ingestion_frame_completion()
+    client.room_get_state_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio

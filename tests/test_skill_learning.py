@@ -44,7 +44,6 @@ from mindroom.llm.provider import (
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.assistant_turn import stamp_model
@@ -79,6 +78,7 @@ from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
+from tests.tool_job_helpers import NewerMessageWaits
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -2002,7 +2002,7 @@ async def test_a_review_runs_in_a_fresh_context(tmp_path: Path, monkeypatch: pyt
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     notice = "Pause tool use and summarize before handling the newer message."
     install_model_providers(monkeypatch, {"default": model})
-    with queued_message_signal_context(_PendingMessage()):
+    with queued_message_signal_context(NewerMessageWaits()):
         await _review_due(config, paths)
     assert len(model.requests) == 2
     assert all(notice not in content for request in model.requests for content in request)
@@ -2032,17 +2032,6 @@ async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -
         await _review(config, paths, captured=unforkable)
     assert load.call_args.args[2] == "thread"
     assert len(replay.requests) == 1
-
-
-@dataclass
-class _PendingMessage:
-    """A response's queued-message state with one newer human message waiting."""
-
-    def has_pending_human_messages(self) -> bool:
-        return True
-
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$pending", None),)
 
 
 @pytest.mark.asyncio

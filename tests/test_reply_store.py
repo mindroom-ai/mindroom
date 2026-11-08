@@ -1615,7 +1615,7 @@ async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_
 
 
 @pytest.mark.parametrize("late_order", [8, 9])
-async def test_a_stop_older_than_the_one_the_reply_took_reaches_none_of_its_jobs(
+async def test_a_stop_older_than_or_the_same_as_the_one_the_reply_took_reaches_none_of_its_jobs(
     journal_store: EventJournalStore,
     late_order: int,
 ) -> None:
