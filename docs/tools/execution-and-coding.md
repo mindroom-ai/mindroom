@@ -203,13 +203,12 @@ An agent has terminals only when it also has [`shell`] with `run_shell_command` 
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
 People who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](../deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
-The shell expands no `!` history and reads no history file or key bindings, so `!!` is typed as written.
+A shell started inside a terminal, such as `bash` or `nix-shell`, keeps `terminal_run` refusing until it exits, so the agent types into it with `terminal_send`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
-The [approval rules](../tool-approval.md) for `run_shell_command` also judge what the agent types.
-`terminal_open` asks whenever those rules may ask, `terminal_run` is judged as its command, and `terminal_send` as the command its Enter runs, including what anyone typed on that line before.
-When the line can't be known, such as after arrow keys, Tab, or keys typed while a command runs, for keys that go on after an Enter, or when the agent types through `mindroom-agent` in [minimal mode](agent-cli.md), the rules ask whenever they may.
-Keys or a command approved before someone typed in the terminal are not typed, and the agent reads the terminal and tries again.
+An agent types in terminals only while its `run_shell_command` calls never ask for approval: no [approval rule](../tool-approval.md) that matches `run_shell_command` may ask, including an approval script, and neither may `tool_approval.default` when no rule matches.
+Otherwise `terminal_open`, `terminal_run`, and `terminal_send` refuse, however the agent calls them, and the agent runs its commands with `run_shell_command`; `terminal_read` and `terminal_list` still work, and people still type in the terminals.
+The rules can't judge typing into a terminal, because what a line runs there depends on what ran in it before, such as aliases, functions, shell options, and programs reading the keys.
 
 ```yaml
 agents:

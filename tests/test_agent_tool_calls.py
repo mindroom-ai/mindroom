@@ -338,37 +338,6 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_cli_call_pauses_and_resumes_with_the_arguments_it_sent_whatever_its_function_prepares(
-    tmp_path: Path,
-) -> None:
-    """Only the model loop stores what a function's preparation adds, so an approved CLI call resumes as it was sent."""
-    seen = []
-
-    def action(value: int) -> int:
-        seen.append(value)
-        return value
-
-    gated = _function(action, gate=ToolGate.POLICY)
-    prepared = replace(gated.functions[0], prepare_approval=lambda arguments: {**arguments, "line": None})
-    catalog = await _catalog(tmp_path, [replace(gated, functions=(prepared,))])
-    binding = await catalog.bind(ToolKey("actions", "action"))
-    [waiting] = await _events(catalog, "actions", "action", {"value": 3})
-    assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
-    assert waiting.requirement.tool_execution.tool_args == {"value": 3}
-    waiting.requirement.confirm()
-    resumed = [
-        event
-        async for event in agent_tool_calls.execute_agent_tool_call(
-            binding,
-            "inner-id",
-            {"value": 3},
-            requirement=waiting.requirement,
-        )
-    ]
-    assert (seen, resumed[-1].kind) == ([3], "completed")
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("gate", "paused"),
     [

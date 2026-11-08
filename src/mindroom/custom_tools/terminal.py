@@ -3,7 +3,10 @@
 They are the terminals people see for the agent's workspace as this turn resolves it (``agent_terminals``), in the
 worker where its shell commands run, and each function types and reads as a viewer attached for the call. An agent
 whose shell runs in the primary process, or offers no ``run_shell_command``, has none and is offered no function.
-How the shell's approval rules judge the typing is in ``mindroom.tools.terminal``.
+
+🔒 An agent types into them only while its ``run_shell_command`` calls never ask for approval: what text typed into a
+persistent shell runs depends on what ran there before (aliases, functions, a program reading the keys, history, shell
+options), so no rule can judge it from the text. Any other agent's typing functions refuse; reading and listing stay.
 """
 
 from __future__ import annotations
@@ -11,26 +14,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.terminal.client import TerminalDetachedError
-from mindroom.terminal.lines import LineState, entered_command, keys_to_text, line_state, prompt_after, run_text
+from mindroom.terminal.lines import keys_to_text, prompt_after
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,  # noqa: TC001  # resolved by tool contract introspection
 )
 
 if TYPE_CHECKING:
-    from typing import Any
-
     from mindroom.terminal.client import TerminalStream, WorkerTerminals
-    from mindroom.tool_system.tool_function import ToolFunction
 
 _COLS, _ROWS = 120, 32
 _DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -43,15 +43,17 @@ _OUTPUT_SECONDS = 0.5
 # The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
 _MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
-_LINE_CHANGED = (
-    "Error: the terminal's line changed after these keys were checked (someone or another call typed in it); nothing "
-    "was typed. Read the terminal, then send them again."
+_RESTRICTED = (
+    "Error: this agent can't type in terminals, because its run_shell_command calls may ask for approval; run the "
+    "command with run_shell_command instead. terminal_read and terminal_list still work."
 )
 _NOT_AT_PROMPT = (
-    "Error: the terminal changed after this command was checked, or its shell is not waiting at an empty prompt (a "
-    "command is still running, or its line holds typing); nothing was typed. Read the terminal, send keys such as "
-    "<ctrl-c> with terminal_send if needed, then run it again."
+    "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, or its line holds "
+    "typing); nothing was typed. Read the terminal, send keys such as <ctrl-c> with terminal_send if needed, then run "
+    "it again."
 )
+# Keys that edit the line, complete, interrupt or end input, which a command line never holds.
+_KEYS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _EXITED = "Error: the terminal's shell has exited; open another with terminal_open."
 _DETACHED = "Error: the connection to the terminal ended; read it again before typing more."
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
@@ -147,26 +149,9 @@ class TerminalTools(Toolkit):
             if runtime_config is None or identity is None or agent_name is None
             else agent_terminals(agent_name, runtime_config, runtime_paths, identity, create=True)
         )
+        self._restricted = runtime_config is None or tool_may_require_approval(runtime_config, SHELL_FUNCTION)
         functions = (self.terminal_open, self.terminal_run, self.terminal_send, self.terminal_read, self.terminal_list)
         super().__init__(tools=functions if self._terminals is not None else ())
-
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Hide a typing function's ``line`` from the model, which only preparation before its approval fills."""
-        if function.name not in ("terminal_run", "terminal_send"):
-            return function
-        properties = {name: schema for name, schema in function.parameters["properties"].items() if name != "line"}
-        entrypoint = self.terminal_run if function.name == "terminal_run" else self.terminal_send
-        return replace(
-            function,
-            parameters=closed_parameters(entrypoint, {**function.parameters, "properties": properties}),
-            prepare_approval=self._with_line,
-        )
-
-    def _with_line(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Return ``arguments`` with the terminal's line as the call is judged and then typed against."""
-        session_id = arguments.get("session_id")
-        state = line_state(self._workspace_terminals.scope, session_id) if isinstance(session_id, str) else None
-        return {**arguments, "line": None if state is None else asdict(state)}
 
     @property
     def _workspace_terminals(self) -> WorkerTerminals:
@@ -183,6 +168,8 @@ class TerminalTools(Toolkit):
             The new terminal's session ID, or why it could not open.
 
         """
+        if self._restricted:
+            return _RESTRICTED
         try:
             info = await self._workspace_terminals.open(cols=_COLS, rows=_ROWS, cwd=cwd or None)
         except TerminalError as error:
@@ -194,7 +181,6 @@ class TerminalTools(Toolkit):
         session_id: str,
         command: str,
         timeout_s: float = _DEFAULT_TIMEOUT_SECONDS,
-        line: LineState | None = None,
     ) -> str:
         """Type one command line into a terminal, wait for its prompt, and return what it printed and its exit status.
 
@@ -206,15 +192,16 @@ class TerminalTools(Toolkit):
             session_id: The terminal, from terminal_open or terminal_list.
             command: One command line; join several with && or ;.
             timeout_s: Seconds to wait for the prompt, 30 by default.
-            line: Filled by MindRoom, never by the caller.
 
         Returns:
             The command's output and exit status, or what it printed so far while it still runs.
 
         """
-        text = run_text(command)
-        # One line, so the run ends at the prompt after it; text, so its judgment is what it runs.
-        if "\n" in text or "\r" in text[:-1] or entered_command("", text) is None:
+        if self._restricted:
+            return _RESTRICTED
+        command = command.strip("\n")
+        # One line of text, so the run ends at the prompt after it.
+        if _KEYS.search(command):
             return (
                 "Error: a command is one line of plain text; join commands with && or ;, and type keys such as "
                 "<ctrl-c> or <tab> with terminal_send."
@@ -224,7 +211,7 @@ class TerminalTools(Toolkit):
             async with self._workspace_terminals.attach(session_id) as stream:
                 if await _ended(stream):
                     return _EXITED
-                before = await stream.send_input(text, judged=line, empty_line=True)
+                before = await stream.send_input(f"{command}\r", empty_line=True)
                 output, cut, finished, exit_status = await _output(stream, timeout, after=before)
         except TerminalError as error:
             return _NOT_AT_PROMPT if error.status_code == 409 else _refused(error, session_id)
@@ -241,7 +228,7 @@ class TerminalTools(Toolkit):
             status = "The terminal's shell has exited."
         return f"{shown}\n[{status}]" if shown else f"[{status}]"
 
-    async def terminal_send(self, session_id: str, keys: str, line: LineState | None = None) -> str:
+    async def terminal_send(self, session_id: str, keys: str) -> str:
         """Type keys into a terminal without waiting for a command: an answer to a prompt, or keys such as <ctrl-c>.
 
         Text is typed as written; <enter>, <tab>, <esc>, <backspace>, <up>, <down>, <left>, <right>, <home>, <end>,
@@ -251,12 +238,13 @@ class TerminalTools(Toolkit):
         Args:
             session_id: The terminal, from terminal_open or terminal_list.
             keys: The text and keys to type.
-            line: Filled by MindRoom, never by the caller.
 
         Returns:
             What the terminal printed right after, or why the keys were not typed.
 
         """
+        if self._restricted:
+            return _RESTRICTED
         text = keys_to_text(keys)
         if "\x03" in text.rstrip("\x03"):
             return "Error: send <ctrl-c> on its own, then the keys after it; the terminal may drop keys typed with it."
@@ -264,10 +252,10 @@ class TerminalTools(Toolkit):
             async with self._workspace_terminals.attach(session_id) as stream:
                 if await _ended(stream):
                     return _EXITED
-                await stream.send_input(text, judged=line)
+                await stream.send_input(text)
                 output, _, ended, _ = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
-            return _LINE_CHANGED if error.status_code == 409 else _refused(error, session_id)
+            return _refused(error, session_id)
         except TerminalDetachedError:
             return _DETACHED
         shown = _plain_text(output).strip()[-_MAX_TEXT_CHARS:]

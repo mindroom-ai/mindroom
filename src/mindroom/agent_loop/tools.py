@@ -219,8 +219,7 @@ def plan_tool_batch(
     ``max_tool_calls_per_turn`` is refused with a limit error instead of running, and each call of a tool that
     ``failing_tools`` says failed in ``MAX_CONSECUTIVE_TOOL_FAILURES`` batches since its last success is refused with
     the tool's last error, logged, and named in the batch's ``refused_for_failures``. An admitted call whose function's
-    gate pauses its run is planned paused, with the flags its stored execution carries, and a gated call stores the
-    arguments its function's ``prepare_approval`` returns.
+    gate pauses its run is planned paused, with the flags its stored execution carries.
     """
     refused_for_failures: dict[str, None] = {}
     calls: list[PlannedCall | RefusedCall] = []
@@ -256,8 +255,6 @@ def plan_tool_batch(
             limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
             calls.append(_refused(call_id, function.name, limit_text, arguments, counts=True))
             continue
-        if function.gate is not None and function.prepare_approval is not None and arguments is not None:
-            arguments = function.prepare_approval(arguments)
         calls.append(PlannedCall(function=function, execution=function.planned_execution(call_id, arguments)))
     return ToolBatch(calls=tuple(calls), refused_for_failures=tuple(refused_for_failures))
 
