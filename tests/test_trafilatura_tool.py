@@ -6,7 +6,6 @@ import gzip
 import json
 import socket
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -366,17 +365,23 @@ def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.Monk
 
 def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """A download that keeps trickling ends at the call's time limit, and no later download starts."""
+    elapsed = [0.0]
     monkeypatch.setattr(compat, "CALL_SECONDS", 0.3)
-    # Each download's own deadline stays well past the call's limit, and short enough to fail in seconds without it.
-    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 10)
-    requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=TrickleBody()))
+    # Each download's own deadline lies past the test's timeout, so only the call's limit can end the trickle.
+    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 3600)
+
+    def trickle(_request: httpx.Request) -> httpx.Response:
+        elapsed[0] = compat.CALL_SECONDS
+        return httpx.Response(200, stream=TrickleBody())
+
+    # The call's clock spends the whole limit once the first download starts, which still trickles for the 0.3 s it
+    # was given, so how fast the machine runs changes nothing.
+    monkeypatch.setattr(compat, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
+    requests = serve(monkeypatch, trickle)
     urls = [f"https://example.com/{index}" for index in range(3)]
-    toolkit = trafilatura_tools()()
-    started = time.monotonic()
 
-    batch = json.loads(toolkit.extract_batch(urls))
+    batch = json.loads(trafilatura_tools()().extract_batch(urls))
 
-    assert time.monotonic() - started < 5
     assert batch["failed_urls"] == urls
     assert batch["results"] == {}
     assert len(requests) == 1
