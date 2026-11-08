@@ -99,14 +99,7 @@ logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
 # Paths a Matrix web client calls from its own origin with a bearer token and no cookies, and the paths under them.
 _CALL_TRANSCRIPTS_PATH = "/api/call-transcripts"
-_CLIENT_ORIGIN_PATHS = (
-    "/api/computers",
-    "/api/client-sessions",
-    "/api/plugins",
-    _CALL_TRANSCRIPTS_PATH,
-    "/api/rooms",
-    "/api/workspaces",
-)
+_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins", _CALL_TRANSCRIPTS_PATH, "/api/rooms")
 # The trailing slash keeps a sibling such as /api/pluginsX out.
 _CLIENT_ORIGIN_PREFIXES = tuple(f"{path}/" for path in _CLIENT_ORIGIN_PATHS)
 _IOS_APP_ORIGIN = "capacitor://localhost"

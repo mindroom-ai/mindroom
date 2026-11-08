@@ -16,10 +16,11 @@ What a person may do there follows the agent's tools, as its turns build them wi
 | Access | When |
 |--------|------|
 | `read` | The agent has a tool that takes local file paths or runs code, such as `file`, `coding`, `shell`, or `python` |
-| `write` | One of those tools can change files, and the person may post messages in the room |
+| `write` | One of those tools can change files in the workspace, and the person may post messages in the room |
 
 A tool can change files when the agent's settings leave on one of its writing functions, such as `save_file` or `replace_file_chunk` of `file` or `write_file` or `edit_file` of `coding`, or when it runs code, as `shell`, `python`, and `script` do.
 So `file` with `enable_save_file: false` and `enable_replace_file_chunk: false` gives only `read`, and a person whom the room's power levels keep from posting may read but not change anything.
+A tool changes files in the workspace where it runs in the primary process, in a dedicated Docker or Kubernetes worker, or on a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data); on a `static_runner` that sees only its own storage it changes that storage instead, so it gives only `read`.
 An agent with none of these tools opens no workspace.
 The agent sees a saved file on its next tool call; nothing needs restarting.
 
@@ -44,17 +45,17 @@ A folder that keeps one of the top-level credentials, such as `.config`, `.claud
 ## Routes
 
 Clients call these routes with a client session, `Authorization: Bearer <session_token>` from `POST /api/client-sessions` (see [Plugin HTTP routes](plugins.md#http-routes)), from an origin `MINDROOM_COMPUTER_ALLOWED_ORIGINS` lists.
-Each route below is under `/api/workspaces/v1/rooms/{room_id}`, and `{agent_user_id}` is the agent's Matrix user ID.
+Each route below is under `/api/rooms/{room_id}`, and `{agent_user_id}` is the agent's Matrix user ID.
 
 | Route | Answer |
 |-------|--------|
-| `GET` (the prefix itself) | `{"workspaces": [{"agent_user_id", "display_name", "private", "files"}]}`, the workspaces the caller may open, in config order; `files` is `read` or `write` |
-| `GET /{agent_user_id}/folder?path=<folder>` | `{"path", "entries", "truncated"}`: the folder's entries, folders and links to folders first, then by name |
-| `GET /{agent_user_id}/file?path=<file>` | `{"path", "encoding", "content", "size", "mtime", "etag"}` |
-| `PUT /{agent_user_id}/file` with `{"path", "content", "encoding", "etag"}` | `{"etag", "size", "mtime"}` of the saved file |
-| `POST /{agent_user_id}/folder` with `{"path"}` | 204; the folder is made with any folders above it |
-| `POST /{agent_user_id}/move` with `{"path", "to"}` | 204; a link moves as a link |
-| `DELETE /{agent_user_id}/entry?path=<path>` | 204; a folder goes with everything in it, and a link without what it leads to |
+| `GET /workspaces` | `{"workspaces": [{"agent_user_id", "display_name", "private", "files"}]}`, the workspaces the caller may open, in config order; `files` is `read` or `write` |
+| `GET /agents/{agent_user_id}/workspace/folder?path=<folder>` | `{"path", "entries", "truncated"}`: the folder's entries, folders and links to folders first, then by name |
+| `GET /agents/{agent_user_id}/workspace/file?path=<file>` | `{"path", "encoding", "content", "size", "mtime", "etag"}` |
+| `PUT /agents/{agent_user_id}/workspace/file` with `{"path", "content", "encoding", "etag"}` | `{"etag", "size", "mtime"}` of the saved file |
+| `POST /agents/{agent_user_id}/workspace/folder` with `{"path"}` | 204; the folder is made with any folders above it |
+| `POST /agents/{agent_user_id}/workspace/move` with `{"path", "to"}` | 204; a link moves as a link |
+| `DELETE /agents/{agent_user_id}/workspace/entry?path=<path>` | 204; a folder goes with everything in it, and a link without what it leads to |
 
 An entry has `name`, `path`, `kind` (`file`, `folder`, or `link`), `size` (0 for a folder or link), `mtime` in milliseconds since the epoch, and for a link `target`, which is `file` or `folder`, or null when it leads outside, to a hidden credential, or nowhere.
 A folder lists at most 5000 entries, and `truncated` says when there were more.
@@ -70,3 +71,11 @@ Making a folder where something already is, or moving onto a taken name, answers
 A missing, unknown, or expired session answers 401.
 A person who may not use the agent there, or a workspace the agent's tools don't reach, answers 403, as does any change from someone with only `read`.
 While MindRoom can't yet decide whether the person may use the agent, the routes answer 503 as [`RoomReader.agent()`](plugins.md#http-routes) does.
+
+## Following changes
+
+The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` sends `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
+It leaves out Git's internals, `node_modules`, `.venv`, caches, editor swap files, MindRoom's temporary save files, and the hidden credentials, and it follows links only while they stay inside the workspace.
+It signs in as [plugin websocket routes](plugins.md#websocket-routes) do, and anyone who may open the workspace, `read` or `write`, may follow it.
+It checks again every 15 seconds, under the config served then, and closes with 1008 once the workspace is no longer open to the caller or is no longer the one it followed, as after a config save makes the agent private, and with 1013 while MindRoom can't tell; the client then connects again.
+In a workspace with more than 10,000 folders, changes in the folders past that are not reported.

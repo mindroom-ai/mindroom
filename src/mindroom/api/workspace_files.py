@@ -1,9 +1,10 @@
-"""Chat clients' routes to the workspaces of a room's agents: list them, and read and change their files.
+"""Chat clients' routes to the workspaces of a room's agents: list them, read and change their files, follow changes.
 
 Every route signs its caller in with a client session and checks them through ``RoomReader`` on each request, so a
 workspace opens only while the room and the agent's access rules let the caller use that agent there. The agent's user
 ID names the workspace; its folder is the one a turn of that agent for this caller in this room uses, never a path
-from the request, and file paths are relative to it (see ``mindroom.workspace_files.operations``).
+from the request, and file paths are relative to it (see ``mindroom.workspace_files.operations``). The change stream
+rechecks the caller as a terminal's stream does.
 """
 
 from __future__ import annotations
@@ -11,25 +12,37 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
-from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
+from mindroom.plugin_http import (
+    AgentWorkspace,
+    ClientUser,
+    RoomReader,
+    client_stream,
+    require_room_reader,
+    stream_room_reader,
+)
 from mindroom.room_agent_access import room_execution_identity
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.workspace_files import operations
+from mindroom.workspace_files.watch import workspace_changes
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-router = APIRouter(prefix="/api/workspaces/v1/rooms/{room_id}", tags=["workspace-files"])
+router = APIRouter(prefix="/api/rooms/{room_id}", tags=["workspace-files"])
 
 _Room = Annotated[RoomReader, Depends(require_room_reader)]
+# As often as a terminal's stream rechecks its viewer, and each check as long.
+_RECHECK_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -88,7 +101,7 @@ async def _made_root(request: Request, room: RoomReader, room_id: str, agent_use
     return workspace.root
 
 
-@router.get("")
+@router.get("/workspaces")
 async def list_workspaces(room: _Room) -> dict[str, list[OpenWorkspace]]:
     """Return the workspaces the caller may open in the room, in config order, with whether they may change files."""
     return {
@@ -100,21 +113,21 @@ async def list_workspaces(room: _Room) -> dict[str, list[OpenWorkspace]]:
     }
 
 
-@router.get("/{agent_user_id}/folder")
+@router.get("/agents/{agent_user_id}/workspace/folder")
 async def list_folder(room: _Room, agent_user_id: str, path: str = "") -> operations.Folder:
     """Return one folder's entries, folders first; the root lists empty before the agent's first turn."""
     workspace = await _opened(room, agent_user_id)
     return await asyncio.to_thread(operations.list_folder, workspace.root, path)
 
 
-@router.get("/{agent_user_id}/file")
+@router.get("/agents/{agent_user_id}/workspace/file")
 async def read_file(room: _Room, agent_user_id: str, path: str) -> operations.FileContent:
     """Return a file's content with its etag, answering 413 for one over 5 MiB."""
     workspace = await _opened(room, agent_user_id)
     return await asyncio.to_thread(operations.read_file, workspace.root, path)
 
 
-@router.put("/{agent_user_id}/file", response_model=operations.Saved)
+@router.put("/agents/{agent_user_id}/workspace/file", response_model=operations.Saved)
 async def save_file(
     request: Request,
     room: _Room,
@@ -138,22 +151,83 @@ async def save_file(
         return JSONResponse({"detail": str(stale), "etag": stale.etag}, status_code=409)
 
 
-@router.post("/{agent_user_id}/folder", status_code=204)
+@router.post("/agents/{agent_user_id}/workspace/folder", status_code=204)
 async def make_folder(request: Request, room: _Room, room_id: str, agent_user_id: str, body: _Path) -> None:
     """Make a folder and the folders above it; 409 when something is already there."""
     root = await _made_root(request, room, room_id, agent_user_id)
     await asyncio.to_thread(operations.make_folder, root, body.path)
 
 
-@router.post("/{agent_user_id}/move", status_code=204)
+@router.post("/agents/{agent_user_id}/workspace/move", status_code=204)
 async def move(room: _Room, agent_user_id: str, body: _Move) -> None:
     """Move or rename a file, folder or link; 409 when ``to`` is taken."""
     workspace = await _writable(room, agent_user_id)
     await asyncio.to_thread(operations.move, workspace.root, body.path, body.to)
 
 
-@router.delete("/{agent_user_id}/entry", status_code=204)
+@router.delete("/agents/{agent_user_id}/workspace/entry", status_code=204)
 async def delete(room: _Room, agent_user_id: str, path: str) -> None:
     """Delete a file, a link, or a folder with everything in it."""
     workspace = await _writable(room, agent_user_id)
     await asyncio.to_thread(operations.delete, workspace.root, path)
+
+
+@router.websocket("/agents/{agent_user_id}/workspace/changes")
+async def follow_changes(websocket: WebSocket, room_id: str, agent_user_id: str) -> None:
+    """Send ``{"type": "changed", "paths": [...]}`` for each batch of changes in the workspace while it stays open.
+
+    It closes with 1008 once the workspace is no longer open to the caller or moved, and 1013 while that can't be told.
+    """
+    async with client_stream(websocket, room_id) as user:
+        try:
+            workspace = await _opened(await stream_room_reader(websocket, user, room_id), agent_user_id)
+            async with workspace_changes(workspace.root) as next_changes:
+                tasks = [
+                    asyncio.create_task(task)
+                    for task in (
+                        _send_changes(websocket, next_changes),
+                        _until_closed(websocket),
+                        _recheck(websocket, user, room_id, workspace),
+                    )
+                ]
+                try:
+                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        task.result()
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+        except HTTPException as error:
+            refused = error.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND)
+            # The client may be gone already.
+            with suppress(RuntimeError, WebSocketDisconnect):
+                await websocket.close(
+                    status.WS_1008_POLICY_VIOLATION if refused else status.WS_1013_TRY_AGAIN_LATER,
+                    error.detail,
+                )
+        except WebSocketDisconnect:
+            pass
+
+
+async def _send_changes(websocket: WebSocket, next_changes: Callable[[], Awaitable[list[str]]]) -> None:
+    while True:
+        await websocket.send_json({"type": "changed", "paths": await next_changes()})
+
+
+async def _until_closed(websocket: WebSocket) -> None:
+    """Return once the client closes the stream; what it sends is ignored."""
+    while (await websocket.receive())["type"] != "websocket.disconnect":
+        pass
+
+
+async def _recheck(websocket: WebSocket, user: ClientUser, room_id: str, workspace: AgentWorkspace) -> None:
+    while True:
+        await asyncio.sleep(_RECHECK_SECONDS)
+        try:
+            async with asyncio.timeout(_RECHECK_SECONDS):
+                current = await _opened(await stream_room_reader(websocket, user, room_id), workspace.user_id)
+        except TimeoutError:
+            raise HTTPException(503, "Agent access is unavailable; try again.") from None
+        if current.root != workspace.root:
+            raise HTTPException(403, "The agent's workspace moved for you.")
