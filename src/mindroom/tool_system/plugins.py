@@ -607,12 +607,11 @@ def candidate_tool_registry(
 
     with _PLUGIN_LOCK:
         plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
-        published = _PUBLISHED
         unresolved = {plugin.path for plugin in skipped}
         plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
         unavailable: dict[str, ToolMetadata] = {}
         for plugin_base, plugin_entry in plugin_bases:
-            loaded = published.plugins.get(plugin_base.root)
+            loaded = _PUBLISHED.plugins.get(plugin_base.root)
             if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
                 tools: Mapping[str, ToolMetadata] = loaded.tools
             else:

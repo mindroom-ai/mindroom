@@ -30,12 +30,9 @@ from tests.test_plugins import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.tool_system.plugin_imports import SkippedPlugin
     from mindroom.tool_system.plugins import ConfigPlugins
-    from mindroom.tool_system.registry import ToolRegistry
 
 
 def test_a_config_without_a_plugin_leaves_another_config_s_plugin_tools_buildable(tmp_path: Path) -> None:
@@ -279,17 +276,20 @@ class _SignalingLock:
         self._lock.release()
 
 
-@pytest.mark.parametrize("first", ["check", "load"])
+@pytest.mark.parametrize(("first", "second"), [("check", "load"), ("load", "check")])
 def test_a_candidate_check_and_a_live_load_of_a_package_plugin_never_interleave(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     first: str,
+    second: str,
 ) -> None:
     """Whichever starts first, the live load keeps the helper module the plugin's tools module imports by absolute name.
 
     The check reports the tools that helper module registers.
     """
     plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "import sys\nsys.modules['mindroom_test_candidate_probe'].entered()\n" + tools_path.read_text(),
@@ -306,36 +306,26 @@ def test_a_candidate_check_and_a_live_load_of_a_package_plugin_never_interleave(
             assert release.wait(10)
 
     probe = ModuleType("mindroom_test_candidate_probe")
-    probe.entered = lambda: None
-    monkeypatch.setitem(sys.modules, probe.__name__, probe)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}", encoding="utf-8")
-    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), config_path)
-    runtime_paths = runtime_paths_for(config)
     probe.entered = block_the_first_execution
+    monkeypatch.setitem(sys.modules, probe.__name__, probe)
     monkeypatch.setattr(plugins_module, "_PLUGIN_LOCK", _SignalingLock(plugins_module._PLUGIN_LOCK, settled))
-    checks: list[tuple[ToolRegistry, tuple[SkippedPlugin, ...]]] = []
-    operations: dict[str, Callable[[], object]] = {
-        "check": lambda: checks.append(candidate_tool_registry(config, runtime_paths)),
-        "load": lambda: refresh_plugins(config, runtime_paths),
-    }
-    [second] = set(operations) - {first}
+    operations = {"check": candidate_tool_registry, "load": refresh_plugins}
 
-    def run_second() -> None:
-        operations[second]()
+    def run_second() -> object:
+        result = operations[second](config, runtime_paths)
         settled.set()
+        return result
 
     with _forgetting_modules("demo_pkg"), ThreadPoolExecutor(max_workers=2) as pool:
-        running = {first: pool.submit(operations[first])}
+        first_run = pool.submit(operations[first], config, runtime_paths)
         assert entered.wait(10)
-        running[second] = pool.submit(run_second)
+        second_run = pool.submit(run_second)
         assert settled.wait(10)
         release.set()
-        for future in running.values():
-            future.result(timeout=10)
+        results = {first: first_run.result(timeout=10), second: second_run.result(timeout=10)}
         installed_helpers = sys.modules.get("demo_pkg.helpers")
 
-    [(tools, skipped)] = checks
+    tools, skipped = results["check"]
     assert installed_helpers is plugins_module._PUBLISHED.modules["demo_pkg.helpers"]
     assert not skipped
     assert "helper_tool" in tools
