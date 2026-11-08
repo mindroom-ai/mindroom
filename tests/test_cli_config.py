@@ -249,7 +249,6 @@ def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
         process_env={},
     )
     env_path = runtime_paths.env_path
-    env_path.write_text("", encoding="utf-8")
 
     config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=False)
     with patch.object(config_cli, "secret", return_value="sk-typed"):
@@ -943,10 +942,8 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0
-        # Rich folds long paths mid-token, so compare without any whitespace.
-        output = "".join(result.output.split())
         expected = f"{OWNER_MATRIX_USER_ID_ENV} in {tmp_path / '.env'} is not a valid Matrix user ID ('@Alice:selfhosted.example')"
-        assert "".join(expected.split()) in output
+        assert expected in result.output
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in target.read_text(encoding="utf-8")
 
     def test_init_names_the_environment_as_the_source_of_an_unusable_owner(
