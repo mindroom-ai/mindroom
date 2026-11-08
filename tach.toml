@@ -4107,7 +4107,7 @@ depends_on = [
     "mindroom.cancellation",
     "mindroom.matrix.client_session",
 ]
-visibility = ["mindroom.approval.execution", "mindroom.reply_turn.request"]
+visibility = ["mindroom.reply_turn.request"]
 
 [[modules]]
 path = "mindroom.matrix.client_session"

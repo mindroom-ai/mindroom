@@ -631,6 +631,56 @@ async def test_approval_settlement_uses_typed_status(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("quiet", [True, False], ids=["quiet", "visible"])
+async def test_an_empty_last_attempt_completes_an_approved_response_only_for_a_quiet_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    quiet: bool,
+) -> None:
+    """A quiet turn may end without an answer after its approval; any other turn's empty attempt fails it."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
+    identity = _identity("session")
+    continuation = approval_continuation(
+        approval_id="approval-empty",
+        run_id="run-saved",
+        session_id="session",
+        room_id="!room:example.org",
+        requester_id="@user:example.org",
+        state="claimed",
+    )
+
+    async def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        assert sinks.on_completed is not None
+        # An attempt that answered nothing completes without visible output, which the run reports as an error.
+        sinks.on_completed(CompletedAttempt(status=RunStatus.error, is_empty=True))
+        return
+        yield
+
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
+    settlement = _stream_continuation_turn(
+        _continuation_turn_context(continuation, model_name="default", metadata=None),
+        CollectedStreamPresentation(show_tool_calls=False),
+        prompt=continuation.request_body,
+        resume=TurnResume(CompletedAttempt()),
+        config=config,
+        runtime_paths=paths,
+        knowledge=None,
+        refresh_scheduler=None,
+        tool_trace_collector=[],
+        tool_context=turn_tool_context(config, paths, identity),
+        progress=None,
+        system_enrichment_items=(),
+        quiet=quiet,
+    )
+    if quiet:
+        assert await settlement == CompletedApprovalRun(response_text="", metadata_content={})
+    else:
+        with pytest.raises(RuntimeError, match="did not complete"):
+            await settlement
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["history", "projected_child"])
 async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: str) -> None:
     """Only newly completed parent tools can request another parent continuation attempt."""
