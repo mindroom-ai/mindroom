@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import shutil
+import time
 from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
@@ -571,6 +572,25 @@ async def test_viewer_is_told_the_loading_state_of_the_page_it_shows_only(monkey
         assert await framed(loading) == []
         shown = None
         assert await sent.message("loading") == _LOADED
+
+
+@pytest.mark.asyncio
+async def test_navigate_waits_for_a_slow_address_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Looking up an address is not the page's to answer, so a lookup slower than the input bound still navigates."""
+    monkeypatch.setattr("mindroom.worker_computer.screencast._INPUT_SECONDS", 0.05)
+
+    def slow_lookup(url: str, **_policy: bool) -> str:
+        time.sleep(0.3)
+        return url
+
+    monkeypatch.setattr("mindroom.worker_computer.screencast.validate_server_fetch_url", slow_lookup)
+    fake = _FakePage()
+    sent = _Viewer()
+    viewer = ScreencastViewer(lambda: cast("Page", fake), lambda: False, lambda: True, sent.send_text, sent.send_bytes)
+    async with _watching(viewer):
+        await asyncio.wait_for(fake.session.screencasting.wait(), _TIMEOUT)
+        await viewer.receive(json.dumps({"type": "navigate", "url": "https://slow.example/"}))
+    assert ("Page.navigate", {"url": "https://slow.example/"}) in fake.session.sent
 
 
 @pytest.mark.asyncio

@@ -294,6 +294,13 @@ class ScreencastViewer:
         cdp = self._cdp
         if cdp is None or not self._controls():
             return
+        if isinstance(message, _Navigate):
+            # Checking the address can take a host name lookup, which is not the page's to answer, so it waits as the
+            # agent's own navigate does instead of giving up like input.
+            url = await self._allowed_address(message.url)
+            if url is None:
+                return
+            message = message.model_copy(update={"url": url})
         # The page may close under this input, and the next poll moves to the agent's next page.
         with suppress(PlaywrightError, TimeoutError):
             async with asyncio.timeout(_INPUT_SECONDS):
@@ -347,7 +354,7 @@ class ScreencastViewer:
 
     async def _command(self, cdp: CDPSession, message: _Navigate | _Command) -> None:
         if isinstance(message, _Navigate):
-            await self._navigate(cdp, message.url)
+            await cdp.send("Page.navigate", {"url": message.url})
         elif message.type == "reload":
             await cdp.send("Page.reload")
         elif message.type == "stop":
@@ -358,22 +365,22 @@ class ScreencastViewer:
             if 0 <= index < len(history["entries"]):
                 await cdp.send("Page.navigateToHistoryEntry", {"entryId": history["entries"][index]["id"]})
 
-    async def _navigate(self, cdp: CDPSession, url: str) -> None:
-        """Open an address the way the agent's browser tool does, refusing what it refuses, and also about:blank."""
-        if url != "about:blank":
-            try:
-                # The agent's browser in a Computer reaches the worker's own loopback; its page's request guard and
-                # destination relay still check every request and redirect.
-                url = await run_browser_tool_url_check(
-                    validate_server_fetch_url,
-                    url,
-                    allow_private_networks=self._allows_private_networks(),
-                    allow_loopback=True,
-                )
-            except ServerFetchUrlError:
-                self._report("This address cannot be opened.")
-                return
-        await cdp.send("Page.navigate", {"url": url})
+    async def _allowed_address(self, url: str) -> str | None:
+        """Return the address if the agent's browser tool would open it, or it is about:blank; else report it."""
+        if url == "about:blank":
+            return url
+        try:
+            # The agent's browser in a Computer reaches the worker's own loopback; its page's request guard and
+            # destination relay still check every request and redirect.
+            return await run_browser_tool_url_check(
+                validate_server_fetch_url,
+                url,
+                allow_private_networks=self._allows_private_networks(),
+                allow_loopback=True,
+            )
+        except ServerFetchUrlError:
+            self._report("This address cannot be opened.")
+            return None
 
     async def close(self) -> None:
         """Release the buttons and keys this viewer still holds, so the page does not see them stuck, and detach."""
