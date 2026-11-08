@@ -1031,13 +1031,17 @@ async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_trigger", [None, "leave", "frame"])
 async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
     room_state: RoomState,
     monkeypatch: pytest.MonkeyPatch,
+    second_trigger: str | None,
 ) -> None:
     """A member change whose reconcile times out in the room's queue still reaches the room state without another trigger.
 
-    Every accounts request takes 3 s: the reload holds the lock until 9 s, so the leave's reconcile times out at 14 s.
+    Every accounts request takes 3 s: the reload holds the lock until 9 s, so agent2's leave times out at 14 s and its
+    retry starts. A second trigger at 6 s, agent1 leaving or a sync frame for the room, queues ahead of that retry, times
+    out at 16 s holding the lock and leaves the retry too little time, so the retry runs once more.
     """
     config, paths, ids, events, client = room_state
     loop = asyncio.get_running_loop()
@@ -1056,21 +1060,26 @@ async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
     for mock in (client.room_get_state_event, client.room_put_state):
         mock.side_effect = slow(mock.side_effect, only=ACCOUNTS_EVENT_TYPE)
     duties = _router_duties(room_state)
-    agent2 = ids["agent2"].full_id
+    departures = {4: "agent2", 6: "agent1"} if second_trigger == "leave" else {4: "agent2"}
     tasks = [asyncio.create_task(RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state())]
     for now in range(60):
-        if now == 4:
-            events["m.room.member", agent2] = {"membership": "leave"}
+        if now in departures:
+            user_id = ids[departures[now]].full_id
+            events["m.room.member", user_id] = {"membership": "leave"}
             tasks.append(
                 asyncio.create_task(
-                    duties.member_event(client.rooms[ROOM_ID], _membership_event(agent2, "leave", "join")),
+                    duties.member_event(client.rooms[ROOM_ID], _membership_event(user_id, "leave", "join")),
                 ),
             )
+        if now == 6 and second_trigger == "frame":
+            duties.mark_joined_for_room_state(ROOM_ID)
+            tasks.append(asyncio.create_task(duties.publish_joined_room_state()))
         # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
         for _ in range(50):
             await asyncio.sleep(0)
     assert all(task.done() for task in tasks)
-    assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1"))
+    remaining = {ROUTER_AGENT_NAME, "agent1", "agent2"} - set(departures.values())
+    assert _accounts(room_state) == sorted(ids[name].full_id for name in remaining)
 
 
 @pytest.mark.asyncio
@@ -1084,7 +1093,24 @@ async def test_failed_reconciles_are_retried_once_per_room(room_state: RoomState
     await asyncio.gather(*(duties.member_event(client.rooms[ROOM_ID], event) for _ in range(2)))
     for _ in range(50):
         await asyncio.sleep(0)
-    assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 3
+    # Two triggers, the retry, and one rerun for the trigger that failed while the retry ran; the retry's own failures
+    # schedule nothing.
+    assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_later_failure_gets_its_own_retry(room_state: RoomState) -> None:
+    """A failure after the room's earlier retry finished schedules another retry."""
+    _, _, ids, _, client = room_state
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    duties = _router_duties(room_state)
+    event = _membership_event(ids["agent2"].full_id, "join", "leave")
+    for expected_writes in (2, 4):
+        await duties.member_event(client.rooms[ROOM_ID], event)
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == expected_writes
 
 
 @pytest.mark.asyncio
@@ -1114,14 +1140,15 @@ async def test_command_reports_a_failed_publication(room_state: RoomState, comma
     set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="thread")
     client.room_put_state.side_effect = None
     client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
-    reply = await handle_thread_mode_command(
-        command,
-        client=client,
-        config=config,
-        runtime_paths=paths,
-        room_id=ROOM_ID,
-        requester_user_id="@admin:localhost",
-        sender_user_id="@admin:localhost",
-    )
-    assert reply.startswith("⚠️")
-    assert "failed" in reply
+    for _ in range(2):  # The reply asks to run the command again; a second failure warns again.
+        reply = await handle_thread_mode_command(
+            command,
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            room_id=ROOM_ID,
+            requester_user_id="@admin:localhost",
+            sender_user_id="@admin:localhost",
+        )
+        assert reply.startswith("⚠️")
+        assert "failed" in reply

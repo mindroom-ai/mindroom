@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -416,3 +417,23 @@ async def test_sync_frame_waits_at_most_ten_seconds_for_a_slow_refresh(monkeypat
     await membership_sync.refresh_if_needed(config, slow_refresh)
     assert refreshes == 1
     assert not memberships.needs_refresh(config)
+
+
+@pytest.mark.asyncio
+async def test_the_routers_stop_cancels_its_slow_refresh() -> None:
+    """The refresh outlives a frame that stopped waiting, but not the router whose drain owns it."""
+    config = Config()
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = True
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+    router = object()
+    started = asyncio.Event()
+
+    async def hung_refresh() -> None:
+        started.set()
+        await asyncio.Future()
+
+    frame = asyncio.create_task(membership_sync.refresh_if_needed(config, hung_refresh, owner=router))
+    await started.wait()
+    assert not await wait_for_background_tasks(timeout=0, owner=router)
+    assert isinstance((await asyncio.gather(frame, return_exceptions=True))[0], asyncio.CancelledError)

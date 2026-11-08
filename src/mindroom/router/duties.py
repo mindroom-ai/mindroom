@@ -67,6 +67,8 @@ class RouterDuties:
     _joined_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
     # The one background retry per room that a failed room state reconcile schedules.
     _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    # Rooms where a trigger failed while their retry ran, so that retry runs once more.
+    _room_state_reruns: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def _membership_sync(self) -> AgentReplyMembershipSync:
@@ -104,26 +106,41 @@ class RouterDuties:
     async def _publish_room_state(self, room_id: str) -> None:
         """Reconcile one held room's thread mode and MindRoom accounts.
 
-        A failure, such as a reconcile that timed out queued behind a slower one, schedules one retry in the background,
+        A failure, such as a reconcile that timed out queued behind a slower one, leaves the room to a background retry,
         so the room catches up without another trigger while the caller still waits at most 10 s.
         """
+        if await self._reconcile_room_state(room_id):
+            return
+        pending = self._room_state_retries.get(room_id)
+        if pending is None or pending.done():
+            self._room_state_retries[room_id] = create_background_task(
+                self._retry_room_state(room_id),
+                name="router_room_state_retry",
+                owner=self.deps.runtime,
+            )
+        else:
+            # This trigger may have held the room's locks until the retry ran out of time, so the retry runs once more.
+            self._room_state_reruns.add(room_id)
+
+    async def _retry_room_state(self, room_id: str) -> None:
+        """Reconcile once, and once more for each trigger that failed meanwhile; the retry's own failure ends it."""
+        while True:
+            self._room_state_reruns.discard(room_id)
+            await self._reconcile_room_state(room_id)
+            if room_id not in self._room_state_reruns:
+                return
+
+    async def _reconcile_room_state(self, room_id: str) -> bool:
+        """Reconcile one held room's thread mode and MindRoom accounts and return whether both are current."""
         runtime = self.deps.runtime
         client = runtime.client
         if client is None or room_id not in client.rooms:
-            return
+            return True
         current = await asyncio.gather(
             reconcile_room_thread_mode(client, runtime.config, runtime.runtime_paths, room_id),
             reconcile_room_accounts(client, runtime.config, runtime.runtime_paths, room_id),
         )
-        pending = self._room_state_retries.get(room_id)
-        # Each reconcile ends within 10 s of starting, so a failure seen while a retry is pending comes from that one
-        # retry or from a trigger that started before it, whose change the retry reads.
-        if not all(current) and (pending is None or pending.done()):
-            self._room_state_retries[room_id] = create_background_task(
-                self._publish_room_state(room_id),
-                name="router_room_state_retry",
-                owner=runtime,
-            )
+        return all(current)
 
     def invalidate_memberships(self, *, reason: str) -> None:
         """Fail closed when the router's view of Matrix membership is uncertain."""
@@ -132,7 +149,11 @@ class RouterDuties:
     async def refresh_memberships_if_needed(self) -> None:
         """Rebuild room-backed reply grants after a receive-generation boundary."""
         orchestrator = self.deps.runtime.orchestrator
-        await self._membership_sync.refresh_if_needed(orchestrator.config, orchestrator.refresh_agent_reply_memberships)
+        await self._membership_sync.refresh_if_needed(
+            orchestrator.config,
+            orchestrator.refresh_agent_reply_memberships,
+            owner=self.deps.runtime,
+        )
 
     def before_ingestion_admission(
         self,

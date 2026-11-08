@@ -61,8 +61,12 @@ async def handle_thread_mode_command(
         removed = clear_room_thread_mode_override(runtime_paths, room_id)
         current = await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
         if not removed:
-            return "This room has no thread mode override."
-        reply = "Room thread mode override removed. Agents use their configured modes again."
+            # A rerun after a failed publication finds no override; it still warns while publishing fails.
+            reply = "This room has no thread mode override."
+            if current:
+                return reply
+        else:
+            reply = "Room thread mode override removed. Agents use their configured modes again."
     else:
         mode = cast("RoomThreadMode", requested)
         set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=mode)
@@ -73,4 +77,7 @@ async def handle_thread_mode_command(
         )
     if current:
         return f"✅ {reply}"
-    return f"⚠️ {reply}\n\nUpdating the thread mode clients show for this room failed. Run the command again to retry."
+    return (
+        f"⚠️ {reply}\n\nClients may still show the old thread mode in this room because publishing the new one failed. "
+        "Run the command again to retry."
+    )

@@ -1127,10 +1127,12 @@ class _MultiAgentOrchestrator:
             if runtime_shutdown_event.is_set():
                 return
 
-            # Publish semantic callbacks once the router's initial owned sync has
-            # rebuilt room-backed reply grants from Matrix. Room setup keeps
-            # running in the background: a grant room it has not joined or
-            # created yet stays pending, and its sources replay after setup
+            # Publish semantic callbacks once the router's initial owned sync
+            # frame has waited up to 10 s for room-backed reply grants to be
+            # rebuilt from Matrix; sources that need a grant not yet rebuilt
+            # stay pending and replay once the refresh publishes. Room setup
+            # keeps running in the background: a grant room it has not joined
+            # or created yet stays pending, and its sources replay after setup
             # refreshes the grants.
             sync_ready = await self._wait_for_initial_membership_sync(
                 runtime_shutdown_event,

@@ -115,11 +115,14 @@ class AgentReplyMembershipSync:
         self,
         config: Config,
         refresh: Callable[[], Awaitable[None]],
+        *,
+        owner: object | None = None,
     ) -> None:
         """Refresh once when due, apply bounded retry backoff on failure, and wait for the refresh at most 10 s.
 
         A slower refresh keeps running in the background, so the router's sync frame never stalls behind a slow
         homeserver and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
+        The owner's shutdown drain, the router's, waits for or cancels it, as stopping the frame did before.
         """
         if self._refresh_task is None or self._refresh_task.done():
             # A sync gap cannot invalidate explicit-user grants. Do not turn a
@@ -129,6 +132,7 @@ class AgentReplyMembershipSync:
             self._refresh_task = create_background_task(
                 self._refresh(config, refresh),
                 name="agent_reply_membership_refresh",
+                owner=owner,
             )
         with suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(self._refresh_task), 10)
