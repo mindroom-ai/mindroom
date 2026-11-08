@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import agno.tools.trafilatura as agno_trafilatura
@@ -385,7 +386,13 @@ def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extra
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A long robots.txt crawl delay ends the crawl's visits at half the time limit, and the other half extracts."""
-    monkeypatch.setattr(compat, "CALL_SECONDS", 2.0)
+    elapsed = [0.0]
+
+    def pause(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    # The call's clock moves only while the crawl pauses, so how fast the machine runs changes nothing.
+    monkeypatch.setattr(compat, "time", SimpleNamespace(monotonic=lambda: elapsed[0], sleep=pause))
     homepage = "https://example.com/"
     serve_routes(
         monkeypatch,
@@ -397,11 +404,10 @@ def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extra
         },
     )
     toolkit = trafilatura_tools()()
-    started = time.monotonic()
 
     crawl = json.loads(toolkit.crawl_website(homepage, extract_content=True))
 
-    assert time.monotonic() - started < 5
+    assert elapsed[0] == compat.CALL_SECONDS / 2
     (unvisited,) = crawl["to_visit"]
     assert unvisited in {"https://example.com/docs", "https://example.com/guide"}
     assert "Configure a bridge" in crawl["extracted_content"][unvisited]
