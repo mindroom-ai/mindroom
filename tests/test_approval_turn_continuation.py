@@ -73,7 +73,7 @@ from tests.scripted_agent_helpers import stop_turn, stored_runs
 from tests.usage_helpers import counted_total, counted_usage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -403,7 +403,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
                 paused_answer=paused_answer,
                 tool_context=tool_context,
                 tool_trace_collector=trace,
-                typing_log_context={},
+                quiet=False,
                 progress=None,
                 system_enrichment_items=(),
             )
@@ -567,11 +567,48 @@ async def test_approval_settlement_preserves_tool_boundary(
         tool_context=turn_tool_context(config, paths, identity),
         progress=None,
         system_enrichment_items=(),
+        quiet=False,
     )
     assert isinstance(result, CompletedApprovalRun)
     expected = "Before approval.\n\n" + ("🔧 `inspect` [1]\n\n" if show_tool_calls else "") + "After approval."
     assert result.response_text == expected
     assert len(trace) == (1 if show_tool_calls else 0)
+
+
+async def _settle_scripted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: Callable[..., AsyncIterator[TextDelta]],
+    *,
+    quiet: bool = False,
+) -> CompletedApprovalRun | PausedAttempt:
+    """Settle a claimed approval of ``general`` whose fresh attempt plays ``stream``, as its continuation drives it."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
+    continuation = approval_continuation(
+        approval_id="approval-status",
+        run_id="run-saved",
+        session_id="session",
+        room_id="!room:example.org",
+        requester_id="@user:example.org",
+        state="claimed",
+    )
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
+    return await _stream_continuation_turn(
+        _continuation_turn_context(continuation, model_name="default", metadata=None),
+        CollectedStreamPresentation(show_tool_calls=False),
+        prompt=continuation.request_body,
+        resume=TurnResume(CompletedAttempt()),
+        config=config,
+        runtime_paths=paths,
+        knowledge=None,
+        refresh_scheduler=None,
+        tool_trace_collector=[],
+        tool_context=turn_tool_context(config, paths, _identity("session")),
+        progress=None,
+        system_enrichment_items=(),
+        quiet=quiet,
+    )
 
 
 @pytest.mark.asyncio
@@ -584,17 +621,6 @@ async def test_approval_settlement_uses_typed_status(
     wire_status: str | None,
 ) -> None:
     """Display metadata cannot grant or deny completion of an approved response."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
-    identity = _identity("session")
-    continuation = approval_continuation(
-        approval_id="approval-status",
-        run_id="run-saved",
-        session_id="session",
-        room_id="!room:example.org",
-        requester_id="@user:example.org",
-        state="claimed",
-    )
 
     async def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[TextDelta]:
         assert sinks.run_metadata_collector is not None
@@ -604,28 +630,37 @@ async def test_approval_settlement_uses_typed_status(
         yield TextDelta("Terminal response")
         sinks.on_completed(CompletedAttempt(status=status))
 
-    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
-    settlement = _stream_continuation_turn(
-        _continuation_turn_context(continuation, model_name="default", metadata=None),
-        CollectedStreamPresentation(show_tool_calls=False),
-        prompt=continuation.request_body,
-        resume=TurnResume(CompletedAttempt()),
-        config=config,
-        runtime_paths=paths,
-        knowledge=None,
-        refresh_scheduler=None,
-        tool_trace_collector=[],
-        tool_context=turn_tool_context(config, paths, identity),
-        progress=None,
-        system_enrichment_items=(),
-    )
     if status is RunStatus.error:
         with pytest.raises(RuntimeError, match="Terminal response"):
-            await settlement
+            await _settle_scripted(tmp_path, monkeypatch, stream)
     else:
-        result = await settlement
+        result = await _settle_scripted(tmp_path, monkeypatch, stream)
         assert isinstance(result, CompletedApprovalRun)
         assert result.response_text == "Terminal response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quiet", [True, False], ids=["quiet", "visible"])
+async def test_an_empty_last_attempt_completes_an_approved_response_only_for_a_quiet_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    quiet: bool,
+) -> None:
+    """A quiet turn may end without an answer after its approval; any other turn's empty attempt fails it."""
+
+    async def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        assert sinks.on_completed is not None
+        # An attempt that answered nothing completes without visible output, which the run reports as an error.
+        sinks.on_completed(CompletedAttempt(status=RunStatus.error, is_empty=True))
+        return
+        yield
+
+    if quiet:
+        settled = await _settle_scripted(tmp_path, monkeypatch, stream, quiet=True)
+        assert settled == CompletedApprovalRun(response_text="", metadata_content={})
+    else:
+        with pytest.raises(RuntimeError, match="did not complete"):
+            await _settle_scripted(tmp_path, monkeypatch, stream)
 
 
 @pytest.mark.asyncio
@@ -748,7 +783,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         paused_answer=PausedAnswer(text=saved.response_text, tool_trace=tuple(saved.tool_trace)),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=progress,
         system_enrichment_items=(),
     )
@@ -847,7 +882,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -984,7 +1019,7 @@ async def _approve_add(
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=system_enrichment_items,
     )
@@ -1051,7 +1086,7 @@ async def test_an_approved_run_rebuilds_from_the_plugins_its_turn_captured(
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=tool_context,
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -1279,7 +1314,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -1344,7 +1379,7 @@ async def test_an_approved_run_settles_its_job_claims_once_it_ends(
         paused_answer=PausedAnswer(),
         tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -1404,6 +1439,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         tool_context=turn_tool_context(config, paths, identity),
         progress=progress,
         system_enrichment_items=(),
+        quiet=False,
     )
 
     assert isinstance(result, PausedAttempt)
@@ -1491,7 +1527,7 @@ async def test_a_call_made_before_an_approval_replays_whole_and_failed_when_the_
             paused_answer=PausedAnswer(text=segment.text, tool_trace=segment.tool_trace),
             tool_context=turn_tool_context(config, paths, identity),
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
             system_enrichment_items=(),
         )

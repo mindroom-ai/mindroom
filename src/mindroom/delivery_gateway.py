@@ -1666,13 +1666,13 @@ class DeliveryGateway:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
         )
-        if suppression_reason is Suppression.SILENT_NO_REPORT and handle.span.kind is rl.SpanKind.APPROVAL_RESUME:
-            # A silent schedule's resumed answer that reports nothing completes the message its pause showed, without
-            # the no-report token, so its approval finishes; with nothing left to show it ends with the nothing-to-show
-            # note's text, never its placeholder. Redacting the message would cut the run from history.
-            token = constants.SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
-            shown = "\n".join(line for line in draft.response_text.splitlines() if line.strip().casefold() != token)
-            draft.response_text = shown.rstrip() or note_segment(NoteKind.NOTHING_TO_SHOW).text
+        if suppression_reason is Suppression.SILENT_NO_REPORT and request.existing_event_id is not None:
+            # A silent schedule's answer that reports nothing completes the message its reply already shows, the one
+            # its approval pause showed, without the no-report token, so its approval finishes, resumed or approved in
+            # place; with nothing left to show it ends with the nothing-to-show note's text, never its placeholder.
+            # Redacting the message would cut the run from history.
+            shown = constants.without_no_report_lines(draft.response_text)
+            draft.response_text = shown or note_segment(NoteKind.NOTHING_TO_SHOW).text
         elif suppression_reason is not None:
             self.deps.logger.info(
                 "Response suppressed",

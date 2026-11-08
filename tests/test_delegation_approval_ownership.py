@@ -370,7 +370,7 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="leader"),
         tool_trace_collector=trace,
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )

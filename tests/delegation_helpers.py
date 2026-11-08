@@ -317,7 +317,6 @@ def approval_executor(config: Config, runtime_paths: RuntimePaths) -> AgentAppro
     return AgentApprovalExecution(
         config=lambda: config,
         runtime_paths=runtime_paths,
-        client=AsyncMock,
         knowledge_access=KnowledgeAccessSupport(
             runtime=MagicMock(config=config, orchestrator=SimpleNamespace(knowledge_refresh_scheduler=None)),
             runtime_paths=runtime_paths,
@@ -376,7 +375,7 @@ async def resume(
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_context=runtime,
         tool_trace_collector=[],
-        typing_log_context={},
+        quiet=False,
         progress=None,
         system_enrichment_items=(),
     )
@@ -566,6 +565,7 @@ async def resume_team(
             show_tool_calls=True,
             tool_trace_collector=[],
             system_enrichment_items=(),
+            quiet=False,
         )
 
 

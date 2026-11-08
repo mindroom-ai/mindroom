@@ -19,6 +19,7 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.config.resolution import entity_timezone
+from mindroom.constants import is_silent_schedule_no_report_response, without_no_report_lines
 from mindroom.delegation.execution import drive_delegation_stream, resume_from_approval
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
@@ -53,7 +54,7 @@ from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.approval.resume import ResumeDecisions
@@ -65,7 +66,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
-    from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
@@ -243,6 +244,29 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     )
 
 
+def settle_quiet_team_answer(
+    presentation: TeamStreamPresentation,
+    record: TeamRunRecord,
+    member_runs: Iterable[AnyRunRecord],
+) -> str | None:
+    """Settle a quiet turn's team answer: the leader's bare answer when the team reports nothing, else None.
+
+    The team reports nothing when its leader does and so does each of its ``member_runs``, as an answer does; delivery
+    withholds that answer, as an agent's. A document that stays keeps every finding but loses its slots' no-report
+    lines, which this removes from ``presentation``.
+    """
+    answer = (record.handover_content or "").strip()
+    if is_silent_schedule_no_report_response(answer) and all(
+        is_silent_schedule_no_report_response(run.handover_content or "") for run in member_runs
+    ):
+        return answer
+    presentation.consensus = without_no_report_lines(presentation.consensus)
+    presentation.per_member = {
+        member_id: without_no_report_lines(text) for member_id, text in presentation.per_member.items()
+    }
+    return None
+
+
 async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
     """Build the members whose paused runs a saved approval's resume continues, before it checks its decisions.
 
@@ -280,13 +304,15 @@ async def continue_paused_team_run(
     tool_trace_collector: list[ToolTraceEntry],
     progress: ProgressPublisher | None,
     system_enrichment_items: tuple[EnrichmentItem, ...],
+    quiet: bool,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
     ``configured_team_name`` is the entity the approval was saved under: the configured team, or for an ad hoc team
     the member whose account handles it. ``progress``, when given, shows the resumed document live in the reply
     being continued; the terminal delivery stays with the caller. The resumed runs keep their stored system prompts,
-    and each member run the resume starts renders ``system_enrichment_items`` into its own.
+    and each member run the resume starts renders ``system_enrichment_items`` into its own. A ``quiet`` turn's team
+    that reports nothing answers as its turn would (``settle_quiet_team_answer``).
     """
     if not member_names:
         # Saved approvals name their members; without them no member could run the approved calls.
@@ -442,10 +468,17 @@ async def continue_paused_team_run(
             raise pause_without_approval_error(continued, entity_label="team")
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
+        # Each member run of this team run is a stored row of it, the resume's updated in place; read only when needed.
+        member_runs = (row for row in storage.session.runs if row.parent_run_id == run_id)
+        quiet_answer = settle_quiet_team_answer(presentation, continued, member_runs) if quiet else None
         # The document already holds what each run wrote before the pause and handed over since, the leader's included,
         # so one that stays empty, every run's text blank, shows the no-reply note, as a new team turn's does.
-        response_text = presentation.render_body(finished=True) or (
-            format_team_header(members.display_names) + NO_TEAM_RESPONSE
+        response_text = (
+            quiet_answer
+            if quiet_answer is not None
+            else (
+                presentation.render_body(finished=True) or format_team_header(members.display_names) + NO_TEAM_RESPONSE
+            )
         )
         return CompletedApprovalRun(
             response_text=response_text,
@@ -466,4 +499,5 @@ __all__ = [
     "continue_paused_team_run",
     "continued_team_pause",
     "drive_team_delegations",
+    "settle_quiet_team_answer",
 ]
