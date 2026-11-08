@@ -129,7 +129,9 @@ async def client_stream(
         await _require_joined(websocket, session.user_id, room_id)
     if admit is not None:
         answer = admit(user)
-        if not (await answer if inspect.isawaitable(answer) else answer):
+        if inspect.isawaitable(answer):
+            answer = await answer
+        if not answer:
             raise HTTPException(503, "The route refused this stream; try again later.")
     # The session may have ended while membership was read or the route's check ran.
     offered_session(websocket)

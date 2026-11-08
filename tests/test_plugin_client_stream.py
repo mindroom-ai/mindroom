@@ -186,9 +186,13 @@ def _admits_path(room_id: str = ROOM) -> str:
     return f"/api/plugins/demo/rooms/{quote(room_id, safe='')}/admits"
 
 
-def _admit_with(check: Callable[[ClientUser], object]) -> None:
-    """Make ``check`` the admission check of the route at ``_admits_path``."""
-    sys.modules[PROBE_MODULE].admit = check
+def _admit_with(check: Callable[[ClientUser], object], *, asynchronous: bool = False) -> None:
+    """Make ``check``, wrapped as a coroutine function when ``asynchronous``, the admission check at ``_admits_path``."""
+
+    async def async_check(user: ClientUser) -> object:
+        return check(user)
+
+    sys.modules[PROBE_MODULE].admit = async_check if asynchronous else check
 
 
 def _offers(token: str) -> list[str]:
@@ -356,17 +360,14 @@ def test_unavailable_membership_is_refused_with_503(
     assert (denial.status_code, denial.json()) == (503, {"detail": detail})
 
 
-def _answering(answer: bool, asynchronous: bool, asked: list[ClientUser]) -> Callable[[ClientUser], object]:
-    """Return an admission check, sync or async, that records each user it is asked about and answers ``answer``."""
+def _answering(answer: bool, asked: list[ClientUser]) -> Callable[[ClientUser], bool]:
+    """Return an admission check that records each user it is asked about and answers ``answer``."""
 
     def check(user: ClientUser) -> bool:
         asked.append(user)
         return answer
 
-    async def async_check(user: ClientUser) -> bool:
-        return check(user)
-
-    return async_check if asynchronous else check
+    return check
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -377,7 +378,7 @@ def test_an_admitting_check_is_asked_about_the_signed_in_user_and_the_stream_ope
 ) -> None:
     """A route's check, sync or async, is asked once about the session's user, and the stream then runs as without one."""
     asked: list[ClientUser] = []
-    _admit_with(_answering(True, asynchronous, asked))
+    _admit_with(_answering(True, asked), asynchronous=asynchronous)
     token = client_session_store(app).create(ALICE).token
 
     with _connect(client, token, _admits_path()) as websocket:
@@ -399,7 +400,7 @@ def test_a_refusing_check_refuses_the_handshake_with_503(
 ) -> None:
     """The route's refusal answers the handshake before accept, so the client never sees the stream open."""
     asked: list[ClientUser] = []
-    _admit_with(_answering(False, asynchronous, asked))
+    _admit_with(_answering(False, asked), asynchronous=asynchronous)
     token = client_session_store(app).create(ALICE).token
 
     denial = _denial(client, _admits_path(), _offers(token), {"origin": CLIENT_ORIGIN})
@@ -415,10 +416,7 @@ def test_a_check_may_refuse_with_its_own_http_answer(app: FastAPI, client: TestC
     def check(_user: ClientUser) -> bool:
         raise HTTPException(429, "Too many streams.")
 
-    async def async_check(user: ClientUser) -> bool:
-        return check(user)
-
-    _admit_with(async_check if asynchronous else check)
+    _admit_with(check, asynchronous=asynchronous)
     token = client_session_store(app).create(ALICE).token
 
     denial = _denial(client, _admits_path(), _offers(token), {"origin": CLIENT_ORIGIN})
@@ -429,7 +427,7 @@ def test_a_check_may_refuse_with_its_own_http_answer(app: FastAPI, client: TestC
 def test_a_check_is_asked_only_once_the_handshakes_own_checks_pass(app: FastAPI, client: TestClient) -> None:
     """A caller from another origin, without a live session, or outside the room never reaches the route's check."""
     asked: list[ClientUser] = []
-    _admit_with(_answering(True, False, asked))
+    _admit_with(_answering(True, asked))
     token = client_session_store(app).create(ALICE).token
 
     for path, protocols, origin, status in (
