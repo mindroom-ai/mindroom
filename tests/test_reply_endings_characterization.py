@@ -22,7 +22,7 @@ import asyncio
 import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -30,6 +30,7 @@ from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -55,6 +56,7 @@ from mindroom.hooks import (
     SessionHookContext,
     hook,
 )
+from mindroom.llm.messages import system_text
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
@@ -112,6 +114,7 @@ _BARE_PROMPT = f'<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]>
 _TEAM_HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 _EDIT_INTERVAL = 0.0
 _TEAM_MEMBERS = "**Writer**: Writer fact.\n\n**Checker**: Checker fact."
+_QUIET_DELIVERY = "Return exactly NO_REPLY when this scheduled check completes routinely without findings."
 
 
 class _EchoTools(Toolkit):
@@ -947,6 +950,122 @@ async def test_a_silent_schedule_that_reports_nothing_shows_nothing(
     assert not is_interrupted_replay_run(run)
     assert run.content == "NO_REPLY"
     assert not await turn.pending()
+
+
+async def _respond_auto_approved(turn: _Turn, request: ResponseRequest) -> None:
+    """Answer ``request``, whose ``echo`` call pauses for an approval the policy grants at once, so the reply resumes.
+
+    It returns once the bot's background work is done, so assertions see the ended approval.
+    """
+    _require_echo_approval(turn)
+    try:
+        with patch("mindroom.approval.response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))):
+            assert await turn.runner.generate_response(request) == Owned()
+        assert await wait_for_background_tasks(timeout=5, owner=turn.bot._runtime_view)
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+@pytest.mark.parametrize(
+    ("resumed", "shown_calls"),
+    [
+        pytest.param([answer("NO_REPLY")], "🔧 `echo` [1]", id="resumed-run"),
+        # The resumed run switches the thread's model for this response, and the fresh attempt reports nothing.
+        pytest.param(
+            [
+                calls(tool_call("switch_thread_model", "call-2", model_name="default", when="after-toolcall")),
+                answer("NO_REPLY"),
+            ],
+            "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
+            id="fresh-attempt",
+        ),
+    ],
+)
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its_waiting_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+    resumed: list[list[ScriptStep]],
+    shown_calls: str,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a silent schedule whose approved run reports nothing: its approval completes and its waiting message ends.
+
+    The message keeps what its pause showed, its calls finished, and never shows the no-report token; one that showed
+    only its placeholder ends with the nothing-to-show note. It stays, so the run stays in history. Every run the
+    resume starts asks for quiet delivery, as the turn's own did, and nothing streams.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=streaming,
+        show_tool_calls=show_tool_calls,
+        tools=[_ECHO_TOOL, "thread_model"],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), *resumed]},
+    )
+
+    # A model switch needs a thread.
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target(thread_id="$thread"))))
+
+    reply = await turn.reply()
+    assert reply.state is rl.ReplyState.COMPLETED
+    # The pause's message is the only one, and its end is an edit of it.
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    assert turn.homeserver.bodies[-1] == (f"\n\n{shown_calls}" if show_tool_calls else "Done.")
+    assert turn.bot.client.room_redact.await_args_list == []
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    assert not await turn.pending()
+    _first, *after_pause = turn.models["default"].requests
+    assert len(after_pause) == len(resumed)
+    assert all(_QUIET_DELIVERY in system_text(request.messages) for request in after_pause)
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("silent", [True, False], ids=["silent-schedule", "message"])
+async def test_a_resumed_answer_a_hook_suppresses_fails_its_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    silent: bool,
+) -> None:
+    """Pins a resumed answer a ``message:before_response`` hook suppresses: the approval fails with its note."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), answer("A finding.")]},
+    )
+    turn.hooks.suppress = True
+    request = _plain_request(_target())
+
+    await _respond_auto_approved(turn, _silent_schedule(request) if silent else request)
+
+    assert (await turn.reply()).state is rl.ReplyState.FAILED
+    assert turn.homeserver.bodies[-1].endswith("Tool approval continuation failed safely.")
+
+
+@pytest.mark.usefixtures("echo_tool")
+async def test_a_silent_schedule_s_resumed_report_is_shown_whole(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins a silent schedule whose approved run reports a finding while its requester is online: no live progress."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=True,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), answer("A finding.")]},
+    )
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())))
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    assert turn.homeserver.bodies[-1].endswith("A finding.")
 
 
 async def test_a_run_whose_reply_a_hook_suppressed_still_counts_as_succeeded(
