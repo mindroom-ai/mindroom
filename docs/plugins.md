@@ -1132,7 +1132,7 @@ Each call to `power()` or `history()` reads again, and `members` is read anew fo
 `power()`, `is_direct()`, and `history()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
 `history()` reads the caller's membership again and answers 403 like `require_room_member` once they are no longer joined, and 503 with `Room history read failed; try again.` when its read fails or times out.
-`is_direct()` keeps its answer for a few minutes and counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
+`is_direct()` keeps its answer for a few minutes, but when the homeserver fails the lookup with an error it may count a direct room as not direct and does not keep that answer; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
