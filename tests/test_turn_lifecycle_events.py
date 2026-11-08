@@ -6,12 +6,12 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.approval.tool_approval import shutdown_approval_runtime
-from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -130,12 +130,10 @@ async def _approval_turns(tmp_path: Path, seen: _Seen, *, requires_human: bool) 
     async with _approval_bot(tmp_path, requires_human=requires_human) as bot:
         _record_turn_events(bot, seen)
         # As the runtime does: the approval's end ends the paused turn, through the bot of its entity.
-        stop = bot._journal_store.approval_signals.follow_ended_approvals(
-            lambda ended: create_background_task(bot.end_paused_turn(ended), owner=bot),
-        )
+        stop = bot._journal_store.approval_signals.follow_ended_approvals(bot.end_paused_turn)
         try:
             yield bot
-            assert await wait_for_background_tasks(timeout=5, owner=bot)
+            assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
             # Every turn whose approval ended took its end: none stays open.
             assert unwrap_extracted_collaborator(bot._response_runner).locked._turn_ends == {}
         finally:
@@ -440,6 +438,31 @@ async def test_an_approval_ends_its_turn_as_its_reply_ended_unless_a_completed_r
     assert seen == [(EVENT_TURN_ENDED, "turn-1", outcome)]
 
 
+async def test_a_stopping_bot_waits_for_the_turn_end_an_ended_approval_started(tmp_path: Path) -> None:
+    """The turn end an ended approval starts is the bot's own work, which its stop waits for before plugins stop."""
+    started, release = asyncio.Event(), asyncio.Event()
+    finished: list[str | None] = []
+
+    @hook(EVENT_TURN_ENDED, name="slow_turn_end")
+    async def slow_turn_end(ctx: TurnLifecycleContext) -> None:
+        started.set()
+        await release.wait()
+        finished.append(ctx.turn_id)
+
+    async with _approval_bot(tmp_path, requires_human=True) as bot:
+        _publish_hooks(bot, [slow_turn_end])
+        bot.end_paused_turn(EndedApproval(approval_continuation(turn_id="turn-1"), ReplyState.COMPLETED))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # As the bot's stop drains the work it owns.
+        drained = asyncio.create_task(wait_for_background_tasks(timeout=5, owner=bot._runtime_view))
+        await asyncio.sleep(0)
+        assert not drained.done()
+        release.set()
+        assert await drained
+
+    assert finished == ["turn-1"]
+
+
 async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(tmp_path: Path) -> None:
     """A run cut short while it waits in place leaves its end to its approval, whose failed settlement ends it once."""
     seen: _Seen = []
@@ -579,17 +602,16 @@ async def test_a_paused_turn_ends_through_its_entity_s_bot_or_the_router_s_once_
     """A removed agent has no bot, so the router ends its paused turns."""
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
-    general, router = AsyncMock(), AsyncMock()
+    general, router = MagicMock(), MagicMock()
     orchestrator.fleet.add("general", general)
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router)
 
     for entity_name in ("general", "removed"):
         orchestrator._end_paused_turn(EndedApproval(approval_continuation(entity_name=entity_name), None))
-    assert await wait_for_background_tasks(timeout=5, owner=orchestrator)
 
-    general.end_paused_turn.assert_awaited_once()
-    router.end_paused_turn.assert_awaited_once()
-    assert router.end_paused_turn.await_args.args[0].continuation.entity_name == "removed"
+    general.end_paused_turn.assert_called_once()
+    router.end_paused_turn.assert_called_once()
+    assert router.end_paused_turn.call_args.args[0].continuation.entity_name == "removed"
 
 
 async def test_the_turn_events_are_built_in_and_plugins_cannot_add_turn_events() -> None:

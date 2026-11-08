@@ -1611,9 +1611,13 @@ class AgentBot:
             await self._close_owned_matrix_after_start_failure()
             raise
 
-    async def end_paused_turn(self, ended: EndedApproval) -> None:
-        """End the turn of a paused reply whose approval ended."""
-        await self._approval_runner.end_paused_turn(ended)
+    def end_paused_turn(self, ended: EndedApproval) -> None:
+        """End the turn of a paused reply whose approval ended, as work this bot's stop waits for before plugins stop."""
+        create_background_task(
+            self._approval_runner.end_paused_turn(ended),
+            name="paused_turn_end",
+            owner=self._runtime_view,
+        )
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Recover one frozen approval answer, owning any recovery-only client lifetime."""

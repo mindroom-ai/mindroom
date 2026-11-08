@@ -1435,7 +1435,7 @@ class _MultiAgentOrchestrator:
         """End a paused turn through the bot of its entity, or through the router's for an entity now gone."""
         bot = self.agent_bots.get(ended.continuation.entity_name) or self.agent_bots.get(ROUTER_AGENT_NAME)
         if bot is not None:
-            create_background_task(bot.end_paused_turn(ended), name="paused_turn_end", owner=self)
+            bot.end_paused_turn(ended)
 
     async def event_journal_still_usable(self) -> bool:
         """Return whether this runtime still holds the journal it claimed and can still use it; true before it claims one."""
