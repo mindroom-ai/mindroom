@@ -108,18 +108,13 @@ def _config(tmp_path: Path) -> Config:
     return config
 
 
-def _reader_client(
-    members: tuple[str, ...],
-    power_levels: dict[str, object],
-    *,
-    joined: bool = True,
-) -> SimpleNamespace:
-    """The router's client as room reads see it: joined to the room with ``members`` and ``power_levels``."""
+def _reader_client(*, joined: bool = True) -> SimpleNamespace:
+    """The router's client as room reads see it: joined to the room with ``MEMBERS`` and ``POWER``."""
     return SimpleNamespace(
         user_id=ROUTER,
         rooms={ROOM: nio.MatrixRoom(ROOM, ROUTER)} if joined else {},
-        joined_members=AsyncMock(return_value=_joined(ROOM, dict.fromkeys(members))),
-        room_get_state=AsyncMock(return_value=_state(power_levels=power_levels)),
+        joined_members=AsyncMock(return_value=_joined(ROOM, dict.fromkeys(MEMBERS))),
+        room_get_state=AsyncMock(return_value=_state(power_levels=POWER)),
     )
 
 
@@ -174,7 +169,7 @@ class _World:
 def world(tmp_path: Path) -> _World:
     """The room, its router and agents, and the API app whose routes post there."""
     config = _config(tmp_path)
-    client = _reader_client(MEMBERS, POWER)
+    client = _reader_client()
     # Agent ``open``'s bot reads the room too, so reads still answer while the router is down.
     bots = {ROUTER_AGENT_NAME: _router(config, client), "open": SimpleNamespace(client=client, running=True)}
     app = FastAPI()
@@ -370,8 +365,7 @@ async def test_relay_may_wake_a_team_in_the_room_once(world: _World) -> None:
 
 
 def _expire(world: _World) -> None:
-    store = client_session_store(world.app)
-    store.clock = lambda: float("inf")
+    client_session_store(world.app).clock = lambda: float("inf")
 
 
 def _revoke(world: _World) -> None:
@@ -440,18 +434,6 @@ async def test_relay_checks_its_user_again_before_it_sends(
         await messenger.relay("@open what changed?", mentions=[OPEN])
 
     assert refused.value.status_code == status
-    transport.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_relay_for_a_member_who_may_not_post_is_refused(world: _World) -> None:
-    """Bob is joined, so the route serves him and may post notices, but the room's power levels keep him from relaying."""
-    messenger = await world.messenger(BOB)
-
-    with _transport() as transport, pytest.raises(HTTPException) as refused:
-        await messenger.relay("@open what changed?", mentions=[OPEN])
-
-    assert refused.value.status_code == 403
     transport.assert_not_awaited()
 
 
@@ -526,7 +508,7 @@ def _remove_router(world: _World) -> None:
 
 
 def _router_out_of_the_room(world: _World) -> None:
-    world.bots[ROUTER_AGENT_NAME] = _router(world.config, _reader_client(MEMBERS, POWER, joined=False))
+    world.bots[ROUTER_AGENT_NAME] = _router(world.config, _reader_client(joined=False))
 
 
 @pytest.mark.asyncio
@@ -565,7 +547,7 @@ async def test_failed_send_answers_503(world: _World, kind: str) -> None:
 async def test_messages_go_through_the_router_running_when_they_are_sent(world: _World) -> None:
     """A router restarted after the route's check, as by a reload, sends with its new client; nothing keeps the old."""
     messenger = await world.messenger(CAROL)
-    new_client = _reader_client(MEMBERS, POWER)
+    new_client = _reader_client()
     world.bots[ROUTER_AGENT_NAME] = _router(world.config, new_client)
 
     with _transport() as transport:

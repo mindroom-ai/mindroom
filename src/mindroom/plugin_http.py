@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated
 
 from fastapi import HTTPException, Path, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves dependency annotations.
@@ -306,15 +306,14 @@ class RoomMessenger:
         """Return the router bot running now, so a restarted router posts with its new client, once it is in the room."""
         embedded = ensure_app_state(self._request.app).embedded
         router = None if embedded is None else embedded.agent_bot(ROUTER_AGENT_NAME)
-        client = None if router is None or not router.running else router.client
-        if router is None or client is None:
+        if router is None or not router.running or (client := router.client) is None:
             raise HTTPException(503, "MindRoom's router is not running; try again.")
         if self._room_id not in client.rooms:
             raise HTTPException(503, "MindRoom's router is not in this room.")
         return router
 
-    def _content(self, router: AgentBot, content: Mapping[str, object] | None) -> dict[str, Any]:
-        """Return a copy of ``content``, answering 400 unless it holds only namespaced keys of the plugin's own.
+    def _content(self, router: AgentBot, content: Mapping[str, object] | None) -> dict[str, object]:
+        """Return a copy of ``content``, answering 400 unless its keys are namespaced and none is reserved for another.
 
         A Matrix key such as ``body``, ``m.relates_to`` or ``m.new_content`` would change what the message says, where
         it goes, or which message it edits; a MindRoom key would claim metadata such as its requester, and another
@@ -340,7 +339,7 @@ class RoomMessenger:
         router: AgentBot,
         text: str,
         thread_id: str | None,
-        extra: dict[str, Any],
+        extra: dict[str, object],
         mentions: Sequence[str],
     ) -> str:
         # One hop into the synthetic chain, as a hook's own send outside a message is, so hooks reacting to it cannot loop.

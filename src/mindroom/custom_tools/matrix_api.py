@@ -211,9 +211,8 @@ class MatrixApiTools(Toolkit):
             return None, f"{field_name} is required and must be a non-empty string."
         return normalized_value, None
 
-    @classmethod
+    @staticmethod
     def _validate_content(
-        cls,
         content: dict[str, object] | None,
         plugin_namespaces: tuple[str, ...],
     ) -> tuple[dict[str, object] | None, str | None]:
