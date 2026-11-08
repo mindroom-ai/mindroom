@@ -749,7 +749,10 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     continuation = get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return None
-    if continuation.state == "failing" and _paused_reply_gone(transaction, principal_id, continuation):
+    if (
+        continuation.state == "failing"
+        and _paused_reply_state(transaction, principal_id, continuation) is ReplyState.GONE
+    ):
         return continuation
     delivered = transaction.fetchone(
         """
@@ -772,11 +775,6 @@ def _paused_reply_state(
     span = reply_spans.load(transaction, principal_id, continuation.span_id)
     reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
     return None if reply is None else reply.state
-
-
-def _paused_reply_gone(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
-    """Return whether the reply a continuation paused is gone."""
-    return _paused_reply_state(transaction, principal_id, continuation) is ReplyState.GONE
 
 
 def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:
