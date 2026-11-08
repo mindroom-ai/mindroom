@@ -151,24 +151,25 @@ def _is_utf8(name: str) -> bool:
     return True
 
 
-def _watched_folders(root: Path, skipped: set[Path]) -> list[Path]:
-    """Return the base folder and the folders below it, reached without a link, up to the cap.
+def _watched_folders(root: Path, *, check_file_names: bool) -> tuple[list[Path], set[Path]]:
+    """Return the base folder and the folders below it, reached without a link, up to the cap, and the folders skipped.
 
-    Watchfiles ends a watch at any event naming a path that is not valid UTF-8, even one that only opens it, as every
-    listing of the base does. So a folder holding such a name is added to ``skipped`` instead, and the walk does not
-    enter that name.
+    Watchfiles ends a watch at any event naming a path that is not valid UTF-8, even one that only opens it. Every
+    listing of the base opens its folders, so a folder holding a folder name that is not valid UTF-8 is skipped, and the
+    walk does not enter that name. With ``check_file_names``, a file name that is not valid UTF-8 skips its folder too.
     """
     folders: list[Path] = []
+    skipped: set[Path] = set()
     with pinned_canonical_directory(root) as root_fd:
         for folder, subfolders, files, _folder_fd in os.fwalk(".", dir_fd=root_fd):
-            if all(map(_is_utf8, [*subfolders, *files])):
+            if all(map(_is_utf8, [*subfolders, *files] if check_file_names else subfolders)):
                 folders.append(root / folder)
             else:
                 skipped.add(root / folder)
             subfolders[:] = [name for name in subfolders if name not in _IGNORED_FOLDER_NAMES and _is_utf8(name)]
             if len(folders) == _MAX_WATCHED_FOLDERS:
                 break
-    return folders
+    return folders, skipped
 
 
 def _is_new_watched_folder(change: Change, path: str) -> bool:
@@ -320,9 +321,9 @@ class KnowledgeSourceWatcher:
         refresh_pending = False
         warned_cap = False
         warned_skipped: set[Path] = set()
+        check_file_names = False
         while not stop_event.is_set():
-            skipped: set[Path] = set()
-            folders = await asyncio.to_thread(_watched_folders, target.path, skipped)
+            folders, skipped = await asyncio.to_thread(_watched_folders, target.path, check_file_names=check_file_names)
             for folder in sorted(skipped - warned_skipped):
                 logger.warning(
                     "Knowledge filesystem watcher skips a folder holding a name that is not valid UTF-8; changes there refresh on search",
@@ -339,9 +340,11 @@ class KnowledgeSourceWatcher:
                     base_ids=list(target.base_ids),
                     watched_folders=len(folders),
                 )
-            await self._watch_folders(
+            # Once such a name ended a watch, something opens or changes it, so file names skip their folder from then on.
+            check_file_names |= await self._watch_folders(
                 target,
                 folders,
+                check_file_names=check_file_names,
                 refresh_pending=refresh_pending,
                 config=config,
                 runtime_paths=runtime_paths,
@@ -355,12 +358,16 @@ class KnowledgeSourceWatcher:
         target: _WatchTarget,
         folders: list[Path],
         *,
+        check_file_names: bool,
         refresh_pending: bool,
         config: Config,
         runtime_paths: RuntimePaths,
         stop_event: asyncio.Event,
-    ) -> None:
-        """Watch ``folders`` until stopped or until the base must be walked again."""
+    ) -> bool:
+        """Watch ``folders`` until stopped or until the base must be walked again.
+
+        Returns whether a name that is not valid UTF-8 ended the watch.
+        """
         watched = frozenset(folders)
         # Yielding on timeouts delivers a first batch within a second of the watch starting, even without a change.
         watcher = awatch(
@@ -379,10 +386,15 @@ class KnowledgeSourceWatcher:
                     # parent, but before that parent was watched, shows up only by walking again.
                     if not checked:
                         checked = True
-                        if set(await asyncio.to_thread(_watched_folders, target.path, set())) != watched:
-                            return
+                        walked, _skipped = await asyncio.to_thread(
+                            _watched_folders,
+                            target.path,
+                            check_file_names=check_file_names,
+                        )
+                        if set(walked) != watched:
+                            return False
                     if any(_is_new_watched_folder(change, path) for change, path in changes):
-                        return
+                        return False
                     if refresh_pending or _changes_include_indexable_path(target, config, changes, watched):
                         refresh_pending = False
                         await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
@@ -391,11 +403,18 @@ class KnowledgeSourceWatcher:
             if checked:
                 raise
         except ExceptionGroup as group:
-            # Watchfiles ends a running watch at an event naming a path that is not valid UTF-8, such as one created in a
-            # watched folder, so walk again, which skips that folder. A failure to start the watch is not wrapped in a
-            # group, and still stops the watcher.
+            # Watchfiles ends a running watch at an event naming a path that is not valid UTF-8, with an error it exports
+            # no public name for, so walk again, which skips the folder holding that name. A failure to start the watch
+            # is not wrapped in a group, and still stops the watcher.
             if group.split(WatchfilesRustInternalError)[1] is not None:
                 raise
+            logger.info(
+                "Knowledge filesystem watcher walks the base again after its watch ended",
+                knowledge_path=str(target.path),
+                error=str(group.exceptions[0]),
+            )
+            return True
+        return False
 
     async def _poll_source(
         self,
