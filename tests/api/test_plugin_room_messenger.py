@@ -340,14 +340,14 @@ async def test_relay_mentions_only_agents_and_teams_in_the_room(world: _World, m
 
 
 @pytest.mark.asyncio
-async def test_relay_may_wake_a_team_in_the_room(world: _World) -> None:
-    """A team joined to the room is mentioned like an agent."""
+async def test_relay_may_wake_a_team_in_the_room_once(world: _World) -> None:
+    """A team joined to the room is mentioned like an agent, and an entity named twice is mentioned once."""
     messenger = await world.messenger(CAROL)
 
     with _transport() as transport:
-        await messenger.relay("@crew what changed?", mentions=[CREW])
+        await messenger.relay("@crew what changed?", mentions=[CREW, OPEN, CREW])
 
-    assert _sent(transport, world.client)["m.mentions"] == {"user_ids": [CREW]}
+    assert _sent(transport, world.client)["m.mentions"] == {"user_ids": [CREW, OPEN]}
 
 
 def _expire(world: _World) -> None:

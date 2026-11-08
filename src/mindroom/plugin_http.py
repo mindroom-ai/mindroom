@@ -351,7 +351,7 @@ class RoomMessenger:
             thread_id,
             format_hook_source(self._plugin_name, "http"),
             extra,
-            mentions=list(mentions),
+            mentions=list(dict.fromkeys(mentions)),
         )
         if event_id is None:
             raise HTTPException(503, "The message could not be sent; try again.")
