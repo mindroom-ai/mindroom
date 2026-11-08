@@ -75,7 +75,7 @@ While MindRoom can't yet decide whether the person may use the agent, the routes
 ## Following changes
 
 The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` sends `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
-It leaves out Git's internals, `node_modules`, `.venv`, caches, editor swap files, MindRoom's temporary save files, and the hidden credentials, and it follows links only while they stay inside the workspace.
+It leaves out Git's internals, `node_modules`, `.venv`, `.cache` and other caches, editor swap files, MindRoom's temporary save files, and the hidden credentials, and it follows links only while they stay inside the workspace.
 It signs in as [plugin websocket routes](plugins.md#websocket-routes) do, and anyone who may open the workspace, `read` or `write`, may follow it.
 It checks again every 15 seconds, under the config served then, and closes with 1008 once the workspace is no longer open to the caller or is no longer the one it followed, as after a config save makes the agent private, and with 1013 while MindRoom can't tell; the client then connects again.
 In a workspace with more than 10,000 folders, changes in the folders past that are not reported.

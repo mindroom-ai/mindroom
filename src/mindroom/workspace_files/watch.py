@@ -1,10 +1,10 @@
 """The changes in agents' workspaces, from one watcher per workspace however many streams follow it.
 
 A follower gets the sorted workspace-relative paths that changed, at most every 150 ms. Left out are what Git,
-editors, caches and atomic saves churn (``watchfiles``' default filter and MindRoom's temporary save names) and the
-credentials ``operations.is_hidden`` names. Code the agent runs can plant links, and ``watchfiles`` would follow them
-out of the workspace, so the watcher watches each folder reached from the root without a link on its own, walks the
-tree again when a folder appears or goes, and reports only paths that stay inside.
+editors, caches and atomic saves churn (``watchfiles``' default filter, ``.cache`` and MindRoom's temporary save
+names) and the credentials ``operations.is_hidden`` names. Code the agent runs can plant links, and ``watchfiles``
+would follow them out of the workspace, so the watcher watches each folder reached from the root without a link on its
+own, walks the tree again when a folder appears, and reports only paths that stay inside.
 """
 
 from __future__ import annotations
@@ -35,7 +35,9 @@ _ABSENT_RETRY_SECONDS = 1.0
 _FAILURE_RETRY_SECONDS = 30.0
 # Each watched folder holds one of the primary's file watches, which the operating system limits.
 _MAX_FOLDERS = 10_000
+# The workspace is the agent's HOME, so tools keep their caches, such as uv's, in its `.cache`.
 _FILTER = watchfiles.DefaultFilter(
+    ignore_dirs=(*watchfiles.DefaultFilter.ignore_dirs, ".cache"),
     ignore_entity_patterns=(*watchfiles.DefaultFilter.ignore_entity_patterns, r"^\.mindroom-[0-9a-f]{32}\.tmp$"),
 )
 

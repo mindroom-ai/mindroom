@@ -40,7 +40,7 @@ async def _settled(root: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_stream_hears_what_changes_but_never_git_credentials_or_save_temporaries(tmp_path: Path) -> None:
-    """Changed paths come relative to the root and sorted, without Git's, credentials or atomic save names."""
+    """Changed paths come relative to the root and sorted, without Git's, credentials, caches or atomic save names."""
     root = tmp_path / "workspace"
     (root / ".git").mkdir(parents=True)
     (root / "src").mkdir()
@@ -49,6 +49,8 @@ async def test_a_stream_hears_what_changes_but_never_git_credentials_or_save_tem
         (root / ".git" / "index").write_text("x")
         (root / ".env").write_text("TOKEN=1\n")
         (root / ".mindroom-0123456789abcdef0123456789abcdef.tmp").write_text("x")
+        (root / ".cache" / "uv").mkdir(parents=True)
+        (root / ".cache" / "uv" / "wheel").write_text("x")
         (root / "src" / "b.py").write_text("x")
         (root / "src" / "a.py").write_text("x")
         (root / "zz.md").write_text("x")
@@ -56,7 +58,7 @@ async def test_a_stream_hears_what_changes_but_never_git_credentials_or_save_tem
         seen = await _until(next_changes, "zz.md")
 
     assert {"src/a.py", "src/b.py", "zz.md"} <= seen
-    assert not {path for path in seen if path.startswith((".git", ".env", ".mindroom-"))}
+    assert not {path for path in seen if path.startswith((".git", ".env", ".mindroom-", ".cache"))}
 
 
 @pytest.mark.asyncio
