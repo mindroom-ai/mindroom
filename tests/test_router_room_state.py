@@ -1015,7 +1015,7 @@ async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_
     setup = RoomSetup(paths, lambda: config, lambda: client, AsyncMock())
     triggers = [asyncio.create_task(setup.publish_room_state()) for _ in range(earlier_triggers)]
     duties = _router_duties(room_state)
-    duties.joined(ROOM_ID)
+    duties.mark_joined_for_room_state(ROOM_ID)
     frame = asyncio.create_task(duties.publish_joined_room_state())
     while True:
         # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
