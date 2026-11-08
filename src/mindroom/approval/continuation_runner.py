@@ -1404,15 +1404,16 @@ class ApprovalContinuationRunner:
     async def end_paused_turn(self, ended: EndedApproval) -> None:
         """End the turn of a paused reply whose approval ended, as the state its end left the reply in says.
 
-        A reply its approval released to replay ended nothing: its sources answer again. How the turn's run ended, when
-        it settled here, says more than the reply's state, which an error that became the reply's text completes.
+        A reply its approval released to replay ended nothing: its sources answer again. A completed reply can hide how
+        its run ended, such as an error that became its text, so how the run ended, when it settled here, says more.
         """
         continuation = ended.continuation
         settled = self.locked.take_turn_end(continuation.turn_id)
-        reply_outcome = _TURN_OUTCOMES.get(ended.reply_state)
-        if reply_outcome is None:
+        outcome = _TURN_OUTCOMES.get(ended.reply_state)
+        if outcome is None:
             return
-        outcome = settled or reply_outcome
+        if outcome is TurnOutcome.COMPLETED and settled is not None:
+            outcome = settled
         request = self.approval_response_request(continuation, target=continuation_target(continuation))
         lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(continuation))
         await lifecycle.end_turn(outcome)

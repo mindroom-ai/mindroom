@@ -243,6 +243,7 @@ Custom events default to 1000 ms.
   A plugin that uses them states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
   Apart from the limits below, every turn that starts ends with exactly one `turn:ended`, whose `ctx.outcome` is a `TurnOutcome` from `mindroom.plugin_api`: `COMPLETED`, `CANCELLED`, or `FAILED`, equal to the strings `"completed"`, `"cancelled"`, and `"failed"`.
   `completed` includes an answer withheld on purpose, such as by a `message:before_response` hook, whose `message:cancelled` says why, and an agent's decision not to answer under adaptive participation; `failed` includes a run whose error became its reply's text.
+  A reply resumed after an approval whose answer a `message:before_response` hook withholds shows that as a failed approval, and its turn ends `failed`.
   A reply that [pauses for a tool approval](tool-approval.md#approving-and-denying) fires `turn:paused`, and `turn:resumed` when the decided approval resumes it, which can repeat before the turn ends; a turn stopped while paused ends `cancelled`.
   A call that asks for approval from its [background job](tools/agent-orchestration.md#approvals), or that a minimal-mode reply waits for in place, does not pause the turn, which keeps running while its reply waits for the decision.
   A request that runs nothing, such as an empty message, starts no turn.

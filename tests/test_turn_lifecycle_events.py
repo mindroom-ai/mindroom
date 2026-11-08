@@ -37,6 +37,7 @@ from mindroom.llm.provider import TextDelta
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.plugin_api import TurnOutcome
 from mindroom.post_response_effects import ResponseOutcome
+from mindroom.reply_lifecycle import ReplyState
 from mindroom.response_turn import CompletedApprovalRun
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation, dispatch_approval
@@ -411,8 +412,36 @@ async def test_a_run_approved_in_place_whose_error_became_its_reply_ends_the_tur
     assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "failed")]
 
 
+@pytest.mark.parametrize(
+    ("settled", "reply_state", "outcome"),
+    [
+        (TurnOutcome.FAILED, ReplyState.COMPLETED, "failed"),
+        (TurnOutcome.COMPLETED, ReplyState.FAILED, "failed"),
+        (TurnOutcome.COMPLETED, ReplyState.GONE, "cancelled"),
+        (None, ReplyState.COMPLETED, "completed"),
+    ],
+    ids=["error-completed-the-reply", "owed-answer-refused", "settled-then-departed", "never-settled-here"],
+)
+async def test_an_approval_ends_its_turn_as_its_reply_ended_unless_a_completed_reply_hides_how_its_run_ended(
+    tmp_path: Path,
+    settled: TurnOutcome | None,
+    reply_state: ReplyState,
+    outcome: str,
+) -> None:
+    """How the run settled here refines only a completed reply; any other reply state is how the approval ended."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=True) as bot:
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        continuation = approval_continuation(turn_id="turn-1")
+        if settled is not None:
+            runner.locked._turn_ends["turn-1"] = settled
+        await runner.approvals.end_paused_turn(EndedApproval(continuation, reply_state))
+
+    assert seen == [(EVENT_TURN_ENDED, "turn-1", outcome)]
+
+
 async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(tmp_path: Path) -> None:
-    """A run cut short while it waits in place ends its turn as a cut-short run does, once its approval settles."""
+    """A run cut short while it waits in place leaves its end to its approval, whose failed settlement ends it once."""
     seen: _Seen = []
     async with _approval_turns(tmp_path, seen, requires_human=True) as bot:
         runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -427,7 +456,7 @@ async def test_a_turn_cut_short_while_it_waits_in_place_for_approval_ends_once(t
         await dispatch_approval(runner.approvals, failing, target=_target())
         assert await bot.journal_principal().approvals.approval_continuation_for_source("$event") is None
 
-    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "cancelled")]
+    assert _events(seen) == [(EVENT_TURN_STARTED, None), (EVENT_TURN_ENDED, "failed")]
 
 
 @pytest.mark.parametrize(("cancel_source", "outcome"), [("user_stop", "cancelled"), ("sync_restart", "failed")])
