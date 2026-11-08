@@ -1169,12 +1169,13 @@ async def lifespan(lifecycle: PluginLifecycle):
 | `stop_reason` | Set before the stop code runs: `"reload"` when the plugin's new lifespan already started and can take over `process_state`, `"disabled"` when no new lifespan did because a config change removed or disabled the plugin or its new code failed to load or start, and `"shutdown"` when MindRoom stops |
 
 MindRoom starts each plugin's lifespan once the plugin loads at startup, in the process that runs the agents.
-`mindroom plugins check` and `mindroom config validate` import the lifecycle module but never run `lifespan`, and workers never import it.
+`mindroom plugins check`, `mindroom config validate`, and `mindroom doctor` import the lifecycle module but never run `lifespan`, and workers never run it either.
+The plugin's routes, tools, and hooks can import the lifecycle module, such as `from .lifecycle import STATE`, to use what its lifespan set up, though a worker that loads such a module then imports the lifecycle module too.
 Every plugin reload, and every config reload that changes `plugins:`, runs every plugin's code again, so it restarts every lifespan, including those of plugins that did not change.
 The new lifespan starts before the old one stops with `"reload"`, so the new code can take over what `process_state` holds.
 The plugin's new tools, hooks, and routes are live while its new lifespan starts, so code that uses what the lifespan sets up handles it not being there yet.
 Orderly shutdown stops each lifespan with `"shutdown"` after the agents have stopped.
-A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespan failed to start` or `Plugin lifespan failed to stop` with the plugin's name, and MindRoom carries on without waiting for it.
+A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespan failed to start` or `Plugin lifespan failed to stop` with the plugin's name, and MindRoom cancels one that overran and carries on; a lifespan whose start failed never runs its stop code.
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
 Either failure costs the plugin only its lifespan: its tools, hooks, and routes keep working.
 A plugin with a lifecycle module states `"mindroom_plugin_api": "1.5"` in its manifest, so an older MindRoom skips it with a clear reason.

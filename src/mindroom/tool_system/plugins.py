@@ -744,6 +744,28 @@ def _materialize_plugin(
     *,
     primary_modules: bool,
 ) -> _LoadedPlugin:
+    lifecycle_entry: plugin_imports._ModuleCacheEntry | None = None
+    lifespan: Callable[[PluginLifecycle], AbstractAsyncContextManager[object]] | None = None
+    lifespan_error: plugin_imports.PluginValidationError | None = None
+    if primary_modules and plugin.lifecycle_module_path is not None:
+        # First, so the plugin's other modules that import it share the instance whose lifespan runs. A broken
+        # lifecycle module costs only the lifespan, as a broken routes module costs only the routes.
+        try:
+            lifecycle_entry = _load_plugin_module(
+                plugin.name,
+                plugin.root,
+                plugin.lifecycle_module_path,
+                kind="lifecycle",
+            )
+            assert lifecycle_entry is not None
+            lifespan = _plugin_lifespan(lifecycle_entry.module)
+        except plugin_imports.PluginValidationError as error:
+            logger.warning(
+                "Plugin lifecycle module failed to load; running no lifespan",
+                plugin_name=plugin.name,
+                error=str(error),
+            )
+            lifespan_error = error
     tools_entry = _load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
     # Without its own hooks module, a plugin's hooks live in its tools module.
     hooks_entry = (
@@ -764,27 +786,6 @@ def _materialize_plugin(
         except plugin_imports.PluginValidationError as error:
             logger.warning("Plugin routes failed to load; serving none", plugin_name=plugin.name, error=str(error))
             routes_error = error
-    lifecycle_entry: plugin_imports._ModuleCacheEntry | None = None
-    lifespan: Callable[[PluginLifecycle], AbstractAsyncContextManager[object]] | None = None
-    lifespan_error: plugin_imports.PluginValidationError | None = None
-    if primary_modules and plugin.lifecycle_module_path is not None:
-        # Likewise, a broken lifecycle module costs only the lifespan.
-        try:
-            lifecycle_entry = _load_plugin_module(
-                plugin.name,
-                plugin.root,
-                plugin.lifecycle_module_path,
-                kind="lifecycle",
-            )
-            assert lifecycle_entry is not None
-            lifespan = _plugin_lifespan(lifecycle_entry.module)
-        except plugin_imports.PluginValidationError as error:
-            logger.warning(
-                "Plugin lifecycle module failed to load; running no lifespan",
-                plugin_name=plugin.name,
-                error=str(error),
-            )
-            lifespan_error = error
     entries = tuple(
         dict.fromkeys(
             entry
@@ -890,7 +891,7 @@ class PluginRoutesApp:
 
     app: ASGIApp
     # Closes one open websocket each.
-    _closers: set[Callable[[], Awaitable[None]]] = field(default_factory=set)
+    _closers: set[Callable[[], Awaitable[None]]] = field(default_factory=set, init=False)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Serve one request or websocket, tracking a websocket until it ends."""

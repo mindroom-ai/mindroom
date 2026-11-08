@@ -88,11 +88,11 @@ async def live(websocket: WebSocket) -> None:
             text = await websocket.receive_text()
             await websocket.send_text(f"v{version}:{{text}}")
     except WebSocketDisconnect as closed:
-        _probe.closes.append(("closed", {version}, closed.code))
+        _probe.events.append(("closed", {version}, closed.code))
     try:
         await websocket.send_text("late")
     except WebSocketDisconnect as refused:
-        _probe.closes.append(("late send", {version}, refused.code))
+        _probe.events.append(("late send", {version}, refused.code))
 """
 
 TOOLS = """
@@ -130,7 +130,6 @@ def _probe() -> Any:  # noqa: ANN401 - a module the test gives the attributes it
     probe = ModuleType(f"{_TEST_PROBE_PREFIX}{uuid.uuid4().hex}")
     probe.events = []
     probe.imports = []
-    probe.closes = []
     sys.modules[probe.__name__] = probe
     return probe
 
@@ -582,6 +581,54 @@ def test_plugin_check_fails_on_a_broken_lifecycle_module(tmp_path: Path, lifecyc
         check_plugin(root)
 
 
+def test_the_plugins_other_modules_share_the_lifecycle_module_its_lifespan_runs_in(tmp_path: Path) -> None:
+    """Routes and tools that import the lifecycle module see what its lifespan set up."""
+    lifecycle = """
+from contextlib import asynccontextmanager
+
+STATE = {{}}
+
+
+@asynccontextmanager
+async def lifespan(lifecycle):
+    STATE["client"] = "open"
+    yield
+"""
+    routes = """
+from fastapi import APIRouter
+
+from .lifecycle import STATE
+
+router = APIRouter()
+
+
+@router.get("/client")
+async def client() -> dict:
+    return {{"client": STATE.get("client")}}
+"""
+    root = _write(
+        tmp_path,
+        _probe(),
+        "demo",
+        lifecycle=lifecycle,
+        routes=routes,
+        tools="from .lifecycle import STATE\n",
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _config(runtime_paths, "demo")
+    lifespans = PluginLifespans(runtime_paths, lambda: config)
+
+    async def publish_and_stop() -> None:
+        await _publish(lifespans, config, runtime_paths)
+        await lifespans.stop()
+
+    asyncio.run(publish_and_stop())
+
+    assert TestClient(_app(config, runtime_paths)).get("/api/plugins/demo/client").json() == {"client": "open"}
+    lifecycle_module = cached_plugin_module((root / "lifecycle.py").resolve())
+    assert cached_plugin_module((root / "tools.py").resolve()).STATE is lifecycle_module.STATE
+
+
 @asynccontextmanager
 async def _serving(app: FastAPI) -> AsyncIterator[str]:
     """Serve ``app`` as the runtime's embedded API server does and yield its websocket base URL."""
@@ -651,7 +698,17 @@ async def test_a_reload_closes_the_replaced_plugins_websockets_so_clients_reconn
     finally:
         await orchestrator.stop()
 
-    assert probe.closes == [("closed", 1, 1012), ("late send", 1, 1012), ("closed", 2, 1012), ("late send", 2, 1012)]
+    # Each reload closes the replaced websocket after the new lifespan started and before the old one stops.
+    assert probe.events == [
+        ("start", "demo", 1, None, {}),
+        ("start", "demo", 2, 1, {}),
+        ("closed", 1, 1012),
+        ("late send", 1, 1012),
+        ("stop", "demo", 1, "reload"),
+        ("closed", 2, 1012),
+        ("late send", 2, 1012),
+        ("stop", "demo", 2, "disabled"),
+    ]
 
 
 @pytest.mark.asyncio

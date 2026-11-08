@@ -126,11 +126,11 @@ class PluginLifespans:
     # The config the runtime serves now.
     current_config: Callable[[], Config]
     # The generation whose lifespans run.
-    _published: PluginGeneration = field(default_factory=PluginGeneration)
-    _running: dict[str, _RunningLifespan] = field(default_factory=dict)
+    _published: PluginGeneration = field(default_factory=PluginGeneration, init=False)
+    _running: dict[str, _RunningLifespan] = field(default_factory=dict, init=False)
     # Orders publications and the shutdown stop, so a publication shutdown interrupts still ends in that stop.
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _stopped: bool = False
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _stopped: bool = field(default=False, init=False)
 
     async def apply_published(self) -> None:
         """Follow the plugin generation published now, when it changed since the last call.
