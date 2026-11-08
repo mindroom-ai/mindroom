@@ -635,6 +635,9 @@ per-file-ignores.".github/scripts/*" = [
 per-file-ignores."cluster/k8s/kind/*" = [
   "INP001", # Part of an implicit namespace package (namespace package for python -m invocation)
 ]
+per-file-ignores."tests/fixtures/*/*.py" = [
+  "INP001", # Example plugins under test fixtures load by path, never as packages
+]
 per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", # `import` should be at the top-level of a file"
 ]

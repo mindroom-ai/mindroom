@@ -5474,6 +5474,34 @@ depends_on = [
 visibility = []
 
 [[modules]]
+path = "mindroom.plugin_testing"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.api.client_sessions",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.connection_agents",
+    "mindroom.api.plugin_routes",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.hooks",
+    "mindroom.matrix.rooms",
+    "mindroom.matrix.state",
+    "mindroom.matrix_identifiers",
+    "mindroom.mcp_gateway.toolkits",
+    "mindroom.mcp_gateway.tools",
+    "mindroom.orchestration.plugin_http_runtime",
+    "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_hooks",
+]
+# Plugins' own test suites import it; MindRoom never does.
+visibility = []
+
+[[modules]]
 path = "mindroom.plugin_check"
 depends_on = [
     "mindroom.config.main",
@@ -8283,7 +8311,7 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
 ]
-visibility = ["mindroom.api.main"]
+visibility = ["mindroom.api.main", "mindroom.plugin_testing"]
 
 # Public: plugin routes import it to require a signed-in Matrix client, live room membership, or a platform
 # administrator, to read and change a room's modes, to learn the agents a caller may use in a room with their workspaces,
@@ -8372,7 +8400,7 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.rooms",
 ]
-visibility = ["mindroom.orchestrator"]
+visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 
 [[modules]]
 path = "mindroom.orchestration.server_state"

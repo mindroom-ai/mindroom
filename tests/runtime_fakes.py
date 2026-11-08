@@ -51,6 +51,39 @@ class ReadyRuntime(_MultiAgentOrchestrator):
         return self.journal_store if self.journal_store is not None else super().event_journal_store()
 
 
+@dataclass
+class RecordingRouter:
+    """A running router bot, recording what each grant refresh's follow-up asks of it."""
+
+    client: object
+    config: Config
+    running: bool = True
+    follow_ups: list[str] = field(default_factory=list)
+
+    def schedule_pending_invite_reconciliation(self) -> None:
+        """Record an invite recheck."""
+        self.follow_ups.append("invites")
+
+    async def revoke_reply_authorized_calls(self) -> None:
+        """Record a call revocation."""
+        self.follow_ups.append("revoke_calls")
+
+    def schedule_reply_authorized_call_reconciliation(self) -> None:
+        """Record a call recheck."""
+        self.follow_ups.append("reconcile_calls")
+
+    def schedule_reply_authorized_call_revocation(self) -> None:
+        """Record a scheduled call revocation."""
+        self.follow_ups.append("scheduled_revoke")
+
+    def release_pending_turn_journal_replay(self) -> None:
+        """Release nothing; the turn recovery pass is recorded once it drains."""
+
+    async def recover_pending_turn_journal_events(self) -> None:
+        """Record a turn recovery pass."""
+        self.follow_ups.append("turns")
+
+
 def ready_runtime(
     config: Config,
     runtime_paths: RuntimePaths,
