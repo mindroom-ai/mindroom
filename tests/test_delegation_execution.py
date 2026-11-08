@@ -38,7 +38,6 @@ from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
-from mindroom.mid_turn import QueuedMessage
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -71,6 +70,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
 from tests.tool_approval_helpers import gated_functions
+from tests.tool_job_helpers import NewerMessageWaits
 from tests.usage_helpers import counted_total
 
 if TYPE_CHECKING:
@@ -1962,16 +1962,6 @@ async def test_a_child_paused_again_after_its_resumed_run_continued_reports_ever
     assert reported == counted
 
 
-class _NewerMessageWaits:
-    """The reply's queue, which holds a newer message of its requester until the reply ends."""
-
-    def has_pending_human_messages(self) -> bool:
-        return True
-
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$newer", None),)
-
-
 @pytest.mark.asyncio
 async def test_a_subagent_works_until_its_own_request_carries_the_pause_notice(
     tmp_path: Path,
@@ -2005,7 +1995,7 @@ async def test_a_subagent_works_until_its_own_request_carries_the_pause_notice(
     code = ScriptedModel([calls(tool_call("write_report", "write-1")), answer("Report written")])
     ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
 
-    with registered_report_tool() as report, queued_message_signal_context(_NewerMessageWaits()):
+    with registered_report_tool() as report, queued_message_signal_context(NewerMessageWaits()):
         await respond(
             "leader",
             "delegate",
