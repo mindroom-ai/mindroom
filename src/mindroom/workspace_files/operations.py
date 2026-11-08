@@ -260,9 +260,14 @@ def _etag(payload: bytes) -> str:
 def _link_target(root: Path, path: PurePosixPath) -> Literal["file", "folder"] | None:
     try:
         found = _find(root, path)
-        kind = _KINDS.get(stat.S_IFMT((found.base / found.relative).lstat().st_mode))
+        if not found.relative.parts:
+            return "folder"
+        # Through its folder's descriptor, so a folder swapped for a link meanwhile is not followed.
+        with open_directory_within_root(found.base, found.relative.parent) as directory:
+            status = os.stat(found.relative.name, dir_fd=directory, follow_symlinks=False)
     except (HTTPException, OSError):
         return None
+    kind = _KINDS.get(stat.S_IFMT(status.st_mode))
     return kind if kind != "link" else None
 
 

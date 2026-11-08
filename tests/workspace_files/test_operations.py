@@ -85,6 +85,7 @@ def test_a_link_is_followed_only_while_it_stays_inside(root: Path) -> None:
     (root / "main").symlink_to(root / "src" / "main.py")
     (root / "code").symlink_to("src")
     (root / "nowhere").symlink_to("missing")
+    (root / "here").symlink_to(".")
 
     assert _status(lambda: read_file(root, "out")) == 403
     assert _status(lambda: read_file(root, "out-dir/outside.txt")) == 403
@@ -101,6 +102,7 @@ def test_a_link_is_followed_only_while_it_stays_inside(root: Path) -> None:
         "main": ("link", "file"),
         "code": ("link", "folder"),
         "nowhere": ("link", None),
+        "here": ("link", "folder"),
     }
 
 
