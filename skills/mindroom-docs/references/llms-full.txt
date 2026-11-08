@@ -2946,6 +2946,7 @@ Router judgments share the process-wide limit and logging described in [Judgment
 ## Welcome Messages
 
 After accepting an invitation into a room with no message history, the router posts a welcome if the inviter has router access, listing the agents and teams the inviter may address, how to mention them, and a quick command reference.
+It posts none when that room's canonical `m.space.parent` is a chat room it can read, such as one it is in, rather than a Space, since the room continues the conversation of the [room above](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 At startup, empty configured rooms get a welcome listing their configured responders.
 Send [`!hi`](https://docs.mindroom.chat/chat-commands/#hi) to see the welcome again, limited to responders visible to you.
 
@@ -4861,10 +4862,13 @@ Add `silently` or `quietly` to a request when the trigger and routine no-report 
 ```
 
 A silent schedule does not show its trigger in the room.
-A successful run that returns nothing, whitespace, or only `NO_REPLY` (any case) posts no message.
+A successful run whose final response is empty, whitespace, or has `NO_REPLY` (any case) alone on its last non-blank line posts no message.
+A final `NO_REPLY` line means do not notify, so a report must not end with it.
 Findings, failures, and messages that tools send explicitly remain visible.
 Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
-When an agent's silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/), it shows a waiting message; when the run resumes after the decision with nothing to report, that message ends showing only the run's tool calls, or `Done.` when tool calls are hidden, and no new message is posted.
+When a silent run pauses for a [tool approval](https://docs.mindroom.chat/tool-approval/), it shows a waiting message; when the run continues after the decision with nothing to report, that message ends with the run's text and tool calls without the `NO_REPLY` line, or `Done.` when nothing else is left, and no new message is posted.
+A team's silent run reports nothing only when its leader and every member do, so a member's finding stays visible, without any `NO_REPLY` line, even when the leader answers `NO_REPLY`.
+After an approval, a team's run that reports nothing ends its waiting message with the leader's own text, or `Done.` when the leader wrote none, instead of the team's document.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
 Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
 
@@ -7511,6 +7515,7 @@ A listed room they cannot join without an invitation, such as a private one, nee
 They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
 Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
 A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.
+Whether the router greets a room under a room it is invited into is described under [Welcome Messages](https://docs.mindroom.chat/configuration/router/#welcome-messages).
 
 ## Room Cleanup
 
