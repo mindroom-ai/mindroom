@@ -16,7 +16,7 @@ import pytest_asyncio
 import starlette.formparsers
 
 from mindroom.api import main
-from mindroom.api.client_sessions import _client_session_store
+from mindroom.api.client_sessions import client_session_store
 from mindroom.call_transcripts import routes
 from mindroom.constants import resolve_runtime_paths
 from tests.call_transcripts.test_service import ANN, BOB, CAROL, OUTSIDER, ROOM, World, _wav
@@ -42,7 +42,7 @@ class Api:
 
     def headers(self, user_id: str) -> dict[str, str]:
         """Sign ``user_id`` in with a client session, from MindRoom Chat's origin."""
-        token = _client_session_store(main.app).create(user_id).token
+        token = client_session_store(main.app).create(user_id).token
         return {"Authorization": f"Bearer {token}", "Origin": CHAT}
 
     async def join(self, user_id: str, room_id: str = ROOM) -> httpx.Response:
@@ -153,7 +153,7 @@ async def test_every_route_answers_404_while_call_transcripts_are_off(api: Api, 
 @pytest.mark.parametrize(("method", "path"), ROUTES)
 async def test_every_route_needs_a_client_session(api: Api, method: str, path: str) -> None:
     """Without a session, or with one that ran out, the answer is 401 and nothing is done."""
-    store = _client_session_store(main.app)
+    store = client_session_store(main.app)
     expired = store.create(ANN).token
     store.clock = lambda: time.time() + 3601
     try:

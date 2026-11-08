@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import _client_session_store
+from mindroom.api.client_sessions import client_session_store
 from mindroom.matrix import rooms
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.orchestration import plugin_http_runtime
@@ -121,7 +121,7 @@ def _bound(client: SimpleNamespace) -> FastAPI:
 
 def _request(app: FastAPI, user_id: str = ALICE) -> Request:
     """A request signed in with a client session of ``user_id``."""
-    token = _client_session_store(app).create(user_id).token
+    token = client_session_store(app).create(user_id).token
     return Request({"type": "http", "app": app, "headers": [(b"authorization", f"Bearer {token}".encode())]})
 
 
@@ -403,8 +403,8 @@ def test_routes_read_a_room_through_the_dependency() -> None:
         return await client_rooms(request, [OTHER_ROOM, ROOM])
 
     http = TestClient(app)
-    alice = {"Authorization": f"Bearer {_client_session_store(app).create(ALICE).token}"}
-    carol = {"Authorization": f"Bearer {_client_session_store(app).create(CAROL).token}"}
+    alice = {"Authorization": f"Bearer {client_session_store(app).create(ALICE).token}"}
+    carol = {"Authorization": f"Bearer {client_session_store(app).create(CAROL).token}"}
     room = quote(ROOM, safe="")
     response = http.get(f"/rooms/{room}/roster?user_id={quote(CAROL)}", headers=alice)
     assert (response.status_code, response.json()) == (
