@@ -121,7 +121,7 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):
         opened_status, opened = await _answer(
-            await client.post(f"{base}/{coder}", json={"cols": 100, "rows": 30}, headers=_auth(room, ALICE)),
+            client.post(f"{base}/{coder}", json={"cols": 100, "rows": 30}, headers=_auth(room, ALICE)),
         )
         assert opened_status == 201
         assert (opened["agent_user_id"], opened["cols"], opened["rows"], opened["alive"], opened["writable"]) == (
@@ -132,7 +132,7 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
             True,
         )
         other_status, other = await _answer(
-            await client.post(f"{base}/agents/{room.ids['other']}/terminals", headers=_auth(room, ALICE)),
+            client.post(f"{base}/agents/{room.ids['other']}/terminals", headers=_auth(room, ALICE)),
         )
         assert other_status == 201
 

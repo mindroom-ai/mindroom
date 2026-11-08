@@ -593,11 +593,11 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
     "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
+    "mindroom.plugin_http.stream_room_reader": "(websocket, user, room_id)",
     "mindroom.plugin_testing.Room": "(room_id, members, power_levels, direct, history_visibility, key, sent)",
     "mindroom.plugin_testing.SentMessage": "(text, thread_id, source, content, mentions)",
     "mindroom.plugin_testing.load_plugin": "(path, tmp_dir, *, config, settings)",
     "mindroom.tool_system.invocation.CallResult": "(status, value, error)",
-    "mindroom.plugin_http.stream_room_reader": "(websocket, user, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -43,14 +42,10 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.asyncio
 
-# A review script that asks before a shell command that runs rm.
-_RM_REVIEW = "def check(tool_name, arguments, agent_name):\n    return 'rm' in arguments['args'].split()\n"
-_ASK_FOR_SHELL = {"rules": [{"match": "run_shell_command", "action": "require_approval"}]}
 _NOT_AT_PROMPT = "Error: the terminal's shell is not waiting at an empty prompt"
 
 
 def _config(paths: RuntimePaths, tools: list[Any], approval: dict[str, Any] | None = None) -> Config:
-    paths.config_path.with_name("rm_review.py").write_text(_RM_REVIEW, encoding="utf-8")
     config = Config(agents={"code": AgentConfig(display_name="Code", tools=tools)}, tool_approval=approval or {})
     return bind_runtime_paths(config, paths)
 
@@ -152,7 +147,7 @@ async def test_an_agent_whose_shell_runs_in_the_primary_gets_no_terminal_functio
 @pytest.mark.parametrize(
     ("approval", "restricted"),
     [
-        (_ASK_FOR_SHELL, True),
+        ({"rules": [{"match": "run_shell_command", "action": "require_approval"}]}, True),
         ({"default": "require_approval"}, True),
         # A review script decides per call, and what a shell runs can't be read from the text typed into it.
         ({"rules": [{"match": "run_*", "script": "rm_review.py"}]}, True),
@@ -171,7 +166,7 @@ async def test_an_agent_types_in_terminals_only_while_its_shell_commands_never_a
     config = _config(paths, ["shell", "terminal"], approval)
     functions = _functions(config, paths)
     terminals = _terminals(config, paths)
-    session_id = (await terminals.open(cols=80, rows=24)).id
+    session_id = (await terminals.open()).id
 
     assert {"terminal_open", "terminal_run", "terminal_send"}.isdisjoint(functions) == restricted
     instructions = agent_toolkit("terminal", config, paths).instructions or ""
@@ -214,10 +209,7 @@ async def test_under_a_default_that_asks_no_path_offers_a_typing_call_to_approve
         middleware=(),
         max_tool_calls_per_turn=None,
     )
-    named = tuple(
-        replace(function, toolkit="terminal", registered_toolkit="terminal") for function in functions.values()
-    )
-    await catalog.prepare([AdaptedToolkit(name="terminal", functions=named, instructions=None)])
+    await catalog.prepare([AdaptedToolkit(name="terminal", functions=tuple(functions.values()), instructions=None)])
     with pytest.raises(UnknownToolError, match="its functions: terminal_list, terminal_read"):
         await catalog.bind(ToolKey("terminal", "terminal_send"))
 
@@ -279,16 +271,17 @@ async def test_a_call_whose_terminal_connection_ends_says_so_rather_than_still_r
         await terminal_tools._output(_Gone(), 10, after=0)  # type: ignore[arg-type]
 
 
-@asynccontextmanager
+@contextlib.asynccontextmanager
 async def _late_first_keys(runner: str) -> AsyncIterator[str]:
     """Serve a proxy to ``runner`` that holds the first input of the first connection to send one.
 
     It releases it once another connection sends input, or after half a second, as a network may deliver it late.
     """
     sent_elsewhere = asyncio.Event()
-    first: list[web.WebSocketResponse] = []
+    first: web.WebSocketResponse | None = None
 
     async def relay(request: web.Request) -> web.WebSocketResponse:
+        nonlocal first
         viewer = web.WebSocketResponse()
         await viewer.prepare(request)
         async with (
@@ -298,15 +291,16 @@ async def _late_first_keys(runner: str) -> AsyncIterator[str]:
 
             async def output() -> None:
                 async for message in upstream:
-                    await viewer.send_bytes(message.data) if message.type == aiohttp.WSMsgType.BINARY else None
+                    if message.type == aiohttp.WSMsgType.BINARY:
+                        await viewer.send_bytes(message.data)
 
             shown = asyncio.create_task(output())
             async for message in viewer:
-                if not first:
-                    first.append(viewer)
+                if first is None:
+                    first = viewer
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(sent_elsewhere.wait(), 0.5)
-                elif first[0] is not viewer:
+                elif first is not viewer:
                     sent_elsewhere.set()
                 await upstream.send_str(message.data)
             shown.cancel()
