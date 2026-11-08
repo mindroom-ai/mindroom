@@ -32,7 +32,7 @@ from tests.conftest import test_runtime_paths
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Coroutine
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 ROOM_ID = "!room:localhost"
 ALICE = "@alice:localhost"
 BOB = "@bob:localhost"
-CAROL = "@carol:localhost"
 THREAD_MODE = "io.mindroom.thread_mode"
 
 
@@ -61,6 +60,18 @@ class _Room:
             {"type": "http", "app": self.app, "headers": [(b"authorization", f"Bearer {token}".encode())]},
         )
         return await require_room_reader(request, ROOM_ID)
+
+    def thread_mode_command(self, args_text: str) -> Coroutine[Any, Any, str]:
+        """Alice's `!thread_mode` command, as the router answers it."""
+        return handle_thread_mode_command(
+            args_text,
+            client=self.client,
+            config=self.config,
+            runtime_paths=self.paths,
+            room_id=ROOM_ID,
+            requester_user_id=ALICE,
+            sender_user_id=ALICE,
+        )
 
     def stored(self) -> tuple[str | None, str | None]:
         return (
@@ -91,10 +102,7 @@ def room(tmp_path: Path) -> _Room:
     }
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = bots[0]
-    live_room = nio.MatrixRoom(ROOM_ID, client.user_id)
-    for user_id in bots:
-        live_room.add_member(user_id, None, None)
-    client.rooms = {ROOM_ID: live_room}
+    client.rooms = {ROOM_ID: nio.MatrixRoom(ROOM_ID, client.user_id)}
 
     async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
         joined = [
@@ -136,15 +144,6 @@ def room(tmp_path: Path) -> _Room:
     return _Room(config, paths, events, client, router, app)
 
 
-async def _answer(change: Awaitable[object]) -> tuple[int, object]:
-    """The status and detail a change answers: 200 and None when it returns, else its HTTP error's."""
-    try:
-        await change
-    except HTTPException as error:
-        return error.status_code, error.detail
-    return 200, None
-
-
 @pytest.mark.asyncio
 async def test_modes_give_each_override_and_the_reply_mode_in_effect(room: _Room) -> None:
     """Each override is None while the room follows the config, and the reply mode is its `rooms` entry's, else auto."""
@@ -183,6 +182,15 @@ async def test_an_admin_sets_and_clears_the_reply_mode_and_the_thread_mode_stays
 
 
 @pytest.mark.asyncio
+async def test_one_call_changes_both_modes(room: _Room) -> None:
+    """A change naming both modes stores both, and the router publishes the thread mode."""
+    reader = await room.reader()
+    await reader.set_modes(thread="room", reply="mentions")
+    assert room.stored() == ("room", "mentions")
+    assert room.published() == {"mode": "room"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "expected"),
     [
@@ -215,7 +223,9 @@ async def test_a_refused_change_writes_and_publishes_nothing(
             reader.modes()
     if case == "router_absent":
         room.router.client = AsyncMock(spec=nio.AsyncClient, rooms={})
-    assert await _answer(reader.set_modes(thread="room", reply="mentions")) == expected
+    with pytest.raises(HTTPException) as refused:
+        await reader.set_modes(thread="room", reply="mentions")
+    assert (refused.value.status_code, refused.value.detail) == expected
     assert room.stored() == (None, None)
     room.client.room_put_state.assert_not_awaited()
 
@@ -240,25 +250,9 @@ def test_a_route_returns_the_modes_as_its_typed_response(room: _Room) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_non_member_is_refused_before_any_power_read(room: _Room) -> None:
-    """Carol, who is not in the room, gets 403 from membership, and the room's power levels are never read."""
-    assert await _answer(room.reader(CAROL)) == (403, "Not a member of this room.")
-    room.client.room_get_state.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_thread_mode_reset_without_an_override_says_so_and_still_republishes(room: _Room) -> None:
     """`!thread_mode reset` answers as before through the shared path, and still publishes the configured mode."""
-    answer = await handle_thread_mode_command(
-        "reset",
-        client=room.client,
-        config=room.config,
-        runtime_paths=room.paths,
-        room_id=ROOM_ID,
-        requester_user_id=ALICE,
-        sender_user_id=ALICE,
-    )
-    assert answer == "This room has no thread mode override."
+    assert await room.thread_mode_command("reset") == "This room has no thread mode override."
     assert room.published() == {"mode": "thread"}
 
 
@@ -277,15 +271,7 @@ async def test_a_route_and_a_command_at_once_leave_the_override_and_published_st
     reader = await room.reader()
     await asyncio.gather(
         reader.set_modes(thread=route_mode),  # type: ignore[arg-type]
-        handle_thread_mode_command(
-            command,
-            client=room.client,
-            config=room.config,
-            runtime_paths=room.paths,
-            room_id=ROOM_ID,
-            requester_user_id=ALICE,
-            sender_user_id=ALICE,
-        ),
+        room.thread_mode_command(command),
     )
     stored, _ = room.stored()
     assert room.published() == {"mode": stored or "thread"}

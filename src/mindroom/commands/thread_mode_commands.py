@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, get_args
 
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.room_modes import change_room_thread_mode
-from mindroom.room_thread_modes import resolve_room_thread_mode_override
+from mindroom.room_thread_modes import RoomThreadMode, resolve_room_thread_mode_override
 
 if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.room_thread_modes import RoomThreadMode
 
 _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
-_VALID_MODES: frozenset[str] = frozenset({"thread", "room"})
+_VALID_MODES: frozenset[str] = frozenset(get_args(RoomThreadMode))
 _USAGE = "Usage: `!thread_mode [room|thread|reset|show]`"
 
 

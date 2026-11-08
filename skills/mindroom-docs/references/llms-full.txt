@@ -18714,7 +18714,7 @@ Either way the user is always the session's own: no parameter of the request can
 It reads live membership through the Matrix client of the router bot if it is in the room, else of any running MindRoom bot in the room, and answers 403 unless the user is joined.
 It answers 503 when membership is unavailable: `No running MindRoom bot is in this room.` lasts until a bot joins the room, `Room membership lookup failed; try again.` means the Matrix call failed or timed out, and `Room membership is unavailable.` means the API is served without MindRoom's bots, as outside `mindroom run` or while it stops.
 
-A route that shows a room's people or checks their power depends on `require_room_reader` instead.
+A route that shows a room's people, checks their power, or reads or changes the room's modes depends on `require_room_reader` instead.
 It checks the caller exactly as `require_room_member` does, with the same answers, before it reads anything else of the room, and then returns a `RoomReader`:
 
 ```python
@@ -18738,7 +18738,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await power()` | A `RoomPower` read from the room's power levels at that moment |
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
 | `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply`, each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
-| `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do, for a room admin only |
+| `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 
 `RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
@@ -18754,10 +18754,11 @@ Before it changes anything, it answers 403 with `Only room admins change the roo
 As with `!thread_mode`, the router then updates the room's [`io.mindroom.thread_mode`](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) state, which clients choose the room's view by, before `set_modes()` returns.
 
 ```python
-from dataclasses import asdict
 from typing import Literal
 
 from pydantic import BaseModel
+
+from mindroom.plugin_http import RoomModes
 
 
 class ModesChange(BaseModel):
@@ -18769,10 +18770,10 @@ class ModesChange(BaseModel):
 async def change_modes(
     change: ModesChange,
     reader: Annotated[RoomReader, Depends(require_room_reader)],
-) -> dict[str, str | None]:
+) -> RoomModes:
     # A field the request leaves out stays as it is; one sent as null clears that override.
     await reader.set_modes(**change.model_dump(exclude_unset=True))
-    return asdict(reader.modes())
+    return reader.modes()
 ```
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.

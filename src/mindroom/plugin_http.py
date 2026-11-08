@@ -209,7 +209,7 @@ class RoomModes:
 
 @dataclass(frozen=True)
 class RoomReader:
-    """What a route may read about one room, once its caller is found joined to it."""
+    """What a route may read about one room, and change as its admin, once its caller is found joined to it."""
 
     user: ClientUser
     """The session's user, joined to the room."""
@@ -274,7 +274,7 @@ class RoomReader:
 
 
 async def require_room_reader(request: Request, room_id: Annotated[str, Path()]) -> RoomReader:
-    """Return what a route may read about ``room_id``, once the client session's user is joined to it.
+    """Return what a route may read and change about ``room_id``, once the client session's user is joined to it.
 
     It checks the caller exactly as ``require_room_member`` does, answering 401, 403 or 503, before it reads anything
     else of the room.
