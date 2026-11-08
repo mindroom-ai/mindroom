@@ -921,12 +921,7 @@ class ApprovalContinuationRunner:
         lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
         post_effect_continuation = claimed
         # A FINAL the resume queued is owed: the approval finishes it once Matrix has it, so the turn has answered.
-        owed = FinalDeliveryOutcome(
-            ending=Owed(),
-            event_id=claimed.response_event_id,
-            is_visible_response=True,
-            extra_content={STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING},
-        )
+        owed = FinalDeliveryOutcome(ending=Owed())
 
         async def continue_response(_message_id: str | None) -> FinalDeliveryOutcome:
             nonlocal post_effect_continuation
@@ -949,7 +944,7 @@ class ApprovalContinuationRunner:
                 and (await self._read_final(claimed))[0]
             ):
                 # A FINAL the resume froze before it failed is the approval's to finish once Matrix has it.
-                return replace(owed, final_visible_body=outcome.final_visible_body)
+                return owed
             return outcome
 
         await self.locked.run_and_settle_locked_response(
