@@ -104,7 +104,7 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
 
 
 def may_need_approval(context: AgentToolContext, toolkit_name: str, function: ToolFunction) -> bool:
-    """Return whether a call of ``function`` may need approval, which a call outside a conversation cannot get."""
+    """Return whether a call of ``function`` may need approval: its gate confirms, or an approval rule may ask."""
     alias = toolkit_approval_alias(context.config, context.plugins.tools, toolkit_name, function.name)
     return function.gate is ToolGate.CONFIRM or tool_may_require_approval(context.config, function.name, alias)
 

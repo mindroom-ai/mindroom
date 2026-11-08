@@ -1531,7 +1531,7 @@ To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to m
 
 `mindroom.plugin_testing`, from plugin API 1.15, loads a plugin in its own tests as MindRoom starts it and drives its routes, tools, and hooks without a homeserver or a model.
 It patches nothing: client sessions, room membership, and each agent's [access](authorization.md#responder-access) decide as in a deployment, from the config the test gives, so a test that needs another sender grants them access there.
-It imports no test runner; with pytest, a fixture wraps `load_plugin`:
+It imports no test runner; with pytest, a fixture wraps `load_plugin`, and async tests such as these need `pytest-asyncio`:
 
 ```python
 from pathlib import Path
@@ -1587,6 +1587,6 @@ An agent's Matrix ID, to make it a room's member or a relay's mention, is its ke
 Once read, whether a room is a direct message is kept for a few minutes, as running agents keep it, but never shared with another `load_plugin` block.
 The plugin reads environment values only from a `.env` file in `tmp_dir`, never from the test's own environment.
 
-The kit does not run agent turns, models, conversation history, workers, tool approval, OAuth flows, MCP server tools, the plugin's `lifespan`, the main app's middleware, such as its response security headers and request size limit, or more than one plugin at once.
+The kit does not run agent turns, models, conversation history, workers, tool approval, OAuth flows, MCP server tools, automations, the plugin's `lifespan`, the main app's middleware, such as its response security headers and request size limit, or more than one plugin at once.
 It fires no other built-in event, and hooks get no `matrix_admin` and cannot `put_room_state`; `RoomReader.set_modes` saves a thread mode but answers 503, as it cannot publish one.
 A call to the Matrix client other than its member and state reads raises `AttributeError` naming the call.

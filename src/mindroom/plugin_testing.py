@@ -528,8 +528,8 @@ def load_plugin(
         storage_path=root / "mindroom_data",
         process_env={COMPUTER_ALLOWED_ORIGINS_ENV: json.dumps([_CLIENT_ORIGIN])},
     )
-    plugin = {"path": str(Path(path).resolve()), "settings": dict(settings or {})}
-    data = {"models": {"default": {"provider": "openai", "id": "unused"}}, **(config or {}), "plugins": [plugin]}
+    entry = {"path": str(Path(path).resolve()), "settings": dict(settings or {})}
+    data = {"models": {"default": {"provider": "openai", "id": "unused"}}, **(config or {}), "plugins": [entry]}
     validated = Config.validate_with_runtime(data, runtime_paths)
     domain = validated.get_domain(runtime_paths)
 
