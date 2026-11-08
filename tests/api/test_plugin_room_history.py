@@ -65,7 +65,7 @@ def _chain(user_id: str, *steps: tuple[str, int, dict[str, str]]) -> list[dict[s
 ALICE_JOINED = _chain(ALICE, ("join", 1_000, {}))
 
 
-def _room_state(visibility: str | None, *chains: list[dict[str, object]]) -> nio.RoomGetStateResponse:
+def _room_state(visibility: object, *chains: list[dict[str, object]]) -> nio.RoomGetStateResponse:
     """The room's state: its history visibility, None for none, Alice joined, and each chain's latest member event."""
     events: list[dict[str, object]] = [
         {"type": "m.room.create", "state_key": "", "sender": ALICE, "content": {"room_version": "10"}},
@@ -83,7 +83,7 @@ def _room_state(visibility: str | None, *chains: list[dict[str, object]]) -> nio
     return nio.RoomGetStateResponse(events, ROOM)
 
 
-def _client(visibility: str | None, *chains: list[dict[str, object]]) -> SimpleNamespace:
+def _client(visibility: object, *chains: list[dict[str, object]]) -> SimpleNamespace:
     """The router's client in ``_room_state(visibility, *chains)``; it reads any of their events by ID."""
     events = {event["event_id"]: event for chain in (ALICE_JOINED, *chains) for event in chain}
 
@@ -158,9 +158,10 @@ async def test_a_caller_no_longer_joined_when_the_history_is_read_gets_403(visib
         ("invited", "invited", INVITED_AT),
         ("joined", "joined", JOINED_AT),
         ("org.example.custom", "org.example.custom", JOINED_AT),
+        (["shared"], "joined", JOINED_AT),
     ],
 )
-async def test_since_follows_the_visibility(visibility: str | None, read_as: str, since: int | None) -> None:
+async def test_since_follows_the_visibility(visibility: object, read_as: str, since: int | None) -> None:
     """None under `shared`, `world_readable` or none; the invite under `invited`; the join under `joined` or another.
 
     Display name and avatar changes after joining leave the start at the join.

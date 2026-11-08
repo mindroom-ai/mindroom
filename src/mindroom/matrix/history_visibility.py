@@ -75,7 +75,6 @@ async def _membership_start(client: nio.AsyncClient, room_id: str, member: Mappi
     """
     joined_at = invited_at = member["origin_server_ts"]
     event = member
-    invited = False
     for _ in range(_WALK_STEPS):
         replaced = event.get("unsigned", {}).get("replaces_state")
         if not isinstance(replaced, str):
@@ -88,11 +87,10 @@ async def _membership_start(client: nio.AsyncClient, room_id: str, member: Mappi
             raise RuntimeError(msg)  # noqa: TRY004
         event = response.event.source
         membership = event["content"].get("membership")
-        if membership == "invite":
-            invited = True
-        elif membership != "join" or invited:
+        # Matrix lets no one be invited while joined, so the joins come first and the invites before them.
+        if membership not in {"join", "invite"}:
             break
-        else:
+        if membership == "join":
             joined_at = event["origin_server_ts"]
         invited_at = event["origin_server_ts"]
     return joined_at, invited_at
