@@ -115,7 +115,7 @@ class RouterCallRoom:
         # Without power levels everyone is at level 0, which may post; room version 12 creators are never listed.
         power_levels = state.content("m.room.power_levels")
         required = send_power_level(power_levels, state.message_type())
-        return user_id in state.creators() or user_power_level(power_levels, user_id) >= required
+        return user_power_level(power_levels, user_id, state.creators()) >= required
 
     async def router_may_post(self, room_id: str) -> bool | None:
         """Return whether the room's power levels let the router send messages, as the room's message event type."""

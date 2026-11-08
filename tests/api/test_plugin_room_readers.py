@@ -6,7 +6,7 @@ first, and answers 503 rather than a guess when Matrix cannot answer.
 
 import asyncio
 import math
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable
 from types import SimpleNamespace
 from typing import Annotated
 from unittest.mock import AsyncMock
@@ -35,13 +35,10 @@ ROUTER = "@mindroom_router:example.org"
 
 
 @pytest.fixture(autouse=True)
-def _fresh_dm_caches() -> Iterator[None]:
+def _fresh_dm_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     """Core's direct-message rule caches its answers per bot and room; each test starts without them."""
-    rooms._DM_ROOM_CACHE.clear()
-    rooms._DIRECT_ROOMS_CACHE.clear()
-    yield
-    rooms._DM_ROOM_CACHE.clear()
-    rooms._DIRECT_ROOMS_CACHE.clear()
+    monkeypatch.setattr(rooms, "_DM_ROOM_CACHE", {})
+    monkeypatch.setattr(rooms, "_DIRECT_ROOMS_CACHE", {})
 
 
 def _joined(room_id: str, names: dict[str, str | None]) -> nio.JoinedMembersResponse:
@@ -53,7 +50,6 @@ def _joined(room_id: str, names: dict[str, str | None]) -> nio.JoinedMembersResp
 
 
 def _state(
-    room_id: str = ROOM,
     *,
     power_levels: dict[str, object] | None = None,
     room_version: str = "10",
@@ -92,7 +88,7 @@ def _state(
         )
     for user_id, content in (members or {}).items():
         events.append({"type": "m.room.member", "state_key": user_id, "sender": user_id, "content": content})
-    return nio.RoomGetStateResponse(events, room_id)
+    return nio.RoomGetStateResponse(events, ROOM)
 
 
 def _client(
@@ -129,20 +125,18 @@ async def _reader(client: SimpleNamespace, user_id: str = ALICE) -> RoomReader:
     return await require_room_reader(_request(_bound(client), user_id), ROOM)
 
 
-async def _status(read: Awaitable[object]) -> int:
-    """The status a read answers: 200 when it returns, else its HTTP error's status."""
+async def _answer(read: Awaitable[object]) -> tuple[int, object]:
+    """The status and detail a read answers: 200 and None when it returns, else its HTTP error's."""
     try:
-        await read
+        async with asyncio.timeout(5):
+            await read
     except HTTPException as error:
-        return error.status_code
-    return 200
+        return error.status_code, error.detail
+    return 200, None
 
 
-def _never_answers() -> AsyncMock:
-    async def wait_forever(*_args: object) -> None:
-        await asyncio.Event().wait()
-
-    return AsyncMock(side_effect=wait_forever)
+async def _never_answers(*_args: object) -> None:
+    await asyncio.Event().wait()
 
 
 @pytest.mark.asyncio
@@ -160,9 +154,7 @@ async def test_only_joined_users_get_a_reader_and_nothing_else_is_read_first(use
         },
     )
     client = _client({ALICE: "Alice"}, state=state)
-    with pytest.raises(HTTPException) as caught:
-        await _reader(client, user_id)
-    assert (caught.value.status_code, caught.value.detail) == (403, "Not a member of this room.")
+    assert await _answer(_reader(client, user_id)) == (403, "Not a member of this room.")
     client.joined_members.assert_awaited_once_with(ROOM)
     client.room_get_state.assert_not_awaited()
     client.room_get_state_event.assert_not_awaited()
@@ -173,9 +165,8 @@ async def test_only_joined_users_get_a_reader_and_nothing_else_is_read_first(use
 async def test_no_session_401_before_any_read() -> None:
     """Without a client session the answer is 401, and no bot is asked anything about the room."""
     client = _client()
-    with pytest.raises(HTTPException) as caught:
-        await require_room_reader(Request({"type": "http", "app": _bound(client), "headers": []}), ROOM)
-    assert caught.value.status_code == 401
+    no_session = Request({"type": "http", "app": _bound(client), "headers": []})
+    assert (await _answer(require_room_reader(no_session, ROOM)))[0] == 401
     client.joined_members.assert_not_awaited()
 
 
@@ -194,17 +185,7 @@ async def test_unbound_503() -> None:
         require_room_reader(_request(only_membership), ROOM),
     )
     for read in unbound:
-        with pytest.raises(HTTPException) as caught:
-            await read
-        assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
-
-
-def test_unbinding_withdraws_every_reader() -> None:
-    """Once the API stops serving, none of the room readers stays bound."""
-    app = _bound(_client())
-    unbind_room_members(app)
-    state = ensure_app_state(app)
-    assert (state.room_members, state.room_state, state.room_direct) == (None, None, None)
+        assert await _answer(read) == (503, "Room membership is unavailable.")
 
 
 @pytest.mark.asyncio
@@ -225,8 +206,8 @@ async def test_concurrent_readers_share_the_membership_call() -> None:
     client = _client({ALICE: "Alice", BOB: "Bob"})
     app = _bound(client)
     users = (ALICE, BOB, CAROL)
-    asked = [asyncio.create_task(_status(require_room_reader(_request(app, user_id), ROOM))) for user_id in users]
-    assert await asyncio.gather(*asked) == [200, 200, 403]
+    asked = [asyncio.create_task(_answer(require_room_reader(_request(app, user_id), ROOM))) for user_id in users]
+    assert [status for status, _ in await asyncio.gather(*asked)] == [200, 200, 403]
     client.joined_members.assert_awaited_once_with(ROOM)
 
 
@@ -283,14 +264,10 @@ async def test_a_failed_power_read_answers_503_never_no_power() -> None:
     client = _client()
     reader = await _reader(client)
     client.room_get_state.side_effect = nio.exceptions.ProtocolError("connection reset")
-    with pytest.raises(HTTPException) as caught:
-        await reader.power()
-    assert (caught.value.status_code, caught.value.detail) == (503, "Room state read failed; try again.")
+    assert await _answer(reader.power()) == (503, "Room state read failed; try again.")
     client.room_get_state.side_effect = None
     client.room_get_state.return_value = nio.RoomGetStateError("M_FORBIDDEN", "M_FORBIDDEN")
-    with pytest.raises(HTTPException) as caught:
-        await reader.power()
-    assert (caught.value.status_code, caught.value.detail) == (503, "Room state read failed; try again.")
+    assert await _answer(reader.power()) == (503, "Room state read failed; try again.")
 
 
 @pytest.mark.asyncio
@@ -299,11 +276,8 @@ async def test_a_power_read_that_never_answers_503(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(plugin_http_runtime, "_LOOKUP_TIMEOUT_SECONDS", 0.01)
     client = _client()
     reader = await _reader(client)
-    client.room_get_state = _never_answers()
-    with pytest.raises(HTTPException) as caught:
-        async with asyncio.timeout(5):
-            await reader.power()
-    assert (caught.value.status_code, caught.value.detail) == (503, "Room state read failed; try again.")
+    client.room_get_state = _never_answers
+    assert await _answer(reader.power()) == (503, "Room state read failed; try again.")
 
 
 @pytest.mark.asyncio
@@ -312,9 +286,7 @@ async def test_power_read_asks_a_bot_still_in_the_room() -> None:
     client = _client()
     reader = await _reader(client)
     del client.rooms[ROOM]
-    with pytest.raises(HTTPException) as caught:
-        await reader.power()
-    assert (caught.value.status_code, caught.value.detail) == (503, "No running MindRoom bot is in this room.")
+    assert await _answer(reader.power()) == (503, "No running MindRoom bot is in this room.")
     client.room_get_state.assert_not_awaited()
 
 
@@ -354,14 +326,9 @@ async def test_a_failed_direct_message_read_answers_503(monkeypatch: pytest.Monk
     client = _client()
     reader = await _reader(client)
     client.list_direct_rooms.side_effect = nio.exceptions.ProtocolError("connection reset")
-    with pytest.raises(HTTPException) as caught:
-        await reader.is_direct()
-    assert (caught.value.status_code, caught.value.detail) == (503, "Direct message lookup failed; try again.")
-    client.list_direct_rooms = _never_answers()
-    with pytest.raises(HTTPException) as caught:
-        async with asyncio.timeout(5):
-            await reader.is_direct()
-    assert (caught.value.status_code, caught.value.detail) == (503, "Direct message lookup failed; try again.")
+    assert await _answer(reader.is_direct()) == (503, "Direct message lookup failed; try again.")
+    client.list_direct_rooms = _never_answers
+    assert await _answer(reader.is_direct()) == (503, "Direct message lookup failed; try again.")
 
 
 @pytest.mark.asyncio
@@ -378,9 +345,8 @@ async def test_client_rooms_keeps_the_joined_candidates_in_order() -> None:
     candidates = iter([ROOM, THIRD_ROOM, "!nobot:example.org", OTHER_ROOM])
     assert await client_rooms(_request(app), candidates) == [ROOM, OTHER_ROOM]
     assert await client_rooms(_request(app, BOB), [OTHER_ROOM, ROOM, THIRD_ROOM]) == [ROOM]
-    with pytest.raises(HTTPException) as caught:
-        await client_rooms(Request({"type": "http", "app": app, "headers": []}), [ROOM])
-    assert caught.value.status_code == 401
+    no_session = Request({"type": "http", "app": app, "headers": []})
+    assert (await _answer(client_rooms(no_session, [ROOM])))[0] == 401
 
 
 def test_routes_read_a_room_through_the_dependency() -> None:

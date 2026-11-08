@@ -46,7 +46,6 @@ __all__ = [
     "require_room_reader",
 ]
 
-_MEMBERSHIP_UNAVAILABLE = "Room membership is unavailable."
 # A stream in a room rechecks its user's membership this long after each check.
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
@@ -218,10 +217,12 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
     user = await require_client_user(request)
     members = await _require_joined(request, user.user_id, room_id)
     state = ensure_app_state(request.app)
-    room_state, room_direct = state.room_state, state.room_direct
-    if room_state is None or room_direct is None:
-        raise HTTPException(503, _MEMBERSHIP_UNAVAILABLE)
-    return RoomReader(user, members, partial(room_state, room_id), partial(room_direct, room_id))
+    return RoomReader(
+        user,
+        members,
+        partial(_bound(state.room_state), room_id),
+        partial(_bound(state.room_direct), room_id),
+    )
 
 
 async def client_rooms(request: Request, candidates: Iterable[str]) -> list[str]:
@@ -231,7 +232,7 @@ async def client_rooms(request: Request, candidates: Iterable[str]) -> list[str]
     answers 401 without a live session, and 503 when membership is unavailable.
     """
     user = await require_client_user(request)
-    room_members = _room_members(request)
+    room_members = _bound(ensure_app_state(request.app).room_members)
     rooms = list(candidates)
     answers = await asyncio.gather(*map(room_members, rooms), return_exceptions=True)
     return [
@@ -241,16 +242,16 @@ async def client_rooms(request: Request, candidates: Iterable[str]) -> list[str]
     ]
 
 
-def _room_members(connection: HTTPConnection) -> Callable[[str], Awaitable[Mapping[str, str | None]]]:
-    room_members = ensure_app_state(connection.app).room_members
-    if room_members is None:
-        raise HTTPException(503, _MEMBERSHIP_UNAVAILABLE)
-    return room_members
+def _bound[T](reader: T | None) -> T:
+    """Return a room reader `mindroom run` bound, or answer 503 while the API is served without MindRoom's bots."""
+    if reader is None:
+        raise HTTPException(503, "Room membership is unavailable.")
+    return reader
 
 
 async def _require_joined(connection: HTTPConnection, user_id: str, room_id: str) -> Mapping[str, str | None]:
     """Return the room's joined users with their display names, once ``user_id`` is one of them."""
-    members = await _room_members(connection)(room_id)
+    members = await _bound(ensure_app_state(connection.app).room_members)(room_id)
     if user_id not in members:
         raise HTTPException(403, "Not a member of this room.")
     return members

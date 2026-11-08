@@ -1045,7 +1045,7 @@ A request for a plugin that is not loaded or has no routes, or for a path its ro
 A route that raises answers 500 with no detail of the error, and the other routes keep serving.
 Only the primary serves plugin routes, and workers never import a routes module, so it may import packages that workers lack.
 That holds only while the routes module is its own file that the tools and hooks modules do not import, because workers load those.
-MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
+MindRoom adds no authentication of its own to these routes, so a route without `require_client_user`, `require_room_member`, `require_room_reader`, or [`require_platform_administrator`](#people-agents-and-administrators) is public.
 
 Each plugin's router runs in that FastAPI app of its own, served under `/api/plugins/<name>/`:
 
@@ -1095,13 +1095,14 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await power()` | A `RoomPower` read from the room's power levels at that moment |
 | `await is_direct()` | Whether MindRoom's agents treat the room as a direct message: the bot's direct-message list names it, it is an unnamed room of two without a topic, or a member joined it as direct; show it, but never grant anything by it |
 
-`RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room.
+`RoomPower.level(user_id)` is the user's power level, `math.inf` for a creator of a room version 12 room, which JSON cannot carry, so a route turns it into a value of its own before returning it.
 `is_admin(user_id)` is true at level 100 or more and for such a creator.
 `may_send(user_id, event_type)` tells whether that level lets the user send message events of the type, which needs the type's level in the power levels' `events`, else their `events_default`, and in an encrypted room also the level of `m.room.encrypted`, the type messages go out as.
 `RoomPower` also carries the `power_levels` content it read, the room's `creators`, and whether it is `encrypted`.
 Each call to `power()` reads again, and `members` is read anew for each request, so a changed name or power level shows on the next one.
-Both read through the same bot as membership, and `power()` answers 503 rather than `False` when its read fails or times out: `Room state read failed; try again.`, or `No running MindRoom bot is in this room.`.
-`is_direct()` gives the agents' own answer, which they keep for up to five minutes and which counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` only when the lookup raises or times out.
+`power()` and `is_direct()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
+`power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
+`is_direct()` keeps its answer for a few minutes and counts a room as not direct when the homeserver answers the lookup with an error; it answers 503 with `Direct message lookup failed; try again.` when the lookup raises or times out.
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
