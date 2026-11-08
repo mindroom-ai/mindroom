@@ -339,7 +339,7 @@ async def test_a_cut_off_response_after_the_pause_notice_ends_the_run() -> None:
     with queued_message_signal_context(NewerMessageWaits()):
         await queued_notice_after_tool_batch("Pause and answer the newer message.")(messages, ())
         [result] = _answer_tool_calls()([*messages, _cut_off_call()], "output_limit") or []
-    assert result.content != CUT_OFF_TOOL_CALL_RESULT
+    assert "newer message" in str(result.content)
     assert result.stop_after_tool_call
 
 
