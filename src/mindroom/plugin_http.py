@@ -259,6 +259,7 @@ class RoomReader:
 
         Before anything is written it answers 403 unless the caller holds room admin power by a ``power()`` read, 503
         when that read fails, and 503 unless the router, which republishes the thread mode, runs and is in the room.
+        A thread mode change the router cannot publish stays saved and answers 503.
         """
         if not (await self.power()).is_admin(self.user.user_id):
             raise HTTPException(403, "Only room admins change the room's modes.")
@@ -269,8 +270,17 @@ class RoomReader:
             clear_room_reply_mode_override(router.runtime_paths, self._room_id)
         elif reply is not ...:
             set_room_reply_mode_override(router.runtime_paths, room_id=self._room_id, mode=reply)
-        if thread is not ...:
-            await change_room_thread_mode(router.client, router.config, router.runtime_paths, self._room_id, thread)
+        if thread is not ... and not await change_room_thread_mode(
+            router.client,
+            router.config,
+            router.runtime_paths,
+            self._room_id,
+            thread,
+        ):
+            raise HTTPException(
+                503,
+                "The modes were saved, but the room's thread mode is not published yet; try again.",
+            )
 
 
 async def require_room_reader(request: Request, room_id: Annotated[str, Path()]) -> RoomReader:

@@ -18,6 +18,7 @@ _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
 _RESET_ARGUMENTS = frozenset({"reset", "clear"})
 _VALID_MODES: frozenset[str] = frozenset(get_args(RoomThreadMode))
 _USAGE = "Usage: `!thread_mode [room|thread|reset|show]`"
+_NOT_PUBLISHED = "⚠️ The room's thread mode state is not published yet, so clients may keep showing the previous view."
 
 
 def _show_room_thread_mode(runtime_paths: RuntimePaths, room_id: str) -> str:
@@ -53,13 +54,18 @@ async def handle_thread_mode_command(
         return "❌ Room admin only."
 
     if requested in _RESET_ARGUMENTS:
-        if await change_room_thread_mode(client, config, runtime_paths, room_id, None):
-            return "✅ Room thread mode override removed. Agents use their configured modes again."
-        return "This room has no thread mode override."
-
-    mode = cast("RoomThreadMode", requested)
-    await change_room_thread_mode(client, config, runtime_paths, room_id, mode)
-    return (
-        f"✅ This room now uses `{mode}` thread mode for future agent replies.\n\n"
-        "Use `!thread_mode reset` to restore configured modes."
-    )
+        removed = resolve_room_thread_mode_override(runtime_paths, room_id) is not None
+        published = await change_room_thread_mode(client, config, runtime_paths, room_id, None)
+        answer = (
+            "✅ Room thread mode override removed. Agents use their configured modes again."
+            if removed
+            else "This room has no thread mode override."
+        )
+    else:
+        mode = cast("RoomThreadMode", requested)
+        published = await change_room_thread_mode(client, config, runtime_paths, room_id, mode)
+        answer = (
+            f"✅ This room now uses `{mode}` thread mode for future agent replies.\n\n"
+            "Use `!thread_mode reset` to restore configured modes."
+        )
+    return answer if published else f"{answer}\n\n{_NOT_PUBLISHED}"

@@ -230,6 +230,36 @@ async def test_a_refused_change_writes_and_publishes_nothing(
     room.client.room_put_state.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_a_change_the_router_cannot_publish_is_saved_and_answers_503(room: _Room) -> None:
+    """When the homeserver refuses the state write, both modes stay saved and the route says the thread mode is not published."""
+    room.client.room_put_state.side_effect = None
+    room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    reader = await room.reader()
+    with pytest.raises(HTTPException) as unpublished:
+        await reader.set_modes(thread="room", reply="mentions")
+    assert (unpublished.value.status_code, unpublished.value.detail) == (
+        503,
+        "The modes were saved, but the room's thread mode is not published yet; try again.",
+    )
+    assert room.stored() == ("room", "mentions")
+    assert room.published() is None
+
+
+@pytest.mark.asyncio
+async def test_a_thread_mode_command_the_router_cannot_publish_says_so(room: _Room) -> None:
+    """`!thread_mode` keeps the override when the state write is refused, and its answer says the view may lag."""
+    room.client.room_put_state.side_effect = None
+    room.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    assert await room.thread_mode_command("room") == (
+        "✅ This room now uses `room` thread mode for future agent replies.\n\n"
+        "Use `!thread_mode reset` to restore configured modes.\n\n"
+        "⚠️ The room's thread mode state is not published yet, so clients may keep showing the previous view."
+    )
+    assert room.stored() == ("room", None)
+    assert room.published() is None
+
+
 def test_a_route_returns_the_modes_as_its_typed_response(room: _Room) -> None:
     """A route annotated to return `RoomModes` answers them as JSON."""
 

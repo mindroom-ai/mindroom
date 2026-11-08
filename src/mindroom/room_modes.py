@@ -25,12 +25,11 @@ async def change_room_thread_mode(
     """Store the room's thread mode override, or clear it given None, then republish the mode through the router's client.
 
     The republish reads the override again under its per-room lock, so changes made at once leave the published state
-    matching the override stored last. Return False only when there was no override to clear.
+    matching the override stored last. Return whether the room's state shows the result; the override stays stored
+    either way.
     """
     if mode is None:
-        changed = clear_room_thread_mode_override(runtime_paths, room_id)
+        clear_room_thread_mode_override(runtime_paths, room_id)
     else:
         set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=mode)
-        changed = True
-    await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
-    return changed
+    return await reconcile_room_thread_mode(client, config, runtime_paths, room_id)

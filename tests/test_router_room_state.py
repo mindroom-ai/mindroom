@@ -155,7 +155,7 @@ async def test_publishes_effective_mode(
     """Every joined responder contributes its effective mode, excluding the router."""
     config, paths, _, _, client = room_state
     config.agents["agent1"].thread_mode, config.agents["agent2"].thread_mode = modes
-    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
     client.room_put_state.assert_awaited_once_with(ROOM_ID, EVENT_TYPE, {"mode": expected}, state_key="")
 
 
@@ -191,7 +191,7 @@ async def test_deduplicates_concurrent_and_unchanged_triggers(room_state: RoomSt
     config, paths, _, _, client = room_state
     await asyncio.gather(*(reconcile_room_thread_mode(client, config, paths, ROOM_ID) for _ in range(3)))
     client.room_put_state.assert_awaited_once()
-    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
     assert client.room_put_state.await_count == 1
 
 
@@ -207,7 +207,7 @@ async def test_invited_agents_do_not_contribute_and_empty_room_keeps_state(room_
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
     events["m.room.member", ids["agent1"].full_id] = {"membership": "ban"}
     _sync_live_room(room_state)
-    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
 
 
@@ -252,8 +252,8 @@ async def test_write_failure_is_nonfatal_and_retried(
     client.room_put_state.side_effect = failure if isinstance(failure, Exception) else None
     client.room_put_state.return_value = failure
     with capture_logs() as logs:
-        await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
-        await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+        assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
+        assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
     assert client.room_put_state.await_count == 2
     assert len(logs) == 2
     assert all(log["event"] == "room_thread_mode_reconcile_failed" and log["log_level"] == "warning" for log in logs)
@@ -264,7 +264,7 @@ async def test_only_router_publishes(room_state: RoomState) -> None:
     """A fallback command owner must never publish through an agent account."""
     config, paths, ids, _, client = room_state
     client.user_id = ids["agent1"].full_id
-    await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
     client.room_put_state.assert_not_awaited()
 
 
@@ -750,6 +750,7 @@ async def test_event_read_failure_is_nonfatal_and_retried(room_state: RoomState,
     read = client.room_get_state_event.side_effect
     client.room_get_state_event.side_effect = failure if isinstance(failure, Exception) else None
     client.room_get_state_event.return_value = failure
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
     await RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state()
     assert not _writes(client, EVENT_TYPE)
     client.room_get_state_event.side_effect = read
@@ -858,7 +859,7 @@ async def test_membership_lookup_race_logs_debug(room_state: RoomState) -> None:
 
     client.joined_members.side_effect = human_joins
     with capture_logs() as logs:
-        await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
+        assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
     client.room_put_state.assert_not_awaited()
     assert any(
         log["event"] == "room_thread_mode_membership_unavailable" and log["log_level"] == "debug" for log in logs
