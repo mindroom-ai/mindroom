@@ -367,6 +367,7 @@ class AgentBot:
                 send_response=send_room_lifecycle_response,
                 change_membership=self.change_local_membership,
                 admit_response=self._runtime_view.admission_fence,
+                refresh_memberships=orchestrator.refresh_agent_reply_memberships_when_needed,
                 on_configured_room_joined=self._post_join_room_setup,
                 on_room_joined=self._restore_scheduled_tasks,
                 get_conversation_reader=lambda: self._conversation_reader,
