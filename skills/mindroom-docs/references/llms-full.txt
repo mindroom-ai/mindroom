@@ -2946,6 +2946,7 @@ Router judgments share the process-wide limit and logging described in [Judgment
 ## Welcome Messages
 
 After accepting an invitation into a room with no message history, the router posts a welcome if the inviter has router access, listing the agents and teams the inviter may address, how to mention them, and a quick command reference.
+A room whose canonical `m.space.parent` is a chat room rather than a Space gets no welcome, since it continues the conversation of the [room above](https://docs.mindroom.chat/rooms/#rooms-under-a-room).
 At startup, empty configured rooms get a welcome listing their configured responders.
 Send [`!hi`](https://docs.mindroom.chat/chat-commands/#hi) to see the welcome again, limited to responders visible to you.
 
@@ -7508,6 +7509,7 @@ If the alias of a recorded room is deleted, the router restores it, and creates 
 A room can list other rooms under it with `m.space.child` events, each listed room naming it back as its canonical `m.space.parent`.
 The router, agents, and teams in a room join every room it lists this way, each only when its `accept_invites` would accept an invitation from whoever listed the room.
 A listed room they cannot join without an invitation, such as a private one, needs them invited.
+The router posts no [welcome](https://docs.mindroom.chat/configuration/router/#welcome-messages) in a room under a room, even when invited into it.
 They leave a listed room when the room above takes it off its list, unless it is one of their configured or personal rooms.
 Rooms listed under a Space are the exception: listing a room under a Space, or taking it off, never makes them join or leave it.
 A bot removed from a listed room joins it again whenever it rejoins the room above, as at a restart, or a room is listed there, so ban it to keep it out.

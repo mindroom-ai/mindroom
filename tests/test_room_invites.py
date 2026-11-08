@@ -964,6 +964,83 @@ async def test_router_joins_a_personal_room_without_its_welcome(
     assert bot._room_lifecycle.invited_room_ids() == {"!personal:localhost"}
 
 
+def _state(event_type: str, content: dict[str, object], state_key: str = "") -> dict[str, object]:
+    return {"type": event_type, "state_key": state_key, "sender": "@alice:localhost", "content": content}
+
+
+def _parent_link(*, canonical: bool = True, via: tuple[str, ...] = ("localhost",)) -> dict[str, object]:
+    return _state("m.space.parent", {"canonical": canonical, "via": list(via)}, "!above:localhost")
+
+
+_CHAT_ROOM = [_state("m.room.create", {"room_version": "11"})]
+_SPACE = [_state("m.room.create", {"room_version": "11", "type": "m.space"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("room_state", "above_state", "welcomed"),
+    [
+        pytest.param([*_CHAT_ROOM, _parent_link()], _CHAT_ROOM, False, id="under-a-chat-room"),
+        pytest.param([*_CHAT_ROOM, _parent_link()], _SPACE, True, id="under-a-space"),
+        pytest.param([*_CHAT_ROOM, _parent_link(canonical=False)], _CHAT_ROOM, True, id="non-canonical-parent"),
+        pytest.param([*_CHAT_ROOM, _parent_link(via=())], _CHAT_ROOM, True, id="parent-without-via"),
+        pytest.param([*_CHAT_ROOM, _parent_link()], None, True, id="unreadable-parent"),
+        pytest.param(None, _CHAT_ROOM, True, id="unreadable-room"),
+        pytest.param(_CHAT_ROOM, _CHAT_ROOM, True, id="plain-room"),
+    ],
+)
+async def test_router_joins_a_room_under_a_chat_room_without_its_welcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    room_state: list[dict[str, object]] | None,
+    above_state: list[dict[str, object]] | None,
+    welcomed: bool,
+) -> None:
+    """A room under a chat room continues its conversation, so the router greets it only when its parent is no chat room."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
+    install_runtime_journal_support(bot)
+    bot.client = AsyncMock()
+    bot.client.rooms = {}
+    states = {"!under:localhost": room_state, "!above:localhost": above_state}
+
+    async def room_get_state(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        events = states[room_id]
+        if events is None:
+            return nio.RoomGetStateError("unreadable", "M_FORBIDDEN")
+        return nio.RoomGetStateResponse(events=events, room_id=room_id)
+
+    async def room_get_state_event(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        for event in states[room_id] or []:
+            if event["type"] == event_type and event["state_key"] == state_key:
+                return nio.RoomGetStateEventResponse(event["content"], event_type, state_key, room_id)
+        return nio.RoomGetStateEventError("unreadable", "M_FORBIDDEN")
+
+    bot.client.room_get_state = AsyncMock(side_effect=room_get_state)
+    bot.client.room_get_state_event = AsyncMock(side_effect=room_get_state_event)
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(return_value=RoomJoinOutcome.JOINED))
+    welcome_message = AsyncMock(return_value=True)
+    monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
+    monkeypatch.setattr(bot.orchestrator.scheduled_tasks, "restore_room", AsyncMock(return_value=0))
+    room = MagicMock(room_id="!under:localhost")
+    room.canonical_alias = None
+
+    await _handle_invite(bot, room, MagicMock(sender="@alice:localhost"))
+
+    if welcomed:
+        welcome_message.assert_awaited_once_with("!under:localhost", "@alice:localhost")
+    else:
+        welcome_message.assert_not_awaited()
+    assert bot._room_lifecycle.invited_room_ids() == {"!under:localhost"}
+
+
 @pytest.mark.asyncio
 async def test_live_invite_forbidden_join_remains_retryable(
     tmp_path: Path,
