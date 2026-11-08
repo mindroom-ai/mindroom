@@ -6,7 +6,6 @@ import asyncio
 import json
 import socket
 import sys
-import threading
 import time
 from contextlib import asynccontextmanager
 from types import ModuleType
@@ -22,22 +21,24 @@ from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from mindroom import plugin_http
-from mindroom.api import client_sessions, config_lifecycle
+from mindroom.api import client_sessions
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import ClientSessionStore
-from mindroom.api.plugin_routes import mount_plugin_routes
+from mindroom.api.client_sessions import ClientSessionStore, client_session_store
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from tests.conftest import bind_runtime_paths, publish_test_plugins
-from tests.test_plugin_routes import _write_plugin
+from tests.test_plugin_routes import _app, _write_plugin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
 
+    from starlette.testclient import WebSocketTestSession
+
 ROOM = "!room:example.org"
 ALICE = "@alice:example.org"
 CLIENT_ORIGIN = "https://chat.example.org"
+NO_SESSION = "Missing, invalid or expired client session."
 
 # The routes reach the test through this module, which the autouse plugin-state restore removes after each test.
 PROBE_MODULE = "mindroom_test_probe_client_stream"
@@ -126,8 +127,9 @@ class _Clock:
         return time.time() + self.offset
 
 
-def _published_app(tmp_path: Path) -> FastAPI:
-    """Return an API app serving the plugin's routes and client sessions, with the client origin allowed."""
+@pytest.fixture
+def app(tmp_path: Path) -> FastAPI:
+    """API app serving the demo plugin's websocket routes and client sessions, with the client origin allowed."""
     probe = ModuleType(PROBE_MODULE)
     probe.after_block = []
     sys.modules[PROBE_MODULE] = probe
@@ -145,23 +147,12 @@ def _published_app(tmp_path: Path) -> FastAPI:
     )
     config = bind_runtime_paths(Config(plugins=["./plugins/demo"]), runtime_paths)
     publish_test_plugins(config, runtime_paths)
-    app = FastAPI()
+    app = _app(config, runtime_paths)
     app.include_router(client_sessions.router)
     state = ensure_app_state(app)
-    state.api_state = config_lifecycle.ApiState(
-        threading.Lock(),
-        config_lifecycle.ApiSnapshot(1, runtime_paths, runtime_config=config),
-    )
     state.client_sessions = ClientSessionStore(clock=_Clock())
     state.room_members = _Membership()
-    mount_plugin_routes(app)
     return app
-
-
-@pytest.fixture
-def app(tmp_path: Path) -> FastAPI:
-    """API app serving the demo plugin's websocket routes."""
-    return _published_app(tmp_path)
 
 
 @pytest.fixture
@@ -169,12 +160,6 @@ def client(app: FastAPI) -> Iterator[TestClient]:
     """Test client of ``app``."""
     with TestClient(app) as test_client:
         yield test_client
-
-
-def _store(app: FastAPI) -> ClientSessionStore:
-    store = ensure_app_state(app).client_sessions
-    assert store is not None
-    return store
 
 
 def _membership(app: FastAPI) -> _Membership:
@@ -189,6 +174,11 @@ def _echo_path(room_id: str = ROOM) -> str:
 
 def _offers(token: str) -> list[str]:
     return ["mindroom-session", f"mindroom-session.{token}"]
+
+
+def _connect(client: TestClient, token: str, path: str | None = None) -> WebSocketTestSession:
+    """Open ``path``, the echo route in the room by default, as a browser does from the allowed origin."""
+    return client.websocket_connect(path or _echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN})
 
 
 def _revoke(client: TestClient, token: str) -> None:
@@ -226,9 +216,9 @@ def test_an_allowed_handshake_is_accepted_with_the_session_protocol_and_never_ec
     client: TestClient,
 ) -> None:
     """The route gets the session's user, and the token is in no header of the accepting answer."""
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
 
-    with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
+    with _connect(client, token) as websocket:
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
         assert websocket.accepted_subprotocol == "mindroom-session"
@@ -238,11 +228,11 @@ def test_an_allowed_handshake_is_accepted_with_the_session_protocol_and_never_ec
 @pytest.mark.parametrize(
     ("offers", "origin", "room_id", "status", "detail"),
     [
-        (lambda _token: ["mindroom-session"], CLIENT_ORIGIN, ROOM, 401, "Missing, invalid or expired client session."),
-        (lambda token: [*_offers(token), f"mindroom-session.{token}x"], CLIENT_ORIGIN, ROOM, 401, None),
-        (lambda token: [f"mindroom-session.{token}"], CLIENT_ORIGIN, ROOM, 401, None),
-        (lambda _token: _offers("unknown"), CLIENT_ORIGIN, ROOM, 401, None),
-        (lambda _token: ["mindroom-session", "mindroom-session."], CLIENT_ORIGIN, ROOM, 401, None),
+        (lambda _token: ["mindroom-session"], CLIENT_ORIGIN, ROOM, 401, NO_SESSION),
+        (lambda token: [*_offers(token), f"mindroom-session.{token}x"], CLIENT_ORIGIN, ROOM, 401, NO_SESSION),
+        (lambda token: [f"mindroom-session.{token}"], CLIENT_ORIGIN, ROOM, 401, NO_SESSION),
+        (lambda _token: _offers("unknown"), CLIENT_ORIGIN, ROOM, 401, NO_SESSION),
+        (lambda _token: ["mindroom-session", "mindroom-session."], CLIENT_ORIGIN, ROOM, 401, NO_SESSION),
         (_offers, None, ROOM, 403, "Origin is not allowed."),
         (_offers, "https://evil.example.org", ROOM, 403, "Origin is not allowed."),
         (_offers, CLIENT_ORIGIN, "!other:example.org", 403, "Not a member of this room."),
@@ -255,28 +245,30 @@ def test_a_handshake_is_refused_before_accept(
     origin: str | None,
     room_id: str,
     status: int,
-    detail: str | None,
+    detail: str,
 ) -> None:
     """A wrong offer, an unknown token, a missing or unlisted origin, or a non-member gets an HTTP answer."""
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
     headers = {"origin": origin} if origin is not None else {}
 
     denial = _denial(client, _echo_path(room_id), offers(token), headers)
 
     assert denial.status_code == status
-    assert denial.json()["detail"] == (detail or "Missing, invalid or expired client session.")
+    assert denial.json()["detail"] == detail
     assert token not in denial.text
 
 
 def test_an_expired_or_revoked_session_is_refused_with_401(app: FastAPI, client: TestClient) -> None:
     """Only a live session signs a websocket in, and an Authorization header never does."""
-    store = _store(app)
+    store = client_session_store(app)
     revoked = store.create(ALICE).token
     store.revoke(revoked)
     expired = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
-    store.clock.offset = 3600
+    store.clock.offset = 1800
     live = store.create(ALICE).token
+    # Expires the earlier session only after the later one was created, so the handshake itself finds it expired.
+    store.clock.offset = 3600
     headers = {"origin": CLIENT_ORIGIN}
 
     for token in (revoked, expired):
@@ -292,7 +284,7 @@ def test_a_session_that_ends_during_the_membership_check_is_refused_with_401(
     ending: str,
 ) -> None:
     """The handshake never accepts a session that ended while the room's membership was read."""
-    store = _store(app)
+    store = client_session_store(app)
     token = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
     clock = store.clock
@@ -307,7 +299,7 @@ def test_a_session_that_ends_during_the_membership_check_is_refused_with_401(
 
     denial = _denial(client, _echo_path(), _offers(token), {"origin": CLIENT_ORIGIN})
 
-    assert (denial.status_code, denial.json()) == (401, {"detail": "Missing, invalid or expired client session."})
+    assert (denial.status_code, denial.json()) == (401, {"detail": NO_SESSION})
 
 
 @pytest.mark.parametrize(
@@ -324,7 +316,7 @@ def test_unavailable_membership_is_refused_with_503(
     detail: str,
 ) -> None:
     """Without a membership answer the stream is refused rather than let through."""
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
     if unavailable == "unbound":
         ensure_app_state(app).room_members = None
     else:
@@ -337,7 +329,7 @@ def test_unavailable_membership_is_refused_with_503(
 
 def test_http_routes_still_sign_in_with_the_authorization_header_only(app: FastAPI, client: TestClient) -> None:
     """A request offering the websocket subprotocols is not signed in by them."""
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
 
     offered = client.get("/api/plugins/demo/whoami", headers={"Sec-WebSocket-Protocol": ", ".join(_offers(token))})
     bearer = client.get("/api/plugins/demo/whoami", headers={"Authorization": f"Bearer {token}"})
@@ -348,9 +340,9 @@ def test_http_routes_still_sign_in_with_the_authorization_header_only(app: FastA
 
 def test_revoking_the_session_closes_the_stream_at_once_with_4401(app: FastAPI, client: TestClient) -> None:
     """`DELETE /api/client-sessions` wakes the stream, long before its expiry or a membership recheck."""
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
 
-    with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
+    with _connect(client, token) as websocket:
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
         started = time.monotonic()
@@ -364,12 +356,12 @@ def test_revoking_the_session_closes_the_stream_at_once_with_4401(app: FastAPI, 
 
 def test_an_expiring_session_closes_the_stream_with_4401(app: FastAPI, client: TestClient) -> None:
     """The stream ends when its session's hour is up."""
-    store = _store(app)
+    store = client_session_store(app)
     token = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
     store.clock.offset = 3600 - 1
 
-    with client.websocket_connect("/api/plugins/demo/waits", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
+    with _connect(client, token, "/api/plugins/demo/waits") as ws:
         assert ws.receive_text() == ALICE
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_text()
@@ -379,9 +371,9 @@ def test_an_expiring_session_closes_the_stream_with_4401(app: FastAPI, client: T
 
 def test_a_closed_stream_cancels_a_block_waiting_on_something_else(app: FastAPI, client: TestClient) -> None:
     """A route waiting on anything but the websocket is cancelled there, and runs on after its block."""
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
 
-    with client.websocket_connect("/api/plugins/demo/waits", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
+    with _connect(client, token, "/api/plugins/demo/waits") as ws:
         assert ws.receive_text() == ALICE
         _revoke(client, token)
         with pytest.raises(WebSocketDisconnect) as closed:
@@ -398,10 +390,10 @@ def test_leaving_the_room_closes_the_stream_with_1008(
 ) -> None:
     """A periodic recheck that finds the user gone from the room ends the stream."""
     monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.05)
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
     membership = _membership(app)
 
-    with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
+    with _connect(client, token) as websocket:
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
         membership.members = {}
@@ -420,10 +412,10 @@ def test_a_failed_recheck_closes_the_stream_with_1013(
 ) -> None:
     """A recheck that fails or finds membership unavailable ends the stream with try-again-later."""
     monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.05)
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
     membership = _membership(app)
 
-    with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
+    with _connect(client, token) as websocket:
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
         if failure == "error":
@@ -443,12 +435,12 @@ def test_a_stream_without_a_room_never_rechecks_membership(
 ) -> None:
     """Only a stream given a room reads membership, and one woken for an expiry the wall clock then moved stays open."""
     monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.01)
-    store = _store(app)
+    store = client_session_store(app)
     token = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
     store.clock.offset = 3600 - 1
 
-    with client.websocket_connect("/api/plugins/demo/echo", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
+    with _connect(client, token, "/api/plugins/demo/echo") as ws:
         store.clock.offset = 0
         time.sleep(1.5)
         ws.send_text("still here")
@@ -468,10 +460,10 @@ def test_revoking_the_session_during_a_membership_recheck_closes_the_stream_at_o
 ) -> None:
     """A recheck that is still waiting for its answer does not hold the revoked session's stream open."""
     monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.01)
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
     membership = _membership(app)
 
-    with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
+    with _connect(client, token) as websocket:
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
         membership.hang = True
@@ -489,13 +481,9 @@ def test_revoking_the_session_during_a_membership_recheck_closes_the_stream_at_o
 
 def test_a_blocks_own_timeout_reaches_the_route(app: FastAPI, client: TestClient) -> None:
     """A `TimeoutError` the block raises is the route's to handle, not taken for the stream's end."""
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
 
-    with client.websocket_connect(
-        "/api/plugins/demo/times-out",
-        _offers(token),
-        headers={"origin": CLIENT_ORIGIN},
-    ) as ws:
+    with _connect(client, token, "/api/plugins/demo/times-out") as ws:
         assert ws.receive_text() == "timed out"
 
 
@@ -506,10 +494,10 @@ def test_a_stream_that_ends_stops_its_membership_rechecks(
 ) -> None:
     """Once the route's block ends, nothing keeps reading the room's membership for it."""
     monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.01)
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
     membership = _membership(app)
 
-    with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
+    with _connect(client, token) as websocket:
         websocket.send_text("hi")
         assert websocket.receive_text() == f"{ALICE}: hi"
         while membership.calls < 2:
@@ -551,10 +539,9 @@ def _assert_well_formed_denial(lines: list[str], body: bytes, status: int) -> No
 
 
 @pytest.mark.asyncio
-async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(tmp_path: Path) -> None:
+async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(app: FastAPI) -> None:
     """Under the websocket transport `mindroom run` uses, the handshake and every refusal are parseable HTTP."""
-    app = _published_app(tmp_path)
-    token = _store(app).create(ALICE).token
+    token = client_session_store(app).create(ALICE).token
     async with _serving(app) as port:
         offers = ", ".join(_offers(token))
         lines, _ = await _handshake(port, _echo_path(), CLIENT_ORIGIN, offers)
@@ -574,10 +561,9 @@ async def test_the_embedded_servers_transport_accepts_and_refuses_well_formed(tm
 
 
 @pytest.mark.asyncio
-async def test_a_stream_whose_client_left_ends_cleanly_on_the_embedded_servers_transport(tmp_path: Path) -> None:
+async def test_a_stream_whose_client_left_ends_cleanly_on_the_embedded_servers_transport(app: FastAPI) -> None:
     """A stream that never read its client's goodbye still ends cleanly at revocation, and runs on after its block."""
-    app = _published_app(tmp_path)
-    store = _store(app)
+    store = client_session_store(app)
     token = store.create(ALICE).token
     async with _serving(app) as port, aiohttp.ClientSession() as session:
         async with session.ws_connect(
