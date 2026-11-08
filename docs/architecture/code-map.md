@@ -327,6 +327,7 @@ Matrix sync callback
 | `tool_system/registry.py` | `ToolRegistry`, the tools one config can build (built-ins, its loaded plugins' tools, its MCP servers, and the tools of plugins that failed to load as unavailable), the built-in tools, and the registration scope plugin modules register into |
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
 | `plugin_context.py` | `PluginContext`, a plugin's own settings, state directory, and config for its routes and tools, which fails closed once a reload disables the plugin |
+| `plugin_lifecycle.py` | `PluginLifespans` runs the `lifespan` of each plugin the primary publishes, starting a reload's new lifespans before it closes the replaced plugins' websockets and stops the old ones, and stopping them all at shutdown |
 | `plugin_http.py` | The supported import surface for plugin HTTP routes: `require_client_user` resolves a client session's bearer token to its Matrix user, `require_room_member` resolves it too and checks that user's live room membership, and `plugin_context` returns the route's `PluginContext` |
 | `orchestration/plugin_http_runtime.py` | The live room-membership reader behind `require_room_member`: a running bot in the room answers each lookup, the router first, and concurrent callers for one room share it |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
-PLUGIN_API_VERSION = (1, 4)
+PLUGIN_API_VERSION = (1, 5)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -49,6 +49,7 @@ class _PluginManifest:
     hooks_module: str | None
     oauth_module: str | None
     routes_module: str | None
+    lifecycle_module: str | None
     skills: list[str]
     reserved_namespaces: tuple[str, ...]
 
@@ -65,6 +66,7 @@ class _PluginBase:
     hooks_module_path: Path | None
     oauth_module_path: Path | None
     routes_module_path: Path | None
+    lifecycle_module_path: Path | None
     skill_dirs: list[Path]
     reserved_namespaces: tuple[str, ...]
 
@@ -297,6 +299,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     hooks_module_path = _resolve_module_path(root, manifest.hooks_module, kind="hooks")
     oauth_module_path = _resolve_module_path(root, manifest.oauth_module, kind="oauth")
     routes_module_path = _resolve_module_path(root, manifest.routes_module, kind="routes")
+    lifecycle_module_path = _resolve_module_path(root, manifest.lifecycle_module, kind="lifecycle")
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
     return _PluginBase(
@@ -308,6 +311,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         hooks_module_path=hooks_module_path,
         oauth_module_path=oauth_module_path,
         routes_module_path=routes_module_path,
+        lifecycle_module_path=lifecycle_module_path,
         skill_dirs=skill_dirs,
         reserved_namespaces=manifest.reserved_namespaces,
     )
@@ -343,6 +347,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
     hooks_module = _manifest_module(data, "hooks_module", path)
     oauth_module = _manifest_module(data, "oauth_module", path)
     routes_module = _manifest_module(data, "routes_module", path)
+    lifecycle_module = _manifest_module(data, "lifecycle_module", path)
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
@@ -368,6 +373,7 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         hooks_module=hooks_module,
         oauth_module=oauth_module,
         routes_module=routes_module,
+        lifecycle_module=lifecycle_module,
         skills=raw_skills,
         reserved_namespaces=tuple(reserved_namespaces),
     )
