@@ -53,7 +53,7 @@ ROOM = "!room:localhost"
 ALICE = "@alice:localhost"
 BOB = "@bob:localhost"
 CAROL = "@carol:localhost"
-DAVE = "@DAVE:localhost"
+DAVE = "@dave:localhost"
 # Bob's power level keeps him from posting; Alice and Carol may post.
 POWER_LEVELS = {"users": {ALICE: 100, CAROL: 10}, "events_default": 10}
 READ_ONLY_FILE = {"file": {"enable_save_file": False, "enable_replace_file_chunk": False}}

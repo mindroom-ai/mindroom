@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import nio
 
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, retry_delay_seconds
 from mindroom.event_journal import (
     DepartureSource,
     EventKind,
@@ -175,12 +175,11 @@ class AgentReplyMembershipSync:
             self._refresh_retry_at = 0.0
             return
         self._refresh_attempt += 1
-        # Access checks retry far more often than frames, so the exponent stops growing well past the cap.
-        backoff_seconds = min(
-            _REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** min(self._refresh_attempt - 1, 16)),
-            _REFRESH_BACKOFF_MAX_SECONDS,
+        self._refresh_retry_at = time.monotonic() + retry_delay_seconds(
+            self._refresh_attempt,
+            initial_delay_seconds=_REFRESH_BACKOFF_INITIAL_SECONDS,
+            max_delay_seconds=_REFRESH_BACKOFF_MAX_SECONDS,
         )
-        self._refresh_retry_at = time.monotonic() + backoff_seconds
 
     async def apply_live_transition(
         self,
