@@ -52,6 +52,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     subagent_worker_key,
 )
+from mindroom.trafilatura_call_limit import trafilatura_request_budget_seconds
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.models import (
     ProgressSink,
@@ -861,6 +862,7 @@ def _call_proxy_sync(
                 request_budget_seconds=max(
                     shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
                     browser_request_budget_seconds(tool_name, function_name),
+                    trafilatura_request_budget_seconds(tool_name, function_name),
                 ),
             ),
             request=request,

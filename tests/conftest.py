@@ -2945,6 +2945,7 @@ def _restore_published_plugins() -> Iterator[None]:
     }
     yield
     plugins_module._PUBLISHED = published
+    plugins_module._PROCESS_STATE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
     plugin_imports._PLUGIN_CACHE.clear()

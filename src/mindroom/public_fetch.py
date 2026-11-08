@@ -26,7 +26,7 @@ type _PublicFetchErrorCode = Literal[
     "request_failed",
 ]
 
-# One deadline covers the whole fetch: every redirect hop, its connection, and the body.
+# One deadline covers the whole request: every redirect hop, its connection, and the body, but not closing the client.
 _DEADLINE_SECONDS = 30.0
 # Each address a hostname resolves to gets this long to connect, so a silent one leaves time to try the next.
 CONNECT_TIMEOUT_SECONDS = 10.0
@@ -89,12 +89,15 @@ async def _fetch(url: str, max_bytes: int, use_env_proxy: bool, user_agent: str 
     headers = {"Accept-Encoding": "identity"}
     if user_agent is not None:
         headers["User-Agent"] = user_agent
-    async with httpx.AsyncClient(
-        transport=ServerFetchAsyncHTTPTransport(),
-        mounts=_proxy_mounts() if use_env_proxy else None,
-        headers=headers,
-        timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_SECONDS),
-    ) as client:
+    async with (
+        httpx.AsyncClient(
+            transport=ServerFetchAsyncHTTPTransport(),
+            mounts=_proxy_mounts() if use_env_proxy else None,
+            headers=headers,
+            timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_SECONDS),
+        ) as client,
+        asyncio.timeout(_DEADLINE_SECONDS),
+    ):
         request = client.build_request("GET", url.strip())
         for _hop in range(_MAX_REDIRECTS + 1):
             if request.url.userinfo:
@@ -130,8 +133,7 @@ async def fetch_public_url(
     Every failure raises `PublicFetchError`.
     """
     try:
-        async with asyncio.timeout(_DEADLINE_SECONDS):
-            return await _fetch(url, max_bytes, use_env_proxy, user_agent)
+        return await _fetch(url, max_bytes, use_env_proxy, user_agent)
     except TimeoutError:
         msg = f"The fetch did not finish within {_DEADLINE_SECONDS:g} seconds."
         raise PublicFetchError(msg, code="timeout") from None
