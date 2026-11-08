@@ -52,24 +52,6 @@ if TYPE_CHECKING:
 # As long as plugin routes wait for a room read, and the Computer for its whole check.
 _ACCESS_TIMEOUT_SECONDS = 20
 _ACCESS_UNAVAILABLE = "Agent access is unavailable; try again."
-# The functions that write any content to any path of the workspace or run code there, by toolkit; delete alone
-# edits nothing. Any function of another toolkit that runs code counts.
-_WRITERS = {
-    "file": frozenset({"save_file", "replace_file_chunk"}),
-    "coding": frozenset({"write_file", "edit_file"}),
-    "python": frozenset(
-        {
-            "run_python_code",
-            "save_to_file_and_run",
-            "run_python_file_return_variable",
-            "pip_install_package",
-            "uv_pip_install_package",
-        },
-    ),
-    "script": frozenset({"start_script"}),
-    "claude_agent": frozenset({"claude_start_session", "claude_send"}),
-    "docker": frozenset({"build_image", "run_container", "start_container", "exec_in_container"}),
-}
 
 
 def _identities(config: Config, runtime_paths: RuntimePaths) -> EntityIdentityRegistry:
@@ -234,8 +216,8 @@ def _workspace(
         use_state_storage_path=storage.execution.policy.private_workspace_enabled,
     )
     tools = config_plugins(config, runtime_paths).tools
-    # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers; by name, whether
-    # one of them writes files or runs code.
+    # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers, and its
+    # declarations whether one of them writes files or runs code.
     path_toolkits: dict[str, bool] = {}
     for entry in resolve_agent_tools(config, name, tools).candidates(matrix_room_tools=True):
         metadata = tools.get(entry.name)
@@ -256,9 +238,11 @@ def _workspace(
         functions = _offered_functions(metadata, settings.values)
         if functions is not None and not functions:
             continue
-        writers = _WRITERS.get(entry.name)
+        # The functions it names as writing, any of them while its build alone could tell; else any that runs code.
         path_toolkits[entry.name] = (
-            metadata.executes_code if writers is None else not writers.isdisjoint(functions or ())
+            functions is None or not functions.isdisjoint(metadata.workspace_writers)
+            if metadata.workspace_writers
+            else metadata.executes_code
         )
     return AgentWorkspace(
         name=name,

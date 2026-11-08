@@ -1083,6 +1083,7 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("worker_inert_agent_functions", None)
+        tool_dict.pop("workspace_writers", None)
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tool_dict.pop("mcp_server_id", None)

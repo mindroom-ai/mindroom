@@ -28,7 +28,6 @@ from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, up
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.plugin_http import AgentWorkspace, RoomReader, require_room_reader
-from mindroom.room_agent_access import _WRITERS
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
@@ -53,6 +52,21 @@ CAROL = "@carol:localhost"
 # Bob's power level keeps him from posting; Alice and Carol may post.
 POWER_LEVELS = {"users": {ALICE: 100, CAROL: 10}, "events_default": 10}
 READ_ONLY_FILE = {"file": {"enable_save_file": False, "enable_replace_file_chunk": False}}
+# The functions of each built-in toolkit that change the workspace's files, by writing them or by running code there.
+WRITING_FUNCTIONS = {
+    "file": ("save_file", "replace_file_chunk"),
+    "coding": ("write_file", "edit_file"),
+    "python": (
+        "run_python_code",
+        "save_to_file_and_run",
+        "run_python_file_return_variable",
+        "pip_install_package",
+        "uv_pip_install_package",
+    ),
+    "script": ("start_script",),
+    "claude_agent": ("claude_start_session", "claude_send"),
+    "docker": ("build_image", "run_container", "start_container", "exec_in_container"),
+}
 
 
 def _agents() -> dict[str, AgentConfig]:
@@ -272,11 +286,20 @@ class NotesTools(Toolkit):
         \"\"\"
         return path
 
+    @tool
+    def save_note(self, path: str) -> str:
+        \"\"\"Save a note.
+
+        Args:
+            path: The note's path.
+        \"\"\"
+        return path
+
 
 @register_tool_with_metadata(
     name="notes",
     file_access=ToolFileAccess.{file_access},
-    executes_code={executes_code},
+    executes_code={executes_code},{writers}
     display_name="Notes",
     description="Notes in the workspace",
     category=ToolCategory.PRODUCTIVITY,
@@ -287,12 +310,16 @@ def notes_tools() -> type[NotesTools]:
 
 
 @pytest.mark.parametrize(
-    ("file_access", "executes_code", "tool", "files"),
+    ("file_access", "executes_code", "writers", "tool", "files"),
     [
-        ("AGENT", False, "notes", "read"),
-        ("NONE", True, "notes", "write"),
-        ("NONE", True, {"notes": {"include_tools": []}}, "none"),
-        ("NONE", True, {"notes": {"include_tools": ["read_note"]}}, "write"),
+        ("AGENT", False, (), "notes", "read"),
+        ("NONE", True, (), "notes", "write"),
+        ("NONE", True, (), {"notes": {"include_tools": []}}, "none"),
+        ("NONE", True, (), {"notes": {"include_tools": ["read_note"]}}, "write"),
+        ("AGENT", False, ("save_note",), "notes", "write"),
+        ("AGENT", False, ("save_note",), {"notes": {"include_tools": ["save_note"]}}, "write"),
+        ("AGENT", False, ("save_note",), {"notes": {"include_tools": ["read_note"]}}, "read"),
+        ("NONE", True, ("save_note",), {"notes": {"include_tools": ["read_note"]}}, "read"),
     ],
 )
 @pytest.mark.asyncio
@@ -300,14 +327,21 @@ async def test_a_plugin_toolkit_that_names_no_functions_counts_by_its_declaratio
     tmp_path: Path,
     file_access: str,
     executes_code: bool,
+    writers: tuple[str, ...],
     tool: object,
     files: str,
 ) -> None:
-    """A plugin toolkit that declares no function names counts as offering what its build offers, unless filtered off."""
+    """A plugin toolkit that declares no function names counts as offering what its build offers, unless filtered off.
+
+    One that names its writing functions writes through those alone, else through any function when it runs code.
+    """
     plugin = tmp_path / "plugins" / "notes"
     plugin.mkdir(parents=True)
     (plugin / "mindroom.plugin.json").write_text('{"name": "notes", "tools_module": "tools.py"}')
-    (plugin / "tools.py").write_text(PLUGIN_TOOLS.format(file_access=file_access, executes_code=executes_code))
+    declared = f"\n    workspace_writers={writers!r}," if writers else ""
+    (plugin / "tools.py").write_text(
+        PLUGIN_TOOLS.format(file_access=file_access, executes_code=executes_code, writers=declared),
+    )
     paths = test_runtime_paths(tmp_path)
     helper = AgentConfig(display_name="Helper", tools=[tool], access={"users": [ALICE]})
     config = bind_runtime_paths(Config(plugins=["./plugins/notes"], agents={"helper": helper}), paths)
@@ -317,12 +351,39 @@ async def test_a_plugin_toolkit_that_names_no_functions_counts_by_its_declaratio
     assert _access(await room.agents(ALICE)) == [("helper", files, "none")]
 
 
-def test_each_named_writer_is_a_function_its_toolkit_declares() -> None:
-    """A renamed writing or code-running function would otherwise turn ``write`` into ``read`` without notice."""
-    tools = builtin_tool_registry()
+def test_the_built_in_toolkits_declare_their_writing_functions_among_their_own() -> None:
+    """Exactly these toolkits name what writes, and a renamed function would otherwise turn ``write`` into ``read``."""
+    tools = builtin_tool_registry().entries
+    declared = {name: set(metadata.workspace_writers) for name, metadata in tools.items() if metadata.workspace_writers}
 
-    for name, functions in _WRITERS.items():
-        assert functions <= set(tools.entries[name].function_names), name
+    assert declared == {name: set(functions) for name, functions in WRITING_FUNCTIONS.items()}
+    for name, functions in declared.items():
+        assert functions <= set(tools[name].function_names), name
+
+
+def _writing_toolkit_cases() -> list[tuple[object, str]]:
+    """Each writing toolkit as it is, with each of its writing functions alone, and with none of them."""
+    cases: list[tuple[object, str]] = []
+    for name, functions in WRITING_FUNCTIONS.items():
+        cases.append((name, "write"))
+        if name == "script":  # It takes no function filters.
+            continue
+        cases.extend(({name: {"include_tools": [function]}}, "write") for function in functions)
+        cases.append(({name: {"exclude_tools": list(functions)}}, "read"))
+    return cases
+
+
+@pytest.mark.parametrize(("tool", "files"), _writing_toolkit_cases())
+@pytest.mark.asyncio
+async def test_a_writing_toolkit_writes_through_its_writing_functions_alone(
+    tmp_path: Path,
+    tool: object,
+    files: str,
+) -> None:
+    """Each built-in toolkit that writes or runs code gives ``write`` exactly while one of its writing functions is on."""
+    room = _room(tmp_path, {"helper": AgentConfig(display_name="Helper", tools=[tool], access={"users": [ALICE]})})
+
+    assert _access(await room.agents(ALICE)) == [("helper", files, "none")]
 
 
 @pytest.mark.asyncio
