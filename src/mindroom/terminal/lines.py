@@ -5,8 +5,10 @@ Every input the primary sends a terminal goes through a ``TerminalStream``, one 
 terminal, say when it is back at its prompt and which prompt ends a command typed now.
 
 After an Enter or a Ctrl-C the shell is busy until its next prompt, since a command or a continuation reads what is
-typed meanwhile; that prompt's line then holds whatever was typed while busy. The line also holds typing after any
-other key at the prompt, after a send that may not have arrived, and in a terminal the primary did not see open.
+typed meanwhile; that prompt's line then holds whatever was typed while busy, and an Enter typed while busy keeps the
+shell busy past it until a Ctrl-C, since the shell runs that line next. The line also holds typing after any other key
+at the prompt. A send that may not have arrived, and a terminal the primary did not see open, keep it busy until a
+Ctrl-C.
 """
 
 from __future__ import annotations
@@ -68,6 +70,8 @@ class TerminalLine:
         self._busy = not opened
         # Something typed while busy waits for the next prompt, whose line it then holds.
         self._ahead = not opened
+        # An Enter typed while busy: the shell runs that line after the prompt, and stays busy until a Ctrl-C drops it.
+        self._queued = not opened
         self._held = False
         # The prompts the shell prints before it reads a command typed now: its first, and one after each Enter or
         # Ctrl-C at the prompt; a command typed onto the line ends at the prompt after them.
@@ -92,6 +96,7 @@ class TerminalLine:
             if self._busy:
                 # Ctrl-C interrupts the command, and the terminal drops the typing it has not read yet.
                 self._ahead = char != _INTERRUPT
+                self._queued = (self._queued or char in "\r\n") and char != _INTERRUPT
             elif char in "\r\n\x03":
                 self._busy, self._ahead = True, False
                 self._owed += 1
@@ -100,7 +105,7 @@ class TerminalLine:
 
     def lost(self) -> None:
         """Record a send that may or may not have arrived."""
-        self._busy = self._ahead = True
+        self._busy = self._ahead = self._queued = True
 
     def prompted(self, number: int) -> None:
         """Record the shell's prompt mark ``number``."""
@@ -109,7 +114,7 @@ class TerminalLine:
         self._owed = max(0, self._owed - (number - self.prompts))
         self.prompts = number
         # A prompt the shell owed from before the Enter, such as after a Ctrl-C, ends no command.
-        if self._busy and not self._owed:
+        if self._busy and not self._owed and not self._queued:
             self._held = self._ahead
             self._busy = self._ahead = False
 

@@ -46,9 +46,10 @@ Approval rules judge a command's text, and what text typed into a persistent she
   The counter lets marks replayed with the scrollback count once, and the exit status is what `terminal_run` reports.
   The prompt command removes itself from the environment of what the shell starts, because a shell started inside would print marks counting from 1 again; until it exits, the line waits for a prompt.
 - After an Enter or a Ctrl-C the shell is busy until its next prompt, because a running command or a continuation reads what is typed meanwhile; that prompt's line holds what was typed while busy, unless a Ctrl-C dropped it, and keys the shell reads first can keep it from printing that prompt.
+  An Enter typed while busy keeps the shell busy past its prompts until a Ctrl-C, because the shell runs the typed-ahead lines one after another, and their prompts say nothing of whether more are queued.
   The line counts the prompts the shell owes, one after each Enter or Ctrl-C at the prompt, so a prompt owed from before a command, such as the one after a Ctrl-C, never ends that command.
   `terminal_send` refuses keys after a Ctrl-C in the same send, since the terminal may drop part of them, and `terminal_run` types only once the shell prompts after it, which a person's keystroke landing just before can keep it from doing, so the agent sends another Ctrl-C.
-- Any other key at the prompt leaves the line holding typing until an Enter or a Ctrl-C, and so does a send that may not have arrived and a terminal the primary did not see open, such as after a primary restart.
+- Any other key at the prompt leaves the line holding typing until an Enter or a Ctrl-C; a send that may not have arrived, and a terminal the primary did not see open, such as after a primary restart, keep the shell busy until a Ctrl-C.
 - Limitations: output a program prints, such as a file it shows, can carry forged prompt marks, which can end a command early in the record, so `terminal_run` types while that program reads the keys, or make the record ignore later prompts, so `terminal_run` refuses until the terminal is replaced.
 
 ## Chat client routes

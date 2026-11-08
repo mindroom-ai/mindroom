@@ -100,6 +100,8 @@ class BotRoomLifecycleDeps:
     send_response: _SendRoomResponse
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
+    # Refreshes the shared reply-membership index when it needs it, as an access check does.
+    refresh_memberships: Callable[[], Awaitable[None]]
     on_configured_room_joined: Callable[[str], Awaitable[None]]
     # Every successful join, configured, invited, or listed, so the bot restores the room's schedules.
     on_room_joined: Callable[[str], Awaitable[None]]
@@ -549,13 +551,9 @@ class BotRoomLifecycle:
                 return False
 
             if not response.chunk:
-                if visible_to_sender_id is not None and not is_sender_allowed_for_agent_reply_in_room(
-                    visible_to_sender_id,
-                    self.deps.agent_name,
-                    self._config(),
+                if visible_to_sender_id is not None and not await self._inviter_has_reply_access(
                     room_id,
-                    self.deps.runtime_paths,
-                    self.deps.runtime.agent_reply_memberships,
+                    visible_to_sender_id,
                 ):
                     self._logger().debug(
                         "invite_welcome_suppressed_by_reply_permissions",
@@ -577,6 +575,31 @@ class BotRoomLifecycle:
                 self._welcomed_room_ids.add(room_id)
                 self._logger().debug("Welcome message already sent", room_id=room_id)
             return True
+
+    async def _inviter_has_reply_access(self, room_id: str, sender: str) -> bool:
+        """Return whether an inviter may talk to the router in a room, reading the room's members again before a denial.
+
+        The router learns a room's members from its own sync after joining, which the invitation's welcome can precede.
+        """
+        memberships = self.deps.runtime.agent_reply_memberships
+
+        def allowed() -> bool:
+            return is_sender_allowed_for_agent_reply_in_room(
+                sender,
+                self.deps.agent_name,
+                self._config(),
+                room_id,
+                self.deps.runtime_paths,
+                memberships,
+            )
+
+        if allowed():
+            return True
+        memberships.reread_room(room_id)
+        # A refresh already in flight may have listed the router's rooms before this join, so a second one follows it.
+        for _ in range(2):
+            await self.deps.refresh_memberships()
+        return allowed()
 
     async def _deliver_welcome(self, room_id: str, visible_to_sender_id: str | None) -> bool:
         """Generate and deliver one welcome after its caller owns the send boundary."""

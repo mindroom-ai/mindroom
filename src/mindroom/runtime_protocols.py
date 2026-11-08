@@ -143,6 +143,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Rebuild room-backed reply grants from the router client."""
         ...
 
+    def refresh_agent_reply_memberships_when_needed(self) -> Awaitable[None]:
+        """Rebuild room-backed reply grants when they need it, for an access check."""
+        ...
+
     def send_approval_notice(
         self,
         *,

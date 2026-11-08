@@ -61,6 +61,7 @@ Matrix sync callback
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
 | `bot.py` | AgentBot runtime shell of every agent, team, and the router: Matrix lifecycle, sync callbacks, and room behavior |
 | `bot_runtime_view.py` | One bot generation's runtime state: its run phase and admission fence, and the runtime's shared config, gate, and membership index read through its orchestrator |
+| `bot_room_lifecycle.py` | One bot's room joins and leaves: configured and invited rooms, durable pending invites, following rooms listed under a room, cleanup of rooms it no longer keeps, the router's welcome, and an entity's notice in a managed room |
 | `turns/ingress.py` | TurnIngress - owns one inbound text or media event from its Matrix callback to gate admission, including onboarding commands, approval replies, edits, and commands that bypass the gate |
 | `turns/dispatch.py` | TurnDispatcher - owns one turn from the coalescing gate's exit to its recorded outcome: prepare, decide, execute, record |
 | `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |

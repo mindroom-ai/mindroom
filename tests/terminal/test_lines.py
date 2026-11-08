@@ -34,8 +34,8 @@ def test_the_line_is_empty_only_at_a_prompt_with_nothing_typed_since() -> None:
     assert line.empty
 
 
-def test_a_prompt_counts_once_and_a_lost_send_leaves_the_next_prompt_holding_typing() -> None:
-    """A mark replayed with another viewer's scrollback ends no command, and a lost send may have typed ahead."""
+def test_a_prompt_counts_once_and_a_lost_send_keeps_the_shell_busy_until_a_ctrl_c() -> None:
+    """A mark replayed with another viewer's scrollback ends no command, and a lost send may have queued lines."""
     line = TerminalLine(opened=True)
     line.prompted(1)
     line.type("sleep 5\r")
@@ -45,7 +45,12 @@ def test_a_prompt_counts_once_and_a_lost_send_leaves_the_next_prompt_holding_typ
     assert line.empty
     line.lost()
     line.prompted(3)
+    line.type("ls\r")
+    line.prompted(4)
     assert not line.empty
+    line.type("\x03")
+    line.prompted(5)
+    assert line.empty
 
 
 def test_keys_sent_with_a_ctrl_c_at_the_prompt_leave_the_line_holding_typing_until_a_ctrl_c_alone() -> None:
@@ -101,6 +106,28 @@ def test_a_terminal_the_primary_did_not_see_open_holds_typing_until_ctrl_c_empti
     line.type("\x03")
     line.prompted(5)
     assert line.empty
+
+
+def test_an_enter_typed_while_a_command_runs_keeps_the_shell_busy_until_a_ctrl_c() -> None:
+    """The shell runs typed-ahead lines one after another, so no prompt after them says it waits at an empty one."""
+    line = TerminalLine(opened=True)
+    line.prompted(1)
+    line.type("npm run build\r")
+    line.type("npm test\r")
+    line.prompted(2)
+    assert not line.empty
+    line.type("npm run lint\r")
+    line.prompted(3)
+    assert not line.empty
+    line.type("\x03")
+    line.prompted(4)
+    assert line.empty
+    # A terminal the primary did not see open may be running such lines too.
+    unseen = TerminalLine(opened=False)
+    unseen.prompted(7)
+    unseen.type("npm test\r")
+    unseen.prompted(8)
+    assert not unseen.empty
 
 
 def test_prompt_marks_count_once_even_split_across_frames() -> None:
