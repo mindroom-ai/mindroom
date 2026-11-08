@@ -3,8 +3,8 @@
 🔒 What the agent types into a terminal runs as shell commands, so ``run_shell_command``'s approval rules judge it as
 the call that would run the same text: ``terminal_open`` as a shell no argument describes, so it asks whenever those
 rules may; ``terminal_run`` as its command, which runs only on an empty line at the shell's prompt; ``terminal_send``
-as what its Enters run, joined to the line the terminal held before (``entered_command``). That earlier line comes
-from the call's ``line`` argument, which only the toolkit's trusted preparation fills before the call's approval
+as what its final Enter runs, joined to the line the terminal held before (``entered_command``). The line comes from
+the call's ``line`` argument, which only the toolkit's trusted preparation fills before the call's approval
 (``TerminalTools.offered_function``), and the call types only while the terminal's line is still that one.
 """
 
