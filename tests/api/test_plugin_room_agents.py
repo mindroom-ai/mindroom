@@ -21,7 +21,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
@@ -206,10 +206,11 @@ async def test_an_agent_not_joined_or_refusing_the_caller_is_left_out(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> None:
-    """The router, a person, and an unknown user are no agent anyone opens."""
-    room = _room(tmp_path, _agents())
+    """The router, a team, a person, and an unknown user are no agent anyone opens."""
+    team = TeamConfig(display_name="Crew", role="Coordinate", agents=["coder"], mode="coordinate")
+    room = _Room(Config(agents=_agents(), teams={"crew": team}), test_runtime_paths(tmp_path), ("coder", "crew"))
 
-    for user_id in (room.ids[ROUTER_AGENT_NAME], BOB, "@ghost:localhost"):
+    for user_id in (room.ids[ROUTER_AGENT_NAME], room.ids["crew"], BOB, "@ghost:localhost"):
         assert await _status(room.agent(ALICE, user_id)) == (403, "The selected user is not a current agent.")
 
 
@@ -220,6 +221,7 @@ async def test_agent_refuses_a_user_that_is_no_current_agent(tmp_path: Path) -> 
         ([{"file": {"all": True, **READ_ONLY_FILE["file"]}}], "write", "none"),
         ([{"file": {"exclude_tools": ["save_file", "replace_file_chunk"]}}], "read", "none"),
         ([{"file": {"enable_delete_file": True, **READ_ONLY_FILE["file"]}}], "read", "none"),
+        ([{"file": {"include_tools": ["delete_file"]}}], "none", "none"),
         (["coding"], "write", "none"),
         ([{"coding": {"include_tools": ["read_file", "grep"]}}], "read", "none"),
         (["python"], "write", "none"),
