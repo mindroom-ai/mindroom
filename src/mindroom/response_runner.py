@@ -1718,10 +1718,10 @@ class ResponseRunner:
     async def _generate_and_settle(self, turn: _LockedTurn) -> None:
         """Generate a prepared turn's reply, streamed or delivered whole, and settle its lifecycle once."""
         request = turn.request
-        # A resumed reply is a stream, and a whole answer would replace what it already showed.
-        use_streaming = _resumed_reply() is not None or (
-            not request.quiet
-            and await should_use_streaming(
+        # A quiet turn never streams. Otherwise a resumed reply streams below what its stopped attempt showed.
+        use_streaming = not request.quiet and (
+            _resumed_reply() is not None
+            or await should_use_streaming(
                 self.locked.client(),
                 request.room_id,
                 requester_user_id=request.user_id,
