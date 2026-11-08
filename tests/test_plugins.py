@@ -1341,6 +1341,32 @@ def test_a_reload_imports_a_nested_package_plugin_afresh_through_its_parent_pack
             _bump_mtime(tools_path)
 
 
+@_PRIMARY_AND_WORKER
+def test_a_subpackage_keeps_the_name_its_package_rebinds(
+    tmp_path: Path,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+) -> None:
+    """A subpackage that re-exports ``search`` from its ``search`` module still offers the function once published."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    (plugin_root / "api").mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "api" / "__init__.py").write_text("from .search import search\n", encoding="utf-8")
+    (plugin_root / "api" / "search.py").write_text(
+        "def search(query):\n    return f'found {query}'\n",
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text("from . import api\n\n\ndef run():\n    return api.search('x')\n", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+
+    load(config, runtime_paths_for(config))
+
+    assert cached_plugin_module(tools_path).run() == "found x"
+
+
 def test_validation_executes_a_module_another_plugin_module_imported_once(tmp_path: Path) -> None:
     """Candidate validation reuses the hooks module the tools module imported, as loading the plugin does."""
     plugin_root = tmp_path / "plugins" / "demo"

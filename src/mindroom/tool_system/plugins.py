@@ -455,11 +455,12 @@ def _remove_modules(modules: Mapping[str, ModuleType]) -> None:
 
 
 def _reinstate_modules(modules: Mapping[str, ModuleType]) -> None:
-    """Put ``modules`` in sys.modules and on their parent packages, as importing them does."""
+    """Put ``modules`` in sys.modules, and on parent packages that lost them, as importing them does."""
     sys.modules.update(modules)
     for module_name, module in modules.items():
         parent_name, _, child_name = module_name.rpartition(".")
-        if (parent := sys.modules.get(parent_name)) is not None:
+        # A package can rebind its submodule's name, such as to a function of the same name it re-exports.
+        if (parent := sys.modules.get(parent_name)) is not None and child_name not in vars(parent):
             setattr(parent, child_name, module)
 
 
@@ -590,7 +591,8 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
                 _log_loaded_plugins(generation)
             publish_plugins(generation)
             # Publishing ends the tasks of the modules the last generation held, not of those imported since.
-            _cancel_module_tasks(replaced.values())
+            held = {id(module) for module in published.modules.values()}
+            _cancel_module_tasks(module for module in replaced.values() if id(module) not in held)
     return config_plugins(config, runtime_paths)
 
 
