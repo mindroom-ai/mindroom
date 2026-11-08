@@ -913,6 +913,7 @@ def test_a_value_assigned_in_a_shell_command_ends_with_its_shell_word(command: s
         ('"Env": ["DB_PASSWORD=correct horse battery"]', f'"Env": ["DB_PASSWORD={REDACTED}"]'),
         ('psql "host=db password=correct horse"', f'psql "host=db password={REDACTED}"'),
         ("12:AUTHORIZATION=Basic dXNlcjpwdw==", f"12:AUTHORIZATION={REDACTED}"),
+        ('export "DB_PASSWORD=correct horse"', f'export "DB_PASSWORD={REDACTED}"'),
         ("     1\tDB_PASSWORD=correct horse battery", f"     1\tDB_PASSWORD={REDACTED}"),
         ("2026-11-08T12:00:00Z PASSWORD=correct horse battery", f"2026-11-08T12:00:00Z PASSWORD={REDACTED}"),
     ],
