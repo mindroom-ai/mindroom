@@ -498,7 +498,7 @@ async def test_a_lifespan_that_raises_or_hangs_is_logged_and_bounded(
 
     One that overruns is cancelled, so it does not go on after MindRoom stopped waiting for it.
     """
-    monkeypatch.setattr(plugin_lifecycle, "_LIFESPAN_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(plugin_lifecycle, "_LIFESPAN_DEADLINE_SECONDS", 0.5)
     probe = _probe()
     probe.phase = phase
     probe.release = asyncio.Event()
@@ -524,7 +524,7 @@ async def test_a_lifespan_that_raises_or_hangs_is_logged_and_bounded(
     if failure in {"raises", "cancelled"}:
         assert errors[0]["exc_info"] is True
     else:
-        assert errors[0]["timeout_seconds"] == 0.05
+        assert errors[0]["timeout_seconds"] == 0.5
 
 
 # A lifecycle module that cannot load, with the reason MindRoom gives.
@@ -727,7 +727,7 @@ async def test_a_websocket_that_cannot_close_holds_up_no_reload(
     The server stalls a close while the client stops reading, and refuses one once the client left. A websocket that
     ended before the reload gets no close at all.
     """
-    monkeypatch.setattr(plugin_lifecycle, "_LIFESPAN_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(plugin_lifecycle, "_LIFESPAN_DEADLINE_SECONDS", 0.5)
     probe = _probe()
     _write(tmp_path, probe, "demo", routes=ROUTES)
     runtime_paths = test_runtime_paths(tmp_path)

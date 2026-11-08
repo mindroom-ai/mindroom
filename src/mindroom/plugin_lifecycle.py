@@ -39,7 +39,7 @@ class PluginLifecycle:
     _current_config: Callable[[], Config] = field(repr=False)
     # Set before the stop code runs: a newer lifespan of the plugin started and can take over ``process_state``
     # (``reload``), none did (``disabled``), or MindRoom stops (``shutdown``).
-    stop_reason: _StopReason | None = None
+    stop_reason: _StopReason | None = field(default=None, init=False)
 
     def context(self) -> PluginContext:
         """Return the plugin's context under the config MindRoom serves now."""

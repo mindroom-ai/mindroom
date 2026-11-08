@@ -236,7 +236,7 @@ _SIGNATURES = {
         "legacy_credentials, consent_group)"
     ),
     "PluginContext": "(plugin_name, runtime_paths)",
-    "PluginLifecycle": "(plugin_name, process_state, stop_reason)",
+    "PluginLifecycle": "(plugin_name, process_state)",
     "PublicFetchError": "(message, *, code, status_code)",
     "PublicFetchResult": "(url, content_type, content)",
     "ReactionReceivedContext": (
@@ -533,7 +533,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 6), "741b0fdd6cdc42b5e0f197627fbf1287c8e0112a40504c091572fc70051adf63")
+_PINNED_VERSION = ((1, 6), "3370e26817e5c832896c5c625f8a814d617f60b7bd9a844bf5f3ed7a9216d7ba")
 
 
 def _is_enum(obj: object) -> bool:
