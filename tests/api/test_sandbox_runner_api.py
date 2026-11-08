@@ -1343,6 +1343,53 @@ def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_fai
     assert response.failure_kind == "worker"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "function_name", "expected_timeout"),
+    [("trafilatura", "crawl_website", 210.0), ("trafilatura", "extract_text", 120.0), ("calculator", "add", 120.0)],
+)
+def test_execute_request_subprocess_sync_lets_a_call_with_its_own_time_limit_run_past_the_runner_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tool_name: str,
+    function_name: str,
+    expected_timeout: float,
+) -> None:
+    """A worker call that stops itself at a longer time limit than the runner's keeps running until it answers."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    timeouts: list[float | None] = []
+
+    def _record_timeout(*_args: object, timeout: float | None, **_kwargs: object) -> object:
+        timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=timeout or 0)
+
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", _record_timeout)
+
+    sandbox_runner_module._execute_request_subprocess_sync(
+        execute_call(
+            runtime_paths,
+            sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+            runner_token=SANDBOX_TOKEN,
+            tool_name=tool_name,
+            function_name=function_name,
+            args=[],
+            kwargs={},
+        ),
+    )
+
+    assert timeouts == [expected_timeout]
+
+
 def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
