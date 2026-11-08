@@ -292,7 +292,6 @@ def test_find_locked_plugin_dirs_skips_unmanaged_entries(tmp_path: Path, monkeyp
     assert find_locked_plugin_dirs(tmp_path / "plugins") == (installed.directory,)
 
 
-@pytest.mark.usefixtures("wide_cli_consoles")
 def test_plugins_install_cli_reports_result_and_config_snippet(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -325,7 +324,6 @@ def test_plugins_install_cli_honors_config_path_and_prints_relative_snippet(
     assert "- path: plugins/demo-plugin" in result.stdout
 
 
-@pytest.mark.usefixtures("wide_cli_consoles")
 def test_plugins_install_cli_reports_failure_without_traceback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -371,7 +369,6 @@ def test_plugins_update_cli_requires_exactly_one_target(tmp_path: Path) -> None:
     assert "exactly one of NAME or --all" in result.output
 
 
-@pytest.mark.usefixtures("wide_cli_consoles")
 def test_plugins_update_cli_prints_markup_literally(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

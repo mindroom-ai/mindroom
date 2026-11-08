@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
-pytestmark = pytest.mark.usefixtures("wide_cli_consoles")
-
 
 @pytest.fixture
 def working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
