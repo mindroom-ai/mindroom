@@ -170,8 +170,8 @@ class TestDMDetection:
         assert dm_result is True
         assert non_dm_result is False
 
-    async def test_does_not_cache_false_when_state_request_errors(self) -> None:
-        """Test API errors don't poison cache with a false negative."""
+    async def test_failed_state_read_answers_unknown_and_reads_again(self) -> None:
+        """Test a failed state read after a clean m.direct read answers unknown, and the next call reads state again."""
         client = AsyncMock()
         client.user_id = "@agent:server"
         client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
@@ -182,7 +182,7 @@ class TestDMDetection:
         first_result = await is_dm_room(client, "!room:server")
         second_result = await is_dm_room(client, "!room:server")
 
-        assert first_result is False
+        assert first_result is None
         assert second_result is False
         assert client.room_get_state.call_count == 2
 
@@ -296,5 +296,18 @@ class TestDMDetection:
 
         await rooms.leave_non_dm_rooms(client, ["!dm:server", "!group:server"], leave_room_action=leave)
         await rooms.leave_non_dm_rooms(client, ["!dm:server"], leave_room_action=leave)
+
+        leave.assert_awaited_once_with("!group:server")
+
+    async def test_leave_non_dm_rooms_keeps_room_whose_state_read_failed(self) -> None:
+        """Test a clean m.direct read that omits a room keeps it when its state read fails, and a readable group goes."""
+        client = AsyncMock()
+        client.user_id = "@agent:server"
+        client.rooms = {}
+        client.list_direct_rooms.return_value = _direct_rooms({})
+        client.room_get_state.side_effect = [MagicMock(spec=nio.RoomGetStateError), _non_dm_state()]
+        leave = AsyncMock(return_value=True)
+
+        await rooms.leave_non_dm_rooms(client, ["!dm:server", "!group:server"], leave_room_action=leave)
 
         leave.assert_awaited_once_with("!group:server")
