@@ -82,6 +82,7 @@ def _save_matrix_room(runtime_paths: constants.RuntimePaths, room_key: str, room
 def mock_matrix_client() -> AsyncMock:
     """Create a mock Matrix client."""
     client = AsyncMock()
+    client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
     client.close = AsyncMock()
     return client
 
