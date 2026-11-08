@@ -19,11 +19,11 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 
-async def _until(next_changes: Callable[[], Awaitable[list[str]]], path: str) -> set[str]:
-    """Collect every reported path until ``path`` shows, failing after five seconds."""
+async def _until(next_changes: Callable[[], Awaitable[list[str]]], *paths: str) -> set[str]:
+    """Collect every reported path until all of ``paths`` show, failing after five seconds."""
     seen: set[str] = set()
     async with asyncio.timeout(5):
-        while path not in seen:
+        while not seen.issuperset(paths):
             seen.update(await next_changes())
     return seen
 
@@ -265,8 +265,7 @@ async def test_nothing_goes_unreported_while_a_new_folder_is_taken_in(
         (root / "old.md").write_text("changed while walking")
         (root / "new" / "inner.md").write_text("written before its folder is watched")
 
-        seen = await _until(next_changes, "old.md")
-        seen |= await _until(next_changes, "new/inner.md")
+        seen = await _until(next_changes, "old.md", "new/inner.md")
 
     assert {"old.md", "new/inner.md"} <= seen
 
@@ -352,3 +351,58 @@ async def test_a_change_just_before_the_new_watch_begins_is_still_reported(
         await _until(next_changes, "new")
 
         assert "old.md" in await _until(next_changes, "old.md")
+
+
+@pytest.mark.asyncio
+async def test_a_folder_made_after_the_walk_is_watched_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder that appears once the tree was walked, in a watched folder or a new one, is walked and watched next."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    real_folders = watch._folders
+    made = threading.Event()
+
+    def folders_then_more(path: Path) -> list[str]:
+        folders = real_folders(path)
+        if "new" in {Path(folder).name for folder in folders} and not made.is_set():
+            made.set()
+            (root / "late").mkdir()
+            (root / "new" / "sub").mkdir()
+        return folders
+
+    monkeypatch.setattr(watch, "_folders", folders_then_more)
+    async with workspace_changes(root) as next_changes:
+        await _settled(root)
+        (root / "new").mkdir()
+        await _until(next_changes, "new/sub")
+        await asyncio.sleep(1)
+        (root / "late" / "a.md").write_text("x")
+        (root / "new" / "sub" / "b.md").write_text("x")
+
+        seen = await _until(next_changes, "late/a.md", "new/sub/b.md")
+
+    assert {"late/a.md", "new/sub/b.md"} <= seen
+
+
+def test_only_a_folder_the_walk_takes_in_calls_for_a_new_walk(tmp_path: Path) -> None:
+    """A cache, a credential folder or a link appearing never makes the whole tree be walked again."""
+    root = tmp_path / "workspace"
+    for name in ("src", "__pycache__", "node_modules", ".ssh"):
+        (root / name).mkdir(parents=True)
+    (root / "link").symlink_to(root / "src")
+    added = watchfiles.Change.added
+
+    assert watch._batch(root, {(added, str(root / "src"))})[1]
+    for name in ("__pycache__", "node_modules", ".ssh", "link"):
+        assert not watch._batch(root, {(added, str(root / name))})[1], name
+
+
+@pytest.mark.asyncio
+async def test_a_link_made_in_the_workspace_is_reported_even_when_it_leads_outside(tmp_path: Path) -> None:
+    """The link is an entry of its folder, so it shows as changed; nothing beyond it ever does."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    async with workspace_changes(root) as next_changes:
+        (root / "out").symlink_to(tmp_path / "outside")
+
+        assert "out" in await _until(next_changes, "out")

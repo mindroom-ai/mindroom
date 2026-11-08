@@ -120,19 +120,29 @@ def _folders(root: Path) -> list[str]:
     # The list grows while it is read.
     for folder in folders:
         with suppress(OSError), os.scandir(folder) as entries:
-            for entry in entries:
-                relative = PurePosixPath(Path(entry.path).relative_to(root))
-                kept = _FILTER(watchfiles.Change.added, str(relative)) and not is_hidden(relative)
-                if kept and entry.is_dir(follow_symlinks=False):
-                    folders.append(entry.path)
+            folders.extend(
+                entry.path for entry in entries if entry.is_dir(follow_symlinks=False) and _walked(root, entry.path)
+            )
         if len(folders) >= _MAX_FOLDERS:
             logger.warning("Workspace has too many folders to follow them all", root=str(root), limit=_MAX_FOLDERS)
             return folders[:_MAX_FOLDERS]
     return folders
 
 
+def _walked(root: Path, folder: str) -> bool:
+    """Return whether a folder below the root is one the walk takes in: not ignored and holding no credentials."""
+    relative = PurePosixPath(Path(folder).relative_to(root))
+    return _FILTER(watchfiles.Change.added, str(relative)) and not is_hidden(relative)
+
+
+def _new_folder(root: Path, raw: str) -> bool:
+    """Return whether a path is a folder, not a link, that the walk would take in."""
+    path = Path(raw)
+    return path.is_dir() and not path.is_symlink() and _walked(root, raw)
+
+
 def _reported(root: Path, change: watchfiles.Change, raw: str) -> str | None:
-    """Return a changed path relative to the root, or None for the root, what is left out, or a path through a link out.
+    """Return a changed path relative to the root, or None for the root, what is left out, or a path through a link.
 
     The filter sees only the relative path, never the folders the root sits in.
     """
@@ -140,7 +150,8 @@ def _reported(root: Path, change: watchfiles.Change, raw: str) -> str | None:
     if not relative.parts or not _FILTER(change, str(relative)) or is_hidden(relative):
         return None
     try:
-        resolve_path_within_root(root, str(relative), symlinks="internal")
+        # A link is an entry of its folder, wherever it leads; the folders above it must be no links.
+        resolve_path_within_root(root, str(relative), symlinks="preserve_leaf")
     except (OSError, ValueError):
         return None
     return str(relative)
@@ -149,10 +160,7 @@ def _reported(root: Path, change: watchfiles.Change, raw: str) -> str | None:
 def _batch(root: Path, changes: set[tuple[watchfiles.Change, str]]) -> tuple[set[str], bool]:
     """Return a batch's reported paths, and whether a folder appeared, so the tree needs walking again."""
     paths = {path for change, raw in changes if (path := _reported(root, change, raw)) is not None}
-    grown = any(
-        change is watchfiles.Change.added and Path(raw).is_dir() and not Path(raw).is_symlink()
-        for change, raw in changes
-    )
+    grown = any(change is watchfiles.Change.added and _new_folder(root, raw) for change, raw in changes)
     return paths, grown
 
 
@@ -168,17 +176,17 @@ def _send(watch: _Watch, paths: set[str]) -> None:
             follower.add(paths)
 
 
-def _held(root: Path, folders: Collection[str]) -> set[str]:
-    """Return the reported paths of what ``folders`` hold now."""
+def _held(root: Path, new: Collection[str], watched: Collection[str]) -> tuple[set[str], bool]:
+    """Return the reported paths of what the ``new`` folders hold now, and whether one holds a folder not ``watched``."""
     paths: set[str] = set()
-    for folder in folders:
+    grown = False
+    for folder in new:
         with suppress(OSError):
-            paths |= {
-                path
-                for entry in Path(folder).iterdir()
-                if (path := _reported(root, watchfiles.Change.added, str(entry))) is not None
-            }
-    return paths
+            for entry in Path(folder).iterdir():
+                if (path := _reported(root, watchfiles.Change.added, str(entry))) is not None:
+                    paths.add(path)
+                grown = grown or (str(entry) not in watched and _new_folder(root, str(entry)))
+    return paths, grown
 
 
 async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown: asyncio.Event) -> None:
@@ -205,10 +213,13 @@ async def _run(watch: _Watch) -> None:
     # The folders watched last, empty while the root is missing, None before the first watch or after a failure.
     watched: list[str] | None = None
     stop_watching = asyncio.Event()
+    # Set by any watch, old or new, once a folder appears after the walk began, so the tree is walked again.
+    grown = asyncio.Event()
     # A replaced watch keeps running until it sees its stop, so it is held until then.
     running: set[asyncio.Task[None]] = set()
     try:
         while not watch.stop.is_set():
+            grown.clear()
             folders = await asyncio.to_thread(_folders, watch.root)
             if not folders:
                 stop_watching.set()
@@ -216,7 +227,7 @@ async def _run(watch: _Watch) -> None:
                 watch.following.set()
                 await _wait(watch, _ABSENT_RETRY_SECONDS)
                 continue
-            previous, stop_watching, grown = stop_watching, asyncio.Event(), asyncio.Event()
+            previous, stop_watching = stop_watching, asyncio.Event()
             following = asyncio.create_task(_follow(watch, folders, stop_watching, grown))
             running.add(following)
             following.add_done_callback(running.discard)
@@ -226,7 +237,10 @@ async def _run(watch: _Watch) -> None:
             watch.following.set()
             if watched is not None:
                 # What a new folder, or a root that was missing, held before its watch began.
-                _send(watch, await asyncio.to_thread(_held, watch.root, set(folders).difference(watched)))
+                held, more = await asyncio.to_thread(_held, watch.root, set(folders).difference(watched), set(folders))
+                _send(watch, held)
+                if more:
+                    grown.set()
             watched = folders
             waits = [asyncio.create_task(grown.wait()), asyncio.create_task(watch.stop.wait())]
             await asyncio.wait([following, *waits], return_when=asyncio.FIRST_COMPLETED)
