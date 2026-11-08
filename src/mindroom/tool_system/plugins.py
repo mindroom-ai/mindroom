@@ -1124,6 +1124,7 @@ def _load_plugin_module(
     previous_packages: dict[str, ModuleType | None] = {}
     if importable_name is not None:
         module = plugin_imports._PENDING_MODULES[module_name] = ModuleType(module_name)
+        module.__file__ = str(module_path)
     elif (
         prepared_module := plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name)
     ) is None:

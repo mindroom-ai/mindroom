@@ -1513,6 +1513,47 @@ def test_a_plugin_that_puts_its_root_on_sys_path_shares_the_modules_it_imports_b
         assert loaded_hooks[0] is not loaded_hooks[1]
 
 
+@_PRIMARY_AND_WORKER
+@pytest.mark.parametrize(
+    ("tools_file", "tools_source"),
+    [("tools.py", "from .hooks import STATE\n"), ("sub/tools.py", "from ..hooks import STATE\n")],
+    ids=["root", "subdirectory"],
+)
+@pytest.mark.parametrize("on_sys_path", ["before-load", "added-by-plugin"])
+def test_a_plugin_whose_directory_is_on_sys_path_keeps_its_relative_imports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+    tools_file: str,
+    tools_source: str,
+    on_sys_path: str,
+) -> None:
+    """A plugin whose own directory is on ``sys.path`` still imports its modules relatively, across a reload."""
+    monkeypatch.setattr(sys, "path", [*sys.path])
+    plugin_root = tmp_path / "plugins" / "demo"
+    (plugin_root / "sub").mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": tools_file, "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
+    tools_path = plugin_root / tools_file
+    if on_sys_path == "before-load":
+        # As when a plugin's tests run from its directory.
+        sys.path.insert(0, str(plugin_root))
+    else:
+        tools_source = f"import sys\n\nsys.path.insert(0, {str(plugin_root)!r})\n\n{tools_source}"
+    tools_path.write_text(tools_source, encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("tools", "hooks", "sub"):
+        for _ in range(2):
+            load(config, runtime_paths)
+            assert cached_plugin_module(tools_path).STATE is cached_plugin_module(plugin_root / "hooks.py").STATE
+            _edit(tools_path)
+
+
 def _same_size_edit_in_place(path: Path, source: str) -> None:
     """Cache ``path``'s bytecode, then write ``source`` of the same size, keeping the mtime that cache records."""
     mtime = path.stat().st_mtime
@@ -1578,18 +1619,15 @@ def test_a_reload_runs_a_helper_imported_through_a_linked_sys_path_entry_from_it
     config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
     runtime_paths = runtime_paths_for(config)
 
-    # Python gives the module the file name it imports it from.
-    imported_tools_path = linked_site_packages / "demo_pkg" / "tools.py"
-
     with _forgetting_modules("demo_pkg"):
         load(config, runtime_paths)
-        assert cached_plugin_module(imported_tools_path).VERSION == 1
+        assert cached_plugin_module(tools_path).VERSION == 1
 
         _same_size_edit_in_place(helper_path, "VERSION = 2\n")
         _edit(tools_path)
         load(config, runtime_paths)
 
-        assert cached_plugin_module(imported_tools_path).VERSION == 2
+        assert cached_plugin_module(tools_path).VERSION == 2
 
 
 def test_validation_counts_the_helper_tools_of_a_published_package_plugin_whose_tools_module_changed(
@@ -3709,11 +3747,16 @@ def _write_import_task_plugin(plugin_root: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("package", [False, True], ids=["directory", "package"])
+@pytest.mark.parametrize(
+    ("package", "hooks_file"),
+    [(False, "hooks.py"), (True, "hooks.py"), (True, "__init__.py")],
+    ids=["directory", "package", "package-init"],
+)
 async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     package: bool,
+    hooks_file: str,
 ) -> None:
     """Validating or loading a plugin whose module raises after starting a task ends that task too."""
     probe = ModuleType(f"mindroom_test_probe_{uuid.uuid4().hex}")
@@ -3731,10 +3774,10 @@ async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_r
         plugin_root = tmp_path / "plugins" / "fails-after-task"
         plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "fails-after-task", "hooks_module": "hooks.py", "skills": []}),
+        json.dumps({"name": "fails-after-task", "hooks_module": hooks_file, "skills": []}),
         encoding="utf-8",
     )
-    hooks_path = plugin_root / "hooks.py"
+    hooks_path = plugin_root / hooks_file
     hooks_path.write_text("", encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")

@@ -8,7 +8,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from importlib import machinery, util
+from importlib import abc, machinery, util
 from pathlib import Path
 from types import CodeType, ModuleType
 from typing import TYPE_CHECKING, Any
@@ -21,7 +21,7 @@ from mindroom.tool_system.plugin_identity import validate_plugin_name
 from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, record_plugin_root
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 logger = get_logger(__name__)
 
@@ -98,7 +98,8 @@ _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _MODULE_IMPORT_CACHE: dict[str, _ModuleCacheEntry] = {}
 
 
-# The module object the next import of each name here fills, so the loader still holds it when its execution raises.
+# The module, with its ``__file__``, that the next import of each name here fills through the plugin source loader, so
+# the loader still holds it when its execution raises.
 _PENDING_MODULES: dict[str, ModuleType] = {}
 # The plugin directories whose modules import through the plugin file loaders.
 _SOURCE_ROOTS: set[Path] = set()
@@ -123,6 +124,25 @@ _PLUGIN_FILE_LOADERS = (
 )
 
 
+class _PendingModuleFinder(abc.MetaPathFinder):
+    """Find each module the plugin loader is importing now at its file, with the plugin source loader."""
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None,
+        target: ModuleType | None = None,
+    ) -> machinery.ModuleSpec | None:
+        del path, target
+        if (module := _PENDING_MODULES.get(fullname)) is None or module.__file__ is None:
+            return None
+        return util.spec_from_file_location(
+            fullname,
+            module.__file__,
+            loader=_SourceFileLoader(fullname, module.__file__),
+        )
+
+
 def _plugin_path_hook(path: str) -> machinery.FileFinder:
     """Find the modules of a directory inside a plugin, however ``sys.path`` reaches it, with the plugin file loaders."""
     resolved = Path(path).resolve()
@@ -138,6 +158,7 @@ def _record_plugin_root(root: Path) -> None:
         return
     if not _SOURCE_ROOTS:
         sys.path_hooks.insert(0, _plugin_path_hook)
+        sys.meta_path.insert(0, _PendingModuleFinder())
     _SOURCE_ROOTS.add(root)
     # A finder cached before the root was recorded never asks the hook.
     for path in [path for path in tuple(sys.path_importer_cache) if Path(path).resolve().is_relative_to(root)]:
@@ -514,16 +535,21 @@ def _importable_name(plugin_root: Path, module_path: Path) -> str | None:
         base = Path(entry).resolve()
         if not plugin_root.is_relative_to(base):
             continue
-        name = ".".join((*plugin_root.relative_to(base).parts, *relative))
-        if _names_file(name, module_path):
+        package = plugin_root.relative_to(base).parts
+        name = ".".join((*package, *relative))
+        # A name from the plugin's own directory on sys.path leaves the module no package for its relative imports, so
+        # it is the module's only once the plugin itself imported the module by it.
+        if _names_file(name, module_path, imported_only=not package):
             return name
     return None
 
 
-def _names_file(module_name: str, module_path: Path) -> bool:
-    """Return whether importing ``module_name`` now gives the module of the file ``module_path``."""
+def _names_file(module_name: str, module_path: Path, *, imported_only: bool) -> bool:
+    """Return whether importing ``module_name`` gives the module of the file ``module_path``, or gave it already."""
     if (imported := sys.modules.get(module_name)) is not None:
         origin = getattr(imported, "__file__", None)
+    elif imported_only:
+        return False
     else:
         try:
             spec = _find_module_spec(module_name)

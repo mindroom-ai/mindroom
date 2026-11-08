@@ -57,9 +57,8 @@ def _package_plugin_config(
 ) -> tuple[Config, Path]:
     """Return a config naming the importable plugin package ``stray_pkg``, and the package's directory.
 
-    Its tools module registers ``stray_pkg_tool``, or runs ``tools_source`` instead. The package's directory is on
-    ``sys.path`` ahead of the package, so the plugin loads its tools module as ``tools`` and ``stray_pkg.tools`` is a
-    second name for it.
+    Its tools module registers ``stray_pkg_tool``, or runs ``tools_source`` instead. The package's own directory is on
+    ``sys.path`` too, so ``tools`` is a second name for the tools module the plugin loads as ``stray_pkg.tools``.
     """
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "stray_pkg"
@@ -85,15 +84,15 @@ def test_stray_import_of_a_loaded_plugin_tools_module_registers_nothing(
     """A plugin's tools module imported under a second name works but registers nothing; the plugin keeps its tools."""
     config, plugin_root = _package_plugin_config(tmp_path, monkeypatch)
 
-    with _forgetting_modules("stray_pkg"):
+    with _forgetting_modules("stray_pkg", "tools"):
         assert "stray_pkg_tool" in _load(config, runtime_paths_for(config)).tools
 
         with capture_logs() as logs:
-            stray_tools = importlib.import_module("stray_pkg.tools")
+            stray_tools = importlib.import_module("tools")
         assert stray_tools.demo_plugin_tools().__name__ == "DemoTool"
         assert "stray_pkg_tool" not in builtin_tool_registry()
         assert [(log["tool"], log["plugin_root"], log["module"]) for log in _warnings(logs)] == [
-            ("stray_pkg_tool", str(plugin_root.resolve()), "stray_pkg.tools"),
+            ("stray_pkg_tool", str(plugin_root.resolve()), "tools"),
         ]
 
         # The plugin's next load executes its tools module again and still registers the tool.
@@ -133,11 +132,11 @@ def test_stray_import_of_a_module_registering_through_a_plugin_helper_registers_
     helper, tools_source = _HELPER_TOOLS_SOURCES[tool_name]
     config, _ = _package_plugin_config(tmp_path, monkeypatch, tools_source)
 
-    with _forgetting_modules("stray_pkg"):
+    with _forgetting_modules("stray_pkg", "tools"):
         assert tool_name in _load(config, runtime_paths_for(config)).tools
 
         with capture_logs() as logs:
-            importlib.import_module("stray_pkg.tools")
+            importlib.import_module("tools")
         assert tool_name not in builtin_tool_registry()
         assert [log["caller"] for log in _warnings(logs)] == [helper]
         assert tool_name in _load(config, runtime_paths_for(config)).tools
