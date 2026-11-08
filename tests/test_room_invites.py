@@ -66,6 +66,7 @@ from tests.identity_helpers import entity_ids
 from tests.journal_helpers import membership_position
 from tests.journal_membership_helpers import admit_room_membership
 from tests.runtime_fakes import ready_runtime
+from tests.test_listed_rooms import PARENT, _create, _parent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -964,29 +965,17 @@ async def test_router_joins_a_personal_room_without_its_welcome(
     assert bot._room_lifecycle.invited_room_ids() == {"!personal:localhost"}
 
 
-def _state(event_type: str, content: dict[str, object], state_key: str = "") -> dict[str, object]:
-    return {"type": event_type, "state_key": state_key, "sender": "@alice:localhost", "content": content}
-
-
-def _parent_link(*, canonical: bool = True, via: tuple[str, ...] = ("localhost",)) -> dict[str, object]:
-    return _state("m.space.parent", {"canonical": canonical, "via": list(via)}, "!above:localhost")
-
-
-_CHAT_ROOM = [_state("m.room.create", {"room_version": "11"})]
-_SPACE = [_state("m.room.create", {"room_version": "11", "type": "m.space"})]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("room_state", "above_state", "welcomed"),
     [
-        pytest.param([*_CHAT_ROOM, _parent_link()], _CHAT_ROOM, False, id="under-a-chat-room"),
-        pytest.param([*_CHAT_ROOM, _parent_link()], _SPACE, True, id="under-a-space"),
-        pytest.param([*_CHAT_ROOM, _parent_link(canonical=False)], _CHAT_ROOM, True, id="non-canonical-parent"),
-        pytest.param([*_CHAT_ROOM, _parent_link(via=())], _CHAT_ROOM, True, id="parent-without-via"),
-        pytest.param([*_CHAT_ROOM, _parent_link()], None, True, id="unreadable-parent"),
-        pytest.param(None, _CHAT_ROOM, True, id="unreadable-room"),
-        pytest.param(_CHAT_ROOM, _CHAT_ROOM, True, id="plain-room"),
+        pytest.param([_create(), _parent(PARENT)], [_create()], False, id="under-a-chat-room"),
+        pytest.param([_create(), _parent(PARENT)], [_create("m.space")], True, id="under-a-space"),
+        pytest.param([_create(), _parent(PARENT, canonical=False)], [_create()], True, id="non-canonical-parent"),
+        pytest.param([_create(), _parent(PARENT, via=())], [_create()], True, id="parent-without-via"),
+        pytest.param([_create(), _parent(PARENT)], None, True, id="unreadable-parent"),
+        pytest.param(None, [_create()], True, id="unreadable-room"),
+        pytest.param([_create()], [_create()], True, id="plain-room"),
     ],
 )
 async def test_router_welcomes_an_invited_room_unless_it_is_under_a_chat_room(
@@ -1000,7 +989,7 @@ async def test_router_welcomes_an_invited_room_unless_it_is_under_a_chat_room(
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     invite = _current_invite("!under:localhost", "@alice:localhost")
     lifecycle = _router_room_lifecycle(config, invite, AsyncMock(return_value=True))
-    states = {"!under:localhost": room_state, "!above:localhost": above_state}
+    states = {"!under:localhost": room_state, PARENT: above_state}
 
     async def room_get_state(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
         events = states[room_id]
