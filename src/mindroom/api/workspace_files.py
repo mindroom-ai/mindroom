@@ -171,7 +171,7 @@ async def delete(room: _Room, agent_user_id: str, path: str) -> None:
 
 @router.websocket("/agents/{agent_user_id}/workspace/changes")
 async def follow_changes(websocket: WebSocket, room_id: str, agent_user_id: str) -> None:
-    """Send ``{"type": "changed", "paths": [...]}`` for each batch of changes in the workspace while it stays open.
+    """Send ``{"type": "ready"}`` once following, then ``{"type": "changed", "paths": [...]}`` for each batch of changes.
 
     It closes with 1008 once the workspace is no longer open to the caller or moved, and 1013 while that can't be told.
     """
@@ -179,6 +179,7 @@ async def follow_changes(websocket: WebSocket, room_id: str, agent_user_id: str)
         try:
             workspace = await _opened(await stream_room_reader(websocket, user, room_id), agent_user_id)
             async with workspace_changes(workspace.root) as next_changes:
+                await websocket.send_json({"type": "ready"})
                 tasks = [
                     asyncio.create_task(task)
                     for task in (

@@ -281,3 +281,42 @@ async def test_a_workspace_stored_below_a_folder_named_like_a_cache_is_followed(
         (root / "notes.md").write_text("x")
 
         assert "notes.md" in await _until(next_changes, "notes.md")
+
+
+@pytest.mark.asyncio
+async def test_a_follower_hears_every_change_made_once_it_follows(tmp_path: Path) -> None:
+    """Following begins once the workspace is watched, so a change made right away is never missed."""
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    async with workspace_changes(root) as next_changes:
+        (root / "src" / "first.md").write_text("x")
+
+        assert "src/first.md" in await _until(next_changes, "src/first.md")
+
+
+@pytest.mark.asyncio
+async def test_what_a_workspace_holds_when_it_appears_is_reported(tmp_path: Path) -> None:
+    """A workspace made after following began reports what it was made with, as the agent's first turn writes it."""
+    root = tmp_path / "workspace"
+    async with workspace_changes(root) as next_changes:
+        (root / "memory").mkdir(parents=True)
+        (root / "memory" / "MEMORY.md").write_text("x")
+
+        assert "memory/MEMORY.md" in await _until(next_changes, "memory/MEMORY.md")
+
+
+def test_the_folder_cap_leaves_out_the_deepest_folders_and_hidden_ones_are_never_watched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool's deep cache in the agent's HOME can't take the watches the project's own top folders need."""
+    root = tmp_path / "workspace"
+    for top in ("a", "b", "c"):
+        (root / top / "deep" / "deeper").mkdir(parents=True)
+    (root / ".ssh").mkdir()
+    (root / ".config" / "gh").mkdir(parents=True)
+    monkeypatch.setattr(watch, "_MAX_FOLDERS", 5)
+
+    folders = {Path(folder).relative_to(root).as_posix() for folder in watch._folders(root)}
+
+    assert folders == {".", "a", "b", "c", ".config"}

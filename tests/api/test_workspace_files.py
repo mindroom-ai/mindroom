@@ -9,7 +9,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
@@ -327,15 +327,10 @@ async def _changes(
     return await client.ws_connect(url, protocols=["mindroom-session", f"mindroom-session.{token}"], origin=ORIGIN)
 
 
-async def _settled(stream: aiohttp.ClientWebSocketResponse, root: Path) -> None:
-    """Write probe files until the stream reports one, so the workspace's watcher follows it."""
+async def _ready(stream: aiohttp.ClientWebSocketResponse) -> None:
+    """Wait for the stream to say it follows the workspace."""
     async with asyncio.timeout(10):
-        for attempt in range(100):
-            (root / f"probe{attempt}").write_text("x")
-            with suppress(TimeoutError):
-                async with asyncio.timeout(0.2):
-                    await stream.receive_json()
-                    return
+        assert await stream.receive_json() == {"type": "ready"}
 
 
 async def _changed_until(stream: aiohttp.ClientWebSocketResponse, path: str) -> set[str]:
@@ -358,7 +353,7 @@ async def test_the_change_stream_reports_what_changes_but_never_git_or_credentia
     (root / ".git").mkdir(parents=True)
     async with _served(room) as (client, base):
         stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", BOB)
-        await _settled(stream, root)
+        await _ready(stream)
         (root / ".git" / "index").write_text("x")
         (root / ".env").write_text("TOKEN=1\n")
         (root / "notes.md").write_text("# Notes\n")
@@ -383,6 +378,8 @@ async def test_the_change_stream_closes_once_the_workspace_is_no_longer_open(
 
         alice = await _changes(client, room, f"{base}{url_of}", ALICE)
         bob = await _changes(client, room, f"{base}{url_of}", BOB)
+        await _ready(alice)
+        await _ready(bob)
         agents = _agents()
         agents["coder"].access = ResponderAccessConfig(users=[BOB])
         room.serve(Config(agents=agents))
@@ -427,6 +424,7 @@ async def test_the_change_stream_closes_once_the_agent_s_tools_no_longer_reach_f
     room = _room(tmp_path, _agents(), MINDROOM_COMPUTER_ALLOWED_ORIGINS=json.dumps([ORIGIN]))
     async with _served(room) as (client, base):
         stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
+        await _ready(stream)
         agents = _agents()
         agents["coder"].tools = []
         room.serve(Config(agents=agents))
@@ -453,7 +451,7 @@ async def test_the_change_stream_closes_with_1013_while_access_cannot_be_told(
     async with _served(room) as (client, base):
         stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
         # Admitted and following, so only a recheck reads the room from here on.
-        await _settled(stream, root)
+        await _ready(stream)
         stalled = asyncio.Event()
 
         async def stall(*_args: object, **_kwargs: object) -> None:
@@ -479,7 +477,7 @@ async def test_the_watcher_stops_once_the_client_leaves(tmp_path: Path) -> None:
     root.mkdir(parents=True)
     async with _served(room) as (client, base):
         stream = await _changes(client, room, f"{base}/agents/{room.ids['coder']}/workspace/changes", ALICE)
-        await _settled(stream, root)
+        await _ready(stream)
         assert list(watch._watches) == [root]
 
         await stream.close()

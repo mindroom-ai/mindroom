@@ -71,6 +71,8 @@ class _Watch:
     root: Path
     followers: set[_Follower] = field(default_factory=set)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set once the root is watched, or found missing, so whatever changes from then on is reported.
+    following: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
 
 
@@ -80,7 +82,10 @@ _watches: dict[Path, _Watch] = {}
 
 @asynccontextmanager
 async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[list[str]]]]:
-    """Follow the changes below ``root``, which may not exist yet; yield a call that waits for the next batch."""
+    """Follow the changes below ``root``, which may not exist yet; yield a call that waits for the next batch.
+
+    It yields once the root is watched, so a change made after that is reported.
+    """
     watch = _watches.get(root)
     if watch is None:
         watch = _watches[root] = _Watch(root)
@@ -88,6 +93,7 @@ async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[
     follower = _Follower()
     watch.followers.add(follower)
     try:
+        await watch.following.wait()
         yield follower.next
     finally:
         watch.followers.discard(follower)
@@ -97,17 +103,27 @@ async def workspace_changes(root: Path) -> AsyncIterator[Callable[[], Awaitable[
 
 
 def _folders(root: Path) -> list[str]:
-    """Return the root and the folders below it reached without a link, leaving out those the filter ignores."""
-    with suppress(OSError):
+    """Return the root and the folders below it reached without a link, breadth first so the cap leaves out the deepest.
+
+    Folders the filter ignores, or that hold credentials, are left out.
+    """
+    try:
         if not stat.S_ISDIR(os.lstat(root).st_mode):
             return []
-    folders: list[str] = []
-    for current, names, _ in os.walk(root):
-        if len(folders) == _MAX_FOLDERS:
+    except OSError:
+        return []
+    folders = [str(root)]
+    # The list grows while it is read.
+    for folder in folders:
+        with suppress(OSError), os.scandir(folder) as entries:
+            for entry in entries:
+                relative = PurePosixPath(Path(entry.path).relative_to(root))
+                kept = _FILTER(watchfiles.Change.added, str(relative)) and not is_hidden(relative)
+                if kept and entry.is_dir(follow_symlinks=False):
+                    folders.append(entry.path)
+        if len(folders) >= _MAX_FOLDERS:
             logger.warning("Workspace has too many folders to follow them all", root=str(root), limit=_MAX_FOLDERS)
-            break
-        folders.append(current)
-        names[:] = [name for name in names if name not in _FILTER.ignore_dirs]
+            return folders[:_MAX_FOLDERS]
     return folders
 
 
@@ -181,7 +197,8 @@ async def _follow(watch: _Watch, folders: list[str], stop: asyncio.Event, grown:
 
 
 async def _run(watch: _Watch) -> None:
-    watched: list[str] = []
+    # The folders watched last, empty while the root is missing, None before the first watch or after a failure.
+    watched: list[str] | None = None
     stop_watching = asyncio.Event()
     # A replaced watch keeps running until it sees its stop, so it is held until then.
     running: set[asyncio.Task[None]] = set()
@@ -191,6 +208,7 @@ async def _run(watch: _Watch) -> None:
             if not folders:
                 stop_watching.set()
                 watched = []
+                watch.following.set()
                 await _wait(watch, _ABSENT_RETRY_SECONDS)
                 continue
             previous, stop_watching, grown = stop_watching, asyncio.Event(), asyncio.Event()
@@ -200,8 +218,9 @@ async def _run(watch: _Watch) -> None:
             # A watch takes in its folders before it first waits, so the one before it stops only once it watches.
             await asyncio.sleep(0)
             previous.set()
-            if watched:
-                # What a new folder held before its watch began.
+            watch.following.set()
+            if watched is not None:
+                # What a new folder, or a root that was missing, held before its watch began.
                 _send(watch, await asyncio.to_thread(_held, watch.root, set(folders).difference(watched)))
             watched = folders
             waits = [asyncio.create_task(grown.wait()), asyncio.create_task(watch.stop.wait())]
@@ -209,7 +228,8 @@ async def _run(watch: _Watch) -> None:
             for waiting in waits:
                 waiting.cancel()
             if following.done() and not watch.stop.is_set():
-                watched = []
+                watched = None
                 await _wait(watch, _FAILURE_RETRY_SECONDS)
     finally:
         stop_watching.set()
+        watch.following.set()
