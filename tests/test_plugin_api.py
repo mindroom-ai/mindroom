@@ -81,6 +81,7 @@ _EXPORTS = [
     "HookContext",
     "HookMatrixAdmin",
     "HookMessageSender",
+    "ManagedEntity",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -134,6 +135,7 @@ _EXPORTS = [
     "current_execution_identity",
     "current_plugin_context",
     "emit_custom_event",
+    "entity_directory",
     "fetch_public_url",
     "fetch_public_url_sync",
     "get_logger",
@@ -142,6 +144,8 @@ _EXPORTS = [
     "google_cloud_oauth_provider",
     "google_workspace_oauth_providers",
     "hook",
+    "is_human_user",
+    "is_platform_administrator",
     "oauth_connect_url",
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
@@ -212,6 +216,7 @@ _SIGNATURES = {
         "agent_message_snapshot_reader, runtime_started_at)"
     ),
     "HookContext": f"({_HOOK}, *, {_HOOK_HELPERS})",
+    "ManagedEntity": "(name, kind, display_name, tool_names)",
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
         "(source_event_id, target, body, attachment_ids, mentioned_agents, agent_name, hook_source, "
@@ -297,6 +302,7 @@ _SIGNATURES = {
     "current_execution_identity": "()",
     "current_plugin_context": "(plugin_name)",
     "emit_custom_event": "(plugin_name, event_name, payload)",
+    "entity_directory": "(config, runtime_paths)",
     "fetch_public_url": "(url, *, max_bytes, use_env_proxy, user_agent)",
     "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy, user_agent)",
     "get_logger": "(name)",
@@ -310,6 +316,8 @@ _SIGNATURES = {
     "google_cloud_oauth_provider": "()",
     "google_workspace_oauth_providers": "(workspace)",
     "hook": "(event, *, name, priority, timeout_ms, agents, rooms, required)",
+    "is_human_user": "(user_id, config, runtime_paths)",
+    "is_platform_administrator": "(user_id, config, runtime_paths)",
     "oauth_connect_url": "(provider, runtime_paths, *, worker_target)",
     "oauth_runtime_bootstrapper": "(config)",
     "open_directory_within_root": "(root, relative_path, *, create, mode)",
@@ -512,7 +520,13 @@ _MANIFEST = {
 
 # What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
-_HTTP_EXPORTS = ["ClientUser", "plugin_context", "require_client_user", "require_room_member"]
+_HTTP_EXPORTS = [
+    "ClientUser",
+    "plugin_context",
+    "require_client_user",
+    "require_platform_administrator",
+    "require_room_member",
+]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
         "(*, name, tools, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs)"
@@ -522,11 +536,12 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.ClientUser": "(user_id)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
+    "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 5), "324cb2afcae544b30109d0cd10c9d4412f6024833dbfe69406bd2a181649dace")
+_PINNED_VERSION = ((1, 6), "b3d1d6c5bd13e39f21d187a0df9e3244f8d79ced4459f88c2373b18270a7eea2")
 
 
 def _is_enum(obj: object) -> bool:

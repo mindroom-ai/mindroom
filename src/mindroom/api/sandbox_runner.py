@@ -734,7 +734,8 @@ async def validate_runner_token(
     # An empty token would match a missing header, so treat it as unconfigured.
     if not proxy_token:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
-    if not secrets.compare_digest(x_mindroom_sandbox_token or "", proxy_token):
+    # Compare bytes: comparing text raises on a header that is not ASCII.
+    if not secrets.compare_digest((x_mindroom_sandbox_token or "").encode(), proxy_token.encode()):
         raise HTTPException(status_code=401, detail="Unauthorized sandbox runner request")
 
 

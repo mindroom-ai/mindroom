@@ -140,6 +140,11 @@ def resolve_human_requester_alias(
     return canonical_user_id
 
 
+def is_platform_administrator(user_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a requester has platform-wide administrative authority."""
+    return resolve_human_requester_alias(user_id, config, runtime_paths) in config.administrators
+
+
 def equivalent_requester_ids(
     user_id: str,
     config: Config,
