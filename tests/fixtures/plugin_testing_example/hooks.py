@@ -1,11 +1,14 @@
 """The example plugin's hooks, one for each kind of event the plugin testing kit fires."""
 
 from mindroom.plugin_api import (
+    AfterResponseContext,
     BeforeResponseContext,
+    CancelledResponseContext,
     CustomEventContext,
     FinalResponseTransformContext,
     MessageEnrichContext,
     MessageReceivedContext,
+    SystemEnrichContext,
     ToolBeforeCallContext,
     hook,
 )
@@ -32,6 +35,12 @@ async def add_greeting(ctx: MessageEnrichContext) -> None:
     ctx.add_metadata("greeting", f"Greet {ctx.envelope.requester_id} with {ctx.settings['greeting']}.")
 
 
+@hook("system:enrich")
+async def add_tone(ctx: SystemEnrichContext) -> None:
+    """Ask the model for a friendly tone."""
+    ctx.add_instruction("tone", "Be friendly.")
+
+
 @hook("message:before_response")
 async def sign_reply(ctx: BeforeResponseContext) -> None:
     """Sign every reply."""
@@ -42,6 +51,18 @@ async def sign_reply(ctx: BeforeResponseContext) -> None:
 async def sign_streamed_reply(ctx: FinalResponseTransformContext) -> None:
     """Sign every streamed reply."""
     ctx.draft.response_text += " -- the greeter"
+
+
+@hook("message:after_response")
+async def note_reply(ctx: AfterResponseContext) -> None:
+    """Note each reply sent."""
+    await ctx.send_message(ctx.result.envelope.room_id, f"Replied: {ctx.result.response_text}")
+
+
+@hook("message:cancelled")
+async def note_cancelled(ctx: CancelledResponseContext) -> None:
+    """Note each reply that was cancelled."""
+    await ctx.send_message(ctx.info.envelope.room_id, f"Cancelled: {ctx.info.failure_reason}")
 
 
 @hook("greeter:waved")

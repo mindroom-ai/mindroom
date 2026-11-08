@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
 
 import nio
+from anyio.from_thread import start_blocking_portal
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
@@ -28,11 +29,11 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
 from mindroom.api.connection_agents import AgentToolContext
 from mindroom.api.plugin_routes import mount_plugin_routes
 from mindroom.api.validation_errors import validation_error_response
-from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.entity_resolution import current_entity_id
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -69,6 +70,7 @@ from mindroom.matrix.rooms import is_dm_room
 from mindroom.matrix.state import MatrixState, update_matrix_state
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.mcp_gateway.toolkits import run_toolkit_operation
+from mindroom.mcp_gateway.tools import may_need_approval
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
@@ -77,13 +79,13 @@ from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.plugins import config_plugins, dispose_plugins, prepare_plugins, publish_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.turn_origin import classify_turn_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
+    from anyio.abc import BlockingPortal
     from starlette.testclient import WebSocketTestSession
 
     from mindroom.api.app_state import EmbeddedRuntime
@@ -145,14 +147,14 @@ class Room:
     sent: list[SentMessage] = field(default_factory=list)
 
 
-def _state_events(room: Room) -> list[dict[str, Any]]:
-    """Return the room's state as a homeserver lists it, each member joined since the epoch."""
+def _state_events(room: Room, joined: Mapping[str, str | None]) -> list[dict[str, Any]]:
+    """Return the room's state as a homeserver lists it, each of the ``joined`` joined since the epoch."""
     events = [
         ("m.room.history_visibility", "", {"history_visibility": room.history_visibility}),
         *((("m.room.power_levels", "", room.power_levels),) if room.power_levels is not None else ()),
         *(
             ("m.room.member", user, {"membership": "join", "displayname": name, "is_direct": room.direct})
-            for user, name in room.members.items()
+            for user, name in joined.items()
         ),
     ]
     return [
@@ -174,8 +176,10 @@ class _StandIn:
 class _PluginClient(TestClient):
     """A test client that, given a session token, presents it, and whose websockets connect from an allowed origin."""
 
-    def __init__(self, app: FastAPI, token: str | None) -> None:
+    def __init__(self, app: FastAPI, token: str | None, portal: BlockingPortal) -> None:
         super().__init__(app, headers={"Authorization": f"Bearer {token}"} if token is not None else None)
+        # One event loop serves every client of a load, as one server does, so sessions and streams can share it.
+        self.portal = portal
         self._offers = [SESSION_PROTOCOL, f"{SESSION_PROTOCOL}.{token}"] if token is not None else []
 
     def websocket_connect(
@@ -192,9 +196,13 @@ class _PluginClient(TestClient):
 class LoadedPlugin:
     """The plugin `load_plugin` loaded: its config, its rooms, and the routes, tools and hooks it serves there."""
 
-    def __init__(self, config: Config, runtime_paths: RuntimePaths) -> None:
+    def __init__(self, config: Config, runtime_paths: RuntimePaths, portal: BlockingPortal) -> None:
         self.config = config
         self.runtime_paths = runtime_paths
+        self._portal = portal
+        # The router is joined to every room, as the bot whose client reads it live is.
+        router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id
+        self._router_member = {router_id: config.entity_display_name(ROUTER_AGENT_NAME)}
         self._rooms: dict[str, Room] = {}
         self._event_ids = count(1)
         self._tokens: dict[str, list[str]] = {}
@@ -260,16 +268,16 @@ class LoadedPlugin:
         """Return a test client of the plugin's routes, signed in as ``user_id`` with a client session when given."""
         token = None
         if user_id is not None:
-            token = client_session_store(self._app).create(user_id).token
+            token = self._portal.call(client_session_store(self._app).create, user_id).token
             self._tokens.setdefault(user_id, []).append(token)
-        return _PluginClient(self._app, token)
+        return _PluginClient(self._app, token, self._portal)
 
     def sign_out(self, user_id: str) -> None:
         """End every client session of ``user_id``, as signing out does."""
         store = client_session_store(self._app)
         for token in self._tokens.pop(user_id, []):
             if store.lookup(token) is not None:
-                store.revoke(token)
+                self._portal.call(store.revoke, token)
 
     async def call_tool(
         self,
@@ -293,14 +301,21 @@ class LoadedPlugin:
         if entry is None:
             msg = f"Agent {agent!r} has no tool {tool!r}"
             raise LookupError(msg)
+        gateway = AgentToolContext(
+            agent,
+            sender,
+            self.config,
+            self.runtime_paths,
+            context.execution_identity,
+            context.resolve_worker_target(),
+        )
 
         async def call(toolkit: AnyToolkit) -> CallResult:
             target = toolkit_function(toolkit, function)
             if target is None:
                 msg = f"Tool {tool!r} has no function {function!r}"
                 raise LookupError(msg)
-            alias = toolkit_approval_alias(self.config, context.plugins.tools, tool, target.name)
-            if target.gate is ToolGate.CONFIRM or tool_may_require_approval(self.config, target.name, alias):
+            if may_need_approval(gateway, tool, target):
                 msg = f"{tool}.{function} may need approval, which a call outside a conversation cannot get"
                 raise PermissionError(msg)
             policy = build_tool_hook_middleware(context.hooks, self.config, self.runtime_paths)
@@ -316,14 +331,6 @@ class LoadedPlugin:
                 middleware=(policy,),
             )
 
-        gateway = AgentToolContext(
-            agent,
-            sender,
-            self.config,
-            self.runtime_paths,
-            context.execution_identity,
-            context.resolve_worker_target(),
-        )
         with tool_runtime_context(context):
             return await run_toolkit_operation(gateway, entry, None, call)
 
@@ -335,7 +342,7 @@ class LoadedPlugin:
         ``TurnRefused`` when the agent would not answer the sender there, and returns what the event's hooks returned
         to MindRoom: the enrichment items, the transformed draft, or the context the hooks changed.
         """
-        validate_event_name(event)
+        event = validate_event_name(event)
         context = await self._turn_context(agent, sender, room)
         base = context.hooks.context_kwargs(
             event,
@@ -400,7 +407,6 @@ class LoadedPlugin:
                 room_id,
                 self.runtime_paths,
                 self._memberships,
-                require_resolved_membership=True,
             )
         ):
             msg = f"{agent} does not answer {sender} in {room_id}"
@@ -444,6 +450,9 @@ class LoadedPlugin:
         room.sent.append(SentMessage(body, thread_id, source_hook, dict(extra_content or {}), mentions))
         return f"$sent{next(self._event_ids)}"
 
+    def _joined(self, room: Room) -> dict[str, str | None]:
+        return {**self._router_member, **room.members}
+
     async def _joined_rooms(self) -> nio.JoinedRoomsResponse:
         return nio.JoinedRoomsResponse(list(self._rooms))
 
@@ -452,7 +461,7 @@ class LoadedPlugin:
         if room is None:
             return nio.JoinedMembersError("Not in this room", "M_FORBIDDEN")
         return nio.JoinedMembersResponse(
-            [nio.RoomMember(user, name or "", "") for user, name in room.members.items()],
+            [nio.RoomMember(user, name or "", "") for user, name in self._joined(room).items()],
             room_id,
         )
 
@@ -460,7 +469,7 @@ class LoadedPlugin:
         room = self._rooms.get(room_id)
         if room is None:
             return nio.RoomGetStateError("Not in this room", "M_FORBIDDEN")
-        return nio.RoomGetStateResponse(_state_events(room), room_id)
+        return nio.RoomGetStateResponse(_state_events(room, self._joined(room)), room_id)
 
     async def _room_get_state_event(
         self,
@@ -469,7 +478,7 @@ class LoadedPlugin:
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
         room = self._rooms.get(room_id)
-        for event in _state_events(room) if room is not None else []:
+        for event in _state_events(room, self._joined(room)) if room is not None else []:
             if (event["type"], event["state_key"]) == (event_type, state_key):
                 return nio.RoomGetStateEventResponse(event["content"], event_type, state_key, room_id)
         return nio.RoomGetStateEventError("Not found", "M_NOT_FOUND")
@@ -477,7 +486,7 @@ class LoadedPlugin:
     async def _room_direct(self, room_id: str) -> bool:
         """Answer as running agents do, through a client of this load's own, whose answers no other load shares."""
         room = nio.MatrixRoom(room_id, self._direct_user)
-        for user, name in self._rooms[room_id].members.items():
+        for user, name in self._joined(self._rooms[room_id]).items():
             room.add_member(user, name, None)
         client = _StandIn(
             "Matrix client",
@@ -534,6 +543,7 @@ def load_plugin(
         raise errors[0]
     publish_plugins(generation)
     try:
-        yield LoadedPlugin(validated, runtime_paths)
+        with start_blocking_portal() as portal:
+            yield LoadedPlugin(validated, runtime_paths, portal)
     finally:
         publish_plugins(published)

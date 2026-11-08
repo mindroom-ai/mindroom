@@ -50,6 +50,8 @@ async def relay(mention: str, messenger: Annotated[RoomMessenger, Depends(requir
 
 @router.websocket("/rooms/{room_id}/stream")
 async def stream(websocket: WebSocket, room_id: str) -> None:
-    """Greet the signed-in member over a websocket."""
+    """Greet the signed-in member over a websocket, then echo what they send while they stay signed in."""
     async with client_stream(websocket, room_id) as user:
         await websocket.send_text(f"hello {user.user_id}")
+        async for text in websocket.iter_text():
+            await websocket.send_text(text)

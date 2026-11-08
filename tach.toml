@@ -1524,7 +1524,6 @@ visibility = [
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.tool_jobs.approvals",
     "mindroom.turns.ingress",
-    "mindroom.plugin_testing",
 ]
 
 [[modules]]
@@ -5483,21 +5482,21 @@ depends_on = [
     "mindroom.api.connection_agents",
     "mindroom.api.plugin_routes",
     "mindroom.api.validation_errors",
-    "mindroom.approval.tool_approval",
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
     "mindroom.mcp_gateway.toolkits",
+    "mindroom.mcp_gateway.tools",
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
 ]
 # Plugins' own test suites import it; MindRoom never does.
