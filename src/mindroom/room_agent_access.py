@@ -106,8 +106,8 @@ def _may_converse(
 
 
 @contextmanager
-def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[None]:
-    """With ``leave_out``, leave an agent out of a listing, logging why, when resolving it fails; else raise.
+def _leaving_out(agent_name: str, room_id: str, *, listing: bool) -> Iterator[None]:
+    """In a ``listing``, leave an agent out, logging why, when resolving it fails; otherwise raise.
 
     These failures belong to one agent: its account is not prepared, its grant rooms are unresolved, or its contacts
     or stored tool settings are corrupt.
@@ -115,7 +115,7 @@ def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[
     try:
         yield
     except (HTTPException, MissingManagedEntityAccountError, ValueError, TypeError) as error:
-        if not leave_out:
+        if not listing:
             raise
         logger.warning(
             "room_agent_left_out",
@@ -123,6 +123,24 @@ def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[
             room_id=room_id,
             reason=f"{type(error).__name__}: {error}",
         )
+
+
+async def _refresh_memberships(
+    requester_id: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    refresh_memberships: Callable[[bool], Awaitable[None]],
+) -> None:
+    """Refresh ``memberships`` when they need it or lack ``requester_id``, whom the room's live roster showed joined.
+
+    A refresh already in flight may have read the room before the requester joined, so grants that still lack them
+    after it get one more.
+    """
+    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
+    if memberships.misses_member(requester_id, room_id, config, runtime_paths):
+        await refresh_memberships(True)
 
 
 async def admit_room_agent(
@@ -148,7 +166,7 @@ async def admit_room_agent(
     joined = await joined_members()
     if requester_id not in joined or agent_user_id not in joined:
         raise HTTPException(403, "Requester and agent must both be joined to this room.")
-    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
+    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
     if not _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
         raise HTTPException(403, "Requester cannot use this agent.")
     return name
@@ -171,18 +189,18 @@ async def _admitted_agents(
     """
     joined_agents: list[tuple[str, str]] = []
     for name in config.agents:
-        with _leaving_out(name, room_id, leave_out=True):
+        with _leaving_out(name, room_id, listing=True):
             user_id = current_entity_id(name, runtime_paths).full_id
             if user_id in joined:
                 joined_agents.append((name, user_id))
     if not joined_agents:
         return []
-    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
+    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
     # Without the router's rooms every room grant is unresolved, and an empty answer would read as no agents.
-    leave_out = memberships.knows_joined_rooms()
+    rooms_known = memberships.knows_joined_rooms()
     admitted: list[tuple[str, str]] = []
     for name, user_id in joined_agents:
-        with _leaving_out(name, room_id, leave_out=leave_out):
+        with _leaving_out(name, room_id, listing=rooms_known):
             if _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
                 admitted.append((name, user_id))
     return admitted
@@ -339,7 +357,7 @@ async def room_agent_workspaces(
     ):
         raise HTTPException(503, _ACCESS_UNAVAILABLE)
     runtime_paths = snapshot.runtime_paths
-    leave_out = agent_user_id is None
+    listing = agent_user_id is None
     try:
         async with asyncio.timeout(_ACCESS_TIMEOUT_SECONDS):
             if agent_user_id is None:
@@ -372,18 +390,18 @@ async def room_agent_workspaces(
         raise HTTPException(503, _ACCESS_UNAVAILABLE) from None
     opened: list[tuple[str, str]] = []
     for name, agent_id in admitted:
-        with _leaving_out(name, room_id, leave_out=leave_out):
+        with _leaving_out(name, room_id, listing=listing):
             # Every turn in a contact room runs as its agent's owner, whom the other side must never reach through it.
             if room_id not in contact_room_ids(config, runtime_paths, name, any_status=True):
                 opened.append((name, agent_id))
     if not opened:
-        if not leave_out:
+        if not listing:
             raise HTTPException(403, "No workspace opens through a contact room.")
         return []
     may_send = (await power()).may_send(user_id, "m.room.message")
     workspaces: list[AgentWorkspace] = []
     for name, agent_id in opened:
-        with _leaving_out(name, room_id, leave_out=leave_out):
+        with _leaving_out(name, room_id, listing=listing):
             workspaces.append(
                 _workspace(
                     name,

@@ -129,12 +129,17 @@ class AgentReplyMembershipSync:
             with suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(task), 10)
 
-    async def refresh_when_needed(self, config: Config, refresh: Callable[[], Awaitable[None]], stale: bool) -> None:
-        """Refresh at once when grants need it or the caller saw them trail Matrix, even during backoff, and wait.
+    async def refresh_for_access_check(
+        self,
+        config: Config,
+        refresh: Callable[[], Awaitable[None]],
+        stale: bool,
+    ) -> None:
+        """Refresh at once when grants need it or are ``stale``, even during backoff, and wait until the refresh ends.
 
-        A refresh in flight serves instead of another, and one started here is the router's own, with its backoff, so
-        an access check outside the router's sync reads current grants without refreshing them on every call. Waiting
-        never cancels the refresh, and a refresh that fails or is cancelled leaves the grants as they were.
+        Access checks outside the router's sync call this, so they refresh only then, share a refresh in flight with
+        the router's sync, and update its backoff. Waiting never cancels the refresh, and one that raises or is
+        cancelled leaves the grants as they were.
         """
         task = self._refresh_task_when_needed(config, refresh, owner=None, stale=stale, after_backoff=False)
         if task is not None:

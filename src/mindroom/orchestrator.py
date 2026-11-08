@@ -1077,7 +1077,7 @@ class _MultiAgentOrchestrator:
         A refresh in flight serves instead of another, so every refresh runs once and with the runtime's follow-up.
         """
         membership_sync = self.agent_reply_membership_sync
-        await membership_sync.refresh_when_needed(self.config, self.refresh_agent_reply_memberships, stale)
+        await membership_sync.refresh_for_access_check(self.config, self.refresh_agent_reply_memberships, stale)
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""

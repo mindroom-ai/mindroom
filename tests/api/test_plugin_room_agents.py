@@ -598,6 +598,51 @@ async def test_requests_refresh_grants_only_when_they_need_it_and_share_one_refr
 
 
 @pytest.mark.asyncio
+async def test_a_member_who_joined_while_a_refresh_read_the_room_is_admitted(tmp_path: Path) -> None:
+    """A refresh already reading the room may predate a join, so grants that still lack the joined caller refresh again."""
+    dave = "@dave:localhost"
+    room = _room(
+        tmp_path,
+        {"helper": AgentConfig(display_name="Helper", tools=["file"], access={"current_room_members": True})},
+    )
+    assert [workspace.name for workspace in await room.agents(ALICE)] == ["helper"]
+    before = room.client.joined_members.return_value
+    after = joined_members_response(ROOM, ALICE, BOB, CAROL, dave, *room.ids.values())
+    reading = asyncio.Event()
+    looked_up = asyncio.Event()
+    release = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        if not reading.is_set():
+            # The router's refresh reads the room before Dave joins, and answers once he has.
+            reading.set()
+            await release.wait()
+            return before
+        looked_up.set()
+        return after
+
+    room.runtime.agent_reply_membership_sync.invalidate(room.runtime.config, reason="test")
+    room.client.joined_members.side_effect = joined_members
+    frame = asyncio.create_task(
+        room.runtime.agent_reply_membership_sync.refresh_if_needed(
+            room.runtime.config,
+            room.runtime.refresh_agent_reply_memberships,
+        ),
+    )
+    await reading.wait()
+    listing = asyncio.create_task(room.agents(dave))
+    await looked_up.wait()
+    # Dave's check, which reads the room's roster itself, then waits on the refresh in flight.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    release.set()
+
+    assert [workspace.name for workspace in await listing] == ["helper"]
+    await frame
+    assert room.refreshes() == 3
+
+
+@pytest.mark.asyncio
 async def test_a_room_the_grants_do_not_track_never_refreshes_them(tmp_path: Path) -> None:
     """Grants hold no view of a room outside the router's rooms, so its callers refresh only when grants need it."""
     room = _room(tmp_path, _agents())
