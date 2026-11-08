@@ -17,6 +17,7 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import _client_session_store
 from mindroom.matrix import rooms
 from mindroom.matrix.rooms import is_dm_room
@@ -181,10 +182,29 @@ async def test_no_session_401_before_any_read() -> None:
 @pytest.mark.asyncio
 async def test_unbound_503() -> None:
     """Served without MindRoom's bots, a reader answers 503 like the membership check, and so does `client_rooms`."""
-    for read in (require_room_reader(_request(FastAPI()), ROOM), client_rooms(_request(FastAPI()), [ROOM])):
+    only_membership = FastAPI()
+
+    async def room_members(_room_id: str) -> dict[str, str | None]:
+        return {ALICE: None}
+
+    ensure_app_state(only_membership).room_members = room_members
+    unbound = (
+        require_room_reader(_request(FastAPI()), ROOM),
+        client_rooms(_request(FastAPI()), [ROOM]),
+        require_room_reader(_request(only_membership), ROOM),
+    )
+    for read in unbound:
         with pytest.raises(HTTPException) as caught:
             await read
         assert (caught.value.status_code, caught.value.detail) == (503, "Room membership is unavailable.")
+
+
+def test_unbinding_withdraws_every_reader() -> None:
+    """Once the API stops serving, none of the room readers stays bound."""
+    app = _bound(_client())
+    unbind_room_members(app)
+    state = ensure_app_state(app)
+    assert (state.room_members, state.room_state, state.room_direct) == (None, None, None)
 
 
 @pytest.mark.asyncio
@@ -251,6 +271,10 @@ async def test_may_send_in_an_encrypted_room_needs_the_encrypted_level_too() -> 
     assert (power.may_send(BOB, "m.room.message"), power.may_send(CAROL, "m.room.message")) == (True, False)
     plain = await (await _reader(_client(state=_state(power_levels=levels)))).power()
     assert (plain.encrypted, plain.may_send(CAROL, "m.room.message")) == (False, True)
+    # The message type's own level still counts in an encrypted room.
+    strict = {"users": {BOB: 50}, "events": {"m.room.message": 75, "m.room.encrypted": 0}}
+    power = await (await _reader(_client(state=_state(power_levels=strict, encrypted=True)))).power()
+    assert (power.may_send(BOB, "m.room.message"), power.may_send(BOB, "m.reaction")) == (False, True)
 
 
 @pytest.mark.asyncio
