@@ -462,6 +462,10 @@ _MEMBERS = {
         "history": "(self)",
     },
     "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
+    "mindroom.plugin_http.RoomMessenger": {
+        "notice": "(self, text, *, thread_id, content)",
+        "relay": "(self, text, *, mentions, thread_id, content)",
+    },
     "mindroom.plugin_http.RoomPower": {
         "level": "(self, user_id)",
         "is_admin": "(self, user_id)",
@@ -543,6 +547,7 @@ _HTTP_EXPORTS = [
     "AgentWorkspace",
     "ClientUser",
     "RoomHistory",
+    "RoomMessenger",
     "RoomModes",
     "RoomPower",
     "RoomReader",
@@ -552,6 +557,7 @@ _HTTP_EXPORTS = [
     "require_client_user",
     "require_platform_administrator",
     "require_room_member",
+    "require_room_messenger",
     "require_room_reader",
 ]
 _ELSEWHERE_SIGNATURES = {
@@ -563,6 +569,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.AgentWorkspace": "(name, user_id, display_name, private, root, files, terminal, config)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
     "mindroom.plugin_http.RoomHistory": "(visibility)",
+    "mindroom.plugin_http.RoomMessenger": "(user)",
     "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
@@ -572,11 +579,12 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_platform_administrator": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
+    "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 12), "b74660524dcf127486ba2e1628a5a4f31dbfb5c485d03bc609420a67e7e8779d")
+_PINNED_VERSION = ((1, 13), "357445143dec1abd53318c8633c0fde55cace7b508387fc61c37c17660e08334")
 
 
 def _is_enum(obj: object) -> bool:

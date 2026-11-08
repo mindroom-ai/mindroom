@@ -3953,6 +3953,7 @@ depends_on = [
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.reserved_content",
     "mindroom.matrix.thread_mutation_impact",
     "mindroom.tool_system.authoring",
 ]
@@ -8286,7 +8287,7 @@ visibility = ["mindroom.api.main"]
 
 # Public: plugin routes import it to require a signed-in Matrix client, live room membership, or a platform
 # administrator, to read and change a room's modes, to learn the agents a caller may use in a room with their workspaces,
-# and for their plugin context.
+# for their plugin context, and to post to a room as the router.
 [[modules]]
 path = "mindroom.plugin_http"
 depends_on = [
@@ -8295,7 +8296,10 @@ depends_on = [
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
+    "mindroom.entity_directory",
+    "mindroom.hooks.types",
     "mindroom.matrix.history_visibility",
+    "mindroom.matrix.reserved_content",
     "mindroom.matrix.room_power",
     "mindroom.plugin_context",
     "mindroom.room_agent_access",
@@ -8323,6 +8327,14 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 
+[[modules]]
+path = "mindroom.matrix.reserved_content"
+depends_on = []
+visibility = [
+    "mindroom.custom_tools.matrix_api",
+    "mindroom.plugin_http",
+]
+
 # Plugins read it through mindroom.plugin_api.
 [[modules]]
 path = "mindroom.entity_directory"
@@ -8331,7 +8343,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
 ]
-visibility = ["mindroom.plugin_api"]
+visibility = [
+    "mindroom.plugin_api",
+    "mindroom.plugin_http",
+]
 
 [[modules]]
 path = "mindroom.plugin_context"
