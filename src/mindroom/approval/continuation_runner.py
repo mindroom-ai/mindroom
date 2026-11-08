@@ -110,6 +110,7 @@ from mindroom.reply_scope import (
     pause_decision,
     pause_write,
 )
+from mindroom.reply_turn.enrichment import with_silent_schedule_delivery
 from mindroom.reply_turn.request import (
     ResponseRequest,
     correlation_id_for_request,
@@ -831,7 +832,7 @@ class ApprovalContinuationRunner:
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Deliver execution output against the latest native continuation generation."""
         tool_trace: list[ToolTraceEntry] = []
-        # Streaming requesters watch the resumed work in the reply it continues.
+        # Streaming requesters watch the resumed work in the reply it continues, unless the turn is quiet.
         # Progress closes before any terminal edit, which stays owned below.
         progress_scope: AbstractAsyncContextManager[ProgressPublisher | None] = (
             self.deps.delivery_gateway.stream_progress(
@@ -842,7 +843,8 @@ class ApprovalContinuationRunner:
                 extra_content=merge_response_extra_content(None, claimed.attachment_ids),
                 visible_progress_callback=self.lifecycle_coordinator.visible_progress_callback(target),
             )
-            if await should_use_streaming(
+            if not request.quiet
+            and await should_use_streaming(
                 self.locked.client(),
                 claimed.room_id,
                 requester_user_id=claimed.requester_id,
@@ -1195,10 +1197,15 @@ class ApprovalContinuationRunner:
         tool_context = replace(tool_context, tool_calls_shown=continuation.show_tool_calls and not request.quiet)
         if cli_approval_handler is not None:
             tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
-        # The agent's or team's new runs get the hook's instructions; a run that paused keeps the system prompt it stored.
+        # The agent's or team's new runs get the hook's instructions and, after them, a silent schedule's quiet-delivery
+        # guidance, as its turn did; a run that paused keeps the system prompt it stored.
         request = await self.deps.request_preparer.with_system_enrichment(
             request,
             target_member_names=continuation.team_member_names or None,
+        )
+        system_enrichment_items = with_silent_schedule_delivery(
+            request.system_enrichment_items,
+            request.response_envelope,
         )
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
@@ -1239,7 +1246,7 @@ class ApprovalContinuationRunner:
                             show_tool_calls=continuation.show_tool_calls,
                             tool_trace_collector=tool_trace_collector,
                             progress=progress,
-                            system_enrichment_items=request.system_enrichment_items,
+                            system_enrichment_items=system_enrichment_items,
                         )
             else:
                 result = await self._approval_execution.continue_run(
@@ -1252,7 +1259,7 @@ class ApprovalContinuationRunner:
                         response_run_id=continuation.run_id,
                     ),
                     progress=progress,
-                    system_enrichment_items=request.system_enrichment_items,
+                    system_enrichment_items=system_enrichment_items,
                 )
         return result
 

@@ -58,6 +58,7 @@ from tests.test_reply_endings_characterization import (  # noqa: F401 - echo_too
     _ECHO_TOOL,
     _explode,
     _require_echo_approval,
+    _silent_schedule,
     _streams_then_blocks,
     _team_reply,
     _team_scripts,
@@ -345,6 +346,21 @@ async def test_a_resume_that_fails_ends_the_turn_failed_once(tmp_path: Path) -> 
         (EVENT_TURN_PAUSED, None),
         (EVENT_TURN_RESUMED, None),
         (EVENT_TURN_ENDED, "failed"),
+    ]
+
+
+async def test_a_silent_schedule_s_resume_that_reports_nothing_ends_the_turn_completed(tmp_path: Path) -> None:
+    """A silent schedule's resumed answer that reports nothing ends its turn completed, as its turn's own answer would."""
+    seen: _Seen = []
+    async with _approval_turns(tmp_path, seen, requires_human=False) as bot:
+        silent = _silent_schedule(_plain_request(_target()))
+        await _respond(bot, request=silent, resume=AsyncMock(return_value=CompletedApprovalRun("NO_REPLY", {})))
+
+    assert _events(seen) == [
+        (EVENT_TURN_STARTED, None),
+        (EVENT_TURN_PAUSED, None),
+        (EVENT_TURN_RESUMED, None),
+        (EVENT_TURN_ENDED, "completed"),
     ]
 
 

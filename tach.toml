@@ -1472,6 +1472,7 @@ depends_on = [
     "mindroom.turn_model",
     "mindroom.interactive",
     "mindroom.reply_turn.request",
+    "mindroom.reply_turn.enrichment",
 ]
 visibility = ["mindroom.bot"]
 
@@ -3265,7 +3266,7 @@ depends_on = [
     "mindroom.teams",
     "mindroom.user_turn_time",
 ]
-visibility = ["mindroom.response_runner"]
+visibility = ["mindroom.response_runner", "mindroom.approval.continuation_runner"]
 
 [[interfaces]]
 from = ["mindroom.reply_turn.enrichment"]

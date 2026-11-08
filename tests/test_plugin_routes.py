@@ -429,7 +429,7 @@ def test_worker_refresh_reads_a_changed_plugin_api_need(tmp_path: Path) -> None:
     """A worker's refresh keeps a plugin's unchanged modules but takes the plugin API its manifest needs now."""
     root = _write_plugin(tmp_path, None, tools_source=TOOLS)
     config, runtime_paths = _config(tmp_path)
-    [before] = refresh_plugins(config, runtime_paths).loaded_plugins
+    before = dict(refresh_plugins(config, runtime_paths).generation.modules)
 
     manifest_path = root / "mindroom.plugin.json"
     manifest = {"name": "demo", "tools_module": "tools.py", "mindroom_plugin_api": "1.0"}
@@ -437,10 +437,10 @@ def test_worker_refresh_reads_a_changed_plugin_api_need(tmp_path: Path) -> None:
     # A refresh rereads a manifest only when its mtime moved, which two quick writes may not do.
     mtime = manifest_path.stat().st_mtime + 5
     os.utime(manifest_path, (mtime, mtime))
-    [after] = refresh_plugins(config, runtime_paths).loaded_plugins
+    refreshed = refresh_plugins(config, runtime_paths)
 
-    assert after.modules == before.modules
-    assert after.mindroom_plugin_api == "1.0"
+    assert refreshed.generation.modules == before
+    assert refreshed.loaded_plugins[0].mindroom_plugin_api == "1.0"
 
 
 def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path) -> None:
