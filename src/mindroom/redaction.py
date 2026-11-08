@@ -76,13 +76,8 @@ _NEXT_ASSIGNMENT_PATTERN = re.compile(
     r"[\"']?[A-Za-z0-9_.-]++[\"']?[^\S\r\n]*+(?::|=(?!=))",
     re.IGNORECASE,
 )
-_VALUE_TERMINATORS = r"\r\n,&)\]}\"'"
-_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(rf"[{_VALUE_TERMINATORS}]")
-# A value assigned in a command's arguments, such as `export API_KEY=value && make` or `--token=value`, is one shell
-# word: it ends at whitespace, a shell operator, or where other values end, and a backslash escapes the next character,
-# a line break included.
-_ASSIGNING_COMMAND_PATTERN = re.compile(r"(?<![\w-])(?:export|env)\Z")
-_SHELL_WORD_PATTERN = re.compile(rf"(?:[^\s\\;|<>({_VALUE_TERMINATORS}]|\\(?:\r\n|[\s\S]))*+")
+# A line break after a backslash continues a value, as in a shell command.
+_ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"(?<!\\)[\r\n]|[,&)\]}\"']")
 # A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
 _QUOTED_VALUE_PATTERNS = {
     quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
@@ -100,8 +95,8 @@ _CURL_USER_OPTION_PATTERN = re.compile(
     r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:(?P<token>(?(quote)[^\"'\r\n]++|[^\s\"']++))",
 )
 _MYSQL_PASSWORD_OPTION_PATTERN = re.compile(r"(?<!\S)-p(?P<token>'[^']*+'?|\"[^\"]*+\"?|[^\s'\"]++)")
-# Words after which a later word can still be the program run, as in `sudo mysql` or `docker exec db mysql`.
-_COMMAND_PREFIX_PATTERN = re.compile(r"(?<!\S)(?:command|env|exec|nohup|sudo|time|xargs)(?!\S)")
+# Words that run the word after them as a program, as in `sudo mysql`.
+_COMMAND_PREFIX_WORDS = frozenset({"command", "env", "exec", "nohup", "sudo", "time", "xargs"})
 # A PEM private key from its BEGIN line through the matching END line, or to the end of the text without one, so a key
 # cut off by a length bound or a mismatched END line never leaves its body behind. Certificates are public and stay.
 _PRIVATE_KEY_PATTERN = re.compile(
@@ -452,7 +447,6 @@ def _assignment_value_span(
     value_start: int,
     *,
     key_quote: str,
-    shell_word: bool,
     unquoted_value_end: Callable[[int], int],
 ) -> tuple[int, int, int] | None:
     """Return the start and end of one assigned value and where the scan resumes, or None when nothing is assigned.
@@ -465,7 +459,6 @@ def _assignment_value_span(
         value_start += 1
         if value_start < len(value) and value[value_start].isspace():
             return None
-        shell_word = True
     if value_start >= len(value):
         return None
     # A key that ends its line can have its value on any later line, as in YAML or in a message that follows.
@@ -473,34 +466,11 @@ def _assignment_value_span(
         return _rest_of_text_span(value, value_start)
     if value[value_start] in {"'", '"'}:
         return _quoted_value_span(value, value_start)
-    if shell_word:
-        word = _SHELL_WORD_PATTERN.match(value, value_start)
-        assert word is not None
-        value_end = word.end()
-    else:
-        value_end = unquoted_value_end(value_start)
-        # Whitespace before where the value ends, as before `&& run`, is not part of it.
-        while value_end > value_start and value[value_end - 1] in " \t":
-            value_end -= 1
+    value_end = unquoted_value_end(value_start)
+    # Whitespace before where the value ends, as before `&& run`, is not part of it.
+    while value_end > value_start and value[value_end - 1] in " \t":
+        value_end -= 1
     return (value_start, value_end, value_end) if value_end > value_start else None
-
-
-def _is_shell_argument_assignment(value: str, prefix_match: re.Match[str]) -> bool:
-    """Return whether an unquoted ``=`` assignment is a command's argument: an option, or a variable after a command word.
-
-    An option such as ``--token=…`` follows another word on its line, and a variable follows ``export`` or ``env``.
-    Elsewhere, as in ``.env`` files, ``env`` output, and numbered listings such as ``grep -n``, a value can hold spaces.
-    """
-    if value[prefix_match.end() - 1] != "=" or prefix_match.group("open"):
-        return False
-    before = prefix_match.start()
-    while before > 0 and value[before - 1] in " \t":
-        before -= 1
-    if before == prefix_match.start() or before == 0 or value[before - 1] in "\r\n":
-        return False
-    if prefix_match.group("key").startswith("-"):
-        return True
-    return _ASSIGNING_COMMAND_PATTERN.search(value, max(before - len("export"), 0), before) is not None
 
 
 def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> str:
@@ -527,17 +497,14 @@ def _redact_secret_assignments(value: str) -> str:
     search_start = 0
     while prefix_match := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start):
         search_start = prefix_match.end()
-        key = prefix_match.group("key")
-        classification = _classify_key(key)
+        classification = _classify_key(prefix_match.group("key"))
         if not classification.is_secret:
             continue
 
-        shell_word = _is_shell_argument_assignment(value, prefix_match)
         value_span = _assignment_value_span(
             value,
             search_start,
             key_quote="" if prefix_match.group("close") else prefix_match.group("open"),
-            shell_word=shell_word,
             unquoted_value_end=unquoted_value_end,
         )
         if value_span is None:
@@ -737,12 +704,11 @@ def redact_private_keys(value: str) -> str:
 
 
 def _redact_password_options(command_match: re.Match[str]) -> str:
-    """Redact the password options of one command that runs curl or mysql, first or after a word such as ``sudo``."""
+    """Redact the password options of one command that runs curl or mysql, first or right after a word such as ``sudo``."""
     command = command_match.group(0)
     program = _PASSWORD_PROGRAM_PATTERN.search(command)
-    if program is None or (
-        command[: program.start()].strip() and not _COMMAND_PREFIX_PATTERN.search(command, 0, program.start())
-    ):
+    words_before = command[: program.start()].split() if program else []
+    if program is None or (words_before and words_before[-1] not in _COMMAND_PREFIX_WORDS):
         return command
     option = _CURL_USER_OPTION_PATTERN if program.group("curl") else _MYSQL_PASSWORD_OPTION_PATTERN
     return command[: program.end()] + option.sub(_redact_matched_token, command[program.end() :])
