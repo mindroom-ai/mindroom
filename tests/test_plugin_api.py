@@ -444,7 +444,13 @@ _MEMBERS = {
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
         ),
     },
-    "mindroom.plugin_http.RoomReader": {"power": "(self)", "is_direct": "(self)", "history": "(self)"},
+    "mindroom.plugin_http.RoomReader": {
+        "power": "(self)",
+        "is_direct": "(self)",
+        "modes": "(self)",
+        "set_modes": "(self, *, thread, reply)",
+        "history": "(self)",
+    },
     "mindroom.plugin_http.RoomHistory": {"since": "(self, recorded_under)"},
     "mindroom.plugin_http.RoomPower": {
         "level": "(self, user_id)",
@@ -522,6 +528,7 @@ _MANIFEST = {
 _HTTP_EXPORTS = [
     "ClientUser",
     "RoomHistory",
+    "RoomModes",
     "RoomPower",
     "RoomReader",
     "client_rooms",
@@ -540,6 +547,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
     "mindroom.plugin_http.RoomHistory": "(visibility)",
+    "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
@@ -552,7 +560,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 9), "34cea6d29248b133afd05aca6513a4f99cb1c06959f0a09ecde4c5fd1e8914d9")
+_PINNED_VERSION = ((1, 10), "c86f8393f573f9c723e0fbd1a41d8d7b3abf231fe1fb0c8804992bacd345bbd2")
 
 
 def _is_enum(obj: object) -> bool:
