@@ -85,6 +85,7 @@ from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
 from mindroom.plugin_context import PluginContext, current_plugin_context
+from mindroom.plugin_lifecycle import PluginLifecycle
 from mindroom.providers.registry import build_model_provider
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
 from mindroom.requester_identity import is_human_requester_id as is_human_user
@@ -189,6 +190,7 @@ __all__ = [
     "OAuthDiscoveryConfig",
     "OAuthProvider",
     "PluginContext",
+    "PluginLifecycle",
     "PublicFetchError",
     "PublicFetchResult",
     "ReactionReceivedContext",
