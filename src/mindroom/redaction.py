@@ -81,13 +81,11 @@ _ASSIGNMENT_VALUE_TERMINATOR_PATTERN = re.compile(r"[\r\n,&)\]}\"']")
 # whitespace, a shell operator, or where other values end, and a backslash escapes the next character, a line break
 # included.
 _SHELL_WORD_PATTERN = re.compile(r"(?:[^\s\\,&)\]}\"';|<>(]|\\(?:\r\n|[\s\S]))*+")
-# A quoted value runs to its closing quote; a backslash escapes the next character, a line break included.
+# A quoted value runs to its closing quote on its line; a backslash escapes the next character, a line break included.
 _QUOTED_VALUE_PATTERNS = {
     quote: re.compile(rf"{quote}(?P<body>(?:[^{quote}\\\r\n]|\\(?:\r\n|[\s\S]))*+)(?P<close>{quote})?")
     for quote in ("'", '"')
 }
-# A key that ends its line, as YAML allows, has its value on the next line.
-_NEXT_LINE_PATTERN = re.compile(r"(?:\r\n|\r|\n)[^\S\r\n]*+(?P<line>[^\r\n]*+)")
 # `curl -u user:password` and `--user user:password` give a password after the user name.
 _USER_OPTION_PATTERN = re.compile(
     r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:"
@@ -428,11 +426,11 @@ def _forward_match_start(pattern: re.Pattern[str], value: str) -> Callable[[int]
     return lookup
 
 
-def _next_line_span(value: str, line_break: int) -> tuple[int, int, int] | None:
-    line = _NEXT_LINE_PATTERN.match(value, line_break)
-    if line is None or not line.group("line"):
-        return None
-    return line.start("line"), line.end(), line.end()
+def _rest_of_text_span(value: str, start: int) -> tuple[int, int, int] | None:
+    """Return the text from ``start`` on, without its leading whitespace, as a value whose end cannot be known."""
+    rest = value[start:]
+    start += len(rest) - len(rest.lstrip())
+    return (start, len(value), len(value)) if start < len(value) else None
 
 
 def _quoted_value_span(value: str, quote_start: int, *, key_quote: str) -> tuple[int, int, int] | None:
@@ -444,10 +442,7 @@ def _quoted_value_span(value: str, quote_start: int, *, key_quote: str) -> tuple
         return body_start, body_end, body_end + 1
     if quote == key_quote:
         return None
-    # A quote left open hides the rest of its line, or the next line when nothing follows it.
-    if body_end == body_start:
-        return _next_line_span(value, body_end)
-    return body_start, body_end, body_end
+    return _rest_of_text_span(value, body_start)
 
 
 def _assignment_value_span(
@@ -465,8 +460,9 @@ def _assignment_value_span(
     """
     if value_start >= len(value):
         return None
+    # A key that ends its line can have its value on any later line, as in YAML or in a message that follows.
     if value[value_start] in "\r\n":
-        return _next_line_span(value, value_start)
+        return _rest_of_text_span(value, value_start)
     if value[value_start] in {"'", '"'}:
         return _quoted_value_span(value, value_start, key_quote=key_quote)
     if shell_word:

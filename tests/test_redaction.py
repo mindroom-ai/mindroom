@@ -688,18 +688,15 @@ def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> No
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("password=\n  hunter2\nmode=safe", f"password=\n  {REDACTED}\nmode=safe"),
-        (
-            "db:\n  password:\r\n    hunter2\n  host: db.example",
-            f"db:\n  password:\r\n    {REDACTED}\n  host: db.example",
-        ),
-        ('password: "\n  hunter2"\nmode=safe', f'password: "\n  {REDACTED}\nmode=safe'),
-        ("if not api_key:\n    raise SystemExit(1)\nrun()", f"if not api_key:\n    {REDACTED}\nrun()"),
+        ("password=\n  hunter2\nmode=safe", f"password=\n  {REDACTED}"),
+        ("db:\n  password:\r\n    hunter2\n  host: db.example", f"db:\n  password:\r\n    {REDACTED}"),
+        ("if not api_key:\n    raise SystemExit(1)\nrun()", f"if not api_key:\n    {REDACTED}"),
         ("token:", "token:"),
+        ("token:\n  \n", "token:\n  \n"),
     ],
 )
-def test_a_secret_name_that_ends_its_line_hides_the_next_line(text: str, expected: str) -> None:
-    """A value can sit on the line after its key, as in YAML, so that line is hidden and the rest stays readable."""
+def test_a_secret_name_that_ends_its_line_hides_the_rest_of_the_text(text: str, expected: str) -> None:
+    """A value can sit on any line after its key, as in YAML or a following message; the text before it stays readable."""
     assert redact_sensitive_text(text) == expected
 
 
@@ -874,11 +871,12 @@ def test_a_quote_closing_the_string_that_holds_a_secret_name_keeps_the_command_r
     [
         ('password="correct horse battery', f'password="{REDACTED}'),
         ('{"password": "hunter2', f'{{"password": "{REDACTED}'),
-        ('password="hunter2\nmode=safe', f'password="{REDACTED}\nmode=safe'),
+        ('password="hunter2\nmode=safe', f'password="{REDACTED}'),
+        ('password: "\n  hunter2"\nmode=safe', f'password: "\n  {REDACTED}'),
     ],
 )
-def test_an_unclosed_quoted_secret_is_hidden_to_the_end_of_its_line(text: str, expected: str) -> None:
-    """A quoted value that a length bound or a mistake left unclosed is hidden instead of failing the whole text."""
+def test_an_unclosed_quoted_secret_hides_the_rest_of_the_text(text: str, expected: str) -> None:
+    """A quoted value left unclosed can continue on later lines, so the rest is hidden instead of the whole text failing."""
     assert redact_sensitive_text(text) == expected
 
 

@@ -822,7 +822,7 @@ async def test_a_call_tells_its_hooks_whether_its_reply_shows_it(tmp_path: Path,
             "api_key=***redacted***, body=first line second " + "x" * 231 + "…",
         ),
         ({"sk-abcdefghijklmnopqrstuvwxyz0123": 1}, "***redacted***=1"),
-        ({"cmd": "export TOKEN=abc123\necho"}, "cmd=export TOKEN=***redacted***"),
+        ({"cmd": "export TOKEN=abc123\necho"}, "cmd=export TOKEN=***redacted*** echo"),
     ],
     ids=["secret-value-and-long-value", "secret-key", "secret-assignment"],
 )

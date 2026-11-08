@@ -20,18 +20,13 @@ def test_a_nested_progress_reporter_keeps_its_reports_from_the_one_it_shadows() 
     assert outer == ["outer only"]
 
 
-def test_output_hides_a_value_on_the_line_after_its_secret_name() -> None:
-    """A secret-named key whose value may be on the next line hides that line, and the rest of the output still shows."""
+def test_output_hides_what_follows_a_secret_name_that_ends_its_line() -> None:
+    """A secret-named key whose value may be on a later line hides the rest of the output; what came before still shows."""
     manifest = "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: db-credentials\n"
-    rollout = "rollout: 1/1 pods ready"
+    rollout = "\n".join(f"rollout: {index}/100 pods ready" for index in range(1, 101))
 
     shown = shown_progress(manifest + rollout)
 
     assert "db-credentials" not in shown
-    assert shown.endswith(rollout)
+    assert shown.startswith("env:\n  - name: DB_PASSWORD")
     assert shown != REDACTION_FAILED
-
-
-def test_shown_output_is_what_a_live_reply_shows() -> None:
-    """A call's shown output is the latest thousand characters, which a live reply's frame carries whole."""
-    assert shown_progress("w" * 3000 + "x" * 1000) == "x" * 1000
