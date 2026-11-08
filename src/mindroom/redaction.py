@@ -727,6 +727,7 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     has_token = any(marker in bounded_value for marker in _TOKEN_LIKE_MARKERS)
     has_private_key = "private key" in lowered_value
     has_mysql = "mysql" in bounded_value or "mariadb" in bounded_value
+    has_user_option = "-u" in bounded_value
     if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token, has_private_key, has_mysql)):
         return _truncate_text(bounded_value, max_length, cut=cut)
     # Keys go first, so the patterns below never see a key's body.
@@ -742,8 +743,9 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
         redacted = _TOKEN_LIKE_PATTERN.sub(redact_token, redacted)
     if has_mysql:
         redacted = _MYSQL_COMMAND_PATTERN.sub(_redact_mysql_passwords, redacted)
-    if has_assignment:
+    if has_user_option:
         redacted = _USER_OPTION_PATTERN.sub(_redact_matched_token, redacted)
+    if has_assignment:
         redacted = _redact_secret_assignments(redacted)
     return _truncate_text(redacted, max_length, cut=cut)
 
