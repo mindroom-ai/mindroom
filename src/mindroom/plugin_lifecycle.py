@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _StopReason = Literal["reload", "disabled", "shutdown"]
+# A lifecycle module's ``lifespan``.
+type PluginLifespan = Callable[[PluginLifecycle], AbstractAsyncContextManager[object]]
 
 # How long a lifespan's start or stop code, or closing a replaced plugin's websockets, may take before MindRoom moves on.
 _LIFESPAN_DEADLINE_SECONDS = 10.0
@@ -60,7 +62,7 @@ class _RunningLifespan:
 
 
 async def _run(
-    lifespan: Callable[[PluginLifecycle], AbstractAsyncContextManager[object]],
+    lifespan: PluginLifespan,
     lifecycle: PluginLifecycle,
     started: asyncio.Future[None],
     stopping: asyncio.Event,
@@ -70,10 +72,7 @@ async def _run(
         await stopping.wait()
 
 
-async def _start(
-    lifespan: Callable[[PluginLifecycle], AbstractAsyncContextManager[object]],
-    lifecycle: PluginLifecycle,
-) -> _RunningLifespan | None:
+async def _start(lifespan: PluginLifespan, lifecycle: PluginLifecycle) -> _RunningLifespan | None:
     """Run ``lifespan`` up to its ``yield``, or log why it did not get there and return None."""
     started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     stopping = asyncio.Event()
@@ -146,9 +145,8 @@ class PluginLifespans:
             if self._stopped or generation is self._published:
                 return
             previous, self._published = self._published, generation
-            plugins = tuple(generation.plugins.values())
             replaced, self._running = self._running, {}
-            for plugin in plugins:
+            for plugin in generation.plugins.values():
                 if plugin.lifespan is None:
                     continue
                 lifecycle = PluginLifecycle(

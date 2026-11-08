@@ -40,7 +40,6 @@ from mindroom.tool_system.registry import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
-    from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
     from starlette.requests import HTTPConnection
@@ -52,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookCallback
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.plugin_lifecycle import PluginLifecycle
+    from mindroom.plugin_lifecycle import PluginLifespan
     from mindroom.tool_system.declarations import ToolMetadata
 
 logger = get_logger(__name__)
@@ -97,7 +96,7 @@ class _LoadedPlugin:
     # Why a staged load serves no routes from the plugin's routes module, which leaves its tools and hooks loaded.
     routes_error: plugin_imports.PluginValidationError | None
     # The lifecycle module's ``lifespan``, imported by staged loads like the routes module; only the primary runs it.
-    lifespan: Callable[[PluginLifecycle], AbstractAsyncContextManager[object]] | None
+    lifespan: PluginLifespan | None
     # Why a staged load found no ``lifespan`` in the plugin's lifecycle module, which leaves the rest of it loaded.
     lifespan_error: plugin_imports.PluginValidationError | None
     modules: tuple[ModuleType, ...]
@@ -498,7 +497,7 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
     Unchanged modules stay as installed and edited ones execute again, on every worker request, ending the tasks of
     the modules they replace. The generation only grows or refreshes, so another request's config keeps the plugins
     it loaded; a plugin that fails to load leaves it until it loads again. Workers serve no HTTP routes and run no
-    lifespans, so routes and lifecycle modules are never imported.
+    lifespans, so they never load routes or lifecycle modules themselves.
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
@@ -745,7 +744,7 @@ def _materialize_plugin(
     primary_modules: bool,
 ) -> _LoadedPlugin:
     lifecycle_entry: plugin_imports._ModuleCacheEntry | None = None
-    lifespan: Callable[[PluginLifecycle], AbstractAsyncContextManager[object]] | None = None
+    lifespan: PluginLifespan | None = None
     lifespan_error: plugin_imports.PluginValidationError | None = None
     if primary_modules and plugin.lifecycle_module_path is not None:
         # First, so the plugin's other modules that import it share the instance whose lifespan runs. A broken
@@ -839,7 +838,7 @@ def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
     return callback
 
 
-def _plugin_lifespan(module: ModuleType) -> Callable[[PluginLifecycle], AbstractAsyncContextManager[object]]:
+def _plugin_lifespan(module: ModuleType) -> PluginLifespan:
     lifespan = vars(module).get("lifespan")
     if not callable(lifespan):
         msg = "Plugin lifecycle module must define lifespan(lifecycle), returning an async context manager"
