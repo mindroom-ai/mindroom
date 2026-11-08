@@ -936,7 +936,7 @@ def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: 
         "docker run -p8080:80 -u 1000 app",
         "ssh -p2222 host",
         "git push -u origin main",
-        "mysql -u root -p app",
+        "mysql -u root -p app && mkdir -pv backup",
     ],
 )
 def test_options_that_carry_no_password_stay(command: str) -> None:
@@ -960,6 +960,11 @@ def test_a_token_split_by_a_backslash_line_break_stays_hidden(text: str) -> None
     assert "abcdef" not in redacted
     assert "ghijkl" not in redacted
     assert REDACTION_FAILED not in redacted
+
+
+def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote() -> None:
+    """The command after a quoted value that a backslash line break continues stays readable."""
+    assert redact_sensitive_text('TOKEN="abcdef\\\nghijkl" make') == f'TOKEN="{REDACTED}" make'
 
 
 @pytest.mark.parametrize(
@@ -1004,9 +1009,11 @@ def test_a_bounded_redaction_of_long_text_shows_its_start() -> None:
 @pytest.mark.parametrize("max_length", [0, 1, 5, 14, 15, 16])
 def test_a_length_bound_shorter_than_the_truncation_marker_is_kept(max_length: int) -> None:
     """Every length bound holds, also one too short for the whole truncation marker."""
-    assert len(redact_sensitive_text("x" * 50, max_length=max_length)) == max_length
+    marker = "... [truncated]"
+    expected = marker[:max_length] if max_length < len(marker) else "x" * (max_length - len(marker)) + marker
+    assert redact_sensitive_text("x" * 50, max_length=max_length) == expected
     assert len(redact_sensitive_text("x" * 70_000, max_length=max_length)) <= max_length
-    assert len(truncate_review_text("x" * 50, max_length)) == max_length
+    assert truncate_review_text("x" * 50, max_length) == expected
 
 
 def _count_key_normalizations(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
