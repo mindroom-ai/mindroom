@@ -10,7 +10,17 @@ from contextlib import suppress
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    WebSocketException,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
@@ -78,13 +88,6 @@ class _Resize(BaseModel):
 
 _FRAME = TypeAdapter(Annotated[_Input | _Resize, Field(discriminator="type")])
 _Room = Annotated[RoomReader, Depends(require_room_reader)]
-
-
-class _StreamEnd(Exception):  # noqa: N818 - how a stream ends, not an error
-    def __init__(self, code: int, reason: str) -> None:
-        super().__init__(reason)
-        self.code = code
-        self.reason = reason
 
 
 async def _workspace_terminals(
@@ -185,7 +188,7 @@ async def terminal_stream(websocket: WebSocket, room_id: str, agent_user_id: str
                 await _Viewer(websocket, terminal, workspace).relay(
                     lambda: stream_room_reader(websocket, user, room_id),
                 )
-        except _StreamEnd as end:
+        except WebSocketException as end:
             await _close(websocket, end.code, end.reason)
         except (HTTPException, TerminalError) as error:
             refused = error.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND)
@@ -237,14 +240,14 @@ class _Viewer:
         while (event := await self._terminal.receive()).type == "output":
             await self._send(event.data)
         await self._send({"type": "exit", "code": event.code})
-        raise _StreamEnd(status.WS_1000_NORMAL_CLOSURE, "The terminal's shell exited.")
+        raise WebSocketException(status.WS_1000_NORMAL_CLOSURE, "The terminal's shell exited.")
 
     async def _keys(self) -> None:
         while True:
             try:
                 frame = _FRAME.validate_json(await self._websocket.receive_text())
             except (ValidationError, KeyError):
-                raise _StreamEnd(status.WS_1003_UNSUPPORTED_DATA, "Unsupported frame.") from None
+                raise WebSocketException(status.WS_1003_UNSUPPORTED_DATA, "Unsupported frame.") from None
             if not self._writable:
                 continue
             if isinstance(frame, _Input):
@@ -259,9 +262,12 @@ class _Viewer:
                 async with asyncio.timeout(_RECHECK_SECONDS):
                     current = await (await room()).agent(self._workspace.user_id)
             except TimeoutError:
-                raise _StreamEnd(status.WS_1013_TRY_AGAIN_LATER, "Agent access is unavailable; try again.") from None
+                raise WebSocketException(
+                    status.WS_1013_TRY_AGAIN_LATER,
+                    "Agent access is unavailable; try again.",
+                ) from None
             if current.terminal == "none" or current.root != self._workspace.root:
-                raise _StreamEnd(status.WS_1008_POLICY_VIOLATION, "This terminal is no longer open to you.")
+                raise WebSocketException(status.WS_1008_POLICY_VIOLATION, "This terminal is no longer open to you.")
             if (current.terminal == "type") != self._writable:
                 self._writable = not self._writable
                 await self._send({"type": "writable", "writable": self._writable})
