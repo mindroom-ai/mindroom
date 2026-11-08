@@ -215,6 +215,8 @@ class ApprovalContinuation:
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
     correlation_id: str | None = None
+    # The paused turn's ID, which its resumed run keeps.
+    turn_id: str = field(kw_only=True)
     history_scope: HistoryScope | None = None
     # Who sent and who requested the paused turn, restored for the resumed hooks.
     origin: TurnOrigin = field(kw_only=True)
@@ -266,6 +268,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "message_received_depth": continuation.message_received_depth,
         "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
         "correlation_id": continuation.correlation_id,
+        "turn_id": continuation.turn_id,
         "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
         "origin": _origin_to_dict(continuation.origin),
         "memory_prompt": continuation.memory_prompt,
@@ -374,6 +377,15 @@ def _from_rows(
         message_received_depth=int(stored["message_received_depth"]),
         dispatch_policy_source_kind=cast("str | None", stored["dispatch_policy_source_kind"]),
         correlation_id=cast("str | None", stored["correlation_id"]),
+        # LEGACY_COMPAT: Approval continuations stored without their paused turn's ID.
+        # Legacy format: the stored context of an approval continuation had no turn_id key.
+        # Last legacy release: every release before this change ships, v2026.11.203 the newest when written, stores
+        #   continuations without it; replacement: unreleased, the first release with this change stores the paused
+        #   turn's ID in every continuation.
+        # Handling: absence reads as the approval's ID, so each resume and the settlement of a reply paused before the
+        #   upgrade carry one turn ID, though not the one the paused turn's earlier hooks carried.
+        # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_turn_id_loads_with_its_approval_id.
+        turn_id=cast("str | None", stored.get("turn_id")) or str(row["approval_id"]),
         history_scope=HistoryScope.from_metadata(stored["history_scope"]),
         origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
         memory_prompt=cast("str | None", stored["memory_prompt"]),
@@ -737,7 +749,10 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     continuation = get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return None
-    if continuation.state == "failing" and _paused_reply_gone(transaction, principal_id, continuation):
+    if (
+        continuation.state == "failing"
+        and _paused_reply_state(transaction, principal_id, continuation) is ReplyState.GONE
+    ):
         return continuation
     delivered = transaction.fetchone(
         """
@@ -750,22 +765,35 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     return None if delivered is None else continuation
 
 
-def _paused_reply_gone(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
-    """Return whether the reply a continuation paused is gone."""
+def _paused_reply_state(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> ReplyState | None:
+    """Return the state of the reply a continuation paused, or None when its records are gone."""
     assert continuation.span_id is not None, "a stored continuation names the span whose pause created it"
     span = reply_spans.load(transaction, principal_id, continuation.span_id)
     reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
-    return reply is not None and reply.state is ReplyState.GONE
+    return None if reply is None else reply.state
 
 
 def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:
-    """Delete a paused run whose end the reply it paused already applied, with the calls no live card shows."""
+    """Delete a paused run whose end the reply it paused already applied, with the calls no live card shows.
+
+    Its end names the continuation and the state that end left the reply in, which says how the paused turn ended.
+    """
+    continuation = get(transaction, principal_id, approval_id=approval_id)
+    ended = (
+        None
+        if continuation is None
+        else approval_signals.EndedApproval(continuation, _paused_reply_state(transaction, principal_id, continuation))
+    )
     approval_calls.delete_reply_calls(transaction, approval_id=approval_id)
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
     )
-    approval_signals.ended(transaction, principal_id, approval_id)
+    approval_signals.ended(transaction, principal_id, approval_id, ended)
 
 
 def may_release(

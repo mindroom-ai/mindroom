@@ -48,6 +48,10 @@ _EXPORTS = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TURN_ENDED",
+    "EVENT_TURN_PAUSED",
+    "EVENT_TURN_RESUMED",
+    "EVENT_TURN_STARTED",
     "PLUGIN_API_VERSION",
     "ROUTER_AGENT_NAME",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
@@ -117,7 +121,9 @@ _EXPORTS = [
     "Toolkit",
     "TranscriptLine",
     "TurnIntent",
+    "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
     "atlassian_connection_oauth_provider",
     "automation",
@@ -282,6 +288,7 @@ _SIGNATURES = {
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
     "TranscriptLine": "(role, sender, display_name, text)",
+    "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, *, {_HOOK_HELPERS})",
     "TurnOrigin": (
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
         "intent, source_kind, trust, acts_for_requester)"
@@ -383,6 +390,7 @@ _ENUM_MEMBERS = {
         "TRUSTED_INTERNAL_RELAY",
         "JOB_FOLLOW_UP",
     ],
+    "TurnOutcome": ["COMPLETED", "CANCELLED", "FAILED"],
     "TurnTrust": ["EXTERNAL", "TRUSTED_INTERNAL", "TRUSTED_USER_RELAY"],
 }
 
@@ -444,7 +452,12 @@ _MEMBERS = {
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
         ),
     },
-    "mindroom.plugin_http.RoomReader": {"power": "(self)", "is_direct": "(self)"},
+    "mindroom.plugin_http.RoomReader": {
+        "power": "(self)",
+        "is_direct": "(self)",
+        "modes": "(self)",
+        "set_modes": "(self, *, thread, reply)",
+    },
     "mindroom.plugin_http.RoomMessenger": {
         "notice": "(self, text, *, thread_id, content)",
         "relay": "(self, text, *, mentions, thread_id, content)",
@@ -501,6 +514,10 @@ _CONSTANTS = {
     "EVENT_TOOL_AFTER_CALL": "tool:after_call",
     "EVENT_TOOL_BEFORE_CALL": "tool:before_call",
     "EVENT_TOOL_ENVIRONMENT": "tool:environment",
+    "EVENT_TURN_ENDED": "turn:ended",
+    "EVENT_TURN_PAUSED": "turn:paused",
+    "EVENT_TURN_RESUMED": "turn:resumed",
+    "EVENT_TURN_STARTED": "turn:started",
     "ROUTER_AGENT_NAME": "router",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND": "trusted_internal_relay",
     "VOICE_PREFIX": "🎤 ",
@@ -525,6 +542,7 @@ _MANIFEST = {
 _HTTP_EXPORTS = [
     "ClientUser",
     "RoomMessenger",
+    "RoomModes",
     "RoomPower",
     "RoomReader",
     "client_rooms",
@@ -544,6 +562,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
     "mindroom.plugin_http.RoomMessenger": "(user)",
+    "mindroom.plugin_http.RoomModes": "(thread, reply, reply_in_effect)",
     "mindroom.plugin_http.RoomPower": "(power_levels, creators, encrypted)",
     "mindroom.plugin_http.RoomReader": "(user, members)",
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
@@ -557,7 +576,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 9), "0f29c841746bea0c5ee471a5bcae3cf01cb97111db9bc8462014339a34d68c02")
+_PINNED_VERSION = ((1, 12), "f302a17b04ac84b19e6293e443048ec64ee3cea98e4221c9fba8379273c3c1b8")
 
 
 def _is_enum(obj: object) -> bool:

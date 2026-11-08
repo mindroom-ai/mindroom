@@ -30,6 +30,7 @@ from .types import (
     EVENT_TOOL_ENVIRONMENT,
     EnrichmentCachePolicy,
     EnrichmentItem,
+    TurnOutcome,
     format_hook_source,
 )
 
@@ -551,6 +552,15 @@ class CancelledResponseContext(HookContext):
 
 
 @dataclass(slots=True)
+class TurnLifecycleContext(HookContext):
+    """Context for turn:started, turn:paused, turn:resumed, and turn:ended hooks."""
+
+    envelope: MessageEnvelope
+    # How the turn ended; set only for turn:ended.
+    outcome: TurnOutcome | None = None
+
+
+@dataclass(slots=True)
 class AgentLifecycleContext(HookContext):
     """Context for agent lifecycle observer hooks."""
 
@@ -890,7 +900,7 @@ def _message_received_depth_for_hook_send(context: HookContext) -> int:
 
 def message_envelope_for_hook_context(context: HookContext) -> MessageEnvelope | None:
     """Return the message envelope carried by one hook context when present."""
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext | TurnLifecycleContext):
         return context.envelope
     if isinstance(context, BeforeResponseContext | FinalResponseTransformContext):
         return context.draft.envelope

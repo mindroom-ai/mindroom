@@ -21,16 +21,28 @@ from mindroom.api.client_sessions import (
     presented_session,
 )
 from mindroom.api.config_lifecycle import bind_current_request_snapshot, require_api_state
+from mindroom.config.agent import RoomReplyMode  # noqa: TC001 - Pydantic resolves RoomModes when a route returns it.
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_directory import entity_directory
 from mindroom.hooks.types import format_hook_source
 from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, send_power_level, user_power_level
 from mindroom.plugin_context import PluginContext, build_plugin_context
+from mindroom.room_modes import change_room_thread_mode
+from mindroom.room_reply_modes import (
+    clear_room_reply_mode_override,
+    resolve_room_reply_mode_override,
+    set_room_reply_mode_override,
+)
+from mindroom.room_thread_modes import (
+    RoomThreadMode,
+    resolve_room_thread_mode_override,
+)
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+    from types import EllipsisType
 
     from mindroom.api.client_sessions import ClientSession
     from mindroom.bot import AgentBot
@@ -41,6 +53,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ClientUser",
     "RoomMessenger",
+    "RoomModes",
     "RoomPower",
     "RoomReader",
     "client_rooms",
@@ -57,6 +70,7 @@ __all__ = [
 _MEMBERSHIP_RECHECK_SECONDS = 60.0
 # The websocket counterpart of HTTP 401, from the private-use range: the client signs in again.
 _SESSION_ENDED_CLOSE_CODE = 4401
+_ROUTER_NOT_RUNNING = "The router is not running in this room."
 
 
 @dataclass(frozen=True)
@@ -187,8 +201,20 @@ class RoomPower:
 
 
 @dataclass(frozen=True)
+class RoomModes:
+    """A room's thread and reply mode overrides, and the reply mode it uses."""
+
+    thread: RoomThreadMode | None
+    """The room's thread mode override, None while each agent uses its configured mode."""
+    reply: RoomReplyMode | None
+    """The room's reply mode override, None while the room uses its configured one."""
+    reply_in_effect: RoomReplyMode
+    """The reply mode the room uses: its override, else its ``rooms`` entry's, else ``auto``."""
+
+
+@dataclass(frozen=True)
 class RoomReader:
-    """What a route may read about one room, once its caller is found joined to it."""
+    """What a route may read about one room, and change as its admin, once its caller is found joined to it."""
 
     user: ClientUser
     """The session's user, joined to the room."""
@@ -196,6 +222,8 @@ class RoomReader:
     """Each joined user's display name in the room, None for one without; read by the check that proved membership."""
     _room_state: Callable[[], Awaitable[RoomStateSnapshot]] = field(repr=False)
     _room_direct: Callable[[], Awaitable[bool]] = field(repr=False)
+    _room_id: str = field(repr=False)
+    _router: Callable[[], AgentBot | None] = field(repr=False)
 
     async def power(self) -> RoomPower:
         """Read the room's power levels now, answering 503 when they cannot be read."""
@@ -214,9 +242,54 @@ class RoomReader:
         """
         return await self._room_direct()
 
+    def modes(self) -> RoomModes:
+        """Return the room's thread and reply mode overrides and the reply mode it uses, answering 503 without a router."""
+        router = self._router()
+        if router is None:
+            raise HTTPException(503, _ROUTER_NOT_RUNNING)
+        paths = router.runtime_paths
+        return RoomModes(
+            resolve_room_thread_mode_override(paths, self._room_id),
+            resolve_room_reply_mode_override(paths, self._room_id),
+            router.config.get_room_reply_mode(paths, self._room_id),
+        )
+
+    async def set_modes(
+        self,
+        *,
+        thread: RoomThreadMode | None | EllipsisType = ...,
+        reply: RoomReplyMode | None | EllipsisType = ...,
+    ) -> None:
+        """Change the room's overrides as ``!thread_mode`` and ``!reply_mode`` do: None clears one, one left out stays.
+
+        Before anything is written it answers 403 unless the caller holds room admin power by a ``power()`` read, 503
+        when that read fails, and 503 unless the router, which republishes the thread mode, runs and is in the room.
+        A thread mode change the router cannot publish stays saved and answers 503.
+        """
+        if not (await self.power()).is_admin(self.user.user_id):
+            raise HTTPException(403, "Only room admins change the room's modes.")
+        router = self._router()
+        if router is None or not router.running or router.client is None or self._room_id not in router.client.rooms:
+            raise HTTPException(503, _ROUTER_NOT_RUNNING)
+        if reply is None:
+            clear_room_reply_mode_override(router.runtime_paths, self._room_id)
+        elif reply is not ...:
+            set_room_reply_mode_override(router.runtime_paths, room_id=self._room_id, mode=reply)
+        if thread is not ... and not await change_room_thread_mode(
+            router.client,
+            router.config,
+            router.runtime_paths,
+            self._room_id,
+            thread,
+        ):
+            raise HTTPException(
+                503,
+                "The modes were saved, but the room's thread mode is not published yet; try again.",
+            )
+
 
 async def require_room_reader(request: Request, room_id: Annotated[str, Path()]) -> RoomReader:
-    """Return what a route may read about ``room_id``, once the client session's user is joined to it.
+    """Return what a route may read and change about ``room_id``, once the client session's user is joined to it.
 
     It checks the caller exactly as ``require_room_member`` does, answering 401, 403 or 503, before it reads anything
     else of the room.
@@ -229,6 +302,8 @@ async def require_room_reader(request: Request, room_id: Annotated[str, Path()])
         members,
         partial(_bound(state.room_state), room_id),
         partial(_bound(state.room_direct), room_id),
+        room_id,
+        lambda: state.runtime.agent_bot(ROUTER_AGENT_NAME),
     )
 
 

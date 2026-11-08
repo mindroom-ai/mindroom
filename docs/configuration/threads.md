@@ -20,7 +20,7 @@ MindRoom publishes each managed room's effective reply placement in room state e
 `room` means all joined responding agents and teams use the main timeline, `thread` means all use threads, and `mixed` means both modes are present.
 Rooms without joined responders are left unchanged.
 When a room has configured responders, other visiting agents and teams do not affect its mode.
-The router updates this state during setup and reconciliation, after configuration or `!thread_mode` changes, when it joins a room by any path, including an invite, and when responders join or leave, so clients can choose the appropriate conversation view.
+The router updates this state during setup and reconciliation, after configuration or thread mode override changes, when it joins a room by any path, including an invite, and when responders join or leave, so clients can choose the appropriate conversation view.
 MindRoom writes the event only when its current value differs from the effective mode.
 Setting or resetting `!thread_mode` reconciles the resulting mode; `show` only reads the override.
 Unavailable room-state permissions do not prevent setup or replies.
@@ -42,7 +42,9 @@ Show or switch how future agent replies are grouped in the current Matrix room.
 Room-mode conversations are not included in [thread exports](../thread-exports.md).
 `!thread_mode thread` uses Matrix threads for separate conversations in this room.
 `!thread_mode reset` (also `clear`) removes the room override so agents use their configured `thread_mode` and `room_thread_modes` again.
+When the router cannot update `io.mindroom.thread_mode`, as without permission to send state events, the command still saves the change and answers with ⚠️ that clients may still show the old thread mode; running it again retries.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
+[Plugin routes](../plugins.md#http-routes) change the override as this command does, for room admins only.
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
 
 ## Reply Mode
@@ -81,6 +83,7 @@ Show or switch the reply mode of the current Matrix room.
 `!reply_mode mentions` and `!reply_mode auto` set an override that takes precedence over `rooms.<key>.reply_mode`.
 `!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
+[Plugin routes](../plugins.md#http-routes) change the override as this command does, for room admins only.
 The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
 The router answers `!reply_mode`, so in a room without the router, such as a direct-message room with one agent, set the mode with a `rooms` entry keyed by the room's `!` room ID instead, for example `rooms: {"!abc123:example.com": {reply_mode: mentions}}`; the router then also joins that room when it can.
 

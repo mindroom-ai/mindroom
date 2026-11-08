@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -135,6 +136,12 @@ class _NoopResponseLifecycle:
         **_kwargs: object,
     ) -> FinalDeliveryOutcome:
         return final_delivery_outcome
+
+    async def start_turn(self, **_kwargs: object) -> None:
+        return None
+
+    def turn(self, **_kwargs: object) -> nullcontext[None]:
+        return nullcontext()
 
 
 def _config(tmp_path: Path) -> Config:
