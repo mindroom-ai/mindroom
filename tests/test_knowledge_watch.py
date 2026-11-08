@@ -16,10 +16,10 @@ from watchfiles import Change
 import mindroom.knowledge.watch as knowledge_watch
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, runtime_paths_for
-from tests.knowledge_test_support import _config
+from tests.knowledge_test_support import _config, _wait_until
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
 # Only the Linux backend follows links while it watches a folder tree, so only Linux watches each folder on its own.
@@ -62,15 +62,6 @@ def docs(tmp_path: Path) -> Path:
     return path.resolve()
 
 
-async def _until(condition: Callable[[], object], failure: str) -> None:
-    try:
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            while not condition():  # noqa: ASYNC110 - the states polled here are plain attributes
-                await asyncio.sleep(0.01)
-    except TimeoutError:
-        pytest.fail(failure)
-
-
 async def _write_until_seen(recorded: _RecordedWatch, path: Path) -> None:
     """Write ``path`` again until the watcher reports it, since a folder created moments ago may not be watched yet."""
     try:
@@ -89,14 +80,10 @@ async def _watching(tmp_path: Path, docs: Path, scheduler: MagicMock, recorded: 
     watcher = KnowledgeSourceWatcher(scheduler, runtime_paths_for(config))
     await watcher.sync(config)
     try:
-        await _until(lambda: recorded.starts, "the watcher did not start")
+        await _wait_until(lambda: recorded.starts, "the watcher did not start")
         yield
     finally:
         await watcher.stop()
-
-
-def _watched_paths(recorded: _RecordedWatch) -> set[str]:
-    return {path for folders, _recursive in recorded.starts for path in folders}
 
 
 @pytest.mark.asyncio
@@ -114,7 +101,10 @@ async def test_watch_never_follows_a_link_out_of_the_base(
     async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
         (outside / "deep" / "outside.md").write_text("outside", encoding="utf-8")
         inside.write_text("inside", encoding="utf-8")
-        await _until(lambda: str(inside) in recorded_watch.changed_paths(), "the change inside the base was not seen")
+        await _wait_until(
+            lambda: str(inside) in recorded_watch.changed_paths(),
+            "the change inside the base was not seen",
+        )
 
     # Changes arrive in order, so the change behind the link, made first, would have arrived by now.
     assert not [path for path in recorded_watch.changed_paths() if path.startswith(str(docs / "linked"))]
@@ -134,7 +124,7 @@ async def test_watch_ignores_a_link_created_while_watching(
 
     async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
         linked.symlink_to(outside, target_is_directory=True)
-        await _until(lambda: str(linked) in recorded_watch.changed_paths(), "the new link was not seen")
+        await _wait_until(lambda: str(linked) in recorded_watch.changed_paths(), "the new link was not seen")
         await _write_until_seen(recorded_watch, docs / "notes" / "after.md")
 
     assert len(recorded_watch.starts) == 1
@@ -166,7 +156,7 @@ async def test_watch_keeps_one_recursive_watch_where_the_backend_never_follows_l
         await _write_until_seen(recorded_watch, docs / "notes" / "other.bin")
         assert not scheduler.schedule_refresh.called
         await _write_until_seen(recorded_watch, docs / "notes" / "doc.md")
-        await _until(lambda: scheduler.schedule_refresh.called, "a change in the base did not refresh")
+        await _wait_until(lambda: scheduler.schedule_refresh.called, "a change in the base did not refresh")
 
     assert recorded_watch.starts == [(frozenset({str(docs)}), True)]
 
@@ -183,12 +173,12 @@ async def test_watch_refreshes_for_changes_in_existing_and_new_folders(
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
         await _write_until_seen(recorded_watch, docs / "notes" / "existing.md")
-        await _until(lambda: scheduler.schedule_refresh.called, "a change in an existing folder did not refresh")
+        await _wait_until(lambda: scheduler.schedule_refresh.called, "a change in an existing folder did not refresh")
 
         (docs / new_folder).mkdir(parents=True)
         scheduler.reset_mock()
         await _write_until_seen(recorded_watch, docs / new_folder / "doc.md")
-        await _until(lambda: scheduler.schedule_refresh.called, "a change in a new folder did not refresh")
+        await _wait_until(lambda: scheduler.schedule_refresh.called, "a change in a new folder did not refresh")
 
     assert scheduler.schedule_refresh.call_args.args == ("docs",)
 
@@ -203,12 +193,12 @@ async def test_watch_refreshes_for_a_file_written_into_a_new_folder_at_once(
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
         # A second batch means the watcher has checked its first folders, so only the new folder's event finds "fresh".
-        await _until(lambda: len(recorded_watch.batches) >= 2, "the watcher did not settle")
+        await _wait_until(lambda: len(recorded_watch.batches) >= 2, "the watcher did not settle")
         (docs / "fresh").mkdir()
         (docs / "fresh" / "doc.md").write_text("fresh", encoding="utf-8")
-        await _until(lambda: scheduler.schedule_refresh.called, "the file in the new folder did not refresh")
+        await _wait_until(lambda: scheduler.schedule_refresh.called, "the file in the new folder did not refresh")
         batches_after_refresh = len(recorded_watch.batches) + 2
-        await _until(lambda: len(recorded_watch.batches) >= batches_after_refresh, "the watcher stopped reporting")
+        await _wait_until(lambda: len(recorded_watch.batches) >= batches_after_refresh, "the watcher stopped reporting")
 
     assert scheduler.schedule_refresh.call_count == 1
 
@@ -232,8 +222,8 @@ async def test_watch_keeps_watching_when_a_folder_disappears_before_its_watch_st
     monkeypatch.setattr(knowledge_watch, "_watched_folders", _first_walk_finds_a_deleted_folder)
     scheduler = MagicMock()
     async with _watching(tmp_path, docs, scheduler, recorded_watch):
-        await _until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
-        await _until(lambda: scheduler.schedule_refresh.called, "the watcher did not refresh after looking again")
+        await _wait_until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
+        await _wait_until(lambda: scheduler.schedule_refresh.called, "the watcher did not refresh after looking again")
         await _write_until_seen(recorded_watch, docs / "notes" / "doc.md")
 
 
@@ -249,7 +239,7 @@ async def test_watch_stops_and_logs_when_scheduling_a_refresh_fails(
     with capture_logs() as logs:
         async with _watching(tmp_path, docs, scheduler, recorded_watch):
             (docs / "notes" / "doc.md").write_text("changed", encoding="utf-8")
-            await _until(
+            await _wait_until(
                 lambda: any(entry["event"] == "Knowledge filesystem watcher stopped after failure" for entry in logs),
                 "the watcher did not stop after the failure",
             )
@@ -292,7 +282,7 @@ async def test_watch_skips_folders_whose_changes_are_ignored(
     async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
         pass
 
-    assert not [path for path in _watched_paths(recorded_watch) if ".git" in path or "node_modules" in path]
+    assert recorded_watch.starts == [(frozenset({str(docs), str(docs / "notes")}), False)]
     assert not knowledge_watch._is_new_watched_folder(Change.added, str(docs / "node_modules"))
     assert knowledge_watch._is_new_watched_folder(Change.added, str(docs / "notes"))
 
@@ -311,7 +301,7 @@ async def test_watch_stops_at_the_folder_cap(
     with capture_logs() as logs:
         async with _watching(tmp_path, docs, MagicMock(), recorded_watch):
             (docs / "another").mkdir()
-            await _until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
+            await _wait_until(lambda: len(recorded_watch.starts) == 2, "the watcher did not look again")
 
     assert [len(folders) for folders, _recursive in recorded_watch.starts] == [2, 2]
     warnings = [

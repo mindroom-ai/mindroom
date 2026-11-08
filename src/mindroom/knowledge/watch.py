@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Only inotify, the Linux backend, follows links while it adds a recursive watch. macOS and Windows watch a folder tree
-# natively without following links, and macOS rebuilds its whole watch for every folder added one by one.
+# Inotify, the Linux backend, follows links while it adds a recursive watch. The macOS and Windows backends watch a
+# folder tree natively without following links, and macOS rebuilds its whole watch for every folder added one by one.
 _WATCH_EACH_FOLDER = sys.platform == "linux"
 # Each new folder makes the watcher watch every folder anew, which holds the event loop for a moment per folder.
 _MAX_WATCHED_FOLDERS = 2_000
@@ -283,7 +283,6 @@ class KnowledgeSourceWatcher:
         stop_event: asyncio.Event,
     ) -> None:
         """Watch every real folder of the base on its own, walking the base again whenever a folder appears."""
-        # Changes made while the watcher restarts go unseen, so the first batch after a restart refreshes the base.
         refresh_pending = False
         warned_cap = False
         while not stop_event.is_set():
@@ -296,7 +295,7 @@ class KnowledgeSourceWatcher:
                     base_ids=list(target.base_ids),
                     watched_folders=len(folders),
                 )
-            refresh_pending = await self._watch_folders(
+            await self._watch_folders(
                 target,
                 folders,
                 refresh_pending=refresh_pending,
@@ -304,6 +303,8 @@ class KnowledgeSourceWatcher:
                 runtime_paths=runtime_paths,
                 stop_event=stop_event,
             )
+            # Changes made while the watcher restarts go unseen, so the first batch after a restart refreshes the base.
+            refresh_pending = True
 
     async def _watch_folders(
         self,
@@ -314,8 +315,8 @@ class KnowledgeSourceWatcher:
         config: Config,
         runtime_paths: RuntimePaths,
         stop_event: asyncio.Event,
-    ) -> bool:
-        """Watch ``folders`` until stopped or until the base must be walked again, and return whether to refresh then."""
+    ) -> None:
+        """Watch ``folders`` until stopped or until the base must be walked again."""
         # Yielding on timeouts delivers a first batch within a second of the watch starting, even without a change.
         watcher = awatch(
             *folders,
@@ -334,9 +335,9 @@ class KnowledgeSourceWatcher:
                     if not checked:
                         checked = True
                         if set(await asyncio.to_thread(_watched_folders, target.path)) != set(folders):
-                            return True
+                            return
                     if any(_is_new_watched_folder(change, path) for change, path in changes):
-                        return True
+                        return
                     if refresh_pending or _changes_include_indexable_path(target, config, changes):
                         refresh_pending = False
                         await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
@@ -344,8 +345,6 @@ class KnowledgeSourceWatcher:
             # Before the first batch, a folder disappeared between the walk and the watch, so walk again.
             if checked:
                 raise
-            return True
-        return refresh_pending
 
     async def _poll_source(
         self,
