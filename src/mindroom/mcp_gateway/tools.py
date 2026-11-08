@@ -103,7 +103,8 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
     return entry
 
 
-def _blocked(context: AgentToolContext, toolkit_name: str, function: ToolFunction) -> bool:
+def may_need_approval(context: AgentToolContext, toolkit_name: str, function: ToolFunction) -> bool:
+    """Return whether a call of ``function`` may need approval: its gate confirms, or an approval rule may ask."""
     alias = toolkit_approval_alias(context.config, context.plugins.tools, toolkit_name, function.name)
     return function.gate is ToolGate.CONFIRM or tool_may_require_approval(context.config, function.name, alias)
 
@@ -112,7 +113,7 @@ def _function(context: AgentToolContext, toolkit_name: str, toolkit: AnyToolkit,
     function = toolkit_function(toolkit, name)
     if function is None:
         raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
-    if _blocked(context, toolkit_name, function):
+    if may_need_approval(context, toolkit_name, function):
         raise GatewayError(code=GatewayErrorCode.APPROVAL_REQUIRED)
     return function
 
@@ -207,7 +208,7 @@ async def search_tools(
                         "description": (function.description or "")[:256],
                     }
                     for function in adapt_toolkit(built).functions
-                    if _handle(function.name) and not _blocked(context, selected_toolkit, function)
+                    if _handle(function.name) and not may_need_approval(context, selected_toolkit, function)
                 ]
                 return _search_results(items, query, limit)
 

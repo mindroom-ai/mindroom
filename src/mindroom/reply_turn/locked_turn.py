@@ -45,7 +45,7 @@ from mindroom.reply_turn.request import (
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
-from mindroom.response_turn import ResponsePausedForApproval, skip_unapproved_attempt
+from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.turn_origin import TurnIntent
@@ -103,6 +103,13 @@ def existing_event_id(request: ResponseRequest) -> str | None:
 
 
 DECLINED = FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_DECLINED))
+
+
+def participation_silence(participation: ParticipationGate) -> FinalDeliveryOutcome:
+    """Return how a turn its participation gate kept quiet ended: declined by its decision, or failed by its check."""
+    if participation.is_declined:
+        return DECLINED
+    return FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_FAILED))
 
 
 @dataclass(frozen=True)
@@ -447,10 +454,10 @@ class LockedTurns:
         except Exception as error:
             if current_task_is_process_shutdown():
                 raise
-            if skip_unapproved_attempt(participation, reason="run_failed_before_decision") is not None:
-                # A failure before the participation decision stays quiet: it declines the turn.
+            if participation is not None and participation.decline("run_failed_before_decision"):
+                # A failure before the participation decision stays quiet.
                 self.deps.logger.exception("Response skipped before participation", error=str(error))
-                return DECLINED
+                return participation_silence(participation)
             self._log_delivery_failure(response_kind=response_kind, error=error)
             if isinstance(error, PausePresentationError):
                 # The run paused, but its reply could not show the pause: no approval exists for it.

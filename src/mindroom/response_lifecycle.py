@@ -20,6 +20,7 @@ from mindroom.final_delivery import (
     Completed,
     Failed,
     Owed,
+    Suppressed,
     Suppression,
     hook_failure_reason,
     outcome_label,
@@ -804,14 +805,14 @@ def _turn_end_for(ending: TurnEnding, *, run_succeeded: bool) -> TurnOutcome | L
     """Return how a settled turn ends for its hooks: paused for approval, or the outcome ``turn:ended`` reports.
 
     A run that failed but answered with its error completed its reply, not its turn; an answer withheld on purpose, or
-    one the outbox still owes, completed it.
+    one the outbox still owes, completed it. A failed participation check answers nothing and fails it.
     """
     match ending:
         case AwaitingApproval():
             return "paused"
         case Cancelled():
             return TurnOutcome.CANCELLED
-        case Failed():
+        case Failed() | Suppressed(reason=Suppression.PARTICIPATION_FAILED):
             return TurnOutcome.FAILED
         case Completed() if not run_succeeded:
             return TurnOutcome.FAILED

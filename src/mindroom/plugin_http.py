@@ -262,7 +262,8 @@ class RoomReader:
         """Return whether MindRoom's agents treat the room as a direct message; a hint for display, never a grant.
 
         It is their own answer, which they keep for a few minutes; it answers 503 when the bot's direct-message list
-        cannot be read and nothing else marks the room as direct, or when the lookup raises or times out.
+        or the room's state cannot be read and nothing else marks the room as direct, or when the lookup raises or
+        times out.
         """
         return await self._room_direct()
 
@@ -325,8 +326,10 @@ class RoomReader:
     async def agents(self) -> list[AgentWorkspace]:
         """Return the agents joined to the room that the caller may use there, in config order, with their workspaces.
 
-        It leaves out an agent whose contact room this is, and answers 503 while the agents' identities or access rules
-        cannot be resolved, as the Computer does, or while the runtime has not applied the API's membership policy.
+        It leaves out an agent whose contact room this is, and, logging why, one without its account, with unresolved
+        grant rooms, or with unreadable contacts or stored tool settings. It answers 503 while the router's rooms are
+        unknown and an agent's access rules wait on them, or while the runtime has not applied the API's membership
+        policy.
         """
         return await self._room_agents(self.power, None)
 
@@ -391,8 +394,8 @@ class RoomMessenger:
         It checks no power level: the route decides who may have the router post. ``content`` adds namespaced keys of
         the plugin's own, and it answers 400 before anything is sent when ``content`` sets one of Matrix's own keys,
         such as ``body`` or ``m.relates_to``, or a key under ``com.mindroom.``, ``io.mindroom.``, ``chat.mindroom.``
-        or another loaded plugin's reserved namespaces at any depth. It answers 503 when the router is not running or not in the room,
-        or when the send fails.
+        or a namespace another loaded plugin reserves and this one does not, at any depth. It answers 503 when the router
+        is not running or not in the room, or when the send fails.
         """
         router = self._router()
         extra = self._content(router, content)
@@ -452,13 +455,16 @@ class RoomMessenger:
         extra = dict(content or {})
         if matrix_keys := sorted(key for key in extra if "." not in key or key.startswith(_MATRIX_KEY_PREFIXES)):
             raise HTTPException(400, f"content must not set Matrix's own keys ({', '.join(matrix_keys)}).")
-        plugins = config_plugins(router.config, router.runtime_paths).loaded_plugins
-        others = (
+        plugins = config_plugins(router.config, router.runtime_paths)
+        # A namespace this plugin reserves is its own even when another plugin reserves it too, as plugins of one
+        # family sharing a namespace do; a narrower one another plugin reserves inside it stays that plugin's.
+        own = {
             namespace
-            for plugin in plugins
-            if plugin.name != self._plugin_name
+            for plugin in plugins.loaded_plugins
+            if plugin.name == self._plugin_name
             for namespace in plugin.reserved_namespaces
-        )
+        }
+        others = (namespace for namespace in plugins.reserved_namespaces if namespace not in own)
         if reserved := reserved_content_keys(extra, (*MINDROOM_RESERVED_PREFIXES, *others)):
             msg = f"content must not set keys MindRoom or another plugin reserves ({', '.join(reserved)})."
             raise HTTPException(400, msg)
