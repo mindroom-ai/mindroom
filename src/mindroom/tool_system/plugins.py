@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from types import ModuleType
 
+    from starlette.requests import HTTPConnection
     from starlette.types import ASGIApp
 
     from mindroom.automations.registry import CheckFn
@@ -156,6 +157,17 @@ class _ConfiguredPlugin:
 
 _PUBLISHED = PluginGeneration()
 
+# The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` sets it, and
+# ``mindroom.plugin_http.plugin_context`` reads it.
+PLUGIN_NAME_SCOPE_KEY = "mindroom.plugin_name"
+
+
+class PluginInactiveError(RuntimeError):
+    """A plugin's context was used while the current config does not load the plugin; plugin routes answer 503."""
+
+    def __init__(self, plugin_name: str) -> None:
+        super().__init__(f"Plugin {plugin_name!r} is not active: the current config does not load it.")
+
 
 @dataclass(frozen=True, eq=False)
 class ConfigPlugins:
@@ -266,6 +278,13 @@ class ConfigPlugins:
     def loaded_plugins(self) -> tuple[_LoadedPlugin, ...]:
         """Return the configured plugins the generation loaded, in config order."""
         return tuple(plugin.loaded for plugin in self._configured if plugin.loaded is not None)
+
+    def plugin_entry(self, plugin_name: str) -> PluginEntryConfig | None:
+        """Return the config entry of the loaded plugin ``plugin_name``, or None when this config does not load it."""
+        for plugin in self._configured:
+            if plugin.loaded is not None and plugin.loaded.name == plugin_name:
+                return plugin.entry_config
+        return None
 
 
 class _CachedConfigPlugins(NamedTuple):
@@ -781,8 +800,9 @@ def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
 def _plugin_routes_app(module: ModuleType) -> ASGIApp:
     """Build the app that serves the module's ``router``, once, so a router FastAPI cannot serve fails as it loads."""
     # Deferred: workers and slim entry points load plugins too, and only a routes module needs FastAPI.
-    from fastapi import APIRouter, FastAPI  # noqa: PLC0415
+    from fastapi import APIRouter, FastAPI, WebSocket, status  # noqa: PLC0415
     from fastapi.exceptions import RequestValidationError  # noqa: PLC0415
+    from fastapi.responses import JSONResponse  # noqa: PLC0415
 
     from mindroom.api.validation_errors import validation_error_response  # noqa: PLC0415
 
@@ -790,13 +810,21 @@ def _plugin_routes_app(module: ModuleType) -> ASGIApp:
     if not isinstance(router, APIRouter):
         msg = "Plugin routes module must define router: APIRouter"
         raise plugin_imports.PluginValidationError(msg)
-    # Errors are answered as the main API answers them, so a rejected body is not echoed back.
-    app = FastAPI(
-        openapi_url=None,
-        docs_url=None,
-        redoc_url=None,
-        exception_handlers={RequestValidationError: validation_error_response},
-    )
+
+    async def plugin_inactive(connection: HTTPConnection, error: Exception) -> JSONResponse | None:
+        """Answer a route that used its context while its plugin is not active with 503, or close its websocket."""
+        if isinstance(connection, WebSocket):
+            await connection.close(status.WS_1013_TRY_AGAIN_LATER, str(error))
+            return None
+        return JSONResponse({"detail": str(error)}, status_code=503)
+
+    # Errors are answered as the main API answers them, so a rejected body is not echoed back. FastAPI types these
+    # handlers for requests only, but Starlette calls them for websockets too.
+    exception_handlers: dict[Any, Any] = {
+        RequestValidationError: validation_error_response,
+        PluginInactiveError: plugin_inactive,
+    }
+    app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None, exception_handlers=exception_handlers)
     try:
         app.include_router(router)
     except Exception as error:  # FastAPI refuses some routers only here, such as one with a route at "".

@@ -5428,6 +5428,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.path_confinement",
+    "mindroom.plugin_context",
     "mindroom.providers.registry",
     "mindroom.tool_system.atlassian_connections",
     "mindroom.tool_system.authoring",
@@ -8250,12 +8251,23 @@ depends_on = [
 ]
 visibility = ["mindroom.api.main"]
 
-# Public: plugin routes import it to require a signed-in Matrix client and live room membership.
+# Public: plugin routes import it to require a signed-in Matrix client and live room membership, and for their
+# plugin context.
 [[modules]]
 path = "mindroom.plugin_http"
 depends_on = [
     "mindroom.api.app_state",
     "mindroom.api.client_sessions",
+    "mindroom.api.config_lifecycle",
+    "mindroom.plugin_context",
+    "mindroom.tool_system.plugins",
+]
+
+[[modules]]
+path = "mindroom.plugin_context"
+depends_on = [
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]

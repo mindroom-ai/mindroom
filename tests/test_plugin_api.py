@@ -86,6 +86,7 @@ _EXPORTS = [
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
+    "PluginContext",
     "PublicFetchError",
     "PublicFetchResult",
     "ReactionReceivedContext",
@@ -125,6 +126,7 @@ _EXPORTS = [
     "config_plugins",
     "current_call",
     "current_execution_identity",
+    "current_plugin_context",
     "emit_custom_event",
     "fetch_public_url",
     "fetch_public_url_sync",
@@ -227,6 +229,7 @@ _SIGNATURES = {
         "token_parser, token_exchanger, claim_validator, runtime_bootstrapper, account_claims_reader, "
         "legacy_credentials, consent_group)"
     ),
+    "PluginContext": "(plugin_name, runtime_paths)",
     "PublicFetchError": "(message, *, code, status_code)",
     "PublicFetchResult": "(url, content_type, content)",
     "ReactionReceivedContext": (
@@ -285,6 +288,7 @@ _SIGNATURES = {
     "config_plugins": "(config, runtime_paths)",
     "current_call": "()",
     "current_execution_identity": "()",
+    "current_plugin_context": "(plugin_name)",
     "emit_custom_event": "(plugin_name, event_name, payload)",
     "fetch_public_url": "(url, *, max_bytes, use_env_proxy, user_agent)",
     "fetch_public_url_sync": "(url, *, max_bytes, use_env_proxy, user_agent)",
@@ -418,6 +422,12 @@ _MEMBERS = {
         "resolve_worker_target": "(self)",
     },
     "mindroom.plugin_api.RuntimePaths": {"env_value": "(self, name, *, default)"},
+    "mindroom.plugin_api.PluginContext": {
+        "settings": "property",
+        "config": "property",
+        "state_root": "property",
+        "is_active": "(self)",
+    },
     "mindroom.plugin_api.HookMessageSender": {
         "__call__": (
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
@@ -490,7 +500,7 @@ _MANIFEST = {
 
 # What docs/plugins.md has plugins import from other modules, which `mindroom.plugin_api` cannot re-export without
 # loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
-_HTTP_EXPORTS = ["ClientUser", "require_client_user", "require_room_member"]
+_HTTP_EXPORTS = ["ClientUser", "plugin_context", "require_client_user", "require_room_member"]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
         "(*, name, tools, runtime_paths, credentials_manager, worker_target, runtime_config, **kwargs)"
@@ -498,12 +508,13 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.memory.refresh_agent_memory_search": "(agent_name, root, config, runtime_paths, execution_identity)",
     "mindroom.memory.write_scope_markdown_file": "(scope_path, relative_path, payload)",
     "mindroom.plugin_http.ClientUser": "(user_id)",
+    "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.require_client_user": "(request)",
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 3), "bb6506982e28ff02bf04e022555626fe6ca05da7df541217cf1ad88501e5dad0")
+_PINNED_VERSION = ((1, 4), "05d3c98f2c3f2513f39334844b44fc9e868198287953b1cc977278d8d5cd9837")
 
 
 def _is_enum(obj: object) -> bool:
