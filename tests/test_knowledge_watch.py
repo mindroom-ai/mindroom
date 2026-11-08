@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -20,6 +21,9 @@ from tests.knowledge_test_support import _config
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
+
+# Only the Linux backend follows links while it watches a folder tree, so only Linux watches each folder on its own.
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="each folder is watched on its own only on Linux")
 
 
 @dataclass
@@ -144,6 +148,23 @@ def test_watched_folders_refuse_a_base_whose_folder_became_a_link(tmp_path: Path
 
     with pytest.raises(OSError, match=r"Too many levels of symbolic links|Not a directory"):
         knowledge_watch._watched_folders(replaced)
+
+
+@pytest.mark.asyncio
+async def test_watch_keeps_one_recursive_watch_where_the_backend_never_follows_links(
+    tmp_path: Path,
+    docs: Path,
+    recorded_watch: _RecordedWatch,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off Linux the base keeps one recursive watch, since watching many folders one by one costs those backends more."""
+    monkeypatch.setattr(knowledge_watch, "_WATCH_EACH_FOLDER", False)
+    scheduler = MagicMock()
+    async with _watching(tmp_path, docs, scheduler, recorded_watch):
+        await _write_until_seen(recorded_watch, docs / "notes" / "doc.md")
+        await _until(lambda: scheduler.schedule_refresh.called, "a change in the base did not refresh")
+
+    assert recorded_watch.starts == [(frozenset({str(docs)}), True)]
 
 
 @pytest.mark.asyncio
