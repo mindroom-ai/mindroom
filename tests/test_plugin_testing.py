@@ -295,10 +295,15 @@ async def test_a_bridge_alias_is_its_person_and_an_agent_sends_nothing(tmp_path:
 
 
 def test_the_block_restores_the_published_plugins_and_their_modules(tmp_path: Path) -> None:
-    """Once the block ends, the plugin modules in `sys.modules` are those before it, and the plugin is not loaded."""
+    """Once the block ends, the plugin's modules are no longer in `sys.modules`, and the plugin is not loaded."""
 
     def plugin_modules() -> dict[str, object]:
-        return {name: module for name, module in sys.modules.items() if name.startswith("mindroom_plugin_")}
+        return {
+            name: module
+            for name, module in sys.modules.items()
+            if isinstance(file := getattr(module, "__file__", None), str)
+            and Path(file).resolve().is_relative_to(EXAMPLE.resolve())
+        }
 
     before = plugin_modules()
     with load_plugin(EXAMPLE, tmp_path, config=CONFIG, settings=SETTINGS) as plugin:

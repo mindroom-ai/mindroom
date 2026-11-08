@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import ModuleType
 from typing import TYPE_CHECKING
@@ -13,7 +11,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.tool_system import plugin_imports
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import candidate_tool_registry, config_plugins
@@ -205,23 +202,20 @@ def test_a_rejected_plugin_validates_once_its_source_is_repaired(tmp_path: Path)
     assert config.agents["code"].tool_names == ["repaired_tool"]
 
 
-def test_validating_a_candidate_never_disturbs_live_modules_another_thread_imports(
+def test_validating_a_candidate_holds_the_plugin_lock_and_restores_the_installed_modules(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """While a changed plugin validates, a live sibling another thread imports is the live one and stays installed."""
+    """No plugin load can start while a changed plugin validates, and afterwards its installed modules are back."""
     plugin_root = tmp_path / "plugins" / "p"
     _write_working_tool_plugin(plugin_root, plugin_name="p", tool_name="p_tool")
     (plugin_root / "helpers.py").write_text("SOURCE = 'live'\n", encoding="utf-8")
-    (plugin_root / "lazy.py").write_text("SOURCE = 'live'\n", encoding="utf-8")
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
         "import sys\nfrom . import helpers\nsys.modules['mindroom_test_candidate_probe'].entered()\n"
         + tools_path.read_text(),
         encoding="utf-8",
     )
-    entered = threading.Event()
-    release = threading.Event()
     probe = ModuleType("mindroom_test_candidate_probe")
     probe.entered = lambda: None
     monkeypatch.setitem(sys.modules, probe.__name__, probe)
@@ -229,30 +223,27 @@ def test_validating_a_candidate_never_disturbs_live_modules_another_thread_impor
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/p"]), config_path)
     runtime_paths = runtime_paths_for(config)
-    root = plugin_root.resolve()
-    helpers_name = plugin_imports._module_name("p", root, root / "helpers.py")
-    lazy_name = plugin_imports._module_name("p", root, root / "lazy.py")
+    helpers_path = str(plugin_root.resolve() / "helpers.py")
 
-    def block() -> None:
-        entered.set()
-        assert release.wait(10)
+    def lock_is_free() -> bool:
+        if not plugins_module._PLUGIN_LOCK.acquire(blocking=False):
+            return False
+        plugins_module._PLUGIN_LOCK.release()
+        return True
 
+    lock_free: list[bool] = []
     _publish(config, runtime_paths)
-    live_helpers = sys.modules[helpers_name]
+    [live_helpers] = [module for module in sys.modules.values() if getattr(module, "__file__", None) == helpers_path]
     (plugin_root / "helpers.py").write_text("SOURCE = 'candidate'\n", encoding="utf-8")
     _bump_mtime(tools_path)
-    probe.entered = block
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        validation = pool.submit(candidate_tool_registry, config, runtime_paths)
-        assert entered.wait(10)
-        live_lazy = importlib.import_module(lazy_name)
-        seen = sys.modules[helpers_name]
-        release.set()
-        tools, skipped = validation.result(timeout=10)
+    with ThreadPoolExecutor(max_workers=1) as other_thread:
+        probe.entered = lambda: lock_free.append(other_thread.submit(lock_is_free).result())
+        tools, skipped = candidate_tool_registry(config, runtime_paths)
 
-    assert seen is live_helpers
+    assert lock_free == [False]
+    assert [module for module in sys.modules.values() if getattr(module, "__file__", None) == helpers_path] == [
+        live_helpers,
+    ]
     assert live_helpers.SOURCE == "live"
-    assert sys.modules[lazy_name] is live_lazy
-    assert sys.modules[helpers_name] is live_helpers
     assert not skipped
     assert "p_tool" in tools

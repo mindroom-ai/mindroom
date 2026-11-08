@@ -2934,7 +2934,8 @@ def restored_builtin_tools() -> Iterator[None]:
 def _restore_published_plugins() -> Iterator[None]:
     """Restore the published plugin generation and the installed plugin modules a test loads or publishes.
 
-    The probe modules a test's plugins read go too.
+    The probe modules a test's plugins read go too, and so do the modules under the package names a test's plugins
+    loaded under, so a later test's plugin of the same name imports its own.
     """
     published = plugins_module._PUBLISHED
     module_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
@@ -2946,6 +2947,7 @@ def _restore_published_plugins() -> Iterator[None]:
         if name.startswith(tool_registry_module.PLUGIN_MODULE_PREFIX)
     }
     yield
+    loaded_packages = tuple(set(plugins_module._ROOT_PACKAGES) - set(root_packages))
     plugins_module._PUBLISHED = published
     plugins_module._PROCESS_STATE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
@@ -2957,11 +2959,12 @@ def _restore_published_plugins() -> Iterator[None]:
     for name in [
         name
         for name in sys.modules
-        if name.startswith(
+        if name in loaded_packages
+        or name.startswith(
             (
                 tool_registry_module.PLUGIN_MODULE_PREFIX,
-                tool_registry_module.CANDIDATE_PLUGIN_MODULE_PREFIX,
                 _TEST_PROBE_PREFIX,
+                *(f"{package}." for package in loaded_packages),
             ),
         )
     ]:

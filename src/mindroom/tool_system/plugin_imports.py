@@ -98,8 +98,17 @@ _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _MODULE_IMPORT_CACHE: dict[str, _ModuleCacheEntry] = {}
 
 
+# The module object the next import of each name here fills, so the loader still holds it when its execution raises.
+_PENDING_MODULES: dict[str, ModuleType] = {}
+# The plugin directories whose modules import through the plugin file loaders.
+_SOURCE_ROOTS: set[Path] = set()
+
+
 class _SourceFileLoader(machinery.SourceFileLoader):
     """Compile a plugin module from its source, never a bytecode cache a same-size edit within a second leaves valid."""
+
+    def create_module(self, spec: machinery.ModuleSpec) -> ModuleType | None:
+        return _PENDING_MODULES.pop(spec.name, None)
 
     def get_code(self, fullname: str) -> CodeType:
         path = self.get_filename(fullname)
@@ -112,6 +121,27 @@ _PLUGIN_FILE_LOADERS = (
     (_SourceFileLoader, machinery.SOURCE_SUFFIXES),
     (machinery.SourcelessFileLoader, machinery.BYTECODE_SUFFIXES),
 )
+
+
+def _plugin_path_hook(path: str) -> machinery.FileFinder:
+    """Find the modules of a directory inside a plugin, however ``sys.path`` reaches it, with the plugin file loaders."""
+    resolved = Path(path).resolve()
+    if not any(resolved.is_relative_to(root) for root in tuple(_SOURCE_ROOTS)) or not resolved.is_dir():
+        raise ImportError
+    return machinery.FileFinder(path, *_PLUGIN_FILE_LOADERS)
+
+
+def _record_plugin_root(root: Path) -> None:
+    """Remember that a config names a plugin at ``root``, whose directories then import through the plugin loaders."""
+    record_plugin_root(root)
+    if root in _SOURCE_ROOTS:
+        return
+    if not _SOURCE_ROOTS:
+        sys.path_hooks.insert(0, _plugin_path_hook)
+    _SOURCE_ROOTS.add(root)
+    # A finder cached before the root was recorded never asks the hook.
+    for path in [path for path in tuple(sys.path_importer_cache) if Path(path).resolve().is_relative_to(root)]:
+        sys.path_importer_cache.pop(path, None)
 
 
 def _warn_once(message: str, *, path: Path) -> None:
@@ -141,7 +171,7 @@ def _collect_plugin_bases(
         try:
             root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
             # Before its manifest loads, so a plugin whose manifest fails still adds no built-in tools.
-            record_plugin_root(root)
+            _record_plugin_root(root)
             plugin_base = _load_plugin_base(root)
         except Exception as exc:
             _log_failed_plugin_entry(plugin_entry, root, exc)
@@ -229,19 +259,11 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         return None
 
     module_name, subpath, _explicit = parsed
-    # Find each later part on disk inside the one before, so finding a plugin runs no package's __init__.py.
-    first, *rest = module_name.split(".")
     try:
-        # The first part goes through sys.modules and sys.meta_path, which raise for a module without a spec.
-        spec = util.find_spec(first)
+        spec = _find_module_spec(module_name)
     except Exception as exc:
         msg = f"Failed to resolve plugin module {plugin_path}: {exc}"
         raise PluginValidationError(msg) from exc
-    for part in rest:
-        if spec is None or not spec.submodule_search_locations:
-            return None
-        # By its bare name, a namespace package's path never looks up its unimported parent in sys.modules.
-        spec = machinery.PathFinder.find_spec(part, list(spec.submodule_search_locations))
     if spec is None:
         return None
 
@@ -257,6 +279,20 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
         return None
 
     return resolved_root
+
+
+def _find_module_spec(module_name: str) -> machinery.ModuleSpec | None:
+    """Find ``module_name`` as importing it would, without running any package's ``__init__.py``."""
+    # Find each later part on disk inside the one before, so finding a module runs no package's __init__.py.
+    first, *rest = module_name.split(".")
+    # The first part goes through sys.modules and sys.meta_path, which raise for a module without a spec.
+    spec = util.find_spec(first)
+    for part in rest:
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        # By its bare name, a namespace package's path never looks up its unimported parent in sys.modules.
+        spec = machinery.PathFinder.find_spec(part, list(spec.submodule_search_locations))
+    return spec
 
 
 def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] | None:
@@ -449,9 +485,9 @@ def _plugin_slug(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_") or "plugin"
 
 
-def _plugin_package_name(plugin_name: str, plugin_root: Path, prefix: str = PLUGIN_MODULE_PREFIX) -> str:
+def _plugin_package_name(plugin_name: str, plugin_root: Path) -> str:
     digest = hashlib.sha256(str(plugin_root.resolve()).encode()).hexdigest()
-    return f"{prefix}{_plugin_slug(plugin_name)}_{digest}"
+    return f"{PLUGIN_MODULE_PREFIX}{_plugin_slug(plugin_name)}_{digest}"
 
 
 def _relative_module_name(plugin_root: Path, module_path: Path) -> str:
@@ -459,13 +495,46 @@ def _relative_module_name(plugin_root: Path, module_path: Path) -> str:
     return ".".join(_plugin_slug(part) for part in relative_path.parts)
 
 
-def _module_name(plugin_name: str, plugin_root: Path, module_path: Path, prefix: str = PLUGIN_MODULE_PREFIX) -> str:
-    package_name = _plugin_package_name(plugin_name, plugin_root, prefix)
+def _module_name(plugin_name: str, plugin_root: Path, module_path: Path) -> str:
+    """Return the name a plugin module imports under where ``sys.path`` gives it none: one under the plugin's package."""
+    package_name = _plugin_package_name(plugin_name, plugin_root)
     return f"{package_name}.{_relative_module_name(plugin_root, module_path)}"
 
 
-def _package_chain_names(plugin_name: str, plugin_root: Path, module_path: Path, prefix: str) -> list[tuple[str, Path]]:
-    package_name = _plugin_package_name(plugin_name, plugin_root, prefix)
+def _importable_name(plugin_root: Path, module_path: Path) -> str | None:
+    """Return the name importing ``module_path`` through ``sys.path`` gives it, or None when no name reaches it.
+
+    Finding it runs no plugin code. A name that ``sys.modules`` or an earlier ``sys.path`` entry gives another file is
+    not the module's.
+    """
+    relative = module_path.relative_to(plugin_root).with_suffix("").parts
+    if relative[-1:] == ("__init__",):
+        relative = relative[:-1]
+    for entry in tuple(sys.path):
+        base = Path(entry).resolve()
+        if not plugin_root.is_relative_to(base):
+            continue
+        parts = (*plugin_root.relative_to(base).parts, *relative)
+        if parts and all(part.isidentifier() for part in parts) and _names_file(".".join(parts), module_path):
+            return ".".join(parts)
+    return None
+
+
+def _names_file(module_name: str, module_path: Path) -> bool:
+    """Return whether importing ``module_name`` now gives the module of the file ``module_path``."""
+    if (imported := sys.modules.get(module_name)) is not None:
+        origin = getattr(imported, "__file__", None)
+    else:
+        try:
+            spec = _find_module_spec(module_name)
+        except Exception:  # A finder may refuse the lookup, as for a package without a spec.
+            return False
+        origin = spec.origin if spec is not None else None
+    return isinstance(origin, str) and Path(origin).resolve() == module_path
+
+
+def _package_chain_names(plugin_name: str, plugin_root: Path, module_path: Path) -> list[tuple[str, Path]]:
+    package_name = _plugin_package_name(plugin_name, plugin_root)
     chain = [(package_name, plugin_root)]
     package_root = plugin_root
     relative_parent = module_path.relative_to(plugin_root).parent
@@ -481,22 +550,15 @@ def _snapshot_plugin_package_chain(
     plugin_name: str,
     plugin_root: Path,
     module_path: Path,
-    prefix: str,
 ) -> dict[str, ModuleType | None]:
     return {
         package_name: sys.modules.get(package_name)
-        for package_name, _ in _package_chain_names(plugin_name, plugin_root, module_path, prefix)
+        for package_name, _ in _package_chain_names(plugin_name, plugin_root, module_path)
     }
 
 
-def _install_plugin_package_chain(
-    plugin_name: str,
-    plugin_root: Path,
-    module_path: Path,
-    prefix: str,
-) -> None:
-    for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path, prefix):
-        sys.path_importer_cache[str(package_root)] = machinery.FileFinder(str(package_root), *_PLUGIN_FILE_LOADERS)
+def _install_plugin_package_chain(plugin_name: str, plugin_root: Path, module_path: Path) -> None:
+    for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path):
         if package_name in sys.modules:
             continue
         package = ModuleType(package_name)
@@ -514,9 +576,9 @@ def _restore_plugin_package_chain(previous_packages: dict[str, ModuleType | None
             sys.modules[package_name] = previous_module
 
 
-def _prepare_module(name: str, root: Path, path: Path, module_name: str, prefix: str) -> _PreparedPluginModule:
-    previous_packages = _snapshot_plugin_package_chain(name, root, path, prefix)
-    _install_plugin_package_chain(name, root, path, prefix)
+def _prepare_module(name: str, root: Path, path: Path, module_name: str) -> _PreparedPluginModule:
+    previous_packages = _snapshot_plugin_package_chain(name, root, path)
+    _install_plugin_package_chain(name, root, path)
     if (spec := util.spec_from_file_location(module_name, path)) is None or spec.loader is None:
         _restore_plugin_package_chain(previous_packages)
         return None

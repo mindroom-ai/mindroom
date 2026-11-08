@@ -1421,6 +1421,182 @@ def test_a_reload_runs_a_sibling_imported_module_from_its_source_not_a_stale_byt
     assert cached_plugin_module(tools_path).VERSION == 2
 
 
+def _edit(path: Path) -> None:
+    """Append a comment to ``path`` and move its mtime on, so the next load counts it as changed."""
+    path.write_text(f"{path.read_text(encoding='utf-8')}# edited\n", encoding="utf-8")
+    _bump_mtime(path)
+
+
+def _write_package_hooks_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tools_source: str) -> Path:
+    """Write the package plugin ``demo_pkg`` with ``tools_source`` as its tools module and ``STATE`` in its hooks."""
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-pkg", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("STATE = {}\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text(tools_source, encoding="utf-8")
+    return plugin_root
+
+
+@_PRIMARY_AND_WORKER
+@pytest.mark.parametrize(
+    "tools_source",
+    [
+        "from demo_pkg.hooks import STATE\n\n\ndef state():\n    return STATE\n",
+        "def state():\n    from demo_pkg.hooks import STATE\n\n    return STATE\n",
+    ],
+    ids=["at-import", "when-a-tool-runs"],
+)
+def test_a_manifest_module_imported_by_package_name_is_the_module_mindroom_loads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+    tools_source: str,
+) -> None:
+    """`from demo_pkg.hooks import STATE` reads the hooks module MindRoom runs, before and after a reload."""
+    plugin_root = _write_package_hooks_plugin(tmp_path, monkeypatch, tools_source)
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("demo_pkg"):
+        for _ in range(2):
+            load(config, runtime_paths)
+            hooks = cached_plugin_module(plugin_root / "hooks.py")
+            assert cached_plugin_module(plugin_root / "tools.py").state() is hooks.STATE
+            assert sys.modules["demo_pkg.hooks"] is hooks
+            _edit(plugin_root / "tools.py")
+
+
+@_PRIMARY_AND_WORKER
+def test_a_plugin_that_puts_its_root_on_sys_path_shares_the_modules_it_imports_by_top_level_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+) -> None:
+    """A tools module that adds its directory to ``sys.path`` and imports the hooks module by name shares its state."""
+    monkeypatch.setattr(sys, "path", [*sys.path])
+    hooks_name = f"hooks_{uuid.uuid4().hex}"
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "hooks_module": f"{hooks_name}.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / f"{hooks_name}.py").write_text("STATE = {}\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n\n"
+        "sys.path.insert(0, str(Path(__file__).parent))\n\n"
+        f"from {hooks_name} import STATE\n",
+        encoding="utf-8",
+    )
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules(hooks_name):
+        for _ in range(2):
+            load(config, runtime_paths)
+            hooks = cached_plugin_module(plugin_root / f"{hooks_name}.py")
+            assert cached_plugin_module(plugin_root / "tools.py").STATE is hooks.STATE
+            _edit(plugin_root / "tools.py")
+
+
+def _same_size_edit_in_place(path: Path, source: str) -> None:
+    """Cache ``path``'s bytecode, then write ``source`` of the same size, keeping the mtime that cache records."""
+    mtime = path.stat().st_mtime
+    py_compile.compile(str(path), invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+    path.write_text(source, encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+
+
+@_PRIMARY_AND_WORKER
+def test_a_reload_runs_a_helper_in_a_subpackage_from_its_source_not_a_stale_bytecode_cache(
+    tmp_path: Path,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+) -> None:
+    """A same-size edit of a helper in a subpackage that keeps its mtime runs at the next reload."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    (plugin_root / "lib").mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    helper_path = plugin_root / "lib" / "util.py"
+    helper_path.write_text("VERSION = 1\n", encoding="utf-8")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text("from .lib.util import VERSION\n", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+    load(config, runtime_paths)
+    assert cached_plugin_module(tools_path).VERSION == 1
+
+    _same_size_edit_in_place(helper_path, "VERSION = 2\n")
+    _edit(tools_path)
+    load(config, runtime_paths)
+
+    assert cached_plugin_module(tools_path).VERSION == 2
+
+
+@_PRIMARY_AND_WORKER
+def test_a_reload_runs_a_helper_imported_through_a_linked_sys_path_entry_from_its_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load: Callable[[Config, RuntimePaths], ConfigPlugins],
+) -> None:
+    """A package plugin Python imports through a symlinked directory still runs a helper's same-size edit."""
+    plugin_root = tmp_path / "site-packages" / "demo_pkg"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-pkg", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    helper_path = plugin_root / "helpers.py"
+    helper_path.write_text("VERSION = 1\n", encoding="utf-8")
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text("from demo_pkg.helpers import VERSION\n", encoding="utf-8")
+    linked_site_packages = tmp_path / "linked-site-packages"
+    linked_site_packages.symlink_to(plugin_root.parent)
+    monkeypatch.syspath_prepend(str(linked_site_packages))
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    # Python gives the module the file name it imports it from.
+    imported_tools_path = linked_site_packages / "demo_pkg" / "tools.py"
+
+    with _forgetting_modules("demo_pkg"):
+        load(config, runtime_paths)
+        assert cached_plugin_module(imported_tools_path).VERSION == 1
+
+        _same_size_edit_in_place(helper_path, "VERSION = 2\n")
+        _edit(tools_path)
+        load(config, runtime_paths)
+
+        assert cached_plugin_module(imported_tools_path).VERSION == 2
+
+
+def test_validation_counts_the_helper_tools_of_a_published_package_plugin_whose_tools_module_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validating a config after the plugin's tools module changes still finds the tool its helper module registers."""
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+
+    with _forgetting_modules("demo_pkg"):
+        _load(config, runtime_paths)
+        installed_helpers = sys.modules["demo_pkg.helpers"]
+        _edit(plugin_root / "tools.py")
+
+        tools, skipped = candidate_tool_registry(config, runtime_paths)
+
+        assert "helper_tool" in tools
+        assert skipped == ()
+        assert sys.modules["demo_pkg.helpers"] is installed_helpers
+
+
 @pytest.mark.asyncio
 async def test_a_worker_refresh_ends_the_task_of_a_module_its_plugin_imported_after_loading(tmp_path: Path) -> None:
     """A module a tool imports only when it runs is replaced on a reload with its task ended, so one task runs."""

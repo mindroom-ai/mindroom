@@ -9,7 +9,7 @@ generations.
 from __future__ import annotations
 
 import asyncio
-import itertools
+import importlib
 import json
 import sys
 import threading
@@ -19,7 +19,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from mindroom.automations.registry import iter_module_automations
@@ -30,7 +30,6 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.plugin_imports import SkippedPlugin
 from mindroom.tool_system.registry import (
-    CANDIDATE_PLUGIN_MODULE_PREFIX,
     PLUGIN_MODULE_PREFIX,
     ToolMetadataValidationError,
     ToolRegistry,
@@ -40,7 +39,6 @@ from mindroom.tool_system.registry import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
-    from types import ModuleType
 
     from starlette.requests import HTTPConnection
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -59,7 +57,6 @@ logger = get_logger(__name__)
 _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
 # Guards the canonical plugin modules in sys.modules, the module cache, the root packages, and the published generation.
 _PLUGIN_LOCK = threading.RLock()
-_CANDIDATE_NAMESPACES = itertools.count()
 
 
 class _ConfiguredPluginRootCacheKey(NamedTuple):
@@ -164,8 +161,9 @@ _PUBLISHED = PluginGeneration()
 
 # Each plugin's ``PluginLifecycle.process_state`` by plugin name, kept for the process, so it outlives reloads.
 _PROCESS_STATE: dict[str, dict[str, Any]] = {}
-# The package name a plugin load imported the plugin's root under, such as ``demo_pkg`` for ``demo_pkg.helpers``, with
-# that root. The modules under it, whenever imported, are the plugin's modules too, so its next load imports them again.
+# The package name a plugin load imported the plugin's root under, such as ``demo_pkg`` for ``demo_pkg.helpers``, or
+# for a root on sys.path the top-level name of one of its modules, with that root. The modules under it, whenever
+# imported, are the plugin's modules too, so its next load imports them again.
 _ROOT_PACKAGES: dict[str, Path] = {}
 
 # The scope key naming the plugin whose routes serve a request: ``mindroom.api.plugin_routes`` sets it, and
@@ -394,10 +392,29 @@ def _modules_named(packages: tuple[str, ...], *prefixes: str) -> dict[str, Modul
 def _evict_plugin_modules(
     plugin: plugin_imports._PluginBase,
 ) -> tuple[dict[str, ModuleType], dict[str, plugin_imports._ModuleCacheEntry]]:
-    """Remove one plugin's canonical modules and their module cache entries, and return both."""
+    """Remove one plugin's canonical modules and their module cache entries, and return both.
+
+    The package names its manifest modules import under count as its own first, so a module imported under one before
+    the plugin's first load leaves too.
+    """
+    for module_path in (
+        plugin.tools_module_path,
+        plugin.hooks_module_path,
+        plugin.oauth_module_path,
+        plugin.routes_module_path,
+        plugin.lifecycle_module_path,
+    ):
+        if module_path is None or (name := plugin_imports._importable_name(plugin.root, module_path)) is None:
+            continue
+        if (package := _root_package(name, module_path, plugin.root)) is not None:
+            _ROOT_PACKAGES[package] = plugin.root
     prefix = f"{plugin_imports._plugin_package_name(plugin.name, plugin.root)}."
     modules = _plugin_modules(plugin)
-    cache = {name: entry for name, entry in plugin_imports._MODULE_IMPORT_CACHE.items() if name.startswith(prefix)}
+    cache = {
+        name: entry
+        for name, entry in plugin_imports._MODULE_IMPORT_CACHE.items()
+        if name in modules or name.startswith(prefix)
+    }
     _remove_modules(modules)
     for module_name in cache:
         del plugin_imports._MODULE_IMPORT_CACHE[module_name]
@@ -418,20 +435,27 @@ def _imported_from_root(root: Path, loaded_before: set[str]) -> dict[str, Module
 
 def _root_packages(root: Path, loaded_before: set[str]) -> set[str]:
     """Return the package names the modules imported since ``loaded_before`` reached ``root`` under."""
-    packages: set[str] = set()
-    for module_name, module in _imported_from_root(root, loaded_before).items():
-        # A candidate check running meanwhile imports under its own namespace.
-        if module_name.startswith(CANDIDATE_PLUGIN_MODULE_PREFIX):
-            continue
-        relative = Path(cast("str", module.__file__)).resolve().relative_to(root).with_suffix("").parts
-        if relative[-1:] == ("__init__",):
-            relative = relative[:-1]
-        parts = tuple(module_name.split("."))
-        depth = len(parts) - len(relative)
-        # A vendored package maps to no root package.
-        if depth > 0 and parts[depth:] == relative:
-            packages.add(".".join(parts[:depth]))
-    return packages
+    return {
+        package
+        for module_name, module in _imported_from_root(root, loaded_before).items()
+        if (package := _root_package(module_name, Path(cast("str", module.__file__)), root)) is not None
+    }
+
+
+def _root_package(module_name: str, module_file: Path, root: Path) -> str | None:
+    """Return the package name ``module_name``, the name of ``module_file``, puts ``root`` under, if any.
+
+    That is the root's own package name, or the top-level name itself when ``root`` is on sys.path; a vendored copy,
+    whose name does not follow its path from the root, has none.
+    """
+    relative = module_file.resolve().relative_to(root).with_suffix("").parts
+    if relative[-1:] == ("__init__",):
+        relative = relative[:-1]
+    parts = tuple(module_name.split("."))
+    depth = len(parts) - len(relative)
+    if depth < 0 or parts[depth:] != relative:
+        return None
+    return ".".join(parts[: max(depth, 1)])
 
 
 def _install_canonical_modules(
@@ -600,36 +624,41 @@ def candidate_tool_registry(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[ToolRegistry, tuple[SkippedPlugin, ...]]:
-    """Return the tools a candidate config can build and the plugins that failed to load, changing nothing live.
+    """Return the tools a candidate config can build and the plugins that failed to load, publishing nothing.
 
     A plugin the published generation loaded from unchanged source is not executed again. A new or changed one
-    executes under a separate module namespace, which is removed afterwards with any task it started.
+    executes under its plugin's module names, holding the plugin lock, and its installed modules return afterwards,
+    ending any task it started; another thread's import of one of its modules meanwhile can get the candidate's.
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
-    plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
-    published = _PUBLISHED
-    unresolved = {plugin.path for plugin in skipped}
-    plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
-    unavailable: dict[str, ToolMetadata] = {}
-    for plugin_base, plugin_entry in plugin_bases:
-        loaded = published.plugins.get(plugin_base.root)
-        if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
-            tools: Mapping[str, ToolMetadata] = loaded.tools
-        else:
-            registrations: dict[str, ToolMetadata] = {}
-            completed: list[str] = []
-            try:
-                _execute_candidate_plugin(plugin_base, registrations, completed)
-            except (Exception, SystemExit) as exc:
-                skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
-                if plugin_base.tools_module_path is not None and "tools" not in completed:
-                    unresolved.add(plugin_base.name)
-                unavailable.update(_declared_tools(plugin_base))
-                unavailable.update(registrations)
-                continue
-            tools = registrations
-        _add_plugin_tools(plugin_tools, plugin_base.name, tools)
+    with _PLUGIN_LOCK:
+        plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
+        published = _PUBLISHED
+        unresolved = {plugin.path for plugin in skipped}
+        plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
+        unavailable: dict[str, ToolMetadata] = {}
+        for plugin_base, plugin_entry in plugin_bases:
+            loaded = published.plugins.get(plugin_base.root)
+            if loaded is not None and _loaded_from_current_source(loaded, plugin_base):
+                tools: Mapping[str, ToolMetadata] = loaded.tools
+            else:
+                registrations: dict[str, ToolMetadata] = {}
+                completed: list[str] = []
+                installed_modules, installed_cache = _evict_plugin_modules(plugin_base)
+                try:
+                    _execute_candidate_plugin(plugin_base, registrations, completed)
+                except (Exception, SystemExit) as exc:
+                    skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
+                    if plugin_base.tools_module_path is not None and "tools" not in completed:
+                        unresolved.add(plugin_base.name)
+                    unavailable.update(_declared_tools(plugin_base))
+                    unavailable.update(registrations)
+                    continue
+                finally:
+                    _restore_plugin_modules(plugin_base, installed_modules, installed_cache)
+                tools = registrations
+            _add_plugin_tools(plugin_tools, plugin_base.name, tools)
     registry = compose_tool_registry(
         {name: metadata for name, (_, metadata) in plugin_tools.items()},
         _mcp_tool_entries(config.mcp_servers),
@@ -644,33 +673,21 @@ def _execute_candidate_plugin(
     registrations: dict[str, ToolMetadata],
     completed: list[str],
 ) -> None:
-    """Execute one plugin's modules under a fresh namespace as loading it does, collecting its tools module's tools.
-
-    Afterwards the namespace is removed, with any module from the plugin's root they imported by absolute name, so
-    the plugin's next load imports and registers those again. Modules under the canonical prefix that another thread
-    imports meanwhile stay.
-    """
-    prefix = f"{CANDIDATE_PLUGIN_MODULE_PREFIX}{next(_CANDIDATE_NAMESPACES)}_"
-    loaded_before = set(sys.modules)
-    try:
-        # A file that serves several kinds executes once, and each kind it serves is checked on that module.
-        for kind, module_path in (
-            ("tools", plugin.tools_module_path),
-            ("hooks", plugin.hooks_module_path),
-            ("oauth", plugin.oauth_module_path),
-        ):
-            entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
-            if entry is None:
-                continue
-            if kind == "tools":
-                registrations.update(entry.registrations)
-            elif kind == "oauth":
-                _oauth_provider_callback(entry.module)
-            completed.append(kind)
-    finally:
-        candidate_modules = {**_modules_named((), prefix), **_imported_from_root(plugin.root, loaded_before)}
-        _remove_modules(candidate_modules)
-        _cancel_module_tasks(candidate_modules.values())
+    """Execute one plugin's tools, hooks, and OAuth modules as loading it does, collecting its tools module's tools."""
+    # A file that serves several kinds executes once, and each kind it serves is checked on that module.
+    for kind, module_path in (
+        ("tools", plugin.tools_module_path),
+        ("hooks", plugin.hooks_module_path),
+        ("oauth", plugin.oauth_module_path),
+    ):
+        entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind)
+        if entry is None:
+            continue
+        if kind == "tools":
+            registrations.update(entry.registrations)
+        elif kind == "oauth":
+            _oauth_provider_callback(entry.module)
+        completed.append(kind)
 
 
 def _module_within(module: ModuleType, root: Path) -> bool:
@@ -765,7 +782,7 @@ def _load_each_plugin(
         try:
             plugin = _materialize_plugin(plugin_base, primary_modules=primary_modules)
         except BaseException as exc:
-            _dispose_failed_plugin(plugin_base, installed_modules, installed_cache)
+            _restore_plugin_modules(plugin_base, installed_modules, installed_cache)
             _raise_if_host_control_exception(exc)
             skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
             continue
@@ -782,12 +799,12 @@ def _load_each_plugin(
     return plugins, tuple(skipped), replaced
 
 
-def _dispose_failed_plugin(
+def _restore_plugin_modules(
     plugin: plugin_imports._PluginBase,
     installed_modules: dict[str, ModuleType],
     installed_cache: dict[str, plugin_imports._ModuleCacheEntry],
 ) -> None:
-    """Cancel the tasks of a failed plugin's newly executed modules and reinstate its installed ones."""
+    """Cancel the tasks of a plugin's newly executed modules and reinstate its installed ones."""
     installed = {id(module) for module in installed_modules.values()}
     executed, _ = _evict_plugin_modules(plugin)
     _cancel_module_tasks(module for module in executed.values() if id(module) not in installed)
@@ -1090,33 +1107,40 @@ def _load_plugin_module(
     module_path: Path | None,
     *,
     kind: str,
-    prefix: str = PLUGIN_MODULE_PREFIX,
 ) -> plugin_imports._ModuleCacheEntry | None:
-    """Execute one plugin module once per load, or return the instance this load already has.
+    """Execute one plugin module once per load, or return the instance this load already has, and cache it.
 
     Another of the plugin's modules may have imported it already, and executing it again would leave that importer a
-    copy of its own. The canonical ``prefix`` installs the module and caches it; another prefix executes it under a
-    separate namespace, with its relative imports, and caches nothing.
+    copy of its own. The module takes the name ``sys.path`` gives it, which other code imports it by too, importing its
+    parent packages as any import does; without one, it takes a name under the plugin's own package.
     """
     if module_path is None:
         return None
-    canonical = prefix == PLUGIN_MODULE_PREFIX
-    module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path, prefix)
-    if (loaded := _loaded_module(module_name, canonical=canonical)) is not None:
+    importable_name = plugin_imports._importable_name(plugin_root, module_path)
+    module_name = importable_name or plugin_imports._module_name(plugin_name, plugin_root, module_path)
+    if (loaded := _loaded_module(module_name)) is not None:
         return loaded
 
-    prepared_module = plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name, prefix)
-    if prepared_module is None:
+    previous_packages: dict[str, ModuleType | None] = {}
+    if importable_name is not None:
+        module = plugin_imports._PENDING_MODULES[module_name] = ModuleType(module_name)
+    elif (
+        prepared_module := plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name)
+    ) is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
         raise plugin_imports.PluginValidationError(msg)
-    module, previous_packages = prepared_module
+    else:
+        module, previous_packages = prepared_module
 
-    loaded_before = set(sys.modules) if canonical else set()
+    loaded_before = set(sys.modules)
     try:
         # A module may provide several capabilities; whatever it registers belongs to this module.
         with plugin_module_registrations(module_name) as registrations:
-            _exec_plugin_source(module_path, module)
+            if importable_name is not None:
+                module = importlib.import_module(module_name)
+            else:
+                _exec_plugin_source(module_path, module)
     except BaseException as exc:
         # Its tasks go with it: once it leaves sys.modules, the failed plugin's cleanup no longer finds them.
         _cancel_module_tasks((module,))
@@ -1127,18 +1151,17 @@ def _load_plugin_module(
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise plugin_imports.PluginValidationError(msg) from exc
     finally:
-        if canonical:
-            _ROOT_PACKAGES.update(dict.fromkeys(_root_packages(plugin_root, loaded_before), plugin_root))
+        plugin_imports._PENDING_MODULES.pop(module_name, None)
+        _ROOT_PACKAGES.update(dict.fromkeys(_root_packages(plugin_root, loaded_before), plugin_root))
 
     entry = plugin_imports._ModuleCacheEntry(module=module, registrations=MappingProxyType(registrations))
-    if canonical:
-        plugin_imports._MODULE_IMPORT_CACHE[module_name] = entry
+    plugin_imports._MODULE_IMPORT_CACHE[module_name] = entry
     return entry
 
 
-def _loaded_module(module_name: str, *, canonical: bool) -> plugin_imports._ModuleCacheEntry | None:
+def _loaded_module(module_name: str) -> plugin_imports._ModuleCacheEntry | None:
     """Return the module this load has already, whether the loader or another plugin module imported it."""
-    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_name) if canonical else None
+    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_name)
     if cached is not None:
         return cached
     imported = sys.modules.get(module_name)
@@ -1146,8 +1169,7 @@ def _loaded_module(module_name: str, *, canonical: bool) -> plugin_imports._Modu
         return None
     # What it registered as it executed belongs to the module that imported it.
     entry = plugin_imports._ModuleCacheEntry(module=imported, registrations=MappingProxyType({}))
-    if canonical:
-        plugin_imports._MODULE_IMPORT_CACHE[module_name] = entry
+    plugin_imports._MODULE_IMPORT_CACHE[module_name] = entry
     return entry
 
 

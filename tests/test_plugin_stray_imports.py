@@ -1,4 +1,4 @@
-"""Tests for a plugin module imported by its own name, outside its plugin's load."""
+"""Tests for a plugin module imported under a second name, outside its plugin's load."""
 
 from __future__ import annotations
 
@@ -57,7 +57,9 @@ def _package_plugin_config(
 ) -> tuple[Config, Path]:
     """Return a config naming the importable plugin package ``stray_pkg``, and the package's directory.
 
-    Its tools module registers ``stray_pkg_tool``, or runs ``tools_source`` instead.
+    Its tools module registers ``stray_pkg_tool``, or runs ``tools_source`` instead. The package's directory is on
+    ``sys.path`` ahead of the package, so the plugin loads its tools module as ``tools`` and ``stray_pkg.tools`` is a
+    second name for it.
     """
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "stray_pkg"
@@ -69,6 +71,7 @@ def _package_plugin_config(
     linked_site_packages = tmp_path / "linked-site-packages"
     linked_site_packages.symlink_to(site_packages)
     monkeypatch.syspath_prepend(str(linked_site_packages))
+    monkeypatch.syspath_prepend(str(plugin_root))
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     return _bind_runtime_paths(Config(plugins=["stray_pkg"]), config_path), plugin_root
@@ -79,7 +82,7 @@ def test_stray_import_of_a_loaded_plugin_tools_module_registers_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A plugin's tools module imported by its own name works but registers nothing, and the plugin keeps its tools."""
+    """A plugin's tools module imported under a second name works but registers nothing; the plugin keeps its tools."""
     config, plugin_root = _package_plugin_config(tmp_path, monkeypatch)
 
     with _forgetting_modules("stray_pkg"):

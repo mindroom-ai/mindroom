@@ -24,7 +24,6 @@ logger = get_logger(__name__)
 
 # Canonical plugin modules, and the modules config validation executes for a candidate config.
 PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
-CANDIDATE_PLUGIN_MODULE_PREFIX = "mindroom_candidate_"
 
 _BUILTIN_TOOLS: dict[str, ToolMetadata] = {}
 _REGISTRATION_SCOPE = threading.local()
@@ -71,7 +70,7 @@ def register_tool(metadata: ToolMetadata) -> None:
         registrations[metadata.name] = metadata
         return
     module_name = metadata.factory.__module__ if metadata.factory is not None else ""
-    if module_name.startswith((PLUGIN_MODULE_PREFIX, CANDIDATE_PLUGIN_MODULE_PREFIX)):
+    if module_name.startswith(PLUGIN_MODULE_PREFIX):
         msg = f"Plugin tool '{metadata.name}' must register while its plugin module loads, not later."
         raise ToolMetadataValidationError(msg)
     plugin_root = _plugin_root(module_name)

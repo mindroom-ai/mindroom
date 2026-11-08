@@ -11,7 +11,6 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -261,23 +260,11 @@ def test_prepare_module_installs_package_chain(tmp_path: Path) -> None:
 
     module_name = plugin_imports._module_name("demo", plugin_root, module_path)
     package_names = [
-        package_name
-        for package_name, _ in plugin_imports._package_chain_names(
-            "demo",
-            plugin_root,
-            module_path,
-            PLUGIN_MODULE_PREFIX,
-        )
+        package_name for package_name, _ in plugin_imports._package_chain_names("demo", plugin_root, module_path)
     ]
 
     try:
-        module, _ = plugin_imports._prepare_module(
-            "demo",
-            plugin_root,
-            module_path,
-            module_name,
-            PLUGIN_MODULE_PREFIX,
-        )
+        module, _ = plugin_imports._prepare_module("demo", plugin_root, module_path, module_name)
         assert module.__spec__ is not None
         assert module.__spec__.loader is not None
         module.__spec__.loader.exec_module(module)
@@ -304,13 +291,7 @@ def test_prepare_module_restores_package_chain_on_spec_failure(
     module_path.write_text("VALUE = 42\n", encoding="utf-8")
 
     package_names = [
-        package_name
-        for package_name, _ in plugin_imports._package_chain_names(
-            "demo",
-            plugin_root,
-            module_path,
-            PLUGIN_MODULE_PREFIX,
-        )
+        package_name for package_name, _ in plugin_imports._package_chain_names("demo", plugin_root, module_path)
     ]
     existing_package = ModuleType(package_names[0])
     sys.modules[package_names[0]] = existing_package
@@ -322,7 +303,6 @@ def test_prepare_module_restores_package_chain_on_spec_failure(
             plugin_root,
             module_path,
             plugin_imports._module_name("demo", plugin_root, module_path),
-            PLUGIN_MODULE_PREFIX,
         )
 
         assert module_execution is None

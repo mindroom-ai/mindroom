@@ -6975,7 +6975,6 @@ from = ["mindroom.tool_system.registry"]
 
 [[interfaces]]
 expose = [
-    "CANDIDATE_PLUGIN_MODULE_PREFIX",
     "PLUGIN_MODULE_PREFIX",
     "ToolMetadataValidationError",
     "ToolRegistry",
