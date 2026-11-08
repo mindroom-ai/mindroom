@@ -63,6 +63,8 @@ _HOME_CREDENTIALS = frozenset(
         (".cache", "huggingface", "token"),
     },
 )
+# The first names of those places, so most paths are cleared by one lookup.
+_HOME_CREDENTIAL_TOPS = frozenset(place[0] for place in _HOME_CREDENTIALS)
 # Credential files by name, in any folder: a project keeps its own `.env` and `.npmrc`.
 _CREDENTIAL_NAMES = frozenset({".netrc", ".git-credentials", ".pgpass", ".pypirc", ".npmrc"})
 # `.env`, `.env.local`, `.envrc`; SSH keys such as `id_rsa`, `id_ed25519_sk`, `id_ecdsa.pub` and `id_rsa-cert.pub`.
@@ -147,7 +149,7 @@ def is_hidden(path: PurePath) -> bool:
     except UnicodeEncodeError:
         return True
     parts = tuple(part.casefold() for part in path.parts)
-    if any(parts[: len(place)] == place for place in _HOME_CREDENTIALS):
+    if parts and parts[0] in _HOME_CREDENTIAL_TOPS and any(parts[: len(place)] == place for place in _HOME_CREDENTIALS):
         return True
     if any(part in _CREDENTIAL_NAMES or _CREDENTIAL_NAME.fullmatch(part) for part in parts):
         return True

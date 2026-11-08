@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import threading
-import time
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-import watchfiles
 
 from mindroom.workspace_files import watch
 from mindroom.workspace_files.watch import workspace_changes
@@ -228,50 +226,6 @@ async def test_folders_past_the_cap_are_not_followed(tmp_path: Path, monkeypatch
     assert "deep/inner.txt" not in seen
 
 
-def test_a_path_reached_through_a_link_out_is_never_reported(tmp_path: Path) -> None:
-    """A folder swapped for a link while the watcher walked could be watched; its changes still never come through."""
-    root = tmp_path / "workspace"
-    root.mkdir()
-    (tmp_path / "outside").mkdir()
-    (root / "out").symlink_to(tmp_path / "outside")
-
-    assert watch._reported(root, watchfiles.Change.added, str(root / "out" / "secret.txt")) is None
-    assert watch._reported(root, watchfiles.Change.added, str(root / "inside.txt")) == "inside.txt"
-
-
-@pytest.mark.asyncio
-async def test_nothing_goes_unreported_while_a_new_folder_is_taken_in(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """While the tree is walked again for a new folder, the old watch still reports, and the new folder's content shows."""
-    root = tmp_path / "workspace"
-    root.mkdir()
-    (root / "old.md").write_text("x")
-    walked = threading.Event()
-    real_folders = watch._folders
-
-    def slow_folders(path: Path) -> list[str]:
-        folders = real_folders(path)
-        if "new" in {Path(folder).name for folder in folders}:
-            walked.set()
-            time.sleep(0.5)
-        return folders
-
-    monkeypatch.setattr(watch, "_folders", slow_folders)
-    async with workspace_changes(root) as next_changes:
-        await _settled(root)
-        (root / "new").mkdir()
-        await _until(next_changes, "new")
-        assert await asyncio.to_thread(walked.wait, 5)
-        (root / "old.md").write_text("changed while walking")
-        (root / "new" / "inner.md").write_text("written before its folder is watched")
-
-        seen = await _until(next_changes, "old.md", "new/inner.md")
-
-    assert {"old.md", "new/inner.md"} <= seen
-
-
 @pytest.mark.asyncio
 async def test_a_workspace_stored_below_a_folder_named_like_a_cache_is_followed(tmp_path: Path) -> None:
     """Only names inside the workspace are filtered, not the folders MindRoom's storage sits in."""
@@ -306,102 +260,6 @@ async def test_what_a_workspace_holds_when_it_appears_is_reported(tmp_path: Path
         assert "memory/MEMORY.md" in await _until(next_changes, "memory/MEMORY.md")
 
 
-def test_the_folder_cap_leaves_out_the_deepest_folders_and_hidden_ones_are_never_watched(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A tool's deep cache in the agent's HOME can't take the watches the project's own top folders need.
-
-    Ignored folders, those holding credentials, and links are never watched.
-    """
-    root = tmp_path / "workspace"
-    for top in ("a", "b", "c"):
-        (root / top / "deep" / "deeper").mkdir(parents=True)
-    (root / ".ssh").mkdir()
-    (root / ".config" / "gh").mkdir(parents=True)
-    (root / "node_modules" / "pkg").mkdir(parents=True)
-    (tmp_path / "outside").mkdir()
-    (root / "out").symlink_to(tmp_path / "outside")
-    monkeypatch.setattr(watch, "_MAX_FOLDERS", 5)
-
-    folders = {Path(folder).relative_to(root).as_posix() for folder in watch._folders(root)}
-
-    assert folders == {".", "a", "b", "c", ".config"}
-
-
-@pytest.mark.asyncio
-async def test_a_change_just_before_the_new_watch_begins_is_still_reported(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The old watch, which holds a change it hasn't sent yet, keeps running until it has sent it."""
-    root = tmp_path / "workspace"
-    root.mkdir()
-    (root / "old.md").write_text("x")
-    real_folders = watch._folders
-
-    changed = threading.Event()
-
-    def folders_then_a_change(path: Path) -> list[str]:
-        folders = real_folders(path)
-        if "new" in {Path(folder).name for folder in folders} and not changed.is_set():
-            changed.set()
-            (root / "old.md").write_text("changed as the walk ends")
-        return folders
-
-    monkeypatch.setattr(watch, "_folders", folders_then_a_change)
-    async with workspace_changes(root) as next_changes:
-        await _settled(root)
-        (root / "new").mkdir()
-        await _until(next_changes, "new")
-
-        assert "old.md" in await _until(next_changes, "old.md")
-
-
-@pytest.mark.asyncio
-async def test_a_folder_made_after_the_walk_is_watched_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A folder that appears once the tree was walked, in a watched folder or a new one, is walked and watched next."""
-    root = tmp_path / "workspace"
-    root.mkdir()
-    real_folders = watch._folders
-    made = threading.Event()
-
-    def folders_then_more(path: Path) -> list[str]:
-        folders = real_folders(path)
-        if "new" in {Path(folder).name for folder in folders} and not made.is_set():
-            made.set()
-            (root / "late").mkdir()
-            (root / "new" / "sub").mkdir()
-        return folders
-
-    monkeypatch.setattr(watch, "_folders", folders_then_more)
-    async with workspace_changes(root) as next_changes:
-        await _settled(root)
-        (root / "new").mkdir()
-        await _until(next_changes, "new/sub")
-        await _settled(root, root / "late")
-        await _settled(root, root / "new" / "sub")
-        (root / "late" / "a.md").write_text("x")
-        (root / "new" / "sub" / "b.md").write_text("x")
-
-        seen = await _until(next_changes, "late/a.md", "new/sub/b.md")
-
-    assert {"late/a.md", "new/sub/b.md"} <= seen
-
-
-def test_only_a_folder_the_walk_takes_in_calls_for_a_new_walk(tmp_path: Path) -> None:
-    """A cache, a credential folder or a link appearing never makes the whole tree be walked again."""
-    root = tmp_path / "workspace"
-    for name in ("src", "__pycache__", "node_modules", ".ssh"):
-        (root / name).mkdir(parents=True)
-    (root / "link").symlink_to(root / "src")
-    added = watchfiles.Change.added
-
-    assert watch._batch(root, {(added, str(root / "src"))})[1]
-    for name in ("__pycache__", "node_modules", ".ssh", "link"):
-        assert not watch._batch(root, {(added, str(root / name))})[1], name
-
-
 @pytest.mark.asyncio
 async def test_a_link_made_in_the_workspace_is_reported_even_when_it_leads_outside(tmp_path: Path) -> None:
     """The link is an entry of its folder, so it shows as changed; nothing beyond it ever does."""
@@ -414,27 +272,74 @@ async def test_a_link_made_in_the_workspace_is_reported_even_when_it_leads_outsi
         assert "out" in await _until(next_changes, "out")
 
 
-@pytest.mark.asyncio
-async def test_a_folder_made_while_the_first_watch_starts_is_watched(
+def test_a_scan_leaves_out_the_deepest_folders_past_the_cap_and_never_looks_into_hidden_ones_or_links(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The tree is walked again once watched, so a folder made between the first walk and the watch is not missed."""
+    """A tool's deep cache in the agent's HOME can't crowd out the project's own top folders, and links lead nowhere."""
     root = tmp_path / "workspace"
-    (root / "src").mkdir(parents=True)
-    real_folders = watch._folders
-    calls = []
+    for top in ("a", "b", "c"):
+        (root / top / "deep" / "deeper").mkdir(parents=True)
+    (root / ".ssh").mkdir()
+    (root / ".ssh" / "id_rsa").write_text("key")
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "secret.txt").write_text("x")
+    (root / "out").symlink_to(tmp_path / "outside")
+    monkeypatch.setattr(watch, "_MAX_FOLDERS", 4)
 
-    def first_walk_then_a_folder(path: Path) -> list[str]:
-        folders = real_folders(path)
-        calls.append(len(folders))
-        if len(calls) == 1:
-            (root / "src" / "generated").mkdir()
-        return folders
+    seen = set(watch._scan(root))
 
-    monkeypatch.setattr(watch, "_folders", first_walk_then_a_folder)
+    assert seen == {"a", "b", "c", "out", "a/deep", "b/deep", "c/deep"}
+
+
+@pytest.mark.asyncio
+async def test_a_folder_swapped_for_a_link_out_never_reports_what_lies_beyond(tmp_path: Path) -> None:
+    """Code the agent runs may swap a folder for a link and back at any moment; no name from beyond it ever shows."""
+    root = tmp_path / "workspace"
+    (root / "sub").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    seen: set[str] = set()
     async with workspace_changes(root) as next_changes:
-        await _settled(root, root / "src" / "generated")
-        (root / "src" / "generated" / "out.md").write_text("x")
+        for attempt in range(30):
+            (root / "sub").rename(root / "held")
+            (root / "sub").symlink_to(outside)
+            (outside / f"secret{attempt}.txt").write_text("x")
+            await asyncio.sleep(0.02)
+            (root / "sub").unlink()
+            (root / "held").rename(root / "sub")
+        (root / "marker.md").write_text("x")
+        seen |= await _until(next_changes, "marker.md")
 
-        assert "src/generated/out.md" in await _until(next_changes, "src/generated/out.md")
+    assert not {path for path in seen if "secret" in path}
+
+
+@pytest.mark.asyncio
+async def test_what_a_recreated_folder_holds_is_reported(tmp_path: Path) -> None:
+    """A folder deleted and made again under its name reports what it holds now."""
+    root = tmp_path / "workspace"
+    (root / "out").mkdir(parents=True)
+    (root / "out" / "old.txt").write_text("x")
+    async with workspace_changes(root) as next_changes:
+        shutil.rmtree(root / "out")
+        (root / "out").mkdir()
+        (root / "out" / "new.txt").write_text("x")
+
+        assert {"out/old.txt", "out/new.txt"} <= await _until(next_changes, "out/old.txt", "out/new.txt")
+
+
+@pytest.mark.asyncio
+async def test_files_written_into_folders_as_they_appear_are_all_reported(tmp_path: Path) -> None:
+    """A build that makes folders and fills them at once loses no change."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    async with workspace_changes(root) as next_changes:
+        expected = set()
+        for index in range(20):
+            folder = root / f"pkg{index}" / "src"
+            folder.mkdir(parents=True)
+            (folder / "mod.py").write_text("x")
+            expected.add(f"pkg{index}/src/mod.py")
+
+        assert expected <= await _until(next_changes, *expected)

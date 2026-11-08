@@ -604,7 +604,7 @@ Matrix sync callback
 | `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
 | `api/workspace_files.py` | `/api/rooms/{room_id}` workspace routes for chat clients with client sessions: the workspaces a room opens to the caller, listing, reading, saving, making, moving and deleting their files, and the change stream, admitted through `RoomReader.agent()` on every request |
 | `workspace_files/operations.py` | The file operations behind those routes, confined to the workspace without following links out, and the credentials they hide (`is_hidden`) |
-| `workspace_files/watch.py` | One watcher per workspace for its change streams, watching each folder reached without a link and reporting changed paths at most every 150 ms |
+| `workspace_files/watch.py` | One scanner per workspace for its change streams, comparing scans that open every folder without following a link and reporting changed paths at most every 150 ms |
 | `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
 | `config/access.py` | Membership access configuration models (responder access, room defaults) |
 | `config/legacy_access.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |
