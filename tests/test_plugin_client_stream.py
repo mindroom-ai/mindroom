@@ -102,9 +102,13 @@ class _Membership:
         self.error: HTTPException | None = None
         self.hang = False
         self.calls = 0
+        # Runs while a lookup is answered, as a sign-out that lands during a slow Matrix call.
+        self.during: Callable[[], None] | None = None
 
     async def __call__(self, room_id: str) -> frozenset[str]:
         self.calls += 1
+        if self.during is not None:
+            self.during()
         if self.error is not None:
             raise self.error
         if self.hang:
@@ -279,6 +283,31 @@ def test_an_expired_or_revoked_session_is_refused_with_401(app: FastAPI, client:
         assert _denial(client, _echo_path(), _offers(token), headers).status_code == 401
     denial = _denial(client, _echo_path(), [], {**headers, "Authorization": f"Bearer {live}"})
     assert denial.status_code == 401
+
+
+@pytest.mark.parametrize("ending", ["revoked", "expired"])
+def test_a_session_that_ends_during_the_membership_check_is_refused_with_401(
+    app: FastAPI,
+    client: TestClient,
+    ending: str,
+) -> None:
+    """The handshake never accepts a session that ended while the room's membership was read."""
+    store = _store(app)
+    token = store.create(ALICE).token
+    assert isinstance(store.clock, _Clock)
+    clock = store.clock
+
+    def end() -> None:
+        if ending == "revoked":
+            store.revoke(token)
+        else:
+            clock.offset = 3600
+
+    _membership(app).during = end
+
+    denial = _denial(client, _echo_path(), _offers(token), {"origin": CLIENT_ORIGIN})
+
+    assert (denial.status_code, denial.json()) == (401, {"detail": "Missing, invalid or expired client session."})
 
 
 @pytest.mark.parametrize(
