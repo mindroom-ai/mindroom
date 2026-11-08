@@ -6,12 +6,13 @@ import asyncio
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
 import agno.tools.trafilatura as agno_trafilatura
 from agno.tools.trafilatura import TrafilaturaTools
 from agno.utils.log import log_warning
+from courlan import UrlStore
 from trafilatura import spider as trafilatura_spider
 from trafilatura.downloads import USER_AGENT, Response
 from trafilatura.settings import DEFAULT_CONFIG
@@ -30,14 +31,29 @@ _CALL_SECONDS = 180.0
 _CRAWL_SHARE = 0.5
 _MAX_BATCH_URLS = 10
 _visit_page = trafilatura_spider.crawl_page
+_process_url_store = trafilatura_spider.URL_STORE
+
+
+def _new_url_store() -> UrlStore:
+    # The settings Trafilatura gives its own crawl store.
+    return UrlStore(compressed=False, strict=False)
 
 
 @dataclass
 class _Call:
-    """One batch extract or crawl: when it started, and whether its crawl has fetched its start page."""
+    """One batch extract or crawl: when it started, whether its crawl has fetched its start page, and its crawl state."""
 
     started: float
     crawl_started: bool = False
+    url_store: UrlStore = field(default_factory=_new_url_store)
+
+
+class _CallUrlStore:
+    """Stand-in for Trafilatura's crawl store that answers from the current call's own store."""
+
+    def __getattr__(self, name: str) -> object:
+        call = _call.get()
+        return getattr(_process_url_store if call is None else call.url_store, name)
 
 
 _call: ContextVar[_Call | None] = ContextVar("trafilatura_call", default=None)
@@ -154,7 +170,7 @@ class TimeLimitedTrafilaturaTools(TrafilaturaTools):
 
 
 def install_server_fetch_guard() -> None:
-    """Replace every downloader TrafilaturaTools reaches with the guarded fetchers, and the crawler's visits and pauses."""
+    """Replace every downloader TrafilaturaTools reaches with the guarded fetchers, and the crawler's visits, pauses, and store."""
     # AGNO_COMPAT: TrafilaturaTools extraction downloads through a fixed module-level fetcher.
     # Reason: Agno 3.0.9 extract_text, extract_metadata_only, extract_batch, and the
     # crawl_website content loop call the module-level trafilatura.fetch_url binding,
@@ -192,3 +208,15 @@ def install_server_fetch_guard() -> None:
     # TimeLimitedTrafilaturaTools describes.
     trafilatura_spider.crawl_page = _crawl_page  # ty: ignore[invalid-assignment]
     trafilatura_spider.sleep = _pause  # ty: ignore[invalid-assignment]
+    # AGNO_COMPAT: Trafilatura's crawler keeps every crawl's links and visited pages in one module-level store.
+    # Reason: Trafilatura 2.0.0 focused_crawler reads and writes trafilatura.spider.URL_STORE, which lives as long as
+    # the process and offers no per-crawl store, so a crawl of a site crawled before in the same process started from
+    # that crawl's links and visited pages, and two crawls running at once shared them. Each crawl call therefore
+    # gets its own store, which ends with the call.
+    # Upstream issue: Tracking gap; no matching issue identified on November 7, 2026.
+    # Upstream PR: None identified for a per-crawl store in focused_crawler.
+    # Remove when: focused_crawler accepts a caller-supplied store, or starts each crawl with its own; keep crawls
+    # that run at once apart.
+    # Coverage: tests/test_trafilatura_tool.py::test_trafilatura_crawl_of_a_site_crawled_before_starts_with_fresh_crawl_state
+    # and ::test_trafilatura_crawls_of_one_site_running_at_once_share_no_crawl_state.
+    trafilatura_spider.URL_STORE = _CallUrlStore()  # ty: ignore[invalid-assignment]

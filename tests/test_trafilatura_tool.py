@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 import agno.tools.trafilatura as agno_trafilatura
 import httpx
 import pytest
-from courlan import UrlStore
 from trafilatura import spider
 from trafilatura.downloads import USER_AGENT
 
@@ -63,9 +62,8 @@ def _public_getaddrinfo(_host: str | bytes, port: int, *_args: object, **_kwargs
 
 @pytest.fixture(autouse=True)
 def _isolate_trafilatura(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use public test DNS, a fresh crawler URL store, and no crawler politeness delay."""
+    """Use public test DNS and no crawler politeness delay."""
     monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", _public_getaddrinfo)
-    monkeypatch.setattr(spider, "URL_STORE", UrlStore(compressed=False, strict=False))
     monkeypatch.setitem(spider.DEFAULT_CONFIG["DEFAULT"], "SLEEP_TIME", "0")
 
 
@@ -287,6 +285,56 @@ def test_trafilatura_crawl_skips_a_discovered_link_it_refuses(
     assert "Configure a bridge" in crawl["extracted_content"]["https://example.com/guide"]
     assert _DENIED in crawl["extracted_content"]["https://example.com/docs"]
     assert all(url.startswith("https://example.com/") for url in requested_urls)
+
+
+def test_trafilatura_crawl_of_a_site_crawled_before_starts_with_fresh_crawl_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeat crawl visits the site again and reports only the links it finds now, none from the earlier crawl."""
+    first, _requested_urls = _crawl(monkeypatch, httpx.Response(200, text=_DOCS_HTML))
+    guide_only = _ARTICLE_HTML.replace('href="/docs"', 'href="/guide"')
+
+    second, _requested_urls = _crawl(monkeypatch, httpx.Response(404), homepage_html=guide_only)
+
+    assert "https://example.com/docs" in json.loads(first)["known_links"]
+    assert set(json.loads(second)["known_links"]) == {"https://example.com/", "https://example.com/guide"}
+
+
+def test_trafilatura_crawls_of_one_site_running_at_once_share_no_crawl_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two crawls of one site that run at the same time each report only the pages they found themselves."""
+    sections = ("alpha", "beta")
+    started = {section: threading.Event() for section in sections}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        section = request.url.path.strip("/")
+        if section in started:
+            # Each crawl reads its start page only once the other crawl has begun, so both run at once.
+            started[section].set()
+            (other,) = set(sections) - {section}
+            started[other].wait(timeout=10)
+            page = _ARTICLE_HTML.replace('href="/docs"', f'href="/{section}/docs"')
+        else:
+            page = _DOCS_HTML
+        return httpx.Response(200, stream=httpx.ByteStream(page.encode()))
+
+    serve(monkeypatch, handler)
+    toolkit = trafilatura_tools()()
+    results: dict[str, dict[str, object]] = {}
+
+    def crawl(section: str) -> None:
+        results[section] = json.loads(toolkit.crawl_website(f"https://example.com/{section}/"))
+
+    threads = [threading.Thread(target=crawl, args=(section,)) for section in sections]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    for section in sections:
+        assert set(results[section]["known_links"]) == {
+            f"https://example.com/{section}/",
+            f"https://example.com/{section}/docs",
+        }
 
 
 def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.MonkeyPatch) -> None:
