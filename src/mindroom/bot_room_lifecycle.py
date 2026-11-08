@@ -551,7 +551,7 @@ class BotRoomLifecycle:
                 return False
 
             if not response.chunk:
-                if visible_to_sender_id is not None and not await self._inviter_has_access(
+                if visible_to_sender_id is not None and not await self._inviter_has_reply_access(
                     room_id,
                     visible_to_sender_id,
                 ):
@@ -576,7 +576,7 @@ class BotRoomLifecycle:
                 self._logger().debug("Welcome message already sent", room_id=room_id)
             return True
 
-    async def _inviter_has_access(self, room_id: str, sender: str) -> bool:
+    async def _inviter_has_reply_access(self, room_id: str, sender: str) -> bool:
         """Return whether an inviter may talk to the router in a room, reading the room's members again before a denial.
 
         The router learns a room's members from its own sync after joining, which the invitation's welcome can precede.

@@ -2279,7 +2279,7 @@ async def test_router_invite_welcome_reads_the_joined_rooms_members(
     room_id = "!adhoc:localhost"
     inviter = "@alice:localhost"
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
-    bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
+    bot = make_test_agent_bot(agent_user=_router_user(), config=config)
     install_runtime_journal_support(bot)
     joined_rooms: list[str] = []
     listed, answer = asyncio.Event(), asyncio.Event()
@@ -2319,7 +2319,7 @@ async def test_router_invite_welcome_reads_the_joined_rooms_members(
         refresh = asyncio.create_task(bot.orchestrator.refresh_agent_reply_memberships_when_needed())
         await listed.wait()
 
-    await _handle_invite(bot, MagicMock(room_id=room_id, canonical_alias=None), MagicMock(sender=inviter))
+    await _handle_invite(bot, MagicMock(room_id=room_id), MagicMock(sender=inviter))
 
     if refresh is not None:
         await refresh
