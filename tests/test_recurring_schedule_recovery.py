@@ -712,6 +712,31 @@ async def test_one_time_task_cancelled_or_deleted_while_its_owner_restarts_is_no
 
 
 @pytest.mark.asyncio
+async def test_one_time_task_edited_while_its_owner_restarts_is_sent_and_stored_with_the_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement sends the edited task and its final status keeps the edit, not the definition read first."""
+    task, runner, old_client, new_client = one_time_owner_stop(tmp_path, monkeypatch)
+    edited = task.model_copy(update={"message": "Remind the team the deadline moved to Friday"})
+    new_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse.from_dict(
+        {"workflow": edited.model_dump_json(), "status": "pending"},
+        room_id="!room:example.org",
+        event_type="com.mindroom.scheduled.task",
+        state_key="daily",
+    )
+
+    await asyncio.wait_for(runner.run_once(task), 10)
+
+    assert task.message in old_client.room_send.await_args.kwargs["content"]["body"]
+    assert new_client.room_send.await_count == 1
+    assert edited.message in new_client.room_send.await_args.kwargs["content"]["body"]
+    stored = [call.kwargs["content"] for call in new_client.room_put_state.await_args_list]
+    assert [content["status"] for content in stored] == ["completed"]
+    assert ScheduledWorkflow.model_validate_json(stored[0]["workflow"]) == edited
+
+
+@pytest.mark.asyncio
 async def test_frozen_sidecar_survives_encryption_enabled_before_retry(
     tmp_path: Path,
     controlled_clock: Clock,

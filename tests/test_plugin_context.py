@@ -51,18 +51,21 @@ Context = Annotated[PluginContext, Depends(plugin_context)]
 
 
 @router.get("/context")
-def context(ctx: Context) -> dict:
+def context(request: Request, ctx: Context) -> dict:
     try:
         ctx.settings["greeting"] = "changed"
     except TypeError:
         read_only = True
     else:
         read_only = False
+    if "nested" in ctx.settings:
+        ctx.settings["nested"]["n"] = 2
+        ctx.settings["nested"]["rooms"].append("!changed")
     return {
         "plugin_name": ctx.plugin_name,
-        "settings": dict(ctx.settings),
+        "settings": dict(plugin_context(request).settings),
         "read_only": read_only,
-        "plugins": [entry.path for entry in ctx.config.plugins],
+        "config_settings": [entry.settings for entry in ctx.config.plugins],
         "storage_root": str(ctx.runtime_paths.storage_root),
     }
 
@@ -127,10 +130,14 @@ def _reload(app: FastAPI, config: Config, runtime_paths: RuntimePaths | None = N
 
 
 def test_each_plugin_route_reads_its_own_plugins_settings_and_config(tmp_path: Path) -> None:
-    """Two plugins' routes each get their own entry's settings, read-only, with the config and paths they run under."""
+    """Two plugins' routes each get their own entry's settings, read-only, with the config and paths they run under.
+
+    A write to a nested value stays in that context: a later context and the config keep the entry's own settings.
+    """
+    demo_settings = {"greeting": "hello", "nested": {"n": 1, "rooms": ["!a"]}}
     _, client, runtime_paths = _client(
         tmp_path,
-        {"name": "demo", "settings": {"greeting": "hello", "nested": {"n": 1}}},
+        {"name": "demo", "settings": demo_settings},
         {"name": "other", "settings": {"greeting": "hi"}},
     )
 
@@ -139,9 +146,9 @@ def test_each_plugin_route_reads_its_own_plugins_settings_and_config(tmp_path: P
 
     assert demo == {
         "plugin_name": "demo",
-        "settings": {"greeting": "hello", "nested": {"n": 1}},
+        "settings": demo_settings,
         "read_only": True,
-        "plugins": ["./plugins/demo", "./plugins/other"],
+        "config_settings": [demo_settings, {"greeting": "hi"}],
         "storage_root": str(runtime_paths.storage_root),
     }
     assert (other["plugin_name"], other["settings"], other["read_only"]) == ("other", {"greeting": "hi"}, True)
