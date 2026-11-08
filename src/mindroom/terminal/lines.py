@@ -1,14 +1,12 @@
-"""What the primary knows of each terminal's shell input line, so typing into a terminal is judged as what it runs.
+"""What the primary knows of each terminal's shell input line, so ``terminal_run`` types only at an empty prompt.
 
-🔒 Approval rules judge an agent's typing as the shell command its Enter runs (``entered_command``): what the line
-held before, typed by anyone, joined with the new keys. Every input the primary sends a terminal goes through a
-``TerminalStream``, one send at a time per terminal (``TerminalLine.lock``), which records it here, and the shell's
-prompt marks, read from any stream attached to the terminal, say when it is back at its prompt.
+Every input the primary sends a terminal goes through a ``TerminalStream``, one send at a time per terminal
+(``TerminalLine.lock``), which records it here, and the shell's prompt marks, read from any stream attached to the
+terminal, say when it is back at its prompt and which prompt ends a command typed now.
 
-The line is unknown after keys that edit it, recall history or complete (every control key but Enter and Ctrl-C),
-from an Enter until the shell's next prompt, since a command or a continuation reads what is typed meanwhile, at that
-prompt when anything was typed before it, after a send that may not have arrived, and in a terminal the primary did
-not see open. Ctrl-C at the prompt empties it again.
+After an Enter or a Ctrl-C the shell is busy until its next prompt, since a command or a continuation reads what is
+typed meanwhile; that prompt's line then holds whatever was typed while busy. The line also holds typing after any
+other key at the prompt, after a send that may not have arrived, and in a terminal the primary did not see open.
 """
 
 from __future__ import annotations
@@ -16,21 +14,18 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import OrderedDict
-from dataclasses import dataclass
 
 # The shell's prompt command prints this before each prompt: the last command's exit status, and the prompt's number,
-# which lets a mark replayed with the scrollback count once (``terminal_launch``).
+# which lets a mark replayed with the scrollback count once (``terminal_launch``). It keeps itself from the shells
+# started inside, whose own prompts would count from 1 again; until such a shell exits, the line waits for a prompt.
 PROMPT_COMMAND = (
-    '__mindroom_status=$?; __mindroom_prompt=$((__mindroom_prompt + 1)); printf "\\033]133;D;%s;mindroom=%s\\007" '
-    '"$__mindroom_status" "$__mindroom_prompt"'
+    "__mindroom_status=$?; export -n PROMPT_COMMAND; __mindroom_prompt=$((__mindroom_prompt + 1)); "
+    'printf "\\033]133;D;%s;mindroom=%s\\007" "$__mindroom_status" "$__mindroom_prompt"'
 )
 _PROMPT_MARK = re.compile(rb"\x1b\]133;D;(\d{1,3});mindroom=(\d{1,18})\x07")
 # Longer than any prompt mark, so an unfinished one waits for the frame that ends it.
 _MAX_MARK_BYTES = 64
 _INTERRUPT = "\x03"
-# Keys that edit the line, recall history, complete or end input, so what it holds can't be read from the keys.
-_EDITING = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]")
-_MAX_LINE_CHARS = 4096
 _MAX_TERMINALS = 4096
 _NAMED_KEYS = {
     "enter": "\r",
@@ -64,50 +59,16 @@ def keys_to_text(keys: str) -> str:
     return _KEY.sub(key, keys)
 
 
-def run_text(command: str) -> str:
-    """Return what ``terminal_run`` types for ``command``: the command line and Enter."""
-    return command.strip("\n") + "\r"
-
-
-def entered_command(typed: str | None, text: str) -> list[dict[str, object]] | None:
-    """Return the ``run_shell_command`` call that typing ``text`` onto a line holding ``typed`` amounts to.
-
-    Its ``args`` is what the Enter ending ``text`` runs, the line's earlier text included: an empty list when ``text``
-    enters nothing, and None when the line or the keys can't tell, as for keys after a Ctrl-C, which the terminal may
-    drop part of when it interrupts, or after an Enter, which what that Enter runs may read.
-    """
-    rest = text.lstrip(_INTERRUPT)
-    if not rest:
-        return []
-    if rest != text or typed is None or _EDITING.search(rest):
-        return None
-    end = max(rest.rfind("\r"), rest.rfind("\n"))
-    if end == -1:
-        return []
-    if end != len(rest) - 1 or "\r" in rest[:end] or "\n" in rest[:end]:
-        return None
-    return [{"args": typed + rest[:end]}]
-
-
-@dataclass(frozen=True)
-class LineState:
-    """A terminal's line as one call was judged against: how often it changed, and its text, None when unknown."""
-
-    revision: int
-    typed: str | None
-
-
 class TerminalLine:
     """One terminal's input line, as the primary saw it typed, and its shell's prompts."""
 
     def __init__(self, *, opened: bool) -> None:
-        self.revision = 0
-        self.typed: str | None = "" if opened else None
         # An Enter or a Ctrl-C went in since the last prompt: a command or a continuation reads what is typed now, or
         # the interrupt may drop it, and typing that reaches the shell first may keep it from printing that prompt.
         self._busy = not opened
         # Something typed while busy waits for the next prompt, whose line it then holds.
         self._ahead = not opened
+        self._held = False
         # The prompts the shell prints before it reads a command typed now: its first, and one after each Enter or
         # Ctrl-C at the prompt; a command typed onto the line ends at the prompt after them.
         self._owed = 1 if opened else 0
@@ -115,18 +76,10 @@ class TerminalLine:
         # Held across each send, so input reaches the shell in the order it is recorded.
         self.lock = asyncio.Lock()
 
-    def state(self) -> LineState:
-        """Return the line as a call typing now is judged against."""
-        return LineState(self.revision, None if self._busy else self.typed)
-
-    def unchanged(self, judged: LineState) -> bool:
-        """Return whether the line is still the one ``judged`` describes, the text it claims included."""
-        return judged.revision == self.revision and judged.typed in (None, self.state().typed)
-
     @property
     def empty(self) -> bool:
         """Whether the shell waits at its prompt with nothing typed."""
-        return not self._busy and self.typed == ""
+        return not self._busy and not self._held
 
     @property
     def awaited(self) -> int:
@@ -135,7 +88,6 @@ class TerminalLine:
 
     def type(self, text: str) -> None:
         """Record ``text`` as sent to the terminal."""
-        self.revision += 1
         for char in text:
             if self._busy:
                 # Ctrl-C interrupts the command, and the terminal drops the typing it has not read yet.
@@ -143,14 +95,11 @@ class TerminalLine:
             elif char in "\r\n\x03":
                 self._busy, self._ahead = True, False
                 self._owed += 1
-            elif self.typed is not None:
-                self.typed = None if _EDITING.match(char) else self.typed + char
-        if self.typed is not None and len(self.typed) > _MAX_LINE_CHARS:
-            self.typed = None
+            else:
+                self._held = True
 
     def lost(self) -> None:
         """Record a send that may or may not have arrived."""
-        self.revision += 1
         self._busy = self._ahead = True
 
     def prompted(self, number: int) -> None:
@@ -161,7 +110,7 @@ class TerminalLine:
         self.prompts = number
         # A prompt the shell owed from before the Enter, such as after a Ctrl-C, ends no command.
         if self._busy and not self._owed:
-            self.typed = None if self._ahead else ""
+            self._held = self._ahead
             self._busy = self._ahead = False
 
 
@@ -188,12 +137,12 @@ def prompt_after(data: bytes, number: int) -> tuple[int, int] | None:
     return None
 
 
-_lines: OrderedDict[tuple[object, str], TerminalLine] = OrderedDict()
+_lines: OrderedDict[tuple[str, str], TerminalLine] = OrderedDict()
 
 
-def terminal_line(scope: object, session_id: str, *, opened: bool = False) -> TerminalLine:
-    """Return the line of terminal ``session_id`` among the terminals ``scope`` names; ``opened`` for one just opened."""
-    key = (scope, session_id)
+def terminal_line(owner: str, session_id: str, *, opened: bool = False) -> TerminalLine:
+    """Return the line of the runner owner ``owner``'s terminal ``session_id``; ``opened`` for one just opened."""
+    key = (owner, session_id)
     line = _lines.pop(key, None)
     if line is None:
         line = TerminalLine(opened=opened)
@@ -203,12 +152,6 @@ def terminal_line(scope: object, session_id: str, *, opened: bool = False) -> Te
     return line
 
 
-def line_state(scope: object, session_id: str) -> LineState | None:
-    """Return the line of a terminal the primary has seen as a call typing now is judged against, else None."""
-    line = _lines.get((scope, session_id))
-    return None if line is None else line.state()
-
-
-def forget_line(scope: object, session_id: str) -> None:
+def forget_line(owner: str, session_id: str) -> None:
     """Forget a closed terminal's line."""
-    _lines.pop((scope, session_id), None)
+    _lines.pop((owner, session_id), None)

@@ -38,7 +38,6 @@ from mindroom.tool_system.sandbox_proxy import worker_call
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from mindroom.terminal.lines import LineState
     from mindroom.tool_system.sandbox_proxy import WorkerCall, WorkerStandIns
     from mindroom.workers.protocol import ExecuteRequest
 
@@ -82,9 +81,9 @@ type _Connect = Callable[[], Awaitable[tuple[aiohttp.ClientSession, aiohttp.Clie
 class _TerminalInput:
     """The one connection every viewer's and call's typing and resizing reaches one terminal through.
 
-    🔒 Separate connections reach the runner in no promised order, so typing recorded before a judged call could reach
-    the shell after it, onto the line that call was judged against. Its holder opens and sends while holding the line's
-    lock; it opens at a send while viewers are attached and closes, before any next one opens, with the last viewer.
+    Separate connections reach the runner in no promised order, so typing recorded before a run could reach the shell
+    after it and join its command. Its holder opens and sends while holding the line's lock; it opens at a send while
+    viewers are attached and closes, before any next one opens, with the last viewer.
     """
 
     def __init__(self) -> None:
@@ -152,18 +151,18 @@ class TerminalStream:
                 return TerminalEvent("exit", code=_Exit.model_validate_json(message.data).code)
         raise TerminalDetachedError
 
-    async def send_input(self, data: str, *, judged: LineState | None = None, empty_line: bool = False) -> int:
+    async def send_input(self, data: str, *, empty_line: bool = False) -> int:
         """Type ``data``, after the input before it, record it on the terminal's line, and return the line's ``awaited``.
 
-        Given ``judged``, only while the line is still the one it describes, and with ``empty_line`` only while the
-        shell waits at its prompt with nothing typed; otherwise it types nothing and raises ``TerminalError`` (409).
+        With ``empty_line``, only while the shell waits at its prompt with nothing typed; otherwise it types nothing and
+        raises ``TerminalError`` (409).
         """
         if len(data) > _MAX_INPUT_CHARS:
             raise TerminalError(413, f"Type at most {_MAX_INPUT_CHARS} characters at once; send a long text in parts.")
         async with self.line.lock:
             websocket = await _inputs[self.line].open(self._connect, self.line)
-            if (judged is not None and not self.line.unchanged(judged)) or (empty_line and not self.line.empty):
-                raise TerminalError(409, "The terminal's line is not the one these keys were checked against.")
+            if empty_line and not self.line.empty:
+                raise TerminalError(409, "The terminal's shell is not waiting at an empty prompt.")
             awaited = self.line.awaited
             self.line.type(data)
             try:
@@ -258,17 +257,6 @@ class WorkerTerminals:
 
     stand_ins: WorkerStandIns
 
-    @property
-    def scope(self) -> tuple[str | None, str | None, str | None]:
-        """What the terminals' owner derives from, read without asking the worker backend: worker, agent, workspace."""
-        target = self.stand_ins.worker_target
-        base_dir = (self.stand_ins.tool_init_overrides or {}).get("base_dir")
-        return (
-            None if target is None else target.worker_key,
-            None if target is None else target.routing_agent_name,
-            None if base_dir is None else str(base_dir),
-        )
-
     async def _worker(self, *, start: bool) -> WorkerCall | None:
         try:
             return await asyncio.to_thread(worker_call, self.stand_ins, "run_shell_command", start=start)
@@ -294,7 +282,7 @@ class WorkerTerminals:
             "cwd": cwd,
         }
         info = _parsed(_INFO, await _send(worker, "POST", _SESSIONS_PATH, body=body))
-        terminal_line(self.scope, info.id, opened=True)
+        terminal_line(_owner(worker.request), info.id, opened=True)
         return info
 
     async def sessions(self) -> list[TerminalInfo]:
@@ -306,9 +294,9 @@ class WorkerTerminals:
 
     async def close(self, session_id: str) -> None:
         """End a terminal."""
-        path = _session_path(session_id)
-        await _send(await self._running_worker(), "DELETE", path)
-        forget_line(self.scope, session_id)
+        worker = await self._running_worker()
+        await _send(worker, "DELETE", _session_path(session_id))
+        forget_line(_owner(worker.request), session_id)
 
     @contextlib.asynccontextmanager
     async def attach(self, session_id: str) -> AsyncIterator[TerminalStream]:
@@ -325,7 +313,7 @@ class WorkerTerminals:
                 raise
 
         client, websocket = await connect()
-        line = terminal_line(self.scope, session_id)
+        line = terminal_line(_owner(worker.request), session_id)
         typing = _inputs.setdefault(line, _TerminalInput())
         typing.viewers += 1
         keepalive = asyncio.create_task(self._keep_worker(), name="terminal-worker-keepalive")

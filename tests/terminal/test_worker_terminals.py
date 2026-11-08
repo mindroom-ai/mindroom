@@ -21,7 +21,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.terminal import client as client_module
 from mindroom.terminal import session as session_module
 from mindroom.terminal.client import TerminalDetachedError, TerminalStream, WorkerTerminals
-from mindroom.terminal.lines import PROMPT_COMMAND, terminal_line
+from mindroom.terminal.lines import terminal_line
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
@@ -125,9 +125,8 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     assert terminal_env["PATH"].startswith("/opt/from-the-call/bin:")
     assert "FROM_STARTUP_FILE" not in terminal_env
     assert terminal_env.pop("TERM") == "xterm-256color"
-    # The shell marks its prompts and reads no key bindings or history from the workspace.
-    assert terminal_env.pop("PROMPT_COMMAND") == PROMPT_COMMAND
-    assert (terminal_env.pop("INPUTRC"), terminal_env.pop("HISTFILE")) == ("/dev/null", "")
+    # The shell marks its prompts and keeps its prompt command from the commands it starts.
+    assert "PROMPT_COMMAND" not in terminal_env
     for name in ("TERM", "SHLVL", "_"):
         command_env.pop(name, None)
         terminal_env.pop(name, None)
@@ -223,7 +222,7 @@ class _Connection:
         self.closed = True
 
 
-async def test_keys_judged_before_the_input_connection_ended_are_not_typed_on_its_successor() -> None:
+async def test_a_run_after_the_input_connection_ended_is_not_typed_on_its_successor() -> None:
     """The runner may not have read what a connection it ended carried last, however late the primary notices."""
     connections: list[_Connection] = []
 
@@ -231,17 +230,21 @@ async def test_keys_judged_before_the_input_connection_ended_are_not_typed_on_it
         connections.append(_Connection())
         return connections[-1], connections[-1]
 
-    line = terminal_line(("worker", "code", "/workspace"), "terminal", opened=True)
+    line = terminal_line("owner", "terminal", opened=True)
+    line.prompted(1)
     client_module._inputs.setdefault(line, client_module._TerminalInput())
     stream = TerminalStream(_Connection(), line, connect)  # type: ignore[arg-type]
-    await stream.send_input("rm -rf ")
-    judged = line.state()
+    # Had the runner read `abc` but not the Ctrl-C after it, the prompt after `sleep` would hold `abc`.
+    await stream.send_input("sleep 1\r")
+    await stream.send_input("abc\x03")
+    line.prompted(2)
+    assert line.empty
     connections[0].closed = True
     with pytest.raises(TerminalError) as refused:
-        await stream.send_input("tmp\r", judged=judged)
+        await stream.send_input("ls\r", empty_line=True)
 
     assert refused.value.status_code == 409
-    assert [frame["data"] for connection in connections for frame in connection.frames] == ["rm -rf "]
+    assert [frame["data"] for connection in connections for frame in connection.frames] == ["sleep 1\r", "abc\x03"]
 
 
 async def test_a_viewer_that_falls_too_far_behind_is_told_to_attach_again(

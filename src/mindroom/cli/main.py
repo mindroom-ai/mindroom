@@ -382,10 +382,7 @@ def _warn_if_dashboard_is_open_beyond_loopback(runtime_paths: RuntimePaths, api_
     if is_loopback_host(api_host) or dashboard_requires_credential(runtime_paths):
         return
     address_host = f"[{api_host}]" if ":" in api_host else api_host
-    warn_dashboard_without_key(
-        f"{address_host}:{api_port}",
-        f"Set MINDROOM_API_KEY in {runtime_paths.env_path}, or pass --api-host 127.0.0.1.",
-    )
+    warn_dashboard_without_key(f"{address_host}:{api_port}", runtime_paths.env_path, ", or pass --api-host 127.0.0.1.")
 
 
 @avatars_app.command("generate")

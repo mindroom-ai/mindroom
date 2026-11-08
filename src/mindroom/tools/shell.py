@@ -437,14 +437,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             Not a function the agent calls: the sandbox runner starts it in a pty beside the commands it runs. It
             reads no startup files, so it starts with exactly that environment. ``process_environ`` is the
             environment of the process a command runs from there, None for this one's.
-
-            🔒 The primary judges typing as the line it enters (``mindroom.terminal.lines``), so the shell marks each
-            prompt, expands no ``!`` history, and reads neither key bindings nor history that worker code wrote.
+            The shell marks each prompt, which ``terminal_run`` waits for (``mindroom.terminal.lines``).
             """
             env = self._command_env(process_environ)
-            env.update(TERM="xterm-256color", PROMPT_COMMAND=PROMPT_COMMAND, INPUTRC="/dev/null", HISTFILE="")
+            env.update(TERM="xterm-256color", PROMPT_COMMAND=PROMPT_COMMAND)
             return TerminalLaunch(
-                argv=("bash", "--noprofile", "--norc", "+H", "-i"),
+                argv=("bash", "--noprofile", "--norc", "-i"),
                 env=env,
                 cwd=_terminal_cwd(self.base_dir, cwd),
             )

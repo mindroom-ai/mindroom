@@ -32,7 +32,7 @@ from mindroom.approval.continuation_rules import (
     continuation_facts,
     next_step,
 )
-from mindroom.approval.execution import AgentApprovalExecution
+from mindroom.approval.execution import AgentApprovalExecution, continuation_model
 from mindroom.approval.failure import (
     cancelled_failure,
     prepare_approval_failure,
@@ -117,7 +117,6 @@ from mindroom.reply_turn.request import (
     merge_response_extra_content,
     reply_authorization_entity_names,
     response_typing_indicator,
-    response_typing_log_context,
 )
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
@@ -125,7 +124,6 @@ from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import body_without_tool_markers
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -249,7 +247,6 @@ class ApprovalContinuationRunner:
         self._approval_execution = AgentApprovalExecution(
             config=lambda: self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            client=self.locked.client,
             knowledge_access=self.deps.knowledge_access,
             refresh_scheduler=self.locked.knowledge_refresh_scheduler,
         )
@@ -1204,12 +1201,8 @@ class ApprovalContinuationRunner:
         )
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
-            if continuation.entity_kind == "team":
-                async with response_typing_indicator(
-                    self.locked.client(),
-                    request,
-                    response_run_id=continuation.run_id,
-                ):
+            async with response_typing_indicator(self.locked.client(), request, response_run_id=continuation.run_id):
+                if continuation.entity_kind == "team":
                     with tool_runtime_context(tool_context):
                         result = await continue_paused_team_run(
                             member_names=continuation.team_member_names,
@@ -1221,16 +1214,10 @@ class ApprovalContinuationRunner:
                             run_id=continuation.run_id,
                             user_id=continuation.requester_id,
                             configured_team_name=continuation.entity_name,
-                            model_name=resolve_turn_model(
+                            model_name=continuation_model(
                                 self.deps.runtime.config,
                                 self.deps.runtime_paths,
-                                ModelScope(
-                                    entity=continuation.entity_name,
-                                    room_id=continuation.room_id,
-                                    thread_id=continuation.thread_id,
-                                    explicit=continuation.runtime_model_name,
-                                ),
-                                None,
+                                continuation,
                             ).model_name,
                             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
                             member_model_names=dict(continuation.team_member_model_names) or None,
@@ -1242,20 +1229,18 @@ class ApprovalContinuationRunner:
                             tool_trace_collector=tool_trace_collector,
                             progress=progress,
                             system_enrichment_items=system_enrichment_items,
+                            quiet=request.quiet,
                         )
-            else:
-                result = await self._approval_execution.continue_run(
-                    continuation,
-                    paused_answer=paused_answer,
-                    tool_context=tool_context,
-                    tool_trace_collector=tool_trace_collector,
-                    typing_log_context=response_typing_log_context(
-                        request,
-                        response_run_id=continuation.run_id,
-                    ),
-                    progress=progress,
-                    system_enrichment_items=system_enrichment_items,
-                )
+                else:
+                    result = await self._approval_execution.continue_run(
+                        continuation,
+                        paused_answer=paused_answer,
+                        tool_context=tool_context,
+                        tool_trace_collector=tool_trace_collector,
+                        progress=progress,
+                        system_enrichment_items=system_enrichment_items,
+                        quiet=request.quiet,
+                    )
         return result
 
     async def run_owned_approvals(

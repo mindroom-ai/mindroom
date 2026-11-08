@@ -66,6 +66,7 @@ from tests.identity_helpers import entity_ids
 from tests.journal_helpers import membership_position
 from tests.journal_membership_helpers import admit_room_membership
 from tests.runtime_fakes import ready_runtime
+from tests.test_listed_rooms import PARENT, _create, _parent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -179,7 +180,7 @@ def _router_room_lifecycle(
         BotRoomLifecycleDeps(
             agent_name=ROUTER_AGENT_NAME,
             agent_user=_router_user(),
-            runtime=SimpleNamespace(client=client, config=config),
+            runtime=SimpleNamespace(client=client, config=config, agent_reply_memberships=MagicMock()),
             runtime_paths=runtime_paths,
             continuity_store=SyncContinuityStore(runtime_paths.storage_root, ROUTER_AGENT_NAME),
             get_logger=lambda: get_logger("tests.room_invites"),
@@ -962,6 +963,63 @@ async def test_router_joins_a_personal_room_without_its_welcome(
     join_room.assert_awaited_once_with(bot.client, "!personal:localhost")
     welcome_message.assert_not_awaited()
     assert bot._room_lifecycle.invited_room_ids() == {"!personal:localhost"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("room_state", "above_state", "welcomed"),
+    [
+        pytest.param([_create(), _parent(PARENT)], [_create()], False, id="under-a-chat-room"),
+        pytest.param([_create(), _parent(PARENT)], [_create("m.space")], True, id="under-a-space"),
+        pytest.param([_create(), _parent(PARENT, canonical=False)], [_create()], True, id="non-canonical-parent"),
+        pytest.param([_create(), _parent(PARENT, via=())], [_create()], True, id="parent-without-via"),
+        pytest.param([_create(), _parent(PARENT)], None, True, id="unreadable-parent"),
+        pytest.param(None, [_create()], True, id="unreadable-room"),
+        pytest.param([_create()], [_create()], True, id="plain-room"),
+    ],
+)
+async def test_router_welcomes_an_invited_room_unless_it_is_under_a_chat_room(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    room_state: list[dict[str, object]] | None,
+    above_state: list[dict[str, object]] | None,
+    welcomed: bool,
+) -> None:
+    """A room under a chat room continues its conversation, so the router greets it only when its parent is no chat room."""
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    invite = _current_invite("!under:localhost", "@alice:localhost")
+    lifecycle = _router_room_lifecycle(config, invite, AsyncMock(return_value=True))
+    states = {"!under:localhost": room_state, PARENT: above_state}
+
+    async def room_get_state(room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        events = states[room_id]
+        if events is None:
+            return nio.RoomGetStateError("unreadable", "M_FORBIDDEN")
+        return nio.RoomGetStateResponse(events=events, room_id=room_id)
+
+    async def room_get_state_event(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        for event in states[room_id] or []:
+            if event["type"] == event_type and event["state_key"] == state_key:
+                return nio.RoomGetStateEventResponse(event["content"], event_type, state_key, room_id)
+        return nio.RoomGetStateEventError("unreadable", "M_FORBIDDEN")
+
+    client = lifecycle.deps.runtime.client
+    client.room_get_state = AsyncMock(side_effect=room_get_state)
+    client.room_get_state_event = AsyncMock(side_effect=room_get_state_event)
+    welcome_message = AsyncMock(return_value=True)
+    monkeypatch.setattr(lifecycle, "send_welcome_message_if_empty", welcome_message)
+
+    await lifecycle._handle_recorded_invite(invite, "@alice:localhost")
+
+    if welcomed:
+        welcome_message.assert_awaited_once_with("!under:localhost", "@alice:localhost")
+    else:
+        welcome_message.assert_not_awaited()
+    assert lifecycle.invited_room_ids() == {"!under:localhost"}
 
 
 @pytest.mark.asyncio

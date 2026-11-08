@@ -110,6 +110,7 @@ Router judgments share the process-wide limit and logging described in [Judgment
 ## Welcome Messages
 
 After accepting an invitation into a room with no message history, the router posts a welcome if the inviter has router access, listing the agents and teams the inviter may address, how to mention them, and a quick command reference.
+It posts none when that room's canonical `m.space.parent` is a chat room it can read, such as one it is in, rather than a Space, since the room continues the conversation of the [room above](../rooms.md#rooms-under-a-room).
 At startup, empty configured rooms get a welcome listing their configured responders.
 Send [`!hi`](../chat-commands.md#hi) to see the welcome again, limited to responders visible to you.
 

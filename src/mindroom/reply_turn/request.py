@@ -148,7 +148,7 @@ def correlation_id_for_request(request: ResponseRequest) -> str:
     return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
 
 
-def response_typing_log_context(
+def _response_typing_log_context(
     request: ResponseRequest,
     *,
     response_run_id: str | None,
@@ -184,7 +184,7 @@ async def response_typing_indicator(
         async with typing_indicator(
             client,
             request.room_id,
-            log_context=response_typing_log_context(request, response_run_id=response_run_id),
+            log_context=_response_typing_log_context(request, response_run_id=response_run_id),
         ):
             yield
 

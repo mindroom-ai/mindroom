@@ -16,7 +16,7 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
   An agent whose shell runs in the primary therefore has no terminal, and the toolkit offers it no function; a terminal host in the primary would be a separate decision.
 - A terminal opens from the request a shell call of the agent's shell toolkit would send, prepared by the same runner code as `/execute`, so its environment, workspace, `PATH`, and the call's own environment changes are the ones the agent's commands get.
   `tests/terminal/test_worker_terminals.py` compares the two environments in both runner execution modes.
-- The shell is `bash --noprofile --norc +H -i` with `INPUTRC=/dev/null` and `HISTFILE=`: it reads no startup files, as the Bash that runs a shell command string reads none, so opening a terminal runs nothing that worker code wrote into the workspace's `~/.bashrc` or `~/.profile`, and it expands no `!` history and reads no key bindings or history file, which worker code could write to change what a judged line runs.
+- The shell is `bash --noprofile --norc -i`: it reads no startup files, as the Bash that runs a shell command string reads none, so opening a terminal runs nothing that worker code wrote into the workspace's `~/.bashrc` or `~/.profile`.
 - Input and resize travel only on a websocket the runner serves its viewers, so there is no second input path to keep consistent with it.
 - Opening a terminal starts the agent's dedicated worker, as a shell call does; listing, attaching, and closing only look the worker up, so a stopped worker has no terminals and nothing starts one to answer.
   An attached viewer marks the worker used every minute, so the worker is not stopped as idle while someone watches it.
@@ -27,24 +27,29 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 - A terminal's shell never starts with a response's CLI grant: the shell outlives the response, while the grant is only for that response's commands.
   `WorkerTerminals.open` builds its request with the grant unbound rather than removing the grant's names afterwards, so the call's other environment changes stay exactly as a shell call gets them.
 
-## How typing is judged
+## Agent typing
 
-`run_shell_command`'s approval rules judge the toolkit's typing through approval aliases: `terminal_open` as a shell no argument describes, `terminal_run` as its command, which it types only on an empty line at the shell's prompt, so the command is all it runs, and `terminal_send` as the command its final Enter runs, joined to what the terminal's line held before; keys after an Enter make the judgment unknown, because what that Enter runs may read them, as `read -n` does.
-An alias's judge reads only the call's arguments, so the line comes from trusted preparation before approval (`ToolFunction.prepare_approval`, applied where the model loop plans a gated call), which adds the line's revision and text to the stored arguments that the approval card shows and the run receives.
-The run types only while the line still has that revision and text, so keys approved for one line never land on another, a command approved before someone typed in the terminal, such as a `cd`, does not run after it, and a path that skips the preparation and claims a line it does not have is refused.
-Without a line, as through the agent CLI, a script, or a scheduled call, which resume or run the call with the arguments it was sent with, the judge cannot tell what an Enter runs, so the rules ask whenever they may.
+An agent types into terminals only while its `run_shell_command` calls never ask for approval, and its typing functions refuse otherwise; the refusal is the functions' own answer, so it holds on every path a call takes, the model loop, the agent CLI, scheduled calls, and scripts alike.
+Approval rules judge a command's text, and what text typed into a persistent shell runs depends on what ran in it before: aliases and functions defined earlier, history expansion and other shell options, a shell started inside, and a program reading the keys instead of the shell.
 
-- The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`; the line is what was typed since its last Enter or Ctrl-C.
-  It sends all of a terminal's input on one connection, which it opens while anyone watches and closes with the last viewer, because the runner applies input from separate connections in no promised order, and a keystroke recorded before a judged call could otherwise reach the shell after it, onto the line that call was judged against.
-  When the runner has ended the input connection, the next send leaves the line unknown before it checks the line it was judged against, since what the old connection carried last may not have arrived.
-  Records are keyed by the worker, agent and workspace the shell stand-ins name, because preparation runs synchronously in the model loop and cannot look the worker up.
+- Rejected: judging typing through approval aliases as the command its Enter runs, from a record of the terminal's line prepared before approval and checked at the run.
+  Seven review rounds each found another way the shell ran something other than the judged text, so a sound version would have to model the shell itself.
+- Rejected: asking before every typing call of a restricted agent, because the card would show text whose effect neither the rules nor the approver can read from it, and an operator's rule for `run_shell_command` would become a card for the same commands through another function.
+- People who may type keep typing whatever the agent's rules say, because their typing is their own and passes no approval.
+
+## The line record
+
+- The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`, so `terminal_run` types only at an empty prompt and knows which prompt ends its command.
+  It sends all of a terminal's input on one connection, which it opens while anyone watches and closes with the last viewer, because the runner applies input from separate connections in no promised order, and a keystroke recorded before a run could otherwise reach the shell after it and join the command.
+  When the runner has ended the input connection, the next send counts the line as holding typing, since what the old connection carried last may not have arrived.
 - The shell's prompt command prints an OSC 133 `D` mark with the last exit status and a prompt counter before each prompt, and the primary reads the marks from any stream attached to the terminal.
   The counter lets marks replayed with the scrollback count once, and the exit status is what `terminal_run` reports.
-- After an Enter or a Ctrl-C the line is unknown until the shell's next prompt, because a running command or a continuation reads what is typed meanwhile, and Ctrl-C drops unread typing, so the shell may lose part of keys typed right after it, and keys it reads first can keep it from printing that prompt; typing before that prompt leaves it unknown there, and a Ctrl-C at that prompt empties it.
+  The prompt command removes itself from the environment of what the shell starts, because a shell started inside would print marks counting from 1 again; until it exits, the line waits for a prompt.
+- After an Enter or a Ctrl-C the shell is busy until its next prompt, because a running command or a continuation reads what is typed meanwhile; that prompt's line holds what was typed while busy, unless a Ctrl-C dropped it, and keys the shell reads first can keep it from printing that prompt.
   The line counts the prompts the shell owes, one after each Enter or Ctrl-C at the prompt, so a prompt owed from before a command, such as the one after a Ctrl-C, never ends that command.
-  `terminal_send` refuses keys after a Ctrl-C in the same send, and `terminal_run` types only once the shell prompts after it, which a person's keystroke landing just before can keep it from doing, so the agent sends another Ctrl-C.
-- Keys that edit the line, recall history, complete, or move the cursor make it unknown, and so does a send that may not have arrived and a terminal the primary did not see open, such as after a primary restart.
-- Limitations: rules judge text, so state a terminal keeps, such as aliases, functions, and variables typed earlier, is invisible to them, as with any shell command string; output a program prints, such as a file it shows, can carry forged prompt marks, which can end a command early in the line's record, so keys meant for that program are judged as shell text, or make the record ignore later prompts, so `terminal_run` refuses until the terminal is replaced; after a primary restart a replayed mark can make the line look like a prompt while a program that ignores Ctrl-C reads the keys.
+  `terminal_send` refuses keys after a Ctrl-C in the same send, since the terminal may drop part of them, and `terminal_run` types only once the shell prompts after it, which a person's keystroke landing just before can keep it from doing, so the agent sends another Ctrl-C.
+- Any other key at the prompt leaves the line holding typing until an Enter or a Ctrl-C, and so does a send that may not have arrived and a terminal the primary did not see open, such as after a primary restart.
+- Limitations: output a program prints, such as a file it shows, can carry forged prompt marks, which can end a command early in the record, so `terminal_run` types while that program reads the keys, or make the record ignore later prompts, so `terminal_run` refuses until the terminal is replaced.
 
 ## Chat client routes
 

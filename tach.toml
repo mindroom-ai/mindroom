@@ -1328,7 +1328,6 @@ depends_on = [
     "mindroom.delegation.execution",
     "mindroom.history.session_context",
     "mindroom.llm",
-    "mindroom.matrix.typing",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_jobs.consumption",
@@ -1471,7 +1470,6 @@ depends_on = [
     "mindroom.teams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
-    "mindroom.turn_model",
     "mindroom.interactive",
     "mindroom.reply_turn.request",
     "mindroom.reply_turn.enrichment",
@@ -4121,7 +4119,7 @@ depends_on = [
     "mindroom.cancellation",
     "mindroom.matrix.client_session",
 ]
-visibility = ["mindroom.approval.execution", "mindroom.reply_turn.request"]
+visibility = ["mindroom.reply_turn.request"]
 
 [[modules]]
 path = "mindroom.matrix.client_session"

@@ -97,6 +97,7 @@ async def test_team_approval_finalizes_consumption_after_member_assembly_fails(t
             show_tool_calls=True,
             tool_trace_collector=[],
             system_enrichment_items=(),
+            quiet=False,
         )
 
     assert finalized == [True]

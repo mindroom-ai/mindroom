@@ -2891,7 +2891,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             paused_answer=PausedAnswer(),
             tool_context=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
             system_enrichment_items=(),
         )
