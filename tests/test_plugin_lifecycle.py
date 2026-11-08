@@ -22,7 +22,7 @@ from structlog.testing import capture_logs
 from mindroom import plugin_lifecycle
 from mindroom.config.main import Config
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED
-from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, plugin_change_paths
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.plugin_check import check_plugin
 from mindroom.plugin_lifecycle import PluginLifespans
@@ -32,10 +32,15 @@ from mindroom.tool_system.plugins import (
     config_plugins,
     dispose_plugins,
     prepare_plugins,
-    publish_plugins,
     refresh_plugins,
 )
-from tests.conftest import _TEST_PROBE_PREFIX, bind_runtime_paths, cached_plugin_module, test_runtime_paths
+from tests.conftest import (
+    _TEST_PROBE_PREFIX,
+    bind_runtime_paths,
+    cached_plugin_module,
+    publish_test_plugins,
+    test_runtime_paths,
+)
 from tests.test_plugin_routes import _app, _write_plugin
 
 if TYPE_CHECKING:
@@ -158,16 +163,22 @@ def _config(runtime_paths: RuntimePaths, *names: str, settings: dict[str, Any] |
     return bind_runtime_paths(Config(plugins=plugins), runtime_paths)
 
 
-async def _publish(lifespans: PluginLifespans, config: Config, runtime_paths: RuntimePaths) -> None:
-    """Load and publish ``config``'s plugins as the primary commits them, then run their lifespans."""
-    generation = prepare_plugins(config, runtime_paths)
-    publish_plugins(generation)
+def _lifespans(tmp_path: Path, *names: str, settings: dict[str, Any] | None = None) -> tuple[Config, PluginLifespans]:
+    """Return a config enabling the plugins ``names``, and the lifespans of a runtime serving it."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _config(runtime_paths, *names, settings=settings)
+    return config, PluginLifespans(runtime_paths, lambda: config)
+
+
+async def _publish(lifespans: PluginLifespans) -> None:
+    """Load and publish the served config's plugins as the primary commits them, then run their lifespans."""
+    publish_test_plugins(lifespans.current_config(), lifespans.runtime_paths)
     await lifespans.apply_published()
 
 
-async def _apply_plugin_change(orchestrator: _MultiAgentOrchestrator, current: Config, new: Config) -> None:
-    """Apply a config reload from ``current`` to ``new`` that changes only plugin entries."""
-    plan = ConfigUpdatePlan(new_config=new, plugin_changes=tuple(entry.path for entry in current.plugins))
+async def _apply_config_change(orchestrator: _MultiAgentOrchestrator, current: Config, new: Config) -> None:
+    """Apply a config reload from ``current`` to ``new`` that changes nothing but plugin entries, if those."""
+    plan = ConfigUpdatePlan(new_config=new, plugin_changes=plugin_change_paths(current, new))
     with (
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
@@ -183,8 +194,8 @@ async def test_a_lifespan_runs_only_once_the_primary_publishes_its_plugin(tmp_pa
     """
     probe = _probe()
     root = _write(tmp_path, probe, "demo", tools=TOOLS)
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo", settings={"greeting": "hi"})
+    config, lifespans = _lifespans(tmp_path, "demo", settings={"greeting": "hi"})
+    runtime_paths = lifespans.runtime_paths
 
     check_plugin(root)
     dispose_plugins(prepare_plugins(config, runtime_paths))
@@ -194,11 +205,10 @@ async def test_a_lifespan_runs_only_once_the_primary_publishes_its_plugin(tmp_pa
     assert probe.events == []
     assert probe.imports == [("demo", 1), ("demo", 1)]
 
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
-    await _publish(lifespans, config, runtime_paths)
+    await _publish(lifespans)
     await lifespans.stop()
     # A publication that comes after the shutdown stop starts nothing.
-    await _publish(lifespans, config, runtime_paths)
+    await _publish(lifespans)
 
     assert probe.events == [
         ("start", "demo", 1, None, {"greeting": "hi"}),
@@ -216,16 +226,14 @@ async def test_an_old_lifespan_no_new_one_took_over_from_stops_as_disabled(tmp_p
     probe = _probe()
     probe.phase = "start"
     _write(tmp_path, probe, "demo")
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
-    await _publish(lifespans, config, runtime_paths)
+    _, lifespans = _lifespans(tmp_path, "demo")
+    await _publish(lifespans)
 
     if change == "start-raises":
         _write(tmp_path, probe, "demo", 2, lifecycle=RAISING)
     else:
         _write_plugin(tmp_path, None, name="demo")
-    await _publish(lifespans, config, runtime_paths)
+    await _publish(lifespans)
     await lifespans.stop()
 
     assert probe.events[1:] == [("stop", "demo", 1, "disabled")]
@@ -249,12 +257,10 @@ async def lifespan(lifecycle):
     probe = _probe()
     probe.turn = contextvars.ContextVar("turn", default=None)
     _write(tmp_path, probe, "demo", lifecycle=lifecycle)
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
+    _, lifespans = _lifespans(tmp_path, "demo")
 
     probe.turn.set("!reload-plugins")
-    await _publish(lifespans, config, runtime_paths)
+    await _publish(lifespans)
     await lifespans.stop()
 
     assert probe.events == [None]
@@ -282,11 +288,9 @@ async def lifespan(lifecycle):
     probe.starting = asyncio.Event()
     probe.gate = asyncio.Event()
     _write(tmp_path, probe, "demo", lifecycle=lifecycle)
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
+    _, lifespans = _lifespans(tmp_path, "demo")
 
-    publication = asyncio.create_task(_publish(lifespans, config, runtime_paths))
+    publication = asyncio.create_task(_publish(lifespans))
     await probe.starting.wait()
     publication.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -334,15 +338,11 @@ async def test_the_runtime_runs_each_plugins_lifespan_from_startup_through_reloa
         probe.events.clear()
         # A config reload that leaves plugins: as they are restarts no lifespan.
         same_plugins = _config(runtime_paths, "kept", "dropped", settings={"greeting": "hi"})
-        with (
-            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        ):
-            await orchestrator._apply_config_update_plan(config, ConfigUpdatePlan(new_config=same_plugins))
+        await _apply_config_change(orchestrator, config, same_plugins)
         assert probe.events == []
 
         new_config = _config(runtime_paths, "kept", settings={"greeting": "hello"})
-        await _apply_plugin_change(orchestrator, same_plugins, new_config)
+        await _apply_config_change(orchestrator, same_plugins, new_config)
         assert probe.events == [
             ("start", "kept", 2, 2, {"greeting": "hello"}),
             ("stop", "kept", 2, "reload"),
@@ -385,15 +385,13 @@ async def lifespan(lifecycle):
 """
     probe = _probe()
     root = _write(tmp_path, probe, "demo", lifecycle=lifecycle)
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
+    _, lifespans = _lifespans(tmp_path, "demo")
 
-    await _publish(lifespans, config, runtime_paths)
+    await _publish(lifespans)
     module = cached_plugin_module((root / "lifecycle.py").resolve())
     ticker, [worker], other = module.STATE["ticker"], module.WORKERS, module.OTHER["task"]
     try:
-        await _publish(lifespans, config, runtime_paths)
+        await _publish(lifespans)
         await asyncio.sleep(0)
 
         assert other.cancelled()
@@ -511,14 +509,12 @@ async def test_a_lifespan_that_raises_or_hangs_is_logged_and_bounded(
     probe.phase = phase
     probe.release = asyncio.Event()
     _write(tmp_path, probe, "demo", lifecycle=lifecycle)
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
+    _, lifespans = _lifespans(tmp_path, "demo")
 
     try:
         with capture_logs() as logs:
             async with asyncio.timeout(5):
-                await _publish(lifespans, config, runtime_paths)
+                await _publish(lifespans)
                 await lifespans.stop()
     finally:
         probe.release.set()
@@ -527,7 +523,7 @@ async def test_a_lifespan_that_raises_or_hangs_is_logged_and_bounded(
 
     assert probe.events == []
     errors = [log for log in logs if log["log_level"] == "error"]
-    event = {"start": "Plugin lifespan failed to start", "stop": "Plugin lifespan failed to stop"}[phase]
+    event = f"Plugin lifespan failed to {phase}"
     assert [(log["event"], log["plugin_name"]) for log in errors] == [(event, "demo")]
     if failure in {"raises", "cancelled"}:
         assert errors[0]["exc_info"] is True
@@ -556,18 +552,16 @@ async def test_a_broken_lifespan_costs_the_plugin_only_its_lifespan(
     probe = _probe()
     probe.phase = "start"
     _write(tmp_path, probe, "demo", lifecycle=lifecycle, routes=ROUTES, tools=TOOLS)
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
+    config, lifespans = _lifespans(tmp_path, "demo")
 
     with capture_logs() as logs:
-        await _publish(lifespans, config, runtime_paths)
+        await _publish(lifespans)
     await lifespans.stop()
 
-    plugins = config_plugins(config, runtime_paths)
+    plugins = config_plugins(config, lifespans.runtime_paths)
     assert "demo_lifecycle_tool" in plugins.tools
     assert len(plugins.hooks.hooks_for(EVENT_MESSAGE_RECEIVED)) == 1
-    assert TestClient(_app(config, runtime_paths)).get("/api/plugins/demo/ping").json() == {"version": 1}
+    assert TestClient(_app(config, lifespans.runtime_paths)).get("/api/plugins/demo/ping").json() == {"version": 1}
     if error is not None:
         [warning] = [
             log for log in logs if log["event"] == "Plugin lifecycle module failed to load; running no lifespan"
@@ -588,7 +582,8 @@ def test_plugin_check_fails_on_a_broken_lifecycle_module(tmp_path: Path, lifecyc
         check_plugin(root)
 
 
-def test_the_plugins_other_modules_share_the_lifecycle_module_its_lifespan_runs_in(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_the_plugins_other_modules_share_the_lifecycle_module_its_lifespan_runs_in(tmp_path: Path) -> None:
     """Routes and tools that import the lifecycle module see what its lifespan set up."""
     lifecycle = """
 from contextlib import asynccontextmanager
@@ -621,17 +616,13 @@ async def client() -> dict:
         routes=routes,
         tools="from .lifecycle import STATE\n",
     )
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
+    config, lifespans = _lifespans(tmp_path, "demo")
+    await _publish(lifespans)
+    await lifespans.stop()
 
-    async def publish_and_stop() -> None:
-        await _publish(lifespans, config, runtime_paths)
-        await lifespans.stop()
-
-    asyncio.run(publish_and_stop())
-
-    assert TestClient(_app(config, runtime_paths)).get("/api/plugins/demo/client").json() == {"client": "open"}
+    assert TestClient(_app(config, lifespans.runtime_paths)).get("/api/plugins/demo/client").json() == {
+        "client": "open",
+    }
     lifecycle_module = cached_plugin_module((root / "lifecycle.py").resolve())
     assert cached_plugin_module((root / "tools.py").resolve()).STATE is lifecycle_module.STATE
 
@@ -698,7 +689,7 @@ async def test_a_reload_closes_the_replaced_plugins_websockets_so_clients_reconn
 
             websocket = await client.ws_connect(f"{base}/demo/live")
             assert await websocket.receive_str(timeout=5) == "v2"
-            await _apply_plugin_change(orchestrator, config, _config(runtime_paths, "other"))
+            await _apply_config_change(orchestrator, config, _config(runtime_paths, "other"))
             assert await _closed_with(websocket) == 1012
             async with client.get(f"{base.replace('ws://', 'http://')}/demo/ping") as response:
                 assert response.status == 404
@@ -738,11 +729,9 @@ async def test_a_websocket_that_cannot_close_holds_up_no_reload(
     monkeypatch.setattr(plugin_lifecycle, "_LIFESPAN_DEADLINE_SECONDS", 0.5)
     probe = _probe()
     _write(tmp_path, probe, "demo", routes=ROUTES)
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _config(runtime_paths, "demo")
-    lifespans = PluginLifespans(runtime_paths, lambda: config)
-    await _publish(lifespans, config, runtime_paths)
-    [plugin] = config_plugins(config, runtime_paths).loaded_plugins
+    config, lifespans = _lifespans(tmp_path, "demo")
+    await _publish(lifespans)
+    [plugin] = config_plugins(config, lifespans.runtime_paths).loaded_plugins
     received: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     received.put_nowait({"type": "websocket.connect"})
     sent: list[str] = []
@@ -751,10 +740,10 @@ async def test_a_websocket_that_cannot_close_holds_up_no_reload(
     async def send(message: dict[str, Any]) -> None:
         sent.append(message["type"])
         accepted.set()
-        if message["type"] == "websocket.close" and server == "stalls":
-            # The server waits for the client to read before it writes anything more.
-            await asyncio.Event().wait()
         if message["type"] == "websocket.close":
+            if server == "stalls":
+                # The server waits for the client to read before it writes anything more.
+                await asyncio.Event().wait()
             msg = "Expected ASGI message 'websocket.send' or 'websocket.close', but got 'websocket.close'."
             raise RuntimeError(msg)
 
@@ -768,7 +757,7 @@ async def test_a_websocket_that_cannot_close_holds_up_no_reload(
             await connection
         sent.clear()
         async with asyncio.timeout(5):
-            await _publish(lifespans, config, runtime_paths)
+            await _publish(lifespans)
     finally:
         connection.cancel()
         await asyncio.gather(connection, return_exceptions=True)

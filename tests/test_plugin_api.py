@@ -605,7 +605,8 @@ def test_each_exported_constant_keeps_its_value() -> None:
 def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
     """MindRoom ignores unknown manifest fields, so renaming a documented one would silently drop it from every plugin."""
     root = tmp_path.resolve()
-    for module in ("tools.py", "oauth.py", "hooks.py", "routes.py", "lifecycle.py"):
+    module_files = ("tools.py", "oauth.py", "hooks.py", "routes.py", "lifecycle.py")
+    for module in module_files:
         (root / module).touch()
     (root / "skills").mkdir()
     (root / "mindroom.plugin.json").write_text(json.dumps(_MANIFEST))
@@ -622,9 +623,7 @@ def test_each_documented_manifest_field_is_read(tmp_path: Path) -> None:
         plugin.lifecycle_module_path,
     )
     assert plugin.name == "demo"
-    assert modules == tuple(
-        root / module for module in ("tools.py", "oauth.py", "hooks.py", "routes.py", "lifecycle.py")
-    )
+    assert modules == tuple(root / module for module in module_files)
     assert (plugin.skill_dirs, plugin.reserved_namespaces) == ([root / "skills"], ("com.example.demo.",))
     with pytest.raises(plugin_imports.PluginValidationError, match=r"needs plugin API 1\.999"):
         plugin_imports._load_plugin_base(root / "later")
