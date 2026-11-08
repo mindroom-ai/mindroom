@@ -23,7 +23,7 @@ from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import configured_primary_worker_manager_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -40,6 +40,7 @@ async def _authorize_computer(
     runtime_paths: RuntimePaths,
     client: nio.AsyncClient,
     memberships: AgentReplyMembershipIndex,
+    refresh_memberships: Callable[[], Awaitable[None]],
 ) -> ComputerTarget:
     """Require exact live room membership, responder access, and ordinary browser routing."""
 
@@ -57,8 +58,8 @@ async def _authorize_computer(
             joined_members,
             config=config,
             runtime_paths=runtime_paths,
-            client=client,
             memberships=memberships,
+            refresh_memberships=refresh_memberships,
         )
     except HTTPException as error:
         raise ComputerError(error.status_code, error.detail) from None
@@ -107,7 +108,7 @@ def _resolve_target(
     runtime_paths: RuntimePaths,
 ) -> ComputerTarget:
     _computer_browser_provider(name, config, runtime_paths)
-    identity = room_execution_identity(name, requester_id, room_id, runtime_paths)
+    identity = room_execution_identity(name, requester_id, room_id, config, runtime_paths)
     target = build_agent_toolkit_worker_target(
         "user_agent",
         name,
@@ -134,6 +135,7 @@ class ComputerRuntimeCoordinator:
 
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
+    refresh_agent_reply_memberships_when_needed: Callable[[], Awaitable[None]]
     api_enabled: bool = True
 
     def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:
@@ -159,6 +161,7 @@ class ComputerRuntimeCoordinator:
                 runtime_paths=self.runtime_paths,
                 client=router_bot.client,
                 memberships=self.agent_reply_memberships,
+                refresh_memberships=self.refresh_agent_reply_memberships_when_needed,
             )
 
         from mindroom.api import config_lifecycle, main  # noqa: PLC0415

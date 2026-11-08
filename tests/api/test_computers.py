@@ -628,7 +628,7 @@ def test_orchestrator_unbind_revokes_active_stream(gateway: Gateway, monkeypatch
     headers = {"Authorization": "Bearer " + session["session_token"]}
     ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
     paths = config_lifecycle.require_api_state(app).snapshot.runtime_paths
-    coordinator = ComputerRuntimeCoordinator(paths, AgentReplyMembershipIndex())
+    coordinator = ComputerRuntimeCoordinator(paths, AgentReplyMembershipIndex(), AsyncMock())
     with client.websocket_connect(
         path + "/stream",
         subprotocols=["binary", "mindroom-ticket." + ticket],

@@ -363,6 +363,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
             agent_reply_memberships=self.agent_reply_memberships,
+            refresh_agent_reply_memberships_when_needed=self.refresh_agent_reply_memberships_when_needed,
         )
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(api_enabled=self.api_enabled)
         self._call_transcripts_runtime = CallTranscriptsRuntimeCoordinator(
@@ -1070,6 +1071,14 @@ class _MultiAgentOrchestrator:
         self.turn_recovery.schedule()
         await self.agent_reply_membership_sync.apply_grant_change()
 
+    async def refresh_agent_reply_memberships_when_needed(self) -> None:
+        """Refresh room-backed reply grants as above when they need it, for an access check.
+
+        A refresh in flight serves instead of another, so every refresh runs once and with the runtime's follow-up.
+        """
+        membership_sync = self.agent_reply_membership_sync
+        await membership_sync.refresh_for_access_check(self.config, self.refresh_agent_reply_memberships)
+
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""
         configured = set(configured_entity_names(config))
@@ -1447,6 +1456,7 @@ class _MultiAgentOrchestrator:
         return EmbeddedRuntime(
             knowledge_refresh_scheduler=self.knowledge_refresh_scheduler,
             agent_reply_memberships=self.agent_reply_memberships,
+            refresh_agent_reply_memberships_when_needed=self.refresh_agent_reply_memberships_when_needed,
             response_admission_gate=self.response_admission_gate,
             budget_monitor=self.budgets,
             scheduled_tasks=self.scheduled_tasks,
