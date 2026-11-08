@@ -61,6 +61,13 @@ async def echo(websocket: WebSocket, room_id: str) -> None:
             await websocket.send_text(f"{user.user_id}: {text}")
 
 
+@router.websocket("/echo")
+async def echo_without_room(websocket: WebSocket) -> None:
+    async with client_stream(websocket) as user:
+        async for text in websocket.iter_text():
+            await websocket.send_text(f"{user.user_id}: {text}")
+
+
 @router.websocket("/waits")
 async def waits(websocket: WebSocket) -> None:
     # Waits on something other than the websocket, as a stream pushing server events does.
@@ -383,24 +390,50 @@ def test_a_stream_without_a_room_never_rechecks_membership(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only a stream given a room reads membership, also when it wakes for an expiry the wall clock then moves away."""
+    """Only a stream given a room reads membership, and one woken for an expiry the wall clock then moved stays open."""
     monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.01)
     store = _store(app)
     token = store.create(ALICE).token
     assert isinstance(store.clock, _Clock)
     store.clock.offset = 3600 - 0.3
 
-    with client.websocket_connect("/api/plugins/demo/waits", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
-        assert ws.receive_text() == ALICE
+    with client.websocket_connect("/api/plugins/demo/echo", _offers(token), headers={"origin": CLIENT_ORIGIN}) as ws:
         store.clock.offset = 0
         time.sleep(0.5)
-        assert _membership(app).calls == 0
+        ws.send_text("still here")
+        assert ws.receive_text() == f"{ALICE}: still here"
         store.revoke(token)
         with pytest.raises(WebSocketDisconnect) as closed:
             ws.receive_text()
 
     assert closed.value.code == 4401
     assert _membership(app).calls == 0
+
+
+def test_revoking_the_session_during_a_membership_recheck_closes_the_stream_at_once(
+    app: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recheck that is still waiting for its answer does not hold the revoked session's stream open."""
+    monkeypatch.setattr(plugin_http, "_MEMBERSHIP_RECHECK_SECONDS", 0.01)
+    token = _store(app).create(ALICE).token
+    membership = _membership(app)
+
+    with client.websocket_connect(_echo_path(), _offers(token), headers={"origin": CLIENT_ORIGIN}) as websocket:
+        websocket.send_text("hi")
+        assert websocket.receive_text() == f"{ALICE}: hi"
+        membership.hang = True
+        calls = membership.calls
+        while membership.calls == calls:
+            time.sleep(0.01)
+        started = time.monotonic()
+        _store(app).revoke(token)
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_text()
+
+    assert closed.value.code == 4401
+    assert time.monotonic() - started < 5
 
 
 def test_a_blocks_own_timeout_reaches_the_route(app: FastAPI, client: TestClient) -> None:

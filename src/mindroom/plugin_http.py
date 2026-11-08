@@ -111,19 +111,33 @@ async def client_stream(websocket: WebSocket, room_id: str | None = None) -> Asy
 
 async def _stream_end(websocket: WebSocket, session: ClientSession, room_id: str | None) -> tuple[int, str]:
     """Wait until the session ends or, given ``room_id``, a membership recheck fails; return the close code and reason."""
+    ends = [asyncio.create_task(_session_end(websocket, session))]
+    if room_id is not None:
+        ends.append(asyncio.create_task(_membership_end(websocket, session.user_id, room_id)))
+    try:
+        # A revocation must not wait for a membership recheck that is still running.
+        done, _ = await asyncio.wait(ends, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in ends:
+            task.cancel()
+    return done.pop().result()
+
+
+async def _session_end(websocket: WebSocket, session: ClientSession) -> tuple[int, str]:
     store = client_session_store(websocket.app)
-    while True:
-        wait = session.expires_at - store.clock()
+    while store.lookup(session.token) is not None:
         with suppress(TimeoutError):
-            async with asyncio.timeout(wait if room_id is None else min(wait, _MEMBERSHIP_RECHECK_SECONDS)):
+            async with asyncio.timeout(session.expires_at - store.clock()):
                 await session.revoked.wait()
-        if store.lookup(session.token) is None:
-            return _SESSION_ENDED_CLOSE_CODE, "Client session ended; sign in again."
-        if room_id is None:
-            continue
+    return _SESSION_ENDED_CLOSE_CODE, "Client session ended; sign in again."
+
+
+async def _membership_end(websocket: WebSocket, user_id: str, room_id: str) -> tuple[int, str]:
+    while True:
+        await asyncio.sleep(_MEMBERSHIP_RECHECK_SECONDS)
         try:
             async with asyncio.timeout(_MEMBERSHIP_RECHECK_TIMEOUT_SECONDS):
-                await _require_joined(websocket, session.user_id, room_id)
+                await _require_joined(websocket, user_id, room_id)
         except TimeoutError:
             return status.WS_1013_TRY_AGAIN_LATER, "Room membership lookup timed out; try again."
         except HTTPException as error:
