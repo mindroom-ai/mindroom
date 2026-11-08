@@ -969,33 +969,40 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest) -> None:
 @pytest.mark.usefixtures("echo_tool")
 @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
 @pytest.mark.parametrize(
-    "resumed",
+    ("resumed", "shown_calls"),
     [
-        pytest.param([answer("NO_REPLY")], id="resumed-run"),
+        pytest.param([answer("NO_REPLY")], "🔧 `echo` [1]", id="resumed-run"),
         # The resumed run switches the thread's model for this response, and the fresh attempt reports nothing.
         pytest.param(
             [
                 calls(tool_call("switch_thread_model", "call-2", model_name="default", when="after-toolcall")),
                 answer("NO_REPLY"),
             ],
+            "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
             id="fresh-attempt",
         ),
     ],
 )
-async def test_a_silent_schedule_that_reports_nothing_after_an_approval_shows_nothing(
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its_waiting_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streaming: bool,
     resumed: list[list[ScriptStep]],
+    shown_calls: str,
+    show_tool_calls: bool,
 ) -> None:
-    """Pins a silent schedule whose approved run reports nothing: its approval completes and its paused reply goes.
+    """Pins a silent schedule whose approved run reports nothing: its approval completes and its waiting message ends.
 
-    Every run the resume starts asks for quiet delivery, as the turn's own did, and nothing streams.
+    The message keeps what its pause showed, its calls finished, and never shows the no-report token; one that showed
+    only its placeholder ends with the nothing-to-show note. It stays, so the run stays in history. Every run the
+    resume starts asks for quiet delivery, as the turn's own did, and nothing streams.
     """
     turn = await _turn(
         tmp_path,
         monkeypatch,
         streaming=streaming,
+        show_tool_calls=show_tool_calls,
         tools=[_ECHO_TOOL, "thread_model"],
         scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), *resumed]},
     )
@@ -1005,9 +1012,10 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_shows_no
 
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.COMPLETED
-    # The pause's message is the only one written, and it goes.
-    assert turn.homeserver.statuses == ["pending"]
-    assert [call.args[1] for call in turn.bot.client.room_redact.await_args_list] == [reply.event_id]
+    # The pause's message is the only one, and its end is an edit of it.
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    assert turn.homeserver.bodies[-1] == (f"\n\n{shown_calls}" if show_tool_calls else "Done.")
+    assert turn.bot.client.room_redact.await_args_list == []
     assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
     assert not await turn.pending()
     _first, *after_pause = turn.models["default"].requests
@@ -1041,7 +1049,6 @@ async def test_a_resumed_answer_a_hook_suppresses_fails_its_approval(
 
     assert (await turn.reply()).state is rl.ReplyState.FAILED
     assert turn.homeserver.bodies[-1].endswith("Tool approval continuation failed safely.")
-    assert turn.bot.client.room_redact.await_args_list == []
 
 
 @pytest.mark.usefixtures("echo_tool")

@@ -382,18 +382,12 @@ class ApprovalStore(PrincipalRows):
         """
         return await self._write(_release_approval_continuation, approval_id, expected_generation=expected_generation)
 
-    async def finish_approval_continuation(
-        self,
-        approval_id: str,
-        *,
-        reported_nothing: bool = False,
-    ) -> tuple[PostCommitEffect, ...] | None:
+    async def finish_approval_continuation(self, approval_id: str) -> tuple[PostCommitEffect, ...] | None:
         """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply.
 
-        ``reported_nothing`` settles a resume that reported nothing instead, which writes no FINAL.
         Returns the work its commit left for afterwards, or ``None`` when the run is not ready to finish.
         """
-        return await self._write(_finish_approval_continuation, approval_id, reported_nothing=reported_nothing)
+        return await self._write(_finish_approval_continuation, approval_id)
 
     async def enqueue_unavailable_approval_notice(
         self,
@@ -571,10 +565,8 @@ def _finish_approval_continuation(
     transaction: Transaction,
     principal_id: str,
     approval_id: str,
-    *,
-    reported_nothing: bool,
 ) -> tuple[PostCommitEffect, ...] | None:
-    """Settle a paused run whose FINAL delivery ended, or whose resume reported nothing, and end its reply."""
+    """Settle a paused run whose FINAL delivery ended, and end its reply."""
     return _end_approval(
         transaction,
         principal_id,
@@ -583,14 +575,12 @@ def _finish_approval_continuation(
             transaction,
             principal_id,
             approval_id=approval_id,
-            reported_nothing=reported_nothing,
         ),
         end=lambda finishing: replies.approval_finished(
             transaction,
             principal_id,
             finishing,
             owner_available=True,
-            reported_nothing=reported_nothing,
         ),
     )
 

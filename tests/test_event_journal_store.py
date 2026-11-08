@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 import pytest_asyncio
 
-from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import (
     AdmissionResult,
     ApprovalCall,
@@ -7807,51 +7806,6 @@ class TestApprovalContinuations:
         assert await alice.approvals.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
-
-    @pytest.mark.parametrize("fenced", [False, True], ids=["claimed", "fenced"])
-    async def test_a_resume_that_reported_nothing_finishes_once_its_span_withheld_the_answer(
-        self,
-        alice: PrincipalStore,
-        fenced: bool,
-    ) -> None:
-        """With no FINAL, only a claimed run whose resume span ended withholding its answer finishes as reporting nothing.
-
-        A run whose approval already fails keeps failing.
-        """
-        await self.admit_sources(alice)
-        assert await paused_for_approval(alice, self.continuation()) is not None
-        claimed = await claim_continuation(alice, "approval-1", runtime_generation="runtime-a")
-        assert claimed is not None
-        assert claimed.claim_span_id is not None
-
-        # The resume still runs.
-        assert await alice.approvals.finish_approval_continuation("approval-1", reported_nothing=True) is None
-        resume = await alice.replies.span(claimed.claim_span_id)
-        assert resume is not None
-        withheld = await alice.replies.update(
-            resume.reply_id,
-            lambda reply: rl.suppress(reply, resume, reason="suppressed", now_ns=1),
-        )
-        assert withheld is not None
-        if fenced:
-            failure = ApprovalFailure(ApprovalFailureKind.INTERRUPTED)
-            assert await alice.approvals.request_approval_failure(
-                "approval-1",
-                failure,
-                expected_state="claimed",
-                expected_generation=claimed.generation,
-                expected_runtime_generation="runtime-a",
-            )
-            assert await alice.approvals.finish_approval_continuation("approval-1", reported_nothing=True) is None
-            assert await alice.is_pending("$source-1")
-            return
-
-        assert await alice.approvals.finish_approval_continuation("approval-1", reported_nothing=True) is not None
-        assert await alice.approvals.approval_continuation_for_source("$source-1") is None
-        assert not await alice.is_pending("$source-1")
-        reply = await alice.replies.load(resume.reply_id)
-        assert reply is not None
-        assert reply.state is ReplyState.COMPLETED
 
     async def test_release_hands_interrupted_sources_back_to_replay(self, alice: PrincipalStore) -> None:
         """A run a restart cut short gives its still-pending sources back to ordinary replay as a fresh attempt."""

@@ -283,11 +283,10 @@ def approval_finished(
     continuation: approval_continuations.ApprovalContinuation,
     *,
     owner_available: bool,
-    reported_nothing: bool = False,
 ) -> AppliedTransition:
     """Apply a finished continuation to the reply it paused, settling the sources its pause held.
 
-    Its turn stays unanswered when no owner is left to answer it; ``reported_nothing`` says its resume reported nothing.
+    Its turn stays unanswered when no owner is left to answer it.
     """
     reply = lock_paused_reply(transaction, principal_id, continuation)
     assert reply is not None, "a continuation's paused reply exists while the continuation does"
@@ -302,7 +301,6 @@ def approval_finished(
             paused_span_id=continuation.span_id,
             failure_kind=None if continuation.failure is None else continuation.failure.kind,
             answers_turn=owner_available,
-            reported_nothing=reported_nothing,
             now_ns=time.time_ns(),
         ),
     )

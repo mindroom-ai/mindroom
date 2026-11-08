@@ -55,6 +55,7 @@ from mindroom.final_delivery import (
     Owed,
     StreamTransportOutcome,
     Suppressed,
+    Suppression,
     hook_failure_reason,
 )
 from mindroom.logging_config import get_logger
@@ -1665,7 +1666,14 @@ class DeliveryGateway:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
         )
-        if suppression_reason is not None:
+        if suppression_reason is Suppression.SILENT_NO_REPORT and handle.span.kind is rl.SpanKind.APPROVAL_RESUME:
+            # A silent schedule's resumed answer that reports nothing ends the message its pause showed as it stands,
+            # completed, so its approval finishes. Removing that message would cut the run from history, and a pause
+            # that showed nothing but its placeholder ends with the fixed nothing-to-show note instead.
+            token = constants.SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
+            shown = "\n".join(line for line in draft.response_text.splitlines() if line.strip().casefold() != token)
+            draft.response_text = shown.rstrip() or note_segment(NoteKind.NOTHING_TO_SHOW).text
+        elif suppression_reason is not None:
             self.deps.logger.info(
                 "Response suppressed",
                 response_kind=request.identity.response_kind,

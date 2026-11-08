@@ -1369,10 +1369,10 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
     committing = asyncio.Event()
     finish = ApprovalStore.finish_approval_continuation
 
-    async def slow_finish(store: ApprovalStore, approval_id: str, *, reported_nothing: bool) -> object:
+    async def slow_finish(store: ApprovalStore, approval_id: str) -> object:
         committing.set()
         await asyncio.sleep(0)
-        return await finish(store, approval_id, reported_nothing=reported_nothing)
+        return await finish(store, approval_id)
 
     with patch.object(ApprovalStore, "finish_approval_continuation", slow_finish):
         finishing = asyncio.create_task(runtime.finish_approval("approval-1"))

@@ -77,7 +77,6 @@ from mindroom.final_delivery import (
     FinalDeliveryOutcome,
     Owed,
     Suppressed,
-    Suppression,
     TurnEnding,
     TurnProgress,
     approval_failure,
@@ -908,7 +907,7 @@ class ApprovalContinuationRunner:
             current,
         )
 
-    async def _run_claimed_approval_lifecycle(  # noqa: C901 - one case per way a resume ends
+    async def _run_claimed_approval_lifecycle(
         self,
         claimed: ApprovalContinuation,
         *,
@@ -974,13 +973,6 @@ class ApprovalContinuationRunner:
                 if not await self._run_step(post_effect_continuation, step, target=target):
                     msg = "Approval continuation final delivery was not durably acknowledged"
                     raise RuntimeError(msg)
-            case Suppressed(reason=Suppression.SILENT_NO_REPORT) if await self.deps.replies.finish_approval(
-                post_effect_continuation.approval_id,
-                reported_nothing=True,
-            ):
-                # A silent schedule's resumed answer that reports nothing completes its approval, and its reply goes as
-                # its turn's would; one that cannot end so fails below.
-                pass
             case Cancelled() | Failed() | Suppressed():
                 # A hook's suppression of a resumed answer fails the approval, as an error does.
                 step = next_step(

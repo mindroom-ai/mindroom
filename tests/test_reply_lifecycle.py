@@ -924,42 +924,6 @@ def test_suppressing_a_span_approved_in_place_leaves_the_reply_to_its_approval()
     assert _span_after(suppressed, span.span_id).outcome is SpanOutcome.SUPPRESSED
 
 
-def test_a_resume_that_reported_nothing_completes_its_reply_and_removes_the_paused_message() -> None:
-    """A silent schedule's resume whose answer reported nothing completes the reply and redacts what its pause showed.
-
-    A Stop recorded after the resume ended is satisfied: nothing is left to stop. Only a resume that ended ends the
-    reply so: a paused reply no resume ran is left as it is.
-    """
-    reply, span, _transition = _paused()
-    resume = rl.claim(_request("resume", delivery_id="$source", approval_id="approval-1"), _context(reply, span))
-    assert resume.reply is not None
-    assert resume.claimed is not None
-    suppressed = rl.suppress(resume.reply, resume.claimed, reason="suppressed", now_ns=NOW)
-    assert suppressed.reply is not None
-
-    def settle(held: Reply, last: Span) -> rl.Transition:
-        return rl.approval_settled(
-            held,
-            last,
-            approval_id="approval-1",
-            paused_span_id="span-1",
-            failure_kind=None,
-            answers_turn=True,
-            now_ns=NOW,
-            reported_nothing=True,
-        )
-
-    stopped = replace(_held(suppressed.reply), stop_receipt_order=4)
-    assert stopped.unapplied_stop
-    finished = settle(stopped, _span_after(suppressed, "resume"))
-    assert finished.reply is not None
-    assert finished.reply.state is ReplyState.COMPLETED
-    assert not finished.reply.unapplied_stop
-    assert finished.reply.redaction_pending == ("$reply",)
-    assert finished.effects == (SettleSources("span-1", answered=True),)
-    assert settle(reply, span).outcome is Outcome.STALE
-
-
 def test_a_failed_approval_ends_a_resume_an_older_instance_left_current() -> None:
     """Nothing runs that resume any more: the failure ends it lost, and the reply no longer names the approval."""
     reply, _span, _transition = _paused()
