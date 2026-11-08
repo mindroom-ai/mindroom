@@ -1174,7 +1174,7 @@ An `AgentWorkspace` holds the agent's `name`, `user_id`, `display_name`, whether
 |-------|-------|
 | `root` | The folder the agent's tools work in when this caller talks to it in this room: one folder for every caller of a shared agent, each caller's own for a private one; it may not exist before the agent's first turn for them |
 | `files` | `none` when none of the agent's toolkits takes local paths or runs code. `write` when the caller may post messages in the room and the agent's settings leave on a writing function of `file` or `coding` or a code-running function of a toolkit such as `shell`, `python`, or `script`. Else `read`, also for other toolkits that save files |
-| `terminal` | `none` without the `shell` toolkit, `type` when the caller may post messages in the room, else `watch` |
+| `terminal` | `none` when the agent has no [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) that offers `run_shell_command`, or that shell runs in the primary process, where no [terminal](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) runs. `type` when the shell runs in a worker that mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` [that mounts the agents' storage](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data), and the caller may post messages in the room. Else `watch` |
 
 A toolkit's own settings count, so `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, only reads, and `include_tools` or `exclude_tools` can take writing functions away.
 `agents()` and `agent()` read the room's power levels for `files` and `terminal` as `power()` does, with its answers.
@@ -1182,7 +1182,7 @@ MindRoom resolves `root` itself, never from the request; a route that opens file
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, and one that uses `agents()` or `agent()` states `"1.13"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process states `"1.14"`.
 
 A route that posts to a room depends on `require_room_messenger`.
 It checks the caller exactly as `require_room_member` does, with the same answers, and returns a `RoomMessenger`, which posts as the router, never from the caller's account:
@@ -1251,6 +1251,11 @@ Once accepted, the websocket closes with code 4401 as soon as its session ends: 
 Given `room_id`, it rechecks membership every 60 seconds, closing with 1008 once the user has left the room and with 1013 when membership is unavailable, with the same reason `require_room_member` gives for its 503, which the client may retry.
 Closing cancels the `async with` block where it waits, and the route runs on after the block.
 A plugin that uses `client_stream` states `"mindroom_plugin_api": "1.6"` in its manifest.
+
+Inside the block, `await stream_room_reader(websocket, user, room_id)` returns the `RoomReader` a route gets from `require_room_reader`, for the user `client_stream` yields.
+It reads the room's members again, answering 403 once the user left and 503 when membership is unavailable, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment, or 409 when MindRoom serves another runtime.
+A stream that keeps checking what its caller may do, such as whether they may still type, calls it again for each check.
+A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.14"` in its manifest.
 Browsers apply no CORS to websockets, so a websocket route without `client_stream` is public and accepts any origin.
 
 ## Plugin context

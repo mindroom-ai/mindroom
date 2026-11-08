@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
-    from fastapi import Request
+    from fastapi.requests import HTTPConnection
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
@@ -309,7 +309,7 @@ def _workspace(
 
 
 async def room_agent_workspaces(
-    request: Request,
+    connection: HTTPConnection,
     user_id: str,
     room_id: str,
     members: Collection[str],
@@ -321,9 +321,9 @@ async def room_agent_workspaces(
     Given ``agent_user_id``, only that agent's, answering as the Computer does; otherwise every one in config order.
     A contact room opens none. Writing and typing need power to post messages in the room.
     """
-    snapshot = bind_current_request_snapshot(request)
+    snapshot = bind_current_request_snapshot(connection)
     config = snapshot.runtime_config
-    runtime = ensure_app_state(request.app).embedded
+    runtime = ensure_app_state(connection.app).embedded
     router = runtime.agent_bot(ROUTER_AGENT_NAME) if runtime is not None else None
     if (
         config is None

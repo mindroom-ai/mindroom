@@ -2032,6 +2032,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.agent_terminals",
     "mindroom.api.app_state",
     "mindroom.api.auth_user",
     "mindroom.config.commit",
@@ -8254,6 +8255,16 @@ depends_on = [
     "mindroom.bounded_bytes",
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.sessions",
+]
+
+[[modules]]
+path = "mindroom.api.agent_terminals"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.plugin_http",
+    "mindroom.room_agent_access",
+    "mindroom.terminal.client",
+    "mindroom.terminal.session",
 ]
 
 [[modules]]

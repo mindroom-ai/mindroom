@@ -19,6 +19,7 @@ from mindroom.agent_policy import PolicyInputs, build_agent_policy_seeds, resolv
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.api.agent_cli import router as agent_cli_router
+from mindroom.api.agent_terminals import router as agent_terminals_router
 from mindroom.api.app_state import EmbeddedRuntime, ExternalTriggerRuntime, ensure_app_state
 from mindroom.api.auth import authenticate_user, dashboard_cors_origins, verify_user
 from mindroom.api.auth import router as auth_router
@@ -97,7 +98,7 @@ logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
 # Paths a Matrix web client calls from its own origin with a bearer token and no cookies, and the paths under them.
 _CALL_TRANSCRIPTS_PATH = "/api/call-transcripts"
-_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins", _CALL_TRANSCRIPTS_PATH)
+_CLIENT_ORIGIN_PATHS = ("/api/computers", "/api/client-sessions", "/api/plugins", _CALL_TRANSCRIPTS_PATH, "/api/rooms")
 # The trailing slash keeps a sibling such as /api/pluginsX out.
 _CLIENT_ORIGIN_PREFIXES = tuple(f"{path}/" for path in _CLIENT_ORIGIN_PATHS)
 _IOS_APP_ORIGIN = "capacitor://localhost"
@@ -515,6 +516,7 @@ app.include_router(external_triggers_router)
 for integration_router in integration_routers():
     app.include_router(integration_router)  # Each integration authenticates its own requests.
 app.include_router(computers_router)
+app.include_router(agent_terminals_router)  # Authenticates client sessions.
 app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
 app.include_router(call_transcripts_router)  # Authenticates client sessions; 404 while call transcripts are off.
 app.include_router(script_gateway_router)

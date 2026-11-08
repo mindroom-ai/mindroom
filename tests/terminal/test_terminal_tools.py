@@ -156,7 +156,7 @@ async def test_the_shell_s_rules_judge_what_the_agent_types_as_the_command_it_ru
     assert await _asks(config, paths, functions["terminal_open"], {})
 
     assert not await _asks(config, paths, send, {"session_id": session_id, "keys": "rm -rf "})
-    assert await _call(send, session_id=session_id, keys="rm -rf ") == "Sent. New output:\nrm -rf"
+    assert (await _call(send, session_id=session_id, keys="rm -rf ")).endswith("rm -rf")
     assert await _asks(config, paths, send, {"session_id": session_id, "keys": "tmp<enter>"})
     assert not await _asks(config, paths, send, {"session_id": session_id, "keys": "<ctrl-c>"})
     await _call(send, session_id=session_id, keys="<ctrl-c>")

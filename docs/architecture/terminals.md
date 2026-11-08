@@ -6,6 +6,7 @@ icon: lucide/terminal
 
 A persistent terminal is an interactive Bash in a pty that keeps running between calls, keeps its recent output, and lets viewers attach and detach.
 The sandbox runner keeps terminals, and the primary reaches them through `WorkerTerminals` in `mindroom.terminal.client`.
+Agents use them through the `terminal` toolkit, and chat clients through the routes under [Chat client routes](#chat-client-routes).
 
 ## Decisions
 
@@ -21,6 +22,43 @@ The sandbox runner keeps terminals, and the primary reaches them through `Worker
 - The primary derives a terminal's owner from the request's worker key, routing agent, and workspace, so agents that share a worker or the shared runner never see each other's terminals, while requesters whose calls reach the same agent workspace share them.
   The runner takes the owner the primary sends, because only the primary holds the runner token.
 - A session ID becomes a path on the runner, so the client accepts only the runner's own ID alphabet, and an ID such as `../../execute` cannot send the runner token to another runner endpoint.
+- A terminal exists only where the agent's shell runs in a worker, so an agent whose shell runs in the primary has none, and the toolkit offers it no function; a terminal host in the primary would be a separate decision.
+- A terminal's shell never starts with a response's CLI grant: the shell outlives the response, while the grant is only for that response's commands.
+  `WorkerTerminals.open` builds its request with the grant unbound rather than removing the grant's names afterwards, so the call's other environment changes stay exactly as a shell call gets them.
+
+## How typing is judged
+
+`run_shell_command`'s approval rules judge the toolkit's typing through approval aliases: `terminal_open` as a shell no argument describes, `terminal_run` as its command, and `terminal_send` as the command its Enters run, joined to what the terminal's line held before.
+An alias's judge reads only the call's arguments, so the line comes from trusted preparation before approval (`ToolFunction.prepare_approval`), which adds the line's revision and text to the stored arguments that the approval card shows and the run receives.
+The run types only while the line still has that revision and text, so keys approved for one line never land on another, and a path that skips the preparation and claims a line it does not have is refused.
+Without a line, as on paths that call the function directly, the judge cannot tell what an Enter runs, so the rules ask whenever they may.
+`terminal_run` types only on an empty line at the shell's prompt, so its judgment is its command alone.
+
+- The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`; the line is what was typed since its last Enter or Ctrl-C.
+  Records are keyed by the worker, agent and workspace the shell stand-ins name, because preparation runs synchronously in the model loop and cannot look the worker up.
+- The shell's prompt command prints an OSC 133 `D` mark with the last exit status and a prompt counter before each prompt, and the primary reads the marks from any stream attached to the terminal.
+  The counter lets marks replayed with the scrollback count once, and the exit status is what `terminal_run` reports.
+- After an Enter the line is unknown until the next prompt mark, because a running command or a continuation reads what is typed meanwhile; typing before that prompt leaves it unknown there, and Ctrl-C, which drops unread typing, empties it.
+- Keys that edit the line, recall history, complete, or move the cursor make it unknown, and so does a send that may not have arrived and a terminal the primary did not see open, such as after a primary restart.
+- The shell expands no `!` history and reads no key bindings (`INPUTRC`) or history file (`HISTFILE`), since worker code can write those in the workspace and change what a judged line runs.
+- Limitations: rules judge text, so state a terminal keeps, such as aliases, functions, and variables typed earlier, is invisible to them, as with any shell command string; a program in the terminal can print prompt marks, but it already runs code there; after a primary restart a replayed mark can make the line look like a prompt while a program that ignores Ctrl-C reads the keys.
+
+## Chat client routes
+
+Routes under `/api/rooms/{room_id}` sign the caller in with a client session as plugin routes do, admit them as `RoomReader.agent()` does, and name the agent by its Matrix user ID; a terminal is always one of that agent's workspace as a turn of it for the caller resolves it, and no path or worker comes from the client.
+Opening, closing, and typing need `terminal: type`; viewers whose agent says `watch` only watch.
+
+| Route | Body | Answer |
+| --- | --- | --- |
+| `GET /terminals` | none | `{"terminals": [...]}`: each terminal of the workspaces the caller may watch in the room, with `agent_user_id`, `id`, `cols`, `rows`, `alive`, `exit_code`, `created_at`, and `writable` |
+| `POST /agents/{agent_user_id}/terminals` | `{"cols", "rows"}`, optional | `201` with the new terminal; `403` without `type` |
+| `DELETE /agents/{agent_user_id}/terminals/{id}` | none | `204`; `403` without `type`; `404` for an ID that is not one of the workspace's terminals |
+| `WS /agents/{agent_user_id}/terminals/{id}` | none | the stream below |
+
+The stream signs in with `client_stream`, sends `{"type": "writable", "writable"}` first and whenever it changes, the scrollback and live output as binary frames, and `{"type": "exit", "code"}` before it closes with 1000 when the shell exits.
+It takes `{"type": "input", "data"}` and `{"type": "resize", "cols", "rows"}`, dropping both while the viewer may only watch, and closes with 1003 on any other frame.
+Every 15 seconds, as the Computer's stream does, it rechecks `agent()` under the config served then: losing `type` sends `writable: false`, an agent no longer open to the caller or a moved `root` closes it with 1008, and a check that cannot be answered closes it with 1013, which the client may retry.
+It also closes with 1008 for a terminal the workspace does not have, and with 1013 when the terminal's own stream ended, after which the client attaches again.
 
 ## Lifecycle and limits
 

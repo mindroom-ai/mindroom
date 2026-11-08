@@ -559,6 +559,7 @@ _HTTP_EXPORTS = [
     "require_room_member",
     "require_room_messenger",
     "require_room_reader",
+    "stream_room_reader",
 ]
 _ELSEWHERE_SIGNATURES = {
     "mindroom.custom_tools.google_service.GoogleCloudToolkit": (
@@ -581,10 +582,11 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.require_room_member": "(request, room_id)",
     "mindroom.plugin_http.require_room_messenger": "(request, room_id)",
     "mindroom.plugin_http.require_room_reader": "(request, room_id)",
+    "mindroom.plugin_http.stream_room_reader": "(websocket, user, room_id)",
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 13), "357445143dec1abd53318c8633c0fde55cace7b508387fc61c37c17660e08334")
+_PINNED_VERSION = ((1, 14), "dd85fffd542df3e66c548aaadd44b49063abb3e7d9f3c68a1e4233fb9209aaf0")
 
 
 def _is_enum(obj: object) -> bool:

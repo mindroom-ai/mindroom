@@ -258,3 +258,26 @@ def test_bootstrap_config_directory_cannot_overlap_a_mount(
 
     assert completed.returncode != 0
     assert "config.path directory overlaps a mounted volume" in completed.stderr
+
+
+@pytest.mark.parametrize(("backend", "mounted"), [("static_runner", "true"), ("kubernetes", None)])
+def test_the_primary_knows_its_static_runner_mounts_the_agents_storage(
+    tmp_path: Path,
+    backend: str,
+    mounted: str | None,
+) -> None:
+    """The static runner sidecar mounts the agents' storage, so its agents' terminals take people's typing."""
+    _, _, container = _render(
+        tmp_path,
+        {"workers": {"backend": backend}, "eventCache": {"postgres": {"auth": {"password": "x"}}}},
+    )
+    setting = _env_by_name(container).get("MINDROOM_STATIC_RUNNER_AGENT_STORAGE")
+
+    assert (setting or {}).get("value") == mounted
+
+
+def test_the_instance_chart_tells_its_primary_the_sandbox_runner_mounts_the_agents_storage() -> None:
+    """The instance chart's sandbox-runner sidecar always mounts the agents' storage."""
+    deployment = _resource(_render_chart(Path("cluster/k8s/instance")), "Deployment", "mindroom-demo")
+
+    assert _env_by_name(_container(deployment, "mindroom"))["MINDROOM_STATIC_RUNNER_AGENT_STORAGE"]["value"] == "true"
