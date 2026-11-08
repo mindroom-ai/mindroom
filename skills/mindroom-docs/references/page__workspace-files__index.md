@@ -1,7 +1,6 @@
 # Workspace Files
 
 A chat client such as MindRoom Chat can browse and edit the files of an agent's workspace, the folder its file, coding, and shell tools work in, and follow changes to them live.
-A person opens a workspace through a room, and sees the workspaces of the agents there that they may use.
 
 ## Who may open and change a workspace
 
@@ -15,7 +14,7 @@ What a person may do there follows the agent's tools, as its turns build them wi
 | `write` | One of those tools can change files in the workspace, and the person may post messages in the room |
 
 A tool can change files when the agent's settings leave on one of its writing functions, such as `save_file` or `replace_file_chunk` of `file` or `write_file` or `edit_file` of `coding`, or when it runs code, as `shell`, `python`, and `script` do.
-So `file` with `enable_save_file: false` and `enable_replace_file_chunk: false` gives only `read`, and a person whom the room's power levels keep from posting may read but not change anything.
+So `file` with `enable_save_file: false` and `enable_replace_file_chunk: false`, and without `all: true`, gives only `read`, and `include_tools` or `exclude_tools` can take writing functions away.
 A tool changes files in the workspace where it runs in the primary process, in a dedicated Docker or Kubernetes worker, or on a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); on a `static_runner` that sees only its own storage it changes that storage instead, so it gives only `read`.
 An agent with none of these tools opens no workspace.
 The agent sees a saved file on its next tool call; nothing needs restarting.
@@ -71,10 +70,10 @@ While MindRoom can't yet decide whether the person may use the agent, the routes
 
 ## Following changes
 
-The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` first sends `{"type": "ready"}` once it follows the workspace, so a client that lists folders after that misses no change, then `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
+The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` first sends `{"type": "ready"}` once it follows the workspace, so what a client lists after that stays in step with what the workspace holds, then `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
 Changes show within about a second, but can take several seconds to show in very large workspaces, such as one with thousands of folders.
 A workspace made after the stream opened reports everything it was made with.
-It leaves out Git's internals, `node_modules`, `.venv`, `.cache` and other caches, editor swap files, MindRoom's temporary save files, and the hidden credentials, and it follows no links: a change inside a folder reached through a link is reported under that folder's own path when it lies in the workspace, and not at all when it lies outside.
+It leaves out Git's internals, `node_modules`, `.venv`, `.cache` and other caches, editor swap files, and the hidden credentials, and it follows no links: a change inside a folder reached through a link is reported under that folder's own path when it lies in the workspace, and not at all when it lies outside.
 It signs in as [plugin websocket routes](https://docs.mindroom.chat/plugins/#websocket-routes) do, and anyone who may open the workspace, `read` or `write`, may follow it.
 It checks again every 15 seconds, under the config served then, and closes with 1008 once the workspace is no longer open to the caller or is no longer the one it followed, as after a config save makes the agent private, and with 1013 while MindRoom can't tell; the client then connects again.
 In a workspace with more than 10,000 folders or 100,000 files and folders, changes in the deepest of them are not reported.
