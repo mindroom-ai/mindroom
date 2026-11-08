@@ -952,6 +952,7 @@ def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: 
         "rsync -u host:/srv/data ./data",
         "docker run --name mysql -p3306:3306 -d mysql:8",
         "find /var/lib/mysql -perm 644 -print",
+        "cc app.c $(mysql_config --libs) -pthread",
         "which curl && git push -u origin main:main",
         "mysql -u root -p app && mkdir -pv backup",
     ],

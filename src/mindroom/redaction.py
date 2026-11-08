@@ -92,7 +92,7 @@ _COMMAND_PATTERN = re.compile(r"(?:[^\\\r\n;&|(`]|\\(?:\r\n|[\s\S]))++")
 # Programs that take a password as an option: curl takes `user:password` after `-u` or `--user`, and mysql and its
 # tools take one attached to `-p`, as in `-p'password'` or `-ppassword`. Other programs use those options for other
 # things, such as `docker run --user 1000:0` or `mkdir -pv`.
-_PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[\w-]*+)(?!\S)")
+_PASSWORD_PROGRAM_PATTERN = re.compile(r"(?<!\S)(?:\S*/)?(?:(?P<curl>curl)|(?:mysql|mariadb)[a-z-]*+)(?!\S)")
 _CURL_USER_OPTION_PATTERN = re.compile(
     r"(?<!\S)(?:-u|--user)(?:=|[^\S\r\n]*+)(?P<quote>[\"'])?[^\s:\"']*+:(?P<token>(?(quote)[^\"'\r\n]++|[^\s\"']++))",
 )
