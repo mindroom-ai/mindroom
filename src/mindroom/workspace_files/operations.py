@@ -51,15 +51,22 @@ _HOME_CREDENTIALS = frozenset(
         (".config", "gh"),
         (".config", "gcloud"),
         (".config", "hub"),
+        (".config", "glab-cli"),
+        (".config", "doctl"),
         (".config", "git", "credentials"),
         (".claude", ".credentials.json"),
         (".codex", "auth.json"),
+        (".cargo", "credentials"),
+        (".cargo", "credentials.toml"),
+        (".terraform.d", "credentials.tfrc.json"),
+        (".vault-token",),
+        (".cache", "huggingface", "token"),
     },
 )
 # Credential files by name, in any folder: a project keeps its own `.env` and `.npmrc`.
 _CREDENTIAL_NAMES = frozenset({".netrc", ".git-credentials", ".pgpass", ".pypirc", ".npmrc"})
 # `.env`, `.env.local`, `.envrc`; SSH keys such as `id_rsa`, `id_ed25519_sk`, `id_ecdsa.pub` and `id_rsa-cert.pub`.
-_CREDENTIAL_NAME = re.compile(r"\.env.*|id_[a-z0-9]+(?:_sk)?(?:\.pub|-cert\.pub)?")
+_CREDENTIAL_NAME = re.compile(r"\.env.*|id_(?:rsa|dsa|ecdsa|ed25519|xmss)(?:_sk)?(?:\.pub|-cert\.pub)?")
 # Below `.git`: its config and a submodule's, whose remotes' URLs can hold a token, and credential files beside them.
 _GIT_CREDENTIAL_NAMES = frozenset({"config", "credentials"})
 
@@ -132,8 +139,13 @@ class StaleEtagError(Exception):
 def is_hidden(path: PurePath) -> bool:
     """Return whether a workspace-relative path is, or lies in, a credential a chat client never sees.
 
-    Names match in any case; docs/workspace-files.md lists them for users.
+    Names match in any case; docs/workspace-files.md lists them for users. A name that isn't UTF-8, which no answer
+    can carry, is hidden too.
     """
+    try:
+        str(path).encode()
+    except UnicodeEncodeError:
+        return True
     parts = tuple(part.casefold() for part in path.parts)
     if any(parts[: len(place)] == place for place in _HOME_CREDENTIALS):
         return True
@@ -359,6 +371,8 @@ def move(root: Path, raw_path: str, raw_to: str) -> None:
     moved, destination = source.relative / source_name, target.relative / target_name
     _refuse_git(moved, destination)
     _refuse_credential_place(moved, destination)
+    if destination == moved:
+        raise HTTPException(400, "That is already its name.")
     if destination.is_relative_to(moved):
         raise HTTPException(400, "A folder can't move into itself.")
     with _CHANGES, _refusals(), open_directory_within_root(source.base, source.relative) as source_directory:

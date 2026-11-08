@@ -157,7 +157,14 @@ def test_nothing_below_git_is_changed(root: Path) -> None:
         "deep/.pypirc",
         "deep/.pgpass",
         "deep/.git-credentials",
+        ".cargo/credentials.toml",
+        ".config/doctl/config.yaml",
+        ".config/glab-cli/config.yml",
+        ".terraform.d/credentials.tfrc.json",
+        ".vault-token",
+        ".cache/huggingface/token",
         "keys/id_rsa",
+        "keys/id_ed25519_sk",
         "keys/id_ecdsa_sk.pub",
         "keys/id_rsa-cert.pub",
         "repo/.git/config",
@@ -173,7 +180,17 @@ def test_credentials_are_hidden_wherever_their_rule_places_them(path: str) -> No
 
 @pytest.mark.parametrize(
     "path",
-    ["notes.md", "src/environment.py", "keys/id_utils.py", ".config/app.toml", "deep/.ssh/notes", "repo/.git/HEAD"],
+    [
+        "notes.md",
+        "src/environment.py",
+        "keys/id_utils.py",
+        "src/id_token",
+        "src/id_mapping/table.csv",
+        ".config/app.toml",
+        ".cargo/config.toml",
+        "deep/.ssh/notes",
+        "repo/.git/HEAD",
+    ],
 )
 def test_ordinary_files_are_not_hidden(path: str) -> None:
     """Names that only resemble a credential, or a home folder below the top, stay visible."""
@@ -377,7 +394,8 @@ def test_move_renames_an_entry_and_moves_a_link_as_a_link(root: Path) -> None:
 def test_a_folder_cannot_move_into_itself(root: Path) -> None:
     """Moving a folder below itself, or onto itself, answers 400."""
     assert _status(lambda: move(root, "src", "src/inner")) == 400
-    assert _status(lambda: move(root, "src", "src")) == 400
+    with pytest.raises(HTTPException, match="already its name"):
+        move(root, "notes.md", "notes.md")
 
 
 def test_delete_removes_a_folder_with_its_content_and_a_link_but_not_its_target(root: Path) -> None:
@@ -464,3 +482,12 @@ def test_two_moves_onto_one_name_never_both_land(root: Path, monkeypatch: pytest
     # The file that did not move is still there under its own name.
     assert len([name for name in ("a.md", "b.md") if (root / name).exists()]) == 1
     assert (root / "report.md").read_text() in {"a", "b"}
+
+
+def test_a_name_that_is_not_utf8_is_left_out(root: Path) -> None:
+    """A client can't be sent a name that isn't UTF-8, so the folder lists without it instead of failing."""
+    descriptor = os.open(bytes(root) + b"/legacy-\xff.txt", os.O_CREAT | os.O_WRONLY, 0o644)
+    os.close(descriptor)
+
+    assert _names(root) == [".config", "repo", "src", "notes.md"]
+    assert is_hidden(PurePosixPath(os.fsdecode(b"src/legacy-\xff.txt")))

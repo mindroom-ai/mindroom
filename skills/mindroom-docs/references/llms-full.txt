@@ -6600,11 +6600,12 @@ The workspace itself can't be deleted, moved, or replaced (400).
 The workspace is the agent's home folder, so credentials kept there are hidden: they are never listed, read, changed, or reported as changed, even through a link, and a path naming one answers 404 as an absent one does.
 Hidden, in any letter case:
 
-- at the top of the workspace: `.ssh/`, `.gnupg/`, `.aws/`, `.azure/`, `.kube/`, `.docker/`, `.password-store/`, `.mindroom/`, `.config/gh/`, `.config/gcloud/`, `.config/hub/`, `.config/git/credentials`, `.claude/.credentials.json`, and `.codex/auth.json`;
-- in any folder: `.netrc`, `.git-credentials`, `.pgpass`, `.pypirc`, `.npmrc`, every name starting with `.env` (such as `.env.local` and `.envrc`), and SSH keys (`id_<type>`, with an optional `_sk`, `.pub`, or `-cert.pub`);
+- at the top of the workspace: `.ssh/`, `.gnupg/`, `.aws/`, `.azure/`, `.kube/`, `.docker/`, `.password-store/`, `.mindroom/`, `.config/gh/`, `.config/gcloud/`, `.config/hub/`, `.config/glab-cli/`, `.config/doctl/`, `.config/git/credentials`, `.claude/.credentials.json`, `.codex/auth.json`, `.cargo/credentials` and `.cargo/credentials.toml`, `.terraform.d/credentials.tfrc.json`, `.vault-token`, and `.cache/huggingface/token`;
+- in any folder: `.netrc`, `.git-credentials`, `.pgpass`, `.pypirc`, `.npmrc`, every name starting with `.env` (such as `.env.local` and `.envrc`), and SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, and `id_xmss`, with an optional `_sk`, `.pub`, or `-cert.pub`);
 - below any `.git` folder: `config`, `credentials`, and names ending in `.credentials`.
 
 A folder that keeps one of the top-level credentials, such as `.config`, `.claude`, or `.codex`, can't be moved or deleted, and nothing can be moved in under its name (403), since its credentials would then show.
+Any other folder moves or is deleted with everything in it, hidden files such as a project's `.env` included.
 
 ## Routes
 
@@ -6638,7 +6639,8 @@ While MindRoom can't yet decide whether the person may use the agent, the routes
 
 ## Following changes
 
-The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` sends `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
+The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` first sends `{"type": "ready"}` once it follows the workspace, so a client that lists folders after that misses no change, then `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
+A workspace made after the stream opened reports everything it was made with.
 It leaves out Git's internals, `node_modules`, `.venv`, `.cache` and other caches, editor swap files, MindRoom's temporary save files, and the hidden credentials, and it follows links only while they stay inside the workspace.
 It signs in as [plugin websocket routes](https://docs.mindroom.chat/plugins/#websocket-routes) do, and anyone who may open the workspace, `read` or `write`, may follow it.
 It checks again every 15 seconds, under the config served then, and closes with 1008 once the workspace is no longer open to the caller or is no longer the one it followed, as after a config save makes the agent private, and with 1013 while MindRoom can't tell; the client then connects again.
@@ -17494,7 +17496,7 @@ A person's typing is recorded on the terminal's line like the agent's, so an age
 `client_rooms` checks each candidate room for the session's own user the same way and leaves out one it cannot check.
 The [workspace file routes](https://docs.mindroom.chat/workspace-files/) under `/api/rooms/` take the same sessions and admit the caller through `RoomReader.agent()` on every request, so a saved change to an agent's access applies to the next request; they serve only the `root` that check resolves, never a path or folder from the request, refuse paths that leave it by `..` or a link, and change files only for a caller whose `files` is `write`, which needs a writing toolkit that works in the workspace: in the primary, a dedicated worker, or a `static_runner` the deployment says mounts the agents' storage, since only there could the agent itself change those files.
 Code the agent runs controls everything in the workspace, so the routes treat it as the primary's other workspace reads and writes do, and the workspace is the agent's `HOME`, so they hide the credentials that page lists, even through a link, and never move or delete a folder that keeps one by its place.
-The change stream rechecks `agent()` every 15 seconds under the config served then, closing once the workspace is no longer open to the caller or its `root` moved; it watches each folder reached from the root without a link, at most 10,000, and reports only paths that stay inside, so a link planted in the workspace never makes the primary watch or report anything outside it.
+The change stream rechecks `agent()` every 15 seconds under the config served then, closing once the workspace is no longer open to the caller or its `root` moved; it watches each folder reached from the root without a link, at most 10,000, and reports only paths that stay inside, so a link planted in the workspace never makes the primary report anything outside it, and makes it watch outside it only when worker code swaps a folder for a link while the tree is being walked.
 `require_room_messenger` makes the same check, and its `RoomMessenger` posts only as the router, never from a person's account: `notice()` is an `m.notice` naming no requester, and `relay()` names the session's own user, never one a request names, as original sender, so each agent it wakes authorizes that user, after checking again just before sending that the session is live and the user is joined and may send `m.room.message`.
 A relay mentions only agents and teams joined to the room, and both refuse content keys under `com.mindroom.`, `io.mindroom.`, MindRoom Chat's `chat.mindroom.`, or a namespace another loaded plugin reserves and the posting plugin does not, at any depth, and Matrix's own top-level keys, such as `body`, `m.relates_to`, and `m.new_content`, so neither a route nor its client can claim a requester, hide whom a relay is for, edit another message, or forge another plugin's card through content.
 `notice()` checks no power level, so a member the power levels keep from posting can still have a route post a router notice; the route chooses who may.
@@ -18954,7 +18956,7 @@ MindRoom resolves `root` itself, never from the request; a route that opens file
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process states `"1.17"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, one that relies on `terminal` being `none` for a shell in the primary process states `"1.17"`, and one that relies on `files` being `read` for writing toolkits on a `static_runner` that sees only its own storage states `"1.18"`.
 
 A route that posts to a room depends on `require_room_messenger`.
 It checks the caller exactly as `require_room_member` does, with the same answers, and returns a `RoomMessenger`, which posts as the router, never from the caller's account:

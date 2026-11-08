@@ -36,11 +36,12 @@ The workspace itself can't be deleted, moved, or replaced (400).
 The workspace is the agent's home folder, so credentials kept there are hidden: they are never listed, read, changed, or reported as changed, even through a link, and a path naming one answers 404 as an absent one does.
 Hidden, in any letter case:
 
-- at the top of the workspace: `.ssh/`, `.gnupg/`, `.aws/`, `.azure/`, `.kube/`, `.docker/`, `.password-store/`, `.mindroom/`, `.config/gh/`, `.config/gcloud/`, `.config/hub/`, `.config/git/credentials`, `.claude/.credentials.json`, and `.codex/auth.json`;
-- in any folder: `.netrc`, `.git-credentials`, `.pgpass`, `.pypirc`, `.npmrc`, every name starting with `.env` (such as `.env.local` and `.envrc`), and SSH keys (`id_<type>`, with an optional `_sk`, `.pub`, or `-cert.pub`);
+- at the top of the workspace: `.ssh/`, `.gnupg/`, `.aws/`, `.azure/`, `.kube/`, `.docker/`, `.password-store/`, `.mindroom/`, `.config/gh/`, `.config/gcloud/`, `.config/hub/`, `.config/glab-cli/`, `.config/doctl/`, `.config/git/credentials`, `.claude/.credentials.json`, `.codex/auth.json`, `.cargo/credentials` and `.cargo/credentials.toml`, `.terraform.d/credentials.tfrc.json`, `.vault-token`, and `.cache/huggingface/token`;
+- in any folder: `.netrc`, `.git-credentials`, `.pgpass`, `.pypirc`, `.npmrc`, every name starting with `.env` (such as `.env.local` and `.envrc`), and SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, and `id_xmss`, with an optional `_sk`, `.pub`, or `-cert.pub`);
 - below any `.git` folder: `config`, `credentials`, and names ending in `.credentials`.
 
 A folder that keeps one of the top-level credentials, such as `.config`, `.claude`, or `.codex`, can't be moved or deleted, and nothing can be moved in under its name (403), since its credentials would then show.
+Any other folder moves or is deleted with everything in it, hidden files such as a project's `.env` included.
 
 ## Routes
 
@@ -74,7 +75,8 @@ While MindRoom can't yet decide whether the person may use the agent, the routes
 
 ## Following changes
 
-The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` sends `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
+The websocket `/api/rooms/{room_id}/agents/{agent_user_id}/workspace/changes` first sends `{"type": "ready"}` once it follows the workspace, so a client that lists folders after that misses no change, then `{"type": "changed", "paths": [...]}` for each batch of changes in the workspace, by the agent or anyone, at most every 150 ms, with the changed paths sorted and relative to the workspace.
+A workspace made after the stream opened reports everything it was made with.
 It leaves out Git's internals, `node_modules`, `.venv`, `.cache` and other caches, editor swap files, MindRoom's temporary save files, and the hidden credentials, and it follows links only while they stay inside the workspace.
 It signs in as [plugin websocket routes](plugins.md#websocket-routes) do, and anyone who may open the workspace, `read` or `write`, may follow it.
 It checks again every 15 seconds, under the config served then, and closes with 1008 once the workspace is no longer open to the caller or is no longer the one it followed, as after a config save makes the agent private, and with 1013 while MindRoom can't tell; the client then connects again.
