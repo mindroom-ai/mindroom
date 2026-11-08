@@ -24,10 +24,11 @@ async def refuse_strangers(ctx: ToolBeforeCallContext) -> None:
 
 @hook("message:received")
 async def acknowledge(ctx: MessageReceivedContext) -> None:
-    """Answer each message in its room, naming the room's history visibility."""
+    """Answer each message in its conversation, naming the room's history visibility."""
     room_id = ctx.envelope.room_id
     visibility = await ctx.query_room_state(room_id, "m.room.history_visibility", "")
-    await ctx.send_message(room_id, f"Got: {ctx.envelope.body} ({(visibility or {}).get('history_visibility')})")
+    text = f"Got: {ctx.envelope.body} ({(visibility or {}).get('history_visibility')})"
+    await ctx.send_message(room_id, text, thread_id=ctx.envelope.target.resolved_thread_id)
 
 
 @hook("message:enrich")

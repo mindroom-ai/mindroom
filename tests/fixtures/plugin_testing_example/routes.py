@@ -25,7 +25,7 @@ async def hello(user: Annotated[ClientUser, Depends(require_room_member)]) -> di
 
 @router.get("/rooms/{room_id}/about")
 async def about(room: Annotated[RoomReader, Depends(require_room_reader)]) -> dict[str, object]:
-    """Tell the member whether the room is direct, whether they are its admin, its history visibility and its agents."""
+    """Tell the member whether the room is direct, whether they are its admin, its history, agents and thread mode."""
     power = await room.power()
     history = await room.history()
     return {
@@ -33,7 +33,14 @@ async def about(room: Annotated[RoomReader, Depends(require_room_reader)]) -> di
         "admin": power.is_admin(room.user.user_id),
         "history": history.visibility,
         "agents": [agent.name for agent in await room.agents()],
+        "thread_mode": room.modes().thread,
     }
+
+
+@router.post("/rooms/{room_id}/thread-mode")
+async def use_room_mode(room: Annotated[RoomReader, Depends(require_room_reader)]) -> None:
+    """Have the room's agents answer in the room, not in threads."""
+    await room.set_modes(thread="room")
 
 
 @router.post("/rooms/{room_id}/notice")

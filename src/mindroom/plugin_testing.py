@@ -297,7 +297,7 @@ class LoadedPlugin:
         no such tool or function, and ``PermissionError`` for a function that may need approval. The call runs through
         the plugins' ``tool:*`` hooks and inside the conversation ``current_plugin_context`` reads.
         """
-        context = await self._turn_context(agent, sender, room)
+        context = await self._turn_context(agent, sender, room, f"$message{next(self._event_ids)}")
         agent_tools = resolve_agent_tools(self.config, agent, context.plugins.tools)
         entry = next((entry for entry in agent_tools.candidates() if entry.name == tool), None)
         if entry is None:
@@ -349,7 +349,8 @@ class LoadedPlugin:
         if event in BUILTIN_EVENT_NAMES and event not in _TURN_EVENTS:
             msg = f"mindroom.plugin_testing fires message, system:enrich and custom events, not {event}"
             raise ValueError(msg)
-        context = await self._turn_context(agent, sender, room)
+        event_id = f"$message{next(self._event_ids)}"
+        context = await self._turn_context(agent, sender, room, event_id)
         if event not in _TURN_EVENTS:
             # A custom event comes from a tool call, so it runs as that call emits it, in the call's conversation.
             with tool_runtime_context(context):
@@ -358,9 +359,8 @@ class LoadedPlugin:
             event,
             config=self.config,
             runtime_paths=self.runtime_paths,
-            correlation_id=f"plugin-testing:{uuid4().hex}",
+            correlation_id=event_id,
         )
-        event_id = f"$message{next(self._event_ids)}"
         origin = classify_turn_origin(
             transport_sender_id=sender,
             requester_id=sender,
@@ -372,7 +372,7 @@ class LoadedPlugin:
         )
         envelope = MessageEnvelope(
             event_id,
-            MessageTarget.resolve(room, None, event_id),
+            context.target,
             body,
             (),
             (),
@@ -394,7 +394,7 @@ class LoadedPlugin:
         await emit(registry, event, hook_context)
         return hook_context
 
-    async def _turn_context(self, agent: str, sender: str, room_id: str) -> ToolRuntimeContext:
+    async def _turn_context(self, agent: str, sender: str, room_id: str, event_id: str) -> ToolRuntimeContext:
         """Return the conversation of ``sender`` with ``agent`` in ``room_id``, once the agent would answer them there.
 
         A turn decides as live ones do, from the membership the rooms show now, and the sender must be joined.
@@ -416,9 +416,12 @@ class LoadedPlugin:
             msg = f"{agent} does not answer {sender} in {room_id}"
             raise TurnRefused(msg)
         plugins = config_plugins(self.config, self.runtime_paths)
+        room_mode = self.config.get_entity_thread_mode(agent, self.runtime_paths, room_id=room_id) == "room"
         return ToolRuntimeContext(
             agent_name=agent,
-            target=MessageTarget.resolve(room_id, None, None),
+            # The sender's message ``event_id`` starts the turn and, in the agent's thread mode, roots its thread.
+            target=MessageTarget.resolve(room_id, None, event_id, event_id, room_mode=room_mode),
+            correlation_id=event_id,
             requester_id=sender,
             client=self._client,
             config=self.config,

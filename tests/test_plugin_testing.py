@@ -82,7 +82,7 @@ def test_a_route_posts_as_the_router_and_streams_to_a_member(plugin: LoadedPlugi
 
 
 def test_a_route_reads_the_room_as_set_up(plugin: LoadedPlugin) -> None:
-    """A route reads the room's power levels, history visibility and the agents its caller may use, as set up."""
+    """A route reads the room as set up, and saves a thread mode its admin sets, which it answers 503 to publish."""
     directory = entity_directory(plugin.config, plugin.runtime_paths)
     (helper,) = (user for user, entity in directory.items() if entity.name == "helper")
     plugin.add_room(
@@ -93,9 +93,18 @@ def test_a_route_reads_the_room_as_set_up(plugin: LoadedPlugin) -> None:
     )
 
     about = {user: plugin.client(user).get(f"{ROUTES}/about").json() for user in (ALICE, BOB)}
+    set_mode = plugin.client(ALICE).post(f"{ROUTES}/thread-mode")
 
-    assert about[ALICE] == {"direct": False, "admin": True, "history": "joined", "agents": ["helper"]}
+    assert about[ALICE] == {
+        "direct": False,
+        "admin": True,
+        "history": "joined",
+        "agents": ["helper"],
+        "thread_mode": None,
+    }
     assert (about[BOB]["admin"], about[BOB]["agents"]) == (False, [])
+    assert set_mode.status_code == 503
+    assert plugin.client(ALICE).get(f"{ROUTES}/about").json()["thread_mode"] == "room"
 
 
 def test_a_room_is_direct_as_running_agents_tell_and_no_load_sees_another_ones_answer(tmp_path: Path) -> None:
@@ -167,13 +176,23 @@ async def test_a_member_of_a_room_never_added_with_its_key_is_refused(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_message_fires_the_hook_whose_send_lands_in_the_room(plugin: LoadedPlugin) -> None:
-    """An admitted sender's message runs the `message:received` hook, which reads the room's state and sends to it."""
-    room = plugin.add_room(ROOM, members={ALICE: "Alice"})
+async def test_message_fires_the_hook_whose_send_lands_in_the_room(tmp_path: Path) -> None:
+    """An admitted sender's message runs the `message:received` hook, which reads the room's state and answers there.
 
-    await plugin.fire("message:received", agent="helper", sender=ALICE, room=ROOM, body="hi")
+    In the agent's default thread mode the message roots a thread, which the answer joins; in room mode it stays at
+    the room's level.
+    """
+    rooms = []
+    for thread_mode in ("thread", "room"):
+        config = {"agents": {"helper": {**CONFIG["agents"]["helper"], "thread_mode": thread_mode}}}
+        with load_plugin(EXAMPLE, tmp_path / thread_mode, config=config, settings=SETTINGS) as plugin:
+            rooms.append(plugin.add_room(ROOM, members={ALICE: "Alice"}))
+            await plugin.fire("message:received", agent="helper", sender=ALICE, room=ROOM, body="hi")
 
-    assert [(sent.text, sent.source) for sent in room.sent] == [("Got: hi (shared)", "greeter:message:received")]
+    threaded, room_level = (room.sent for room in rooms)
+    assert [(sent.text, sent.source) for sent in threaded] == [("Got: hi (shared)", "greeter:message:received")]
+    assert threaded[0].thread_id is not None
+    assert [sent.thread_id for sent in room_level] == [None]
 
 
 @pytest.mark.asyncio

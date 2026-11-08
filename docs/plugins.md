@@ -1583,6 +1583,7 @@ async def test_hook(plugin):
 | `await fire(event, *, agent, sender, room, body="", **fields)` | Runs the hooks of a `message:*`, `system:enrich`, or custom event for `sender`'s message `body` in `room`, and returns what they returned to MindRoom: the enrichment items, the transformed draft, the context, or `None` for a custom event. `fields` are the event context's own required fields, such as `target_entity_name` and `target_member_names` for enrichment, or for `message:before_response`, `message:final_response_transform`, `message:after_response`, and `message:cancelled` those of its draft, result, or info. A custom event takes `payload` and `source_plugin` and runs as a tool call's `emit_custom_event` emits it, so its hooks can emit further events. |
 
 `call_tool` and `fire` raise `TurnRefused` and run nothing unless `sender` is joined to `room` and `agent` would answer them there.
+Each starts from a new message of `sender`'s, which roots a thread unless the agent answers in room mode, so `resolved_thread_id` is that message's ID as it would be live.
 A room never added is one no MindRoom bot is in, so routes answer 503 for it.
 An agent's Matrix ID, to make it a room's member or a relay's mention, is its key in `entity_directory(plugin.config, plugin.runtime_paths)` from `mindroom.plugin_api`.
 Once read, whether a room is a direct message is kept for a few minutes, as running agents keep it, but never shared with another `load_plugin` block.
