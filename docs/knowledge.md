@@ -99,6 +99,7 @@ Use a smaller `chunk_size` when your embedding server has lower token or batch l
 Chat never waits for indexing or Git sync.
 Agents search the last successfully published index, and a missing, stale, or failed base schedules a background refresh while the current request continues.
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
+On Linux, `watch: true` watches at most 2,000 folders of a base, not counting folders such as `.git` and `node_modules`, and changes in folders past that cap are picked up when an agent searches the base, at most every five minutes.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
 A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
