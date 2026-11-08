@@ -18,7 +18,6 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import RoomReader, client_stream, require_room_reader, stream_room_reader
-from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.room_agent_access import room_execution_identity
 from mindroom.terminal.client import TerminalDetachedError
 from mindroom.terminal.resolution import agent_terminals
@@ -101,8 +100,7 @@ async def _workspace_terminals(
 ) -> WorkerTerminals:
     """Return ``workspace``'s terminals as a turn of its agent for ``user_id`` in ``room_id`` resolves them."""
     paths = bind_current_request_snapshot(connection).runtime_paths
-    requester_id = resolve_human_requester_alias(user_id, workspace.config, paths)
-    identity = room_execution_identity(workspace.name, requester_id, room_id, paths)
+    identity = room_execution_identity(workspace.name, user_id, room_id, workspace.config, paths)
     terminals = await asyncio.to_thread(
         agent_terminals,
         workspace.name,
