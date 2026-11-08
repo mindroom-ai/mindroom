@@ -1137,7 +1137,7 @@ Each call to `power()` or `history()` reads again, and `members` is read anew fo
 `power()`, `is_direct()`, and `history()` pick their bot as membership does and answer 503 with `No running MindRoom bot is in this room.` once none is in the room.
 `power()` answers 503 rather than `False` with `Room state read failed; try again.` when its read fails or times out.
 `history()` reads the caller's membership again and answers 403 like `require_room_member` once they are no longer joined, and 503 with `Room history read failed; try again.` when its read fails or times out.
-`is_direct()` keeps its answer for a few minutes; it answers 503 with `Direct message lookup failed; try again.` when the bot's direct-message list cannot be read and nothing else marks the room as direct, or when the lookup raises or times out.
+`is_direct()` keeps its answer for a few minutes; it answers 503 with `Direct message lookup failed; try again.` when the bot's direct-message list or the room's state cannot be read and nothing else marks the room as direct, or when the lookup raises or times out.
 
 `set_modes()` takes `thread` as `"thread"` or `"room"` and `reply` as `"auto"` or `"mentions"`; `None` clears that override, and one left out stays.
 Before it changes anything, it answers 403 with `Only room admins change the room's modes.` unless the caller holds room admin power by a `power()` read, 503 when that read fails, and 503 with `The router is not running in this room.` while the router is stopped or not in the room, as in a direct message with one agent.

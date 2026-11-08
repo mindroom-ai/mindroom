@@ -894,8 +894,8 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool | None:
         room_id: The room ID to check
 
     Returns:
-        True if the room is a DM room, False if it is not, and None when the ``m.direct`` read failed and the other
-        signals do not mark the room as a DM, since ``m.direct`` alone may list it
+        True if the room is a DM room, False if it is not, and None when the ``m.direct`` read or the room state read
+        failed and the other signals do not mark the room as a DM, since the unread source alone may mark it
 
     """
     cache_key = _dm_cache_key(client, room_id)
@@ -918,7 +918,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool | None:
     # Get the room state events, specifically member events.
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
-        return None if direct_room_ids is None else False
+        return None
 
     is_dm = _has_is_direct_marker(response.events)
     # After a failed m.direct read only a marked room is known; nothing is cached, so the next call reads it again.

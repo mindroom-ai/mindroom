@@ -170,8 +170,8 @@ class TestDMDetection:
         assert dm_result is True
         assert non_dm_result is False
 
-    async def test_does_not_cache_false_when_state_request_errors(self) -> None:
-        """Test API errors don't poison cache with a false negative."""
+    async def test_failed_state_read_answers_unknown_and_reads_again(self) -> None:
+        """Test a failed state read after a clean m.direct read answers unknown, and the next call reads state again."""
         client = AsyncMock()
         client.user_id = "@agent:server"
         client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
@@ -182,7 +182,7 @@ class TestDMDetection:
         first_result = await is_dm_room(client, "!room:server")
         second_result = await is_dm_room(client, "!room:server")
 
-        assert first_result is False
+        assert first_result is None
         assert second_result is False
         assert client.room_get_state.call_count == 2
 
