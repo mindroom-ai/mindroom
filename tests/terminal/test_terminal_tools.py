@@ -238,6 +238,11 @@ async def test_a_shell_started_in_a_terminal_keeps_runs_out_until_it_exits(tmp_p
     assert await _call(run, session_id=session_id, command="echo back-$((2*3))") == "back-6\n[Exit status 0.]"
 
 
+async def test_output_reads_as_the_screen_shows_it() -> None:
+    """Escapes go, and backspaces take effect, as readline's own erasing of a typed character shows."""
+    assert terminal_tools._plain_text(b"abc\x08\x1b[K\r\nx\x08\x08y") == "ab\ny"
+
+
 class _Chatty:
     """A viewer of a terminal printing far more than a call keeps, then exiting."""
 

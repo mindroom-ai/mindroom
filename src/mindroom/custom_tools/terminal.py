@@ -64,16 +64,19 @@ _DETACHED = "Error: the connection to the terminal ended; read it again before t
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OTHER_ESCAPE = re.compile(r"\x1b[P^_X][^\x1b]*(?:\x1b\\)?|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\-_=>78]?")
-_CONTROL = re.compile(r"[\x00-\x07\x0b\x0c\x0e-\x1f\x7f]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BACKSPACED = re.compile(r"[^\x08\n]\x08")
 
 
 def _plain_text(data: bytes) -> str:
-    """Return terminal output as the text a person reads on screen: escapes removed, carriage returns applied."""
+    """Return terminal output as a person reads it on screen: escapes removed, carriage returns and backspaces applied."""
     text = data.decode("utf-8", errors="replace")
     for pattern in (_OSC, _CSI, _OTHER_ESCAPE):
         text = pattern.sub("", text)
-    lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n")]
-    return _CONTROL.sub("", "\n".join(lines))
+    text = "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
+    while (erased := _BACKSPACED.sub("", text)) != text:
+        text = erased
+    return _CONTROL.sub("", text)
 
 
 async def _ended(stream: TerminalStream) -> bool:
@@ -269,7 +272,7 @@ class TerminalTools(Toolkit):
             session_id: The terminal, from terminal_open or terminal_list.
 
         Returns:
-            Its recent output, and its shell's exit status once it has exited.
+            Its recent output, and whether its shell has exited.
 
         """
         try:
