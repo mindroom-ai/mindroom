@@ -7036,7 +7036,7 @@ expose = [
 from = ["mindroom.tool_system.runtime_context"]
 
 [[interfaces]]
-expose = ["validate_plugin_name"]
+expose = ["plugin_state_root", "validate_plugin_name"]
 from = ["mindroom.tool_system.plugin_identity"]
 
 [[interfaces]]
@@ -8330,6 +8330,7 @@ visibility = [
 [[modules]]
 path = "mindroom.plugin_context"
 depends_on = [
+    "mindroom.tool_system.plugin_identity",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
 ]
