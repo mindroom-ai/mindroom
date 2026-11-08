@@ -151,6 +151,7 @@ _EXPORTS = [
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
     "read_regular_file_within_root",
+    "redact_sensitive_text",
     "register_atlassian_connection_tools",
     "register_google_workspace_tools",
     "register_tool_with_metadata",
@@ -324,6 +325,7 @@ _SIGNATURES = {
     "oauth_runtime_bootstrapper": "(config)",
     "open_directory_within_root": "(root, relative_path, *, create, mode)",
     "read_regular_file_within_root": "(root, relative_path, *, max_bytes, truncate)",
+    "redact_sensitive_text": "(value, *, max_length)",
     "register_atlassian_connection_tools": "(connection)",
     "register_google_workspace_tools": "(workspace)",
     "register_tool_with_metadata": (
@@ -599,7 +601,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 17), "7b8a81ac3029555db0a165fbd832530cde999dc46d13f8969774493b5177c711")
+_PINNED_VERSION = ((1, 18), "d8f441c5698ff368112f95acba31677eb00b55c56a46244b67380974c234fd1c")
 
 
 def _is_enum(obj: object) -> bool:

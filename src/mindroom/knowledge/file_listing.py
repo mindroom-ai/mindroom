@@ -223,7 +223,7 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
 
 
 @contextmanager
-def _pinned_directory(path: Path) -> Iterator[int]:
+def pinned_canonical_directory(path: Path) -> Iterator[int]:
     """Pin one canonical absolute directory by a no-follow walk from the filesystem root."""
     with open_directory_within_root(Path(path.anchor), path.relative_to(path.anchor)) as directory_fd:
         yield directory_fd
@@ -359,7 +359,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     files: set[Path] = set()
     try:
-        with _pinned_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             for target in _listing_targets(root, include_patterns):
                 for relative_path in _iter_target_files(root_fd, target, root):
                     if not include_knowledge_relative_path(config, base_id, relative_path.as_posix()):
@@ -386,7 +386,7 @@ def knowledge_files_from_relative_paths(
         return []
     files: list[Path] = []
     try:
-        with _pinned_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             for relative_path in sorted(set(relative_paths)):
                 if not include_knowledge_relative_path(config, base_id, relative_path):
                     continue

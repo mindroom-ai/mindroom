@@ -672,6 +672,31 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
 
+### Redacting credentials
+
+To keep or show text from a tool call, such as a shell command or a search query, without the credentials it may carry, pass it through `redact_sensitive_text` from `mindroom.plugin_api`, which needs plugin API 1.17:
+
+```python
+from mindroom.plugin_api import ToolBeforeCallContext, hook, redact_sensitive_text
+
+
+@hook("tool:before_call")
+async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
+    if ctx.tool_name != "run_shell_command":
+        return
+    args = ctx.arguments.get("args", "")
+    command = args if isinstance(args, str) else " ".join(args)
+    line = redact_sensitive_text(" ".join(command.split()), max_length=500)
+    with (ctx.state_root / "commands.log").open("a") as log:
+        log.write(f"{ctx.room_id} {line}\n")
+```
+
+It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+`max_length` cuts the result to that many characters, ending in `... [truncated]`.
+It never raises: text it cannot check, such as text over 65,536 characters without `max_length`, comes back as `[redaction failed]`.
+What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.
+To show a tool call's whole arguments as its reply's tool trace does, use the hook context's [`chat_preview()`](hooks.md#event-specific-fields) instead.
+
 ### Calling a configured model
 
 A tool that runs its own model calls, such as a research loop, builds a provider for a model named in `config.yaml` and sends it one prompt at a time:
@@ -1187,7 +1212,7 @@ MindRoom resolves `root` itself, never from the request; a route that opens file
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process states `"1.17"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process states `"1.18"`.
 
 A route that posts to a room depends on `require_room_messenger`.
 It checks the caller exactly as `require_room_member` does, with the same answers, and returns a `RoomMessenger`, which posts as the router, never from the caller's account:
@@ -1295,7 +1320,7 @@ Browsers apply no CORS to websockets, so a websocket route without `client_strea
 Inside the block, `await stream_room_reader(websocket, user, room_id)` returns the `RoomReader` a route gets from `require_room_reader`, for the user `client_stream` yields.
 It answers 409 when MindRoom now serves another runtime, then checks membership again as `require_room_member` does, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment.
 A stream that keeps checking what its caller may do, such as whether they may still type, calls it again for each check.
-A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.17"` in its manifest.
+A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.18"` in its manifest.
 
 ## Plugin context
 

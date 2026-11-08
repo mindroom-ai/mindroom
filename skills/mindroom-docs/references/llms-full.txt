@@ -3872,6 +3872,8 @@ Use a smaller `chunk_size` when your embedding server has lower token or batch l
 Chat never waits for indexing or Git sync.
 Agents search the last successfully published index, and a missing, stale, or failed base schedules a background refresh while the current request continues.
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
+On Linux, `watch: true` watches at most 2,000 folders of a base, and changes in folders past that cap are picked up when an agent searches the base, at most every five minutes.
+Folders such as `.git` and `node_modules` do not count toward the cap, since changes in them never start a refresh.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
 A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
@@ -17505,6 +17507,9 @@ Do not report or "fix" these; they are deliberate.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
 - A proxy environment the primary cannot follow, such as a SOCKS proxy or `auto_proxy`, makes the relay dial directly within the browser's destination policy instead of refusing to start, because no MindRoom egress policy depends on that proxy there; a sandbox runner refuses.
 - A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, or inside a shared directory is bound without following links below that directory, so even an operator-made link there is refused; shared knowledge outside every agent workspace and shared directory still follows operator links.
+- On Linux, the knowledge folder watcher finds a base's folders without following links and then watches each one by path, so keeping its watches inside the base is best effort.
+  A folder swapped for a link between that walk and its watch moves its own watch, and those of the folders the walk found below it, to the link's target and the matching folders below that target; each watch stays not recursive and within the folder cap, and lasts until the watcher next rebuilds its watches, such as when a folder appears in the base.
+  A change there can start a refresh of the base, which still reads only files reached inside the base without links, as code that writes inside the base can already do by writing a file there.
 - `egress_broker.private_networks` lets the broker, which runs in the primary, dial the listed private ranges for workers, including primary-host addresses in them (such as the `docker0` gateway) and destinations a Kubernetes worker's NetworkPolicy blocks; loopback and metadata addresses stay refused, and [Private networks](https://docs.mindroom.chat/deployment/egress-broker/#private-networks) describes the exposure.
 - The egress broker streams request bodies, so a valid request head can reach the right upstream before a bad or oversized body gets 400 or 413 and the upstream connection is aborted; the head carries the secret only to the host the request was routed to, and [Egress Broker Design Decisions](https://docs.mindroom.chat/architecture/egress-broker-design/#where-a-secret-may-go) gives the reason.
 - The egress broker's check for stray bytes on a reused tunnel upstream cannot see bytes that reach the socket just after the check polls it.
@@ -18356,6 +18361,31 @@ It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
 
+### Redacting credentials
+
+To keep or show text from a tool call, such as a shell command or a search query, without the credentials it may carry, pass it through `redact_sensitive_text` from `mindroom.plugin_api`, which needs plugin API 1.17:
+
+```python
+from mindroom.plugin_api import ToolBeforeCallContext, hook, redact_sensitive_text
+
+
+@hook("tool:before_call")
+async def record_shell_commands(ctx: ToolBeforeCallContext) -> None:
+    if ctx.tool_name != "run_shell_command":
+        return
+    args = ctx.arguments.get("args", "")
+    command = args if isinstance(args, str) else " ".join(args)
+    line = redact_sensitive_text(" ".join(command.split()), max_length=500)
+    with (ctx.state_root / "commands.log").open("a") as log:
+        log.write(f"{ctx.room_id} {line}\n")
+```
+
+It replaces bearer tokens, API keys, tokens with a known prefix such as `sk-` or `ghp_`, values assigned to secret names such as `password=` or `API_KEY=`, secret URL query parameters, and private keys with `***redacted***`, and a URL's user name and password with `***`, as MindRoom's logs and reply tool traces do.
+`max_length` cuts the result to that many characters, ending in `... [truncated]`.
+It never raises: text it cannot check, such as text over 65,536 characters without `max_length`, comes back as `[redaction failed]`.
+What a plugin logs through `ctx.logger` or `get_logger` is already redacted, so call it for text that goes elsewhere, such as a file, a message, or room state.
+To show a tool call's whole arguments as its reply's tool trace does, use the hook context's [`chat_preview()`](https://docs.mindroom.chat/hooks/#event-specific-fields) instead.
+
 ### Calling a configured model
 
 A tool that runs its own model calls, such as a research loop, builds a provider for a model named in `config.yaml` and sends it one prompt at a time:
@@ -18871,7 +18901,7 @@ MindRoom resolves `root` itself, never from the request; a route that opens file
 
 `await client_rooms(request, candidates)` returns those of the room IDs in `candidates` that the session's user is joined to now, in their order.
 It checks each room as `require_room_member` does and leaves out a room whose check fails, and it answers 401 without a live session and 503 with `Room membership is unavailable.` outside `mindroom run`.
-A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process states `"1.17"`.
+A plugin that uses `require_room_reader` or `client_rooms` states `"mindroom_plugin_api": "1.7"` in its manifest, one that uses `modes()` or `set_modes()` states `"1.9"`, one that calls `history()` states `"1.11"`, one that uses `agents()` or `agent()` states `"1.13"`, and one that relies on `terminal` being `none` for a shell in the primary process states `"1.18"`.
 
 A route that posts to a room depends on `require_room_messenger`.
 It checks the caller exactly as `require_room_member` does, with the same answers, and returns a `RoomMessenger`, which posts as the router, never from the caller's account:
@@ -18979,7 +19009,7 @@ Browsers apply no CORS to websockets, so a websocket route without `client_strea
 Inside the block, `await stream_room_reader(websocket, user, room_id)` returns the `RoomReader` a route gets from `require_room_reader`, for the user `client_stream` yields.
 It answers 409 when MindRoom now serves another runtime, then checks membership again as `require_room_member` does, and its `agents()` and `agent()` answer under the config MindRoom serves at that moment.
 A stream that keeps checking what its caller may do, such as whether they may still type, calls it again for each check.
-A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.17"` in its manifest.
+A plugin that uses `stream_room_reader` states `"mindroom_plugin_api": "1.18"` in its manifest.
 
 ## Plugin context
 

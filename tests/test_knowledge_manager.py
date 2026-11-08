@@ -150,6 +150,7 @@ from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
     _config,
     _FakeEmbedder,
+    _wait_until,
     collection_meta,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
     publish,
@@ -163,7 +164,7 @@ from tests.runtime_fakes import bind_test_embedded_runtime
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Coroutine, Iterable, Mapping, Sequence
     from typing import IO
 
     from mindroom.constants import RuntimePaths
@@ -291,16 +292,6 @@ def _source_has_vectors(manager: KnowledgeManager, relative_path: str) -> bool:
     return published.exists() and any(
         row["metadata"].get("source_path") == relative_path for row in stored_rows(published)
     )
-
-
-async def _wait_until(condition: Callable[[], bool], failure: str) -> None:
-    """Poll `condition` until it holds, and fail with `failure` if the settle deadline passes first."""
-    try:
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            while not condition():  # noqa: ASYNC110 - the states polled here are plain attributes
-                await asyncio.sleep(0.01)
-    except TimeoutError:
-        pytest.fail(failure)
 
 
 def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
@@ -2213,7 +2204,7 @@ def test_listing_targets_never_walk_out_through_parent_traversal(tmp_path: Path)
     (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
     target = knowledge_file_listing_module._ListingTarget(root / "..", "dir")
 
-    with knowledge_file_listing_module._pinned_directory(root) as root_fd:
+    with knowledge_file_listing_module.pinned_canonical_directory(root) as root_fd:
         assert list(knowledge_file_listing_module._iter_target_files(root_fd, target, root)) == []
 
 
