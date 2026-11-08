@@ -81,8 +81,8 @@ class _TerminalInput:
     """The one connection every viewer's and call's typing and resizing reaches one terminal through.
 
     🔒 Separate connections reach the runner in no promised order, so typing recorded before a judged call could reach
-    the shell after it, onto the line that call was judged against. Its holder sends while holding the line's lock; it
-    opens at a send while viewers are attached and closes, before any next one opens, with the last viewer.
+    the shell after it, onto the line that call was judged against. Its holder opens and sends while holding the line's
+    lock; it opens at a send while viewers are attached and closes, before any next one opens, with the last viewer.
     """
 
     def __init__(self) -> None:
@@ -90,15 +90,16 @@ class _TerminalInput:
         self._websocket: aiohttp.ClientWebSocketResponse | None = None
         self._reader: asyncio.Task[None] | None = None
 
-    async def send(self, frame: dict[str, object], connect: _Connect, line: TerminalLine) -> None:
-        if self._websocket is None or self._websocket.closed:
-            await self.close()
-            client, self._websocket = await connect()
-            self._reader = asyncio.create_task(_drained(client, self._websocket, line), name="terminal-input-reader")
-        try:
-            await self._websocket.send_json(frame)
-        except (aiohttp.ClientError, ConnectionResetError):
-            raise TerminalDetachedError from None
+    async def open(self, connect: _Connect, line: TerminalLine) -> aiohttp.ClientWebSocketResponse:
+        """Return the open connection, first opening one; the runner may not have read what one it ended carried."""
+        if self._websocket is not None and not self._websocket.closed:
+            return self._websocket
+        if self._websocket is not None:
+            line.lost()
+        await self.close()
+        client, self._websocket = await connect()
+        self._reader = asyncio.create_task(_drained(client, self._websocket), name="terminal-input-reader")
+        return self._websocket
 
     async def close(self) -> None:
         if self._reader is not None:
@@ -107,16 +108,18 @@ class _TerminalInput:
         self._reader = self._websocket = None
 
 
-async def _drained(
-    client: aiohttp.ClientSession,
-    websocket: aiohttp.ClientWebSocketResponse,
-    line: TerminalLine,
-) -> None:
-    """Discard what the runner shows the input connection, which its viewers see; typing it ends with may be lost."""
+async def _drained(client: aiohttp.ClientSession, websocket: aiohttp.ClientWebSocketResponse) -> None:
+    """Discard what the runner shows the input connection, which its viewers see, and close it when it ends."""
     async with client, websocket:
         async for _ in websocket:
             pass
-        line.lost()
+
+
+async def _typed(websocket: aiohttp.ClientWebSocketResponse, frame: dict[str, object]) -> None:
+    try:
+        await websocket.send_json(frame)
+    except (aiohttp.ClientError, ConnectionResetError):
+        raise TerminalDetachedError from None
 
 
 _inputs: weakref.WeakKeyDictionary[TerminalLine, _TerminalInput] = weakref.WeakKeyDictionary()
@@ -154,12 +157,13 @@ class TerminalStream:
         shell waits at its prompt with nothing typed; otherwise it types nothing and raises ``TerminalError`` (409).
         """
         async with self.line.lock:
+            websocket = await _inputs[self.line].open(self._connect, self.line)
             if (judged is not None and not self.line.unchanged(judged)) or (empty_line and not self.line.empty):
                 raise TerminalError(409, "The terminal's line is not the one these keys were checked against.")
             awaited = self.line.awaited
             self.line.type(data)
             try:
-                await _inputs[self.line].send({"type": "input", "data": data}, self._connect, self.line)
+                await _typed(websocket, {"type": "input", "data": data})
             except BaseException:
                 self.line.lost()
                 raise
@@ -168,7 +172,8 @@ class TerminalStream:
     async def resize(self, cols: int, rows: int) -> None:
         """Change the terminal's size."""
         async with self.line.lock:
-            await _inputs[self.line].send({"type": "resize", "cols": cols, "rows": rows}, self._connect, self.line)
+            websocket = await _inputs[self.line].open(self._connect, self.line)
+            await _typed(websocket, {"type": "resize", "cols": cols, "rows": rows})
 
 
 def _owner(request: ExecuteRequest) -> str:

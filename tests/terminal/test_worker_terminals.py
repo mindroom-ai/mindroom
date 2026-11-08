@@ -20,8 +20,8 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.terminal import client as client_module
 from mindroom.terminal import session as session_module
-from mindroom.terminal.client import TerminalDetachedError, WorkerTerminals
-from mindroom.terminal.lines import PROMPT_COMMAND
+from mindroom.terminal.client import TerminalDetachedError, TerminalStream, WorkerTerminals
+from mindroom.terminal.lines import PROMPT_COMMAND, terminal_line
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.terminal.client import TerminalStream
     from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 pytestmark = pytest.mark.asyncio
@@ -201,22 +200,48 @@ async def test_viewers_type_through_one_connection_that_ends_with_the_last_viewe
             await asyncio.sleep(0.01)
 
 
-async def test_typing_that_may_not_have_reached_the_shell_leaves_its_line_unknown(
-    tmp_path: Path,
-    runner: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A runner that drops the input connection may not have read what it carried last."""
-    terminals = _terminals(_shell(primary_paths(tmp_path, runner)))
-    info = await terminals.open()
-    with monkeypatch.context() as limited:
-        # Any output at all puts a viewer, the input connection too, too far behind.
-        limited.setattr(session_module, "_MAX_VIEWER_BACKLOG_BYTES", 0)
-        async with terminals.attach(info.id) as stream:
-            await stream.send_input("echo hi")
-            async with asyncio.timeout(10):
-                while stream.line.state().typed is not None:  # noqa: ASYNC110 - the drop signals no event here
-                    await asyncio.sleep(0.01)
+class _Connection:
+    """A stand-in for a connection to the runner: it takes frames and shows nothing until someone closes it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.frames: list[dict[str, object]] = []
+
+    async def send_json(self, frame: dict[str, object]) -> None:
+        self.frames.append(frame)
+
+    def __aiter__(self) -> _Connection:
+        return self
+
+    async def __anext__(self) -> object:
+        await asyncio.Event().wait()
+
+    async def __aenter__(self) -> _Connection:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.closed = True
+
+
+async def test_keys_judged_before_the_input_connection_ended_are_not_typed_on_its_successor() -> None:
+    """The runner may not have read what a connection it ended carried last, however late the primary notices."""
+    connections: list[_Connection] = []
+
+    async def connect() -> tuple[Any, Any]:
+        connections.append(_Connection())
+        return connections[-1], connections[-1]
+
+    line = terminal_line(("worker", "code", "/workspace"), "terminal", opened=True)
+    client_module._inputs.setdefault(line, client_module._TerminalInput())
+    stream = TerminalStream(_Connection(), line, connect)  # type: ignore[arg-type]
+    await stream.send_input("rm -rf ")
+    judged = line.state()
+    connections[0].closed = True
+    with pytest.raises(TerminalError) as refused:
+        await stream.send_input("tmp\r", judged=judged)
+
+    assert refused.value.status_code == 409
+    assert [frame["data"] for connection in connections for frame in connection.frames] == ["rm -rf "]
 
 
 async def test_a_viewer_that_falls_too_far_behind_is_told_to_attach_again(

@@ -36,7 +36,7 @@ Without a line, as through the agent CLI, a script, or a scheduled call, which r
 
 - The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`; the line is what was typed since its last Enter or Ctrl-C.
   It sends all of a terminal's input on one connection, which it opens while anyone watches and closes with the last viewer, because the runner applies input from separate connections in no promised order, and a keystroke recorded before a judged call could otherwise reach the shell after it, onto the line that call was judged against.
-  An input connection the runner drops leaves the line unknown, since what it carried last may not have arrived.
+  When the runner has ended the input connection, the next send leaves the line unknown before it checks the line it was judged against, since what the old connection carried last may not have arrived.
   Records are keyed by the worker, agent and workspace the shell stand-ins name, because preparation runs synchronously in the model loop and cannot look the worker up.
 - The shell's prompt command prints an OSC 133 `D` mark with the last exit status and a prompt counter before each prompt, and the primary reads the marks from any stream attached to the terminal.
   The counter lets marks replayed with the scrollback count once, and the exit status is what `terminal_run` reports.
