@@ -330,7 +330,7 @@ Matrix sync callback
 | `entity_directory.py` | `entity_directory`, the router and configured agents and teams with prepared Matrix accounts by user ID, with each one's kind, display name, and agent tool names, for plugins |
 | `plugin_context.py` | `PluginContext`, a plugin's own settings, state directory, and config for its routes and tools, which fails closed once a reload disables the plugin |
 | `plugin_lifecycle.py` | `PluginLifespans` runs the `lifespan` of each plugin the primary publishes, starting a reload's new lifespans before it closes the replaced plugins' websockets and stops the old ones, and stopping them all at shutdown |
-| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks, room reads, and room admins' mode changes (`RoomReader`, `RoomPower`, `RoomModes`, `RoomHistory`, `client_rooms`), the agents a caller may use in a room with their workspaces (`AgentWorkspace`), posting as the router (`RoomMessenger`), administrator checks, and the route's `PluginContext` |
+| `plugin_http.py` | The supported import surface for plugin HTTP routes: client-session sign-in for HTTP and websocket routes, room-membership checks, room reads for routes and streams, and room admins' mode changes (`RoomReader`, `RoomPower`, `RoomModes`, `RoomHistory`, `client_rooms`, `stream_room_reader`), the agents a caller may use in a room with their workspaces (`AgentWorkspace`), posting as the router (`RoomMessenger`), administrator checks, and the route's `PluginContext` |
 | `orchestration/plugin_http_runtime.py` | Live room reads for plugin HTTP routes: a running bot in the room answers each read, the router first, and concurrent membership callers for one room share a lookup |
 | `matrix/history_visibility.py` | Where a joined member's view of a room's history begins under its history visibility, walking back from their member event to the join or invite that began their membership |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
@@ -513,6 +513,10 @@ Matrix sync callback
 | `terminal/session.py` | Persistent shells in a pty in the sandbox runner: scrollback, attached viewers, input, resize, and the idle end |
 | `api/worker_terminal.py` | Runner routes that open, list, and close an owner's terminals, and the websocket a viewer attaches with |
 | `terminal/client.py` | The primary's client for an agent's terminals, reached with the request its worker-routed shell toolkit would send |
+| `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, and the shell command typing onto it amounts to |
+| `terminal/resolution.py` | The terminals of an agent's workspace as its turn for one requester resolves them |
+| `custom_tools/terminal.py` | The agent's terminal toolkit: open, run, type keys, read, and list, judged by the shell's approval rules |
+| `api/agent_terminals.py` | Chat clients' routes to the terminals of the agents they may use in a room, and the rechecked terminal stream |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits (durable checkpoints while live frames run), tool traces, reasoning, and the terminal write of a stream that finished; a stopped or failed stream raises for its span exit to end |
 | `live_frames/frames.py` | The `io.mindroom.live` frame format: snapshots and UTF-16 splice deltas of a reply's live documents, and the durable checkpoint watermark key |
 | `live_frames/publisher.py` | One streaming reply's frame loop: a frame per tick when its documents changed, periodic snapshots, and the watermark its durable writes carry |
@@ -596,7 +600,7 @@ Matrix sync callback
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
-| `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
+| `room_agent_access.py` | The room access check the worker Computer and plugin routes share, each admitted agent's workspace root and file and terminal access for one caller in one room, and where an agent's toolkit runs |
 | `access_policy.py` | Resolve membership access config into immutable effective room and responder policies |
 | `config/access.py` | Membership access configuration models (responder access, room defaults) |
 | `config/legacy_access.py` | One-shot migration from retired access fields to the membership schema; delete with the retired fields |
