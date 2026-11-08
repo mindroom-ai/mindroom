@@ -17,7 +17,14 @@ from typing import TYPE_CHECKING
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.terminal.client import TerminalDetachedError
-from mindroom.terminal.lines import LineState, entered_command, keys_to_text, line_state, run_text
+from mindroom.terminal.lines import (
+    PROMPT_MARK_START,
+    LineState,
+    entered_command,
+    keys_to_text,
+    line_state,
+    run_text,
+)
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.authoring import Toolkit
@@ -41,7 +48,6 @@ _OUTPUT_SECONDS = 0.5
 # The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
 _MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
-_PROMPT_MARK_START = b"\x1b]133;D;"
 _LINE_CHANGED = (
     "Error: the terminal's line changed after these keys were checked (someone or another call typed in it); nothing "
     "was typed. Read the terminal, then send them again."
@@ -50,7 +56,7 @@ _NOT_AT_PROMPT = (
     "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, or its line holds "
     "typing); nothing was typed. Read the terminal, and send keys such as <ctrl-c> with terminal_send."
 )
-_DETACHED = "Error: the connection to the terminal ended, and the keys may or may not have arrived. Read it again."
+_DETACHED = "Error: the connection to the terminal ended, and keys sent may or may not have arrived. Read it again."
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OTHER_ESCAPE = re.compile(r"\x1b[P^_X][^\x1b]*(?:\x1b\\)?|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\-_=>78]?")
@@ -82,7 +88,7 @@ async def _output(
     """Return what ``stream`` prints within ``seconds``, whether older output was dropped, and whether it ended.
 
     It keeps the newest ``_MAX_OUTPUT_BYTES``, and ends at the shell's exit or, given ``prompt_after``, at the first
-    prompt mark numbered above it, before which it cuts the output.
+    prompt mark numbered above it, before which it cuts the output. A lost connection raises ``TerminalDetachedError``.
     """
     kept = bytearray()
     cut = False
@@ -97,8 +103,8 @@ async def _output(
                     del kept[: len(kept) - _MAX_OUTPUT_BYTES]
                     cut = True
                 if prompt_after is not None and stream.prompt is not None and stream.prompt[0] > prompt_after:
-                    return bytes(kept).rsplit(_PROMPT_MARK_START, 1)[0], cut, True
-    except (TimeoutError, TerminalDetachedError):
+                    return bytes(kept).rsplit(PROMPT_MARK_START, 1)[0], cut, True
+    except TimeoutError:
         return bytes(kept), cut, False
 
 
@@ -114,10 +120,11 @@ class TerminalTools(Toolkit):
     name = "terminal"
     instructions = (
         "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room "
-        "can watch live and type in too. Use them for work people should see or that keeps state between commands: a "
-        "dev server, a REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one "
-        "command line and waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt; "
-        "terminal_read shows recent output; terminal_list shows them all."
+        "can watch and type in from a chat client that shows terminals. Use them for work that keeps state between "
+        "commands or that people should see: a dev server, a REPL, an interactive program, a long build. "
+        "terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types "
+        "keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read shows recent "
+        "output; terminal_list shows them all."
     )
 
     def __init__(
@@ -150,10 +157,7 @@ class TerminalTools(Toolkit):
     def _with_line(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Return ``arguments`` with the terminal's line as the keys are judged and then typed against."""
         session_id = arguments.get("session_id")
-        terminals = self._terminals
-        state = (
-            None if terminals is None or not isinstance(session_id, str) else line_state(terminals.scope, session_id)
-        )
+        state = line_state(self._workspace_terminals.scope, session_id) if isinstance(session_id, str) else None
         return {**arguments, "line": None if state is None else asdict(state)}
 
     @property
@@ -195,7 +199,7 @@ class TerminalTools(Toolkit):
         """
         text = run_text(command)
         # One line, so the run ends at the prompt after it; text, so its judgment is what it runs.
-        if "\n" in text or "\r" in text[:-1] or entered_command("", text) is None:
+        if "\n" in text or "\r" in text[:-1] or "\x03" in text or entered_command("", text) is None:
             return (
                 "Error: a command is one line of plain text; join commands with && or ;, and type keys such as "
                 "<ctrl-c> or <tab> with terminal_send."
@@ -263,6 +267,8 @@ class TerminalTools(Toolkit):
                 output, _, exited = await _output(stream, _OUTPUT_SECONDS)
         except TerminalError as error:
             return _refused(error, session_id)
+        except TerminalDetachedError:
+            return _DETACHED
         shown = _plain_text(output).strip("\n")[-_MAX_TEXT_CHARS:]
         return f"{shown}\n[The terminal's shell has exited.]" if exited else shown or "[No output yet.]"
 

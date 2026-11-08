@@ -256,7 +256,6 @@ def plan_tool_batch(
             limit_text = _LIMIT_ERROR_TEXT.format(name=function.name)
             calls.append(_refused(call_id, function.name, limit_text, arguments, counts=True))
             continue
-        # A gated call stores what its toolkit's trusted preparation adds, which its approval judges and its run checks.
         if function.gate is not None and function.prepare_approval is not None and arguments is not None:
             arguments = function.prepare_approval(arguments)
         calls.append(PlannedCall(function=function, execution=function.planned_execution(call_id, arguments)))

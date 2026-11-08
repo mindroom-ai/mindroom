@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -12,7 +11,6 @@ from urllib.parse import quote
 import aiohttp
 import nio
 import pytest
-import uvicorn
 
 from mindroom.api import agent_terminals
 from mindroom.api.client_sessions import client_session_store
@@ -21,6 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from tests.api.test_plugin_room_agents import ALICE, BOB, ROOM, _Room
 from tests.terminal.conftest import primary_paths
+from tests.test_plugin_client_stream import _serving
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -59,21 +58,8 @@ def _paths(tmp_path: Path, runner: str) -> RuntimePaths:
 async def _served(room: _Room) -> AsyncIterator[tuple[aiohttp.ClientSession, str]]:
     """Serve the room's API with the terminal routes; yield a client and the base URL of the room's routes."""
     room.app.include_router(agent_terminals.router)
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    server = uvicorn.Server(uvicorn.Config(room.app, ws="websockets-sansio", log_level="critical"))
-    serving = asyncio.create_task(server.serve(sockets=[listener]))
-    try:
-        async with asyncio.timeout(10):
-            while not server.started:
-                if serving.done():
-                    await serving
-                await asyncio.sleep(0.01)
-        async with aiohttp.ClientSession() as client:
-            yield client, f"http://127.0.0.1:{listener.getsockname()[1]}/api/rooms/{quote(ROOM, safe='')}"
-    finally:
-        server.should_exit = True
-        await serving
+    async with _serving(room.app) as port, aiohttp.ClientSession() as client:
+        yield client, f"http://127.0.0.1:{port}/api/rooms/{quote(ROOM, safe='')}"
 
 
 def _token(room: _Room, user_id: str) -> str:
@@ -84,9 +70,18 @@ def _auth(room: _Room, user_id: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {_token(room, user_id)}"}
 
 
-async def _answer(response: aiohttp.ClientResponse) -> tuple[int, Any]:
-    async with response:
+async def _answer(request: Any) -> tuple[int, Any]:  # noqa: ANN401 - an aiohttp request, awaited as it is answered
+    """Send ``request`` and return its status and JSON answer, None for an answer without one."""
+    async with request as response:
         return response.status, await response.json() if response.content_type == "application/json" else None
+
+
+async def _after_output(stream: aiohttp.ClientWebSocketResponse) -> aiohttp.WSMessage:
+    """Return the stream's first message that is not output."""
+    async with asyncio.timeout(10):
+        while (message := await stream.receive()).type == aiohttp.WSMsgType.BINARY:
+            pass
+    return message
 
 
 async def _stream(
@@ -113,8 +108,8 @@ async def test_the_routes_need_a_client_session(tmp_path: Path, runner: str) -> 
     """Without a session nothing answers but 401."""
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
     async with _served(room) as (client, base):
-        assert (await _answer(await client.get(f"{base}/terminals")))[0] == 401
-        assert (await _answer(await client.post(f"{base}/agents/{room.ids['coder']}/terminals")))[0] == 401
+        assert (await _answer(client.get(f"{base}/terminals")))[0] == 401
+        assert (await _answer(client.post(f"{base}/agents/{room.ids['coder']}/terminals")))[0] == 401
 
 
 async def test_people_who_may_post_open_close_and_list_terminals_and_others_only_watch(
@@ -141,8 +136,8 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
         )
         assert other_status == 201
 
-        _, alice_sees = await _answer(await client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
-        _, bob_sees = await _answer(await client.get(f"{base}/terminals", headers=_auth(room, BOB)))
+        _, alice_sees = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
+        _, bob_sees = await _answer(client.get(f"{base}/terminals", headers=_auth(room, BOB)))
         assert [(t["id"], t["writable"]) for t in alice_sees["terminals"]] == [
             (opened["id"], True),
             (other["id"], True),
@@ -156,15 +151,11 @@ async def test_people_who_may_post_open_close_and_list_terminals_and_others_only
             client.post(f"{base}/{coder}", headers=_auth(room, BOB)),
             client.delete(f"{base}/{coder}/{opened['id']}", headers=_auth(room, BOB)),
         ):
-            assert (await _answer(await refused))[0] == 403
+            assert (await _answer(refused))[0] == 403
         # Another workspace's terminal is no terminal of this one.
-        assert (await _answer(await client.delete(f"{base}/{coder}/{other['id']}", headers=_auth(room, ALICE))))[
-            0
-        ] == 404
-        assert (await _answer(await client.delete(f"{base}/{coder}/{opened['id']}", headers=_auth(room, ALICE))))[
-            0
-        ] == 204
-        _, after = await _answer(await client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
+        assert (await _answer(client.delete(f"{base}/{coder}/{other['id']}", headers=_auth(room, ALICE))))[0] == 404
+        assert (await _answer(client.delete(f"{base}/{coder}/{opened['id']}", headers=_auth(room, ALICE))))[0] == 204
+        _, after = await _answer(client.get(f"{base}/terminals", headers=_auth(room, ALICE)))
         assert [t["id"] for t in after["terminals"]] == [other["id"]]
 
 
@@ -181,7 +172,7 @@ async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
     room = _Room(Config(agents=_agents(ALICE, BOB)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):
-        _, opened = await _answer(await client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
+        _, opened = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
         url = f"{base}/{coder}/{opened['id']}"
         alice = await _stream(client, room, url, ALICE)
         bob = await _stream(client, room, url, BOB)
@@ -200,15 +191,11 @@ async def test_a_stream_relays_the_terminal_and_follows_what_its_viewer_may_do(
             ],
             ROOM,
         )
-        async with asyncio.timeout(10):
-            while (message := await alice.receive()).type == aiohttp.WSMsgType.BINARY:
-                pass
+        message = await _after_output(alice)
         assert json.loads(message.data) == {"type": "writable", "writable": False}
 
         room.serve(Config(agents=_agents(BOB)))
-        async with asyncio.timeout(10):
-            while (message := await alice.receive()).type == aiohttp.WSMsgType.BINARY:
-                pass
+        message = await _after_output(alice)
         assert (message.type, alice.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
         await bob.close()
 
@@ -223,15 +210,13 @@ async def test_a_stream_closes_once_a_config_save_leaves_the_agent_no_terminal(
     room = _Room(Config(agents=_agents(ALICE)), _paths(tmp_path, runner), ("coder",))
     coder = f"agents/{room.ids['coder']}/terminals"
     async with _served(room) as (client, base):
-        _, opened = await _answer(await client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
+        _, opened = await _answer(client.post(f"{base}/{coder}", headers=_auth(room, ALICE)))
         alice = await _stream(client, room, f"{base}/{coder}/{opened['id']}", ALICE)
         assert await alice.receive_json() == {"type": "writable", "writable": True}
         agents = _agents(ALICE)
         agents["coder"].tools = []
         room.serve(Config(agents=agents))
-        async with asyncio.timeout(10):
-            while (message := await alice.receive()).type == aiohttp.WSMsgType.BINARY:
-                pass
+        message = await _after_output(alice)
         assert (message.type, alice.close_code) == (aiohttp.WSMsgType.CLOSE, 1008)
 
 

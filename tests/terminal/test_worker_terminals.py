@@ -14,7 +14,6 @@ from aiohttp import web
 from structlog.testing import capture_logs
 
 from mindroom.agent_cli.shell_contract import AGENT_CLI_TOKEN_ENV, AgentCliShellEnv, bound_agent_cli_shell_env
-from mindroom.agents import build_agent_toolkit
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -24,13 +23,11 @@ from mindroom.terminal.client import TerminalDetachedError, WorkerTerminals
 from mindroom.terminal.lines import PROMPT_COMMAND
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
-from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
+from mindroom.tool_system.sandbox_proxy import worker_call
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.terminal.conftest import RUNNER_TOKEN, primary_paths, serve_runner
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.terminal.conftest import RUNNER_TOKEN, agent_toolkit, primary_paths, serve_runner
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,21 +40,11 @@ pytestmark = pytest.mark.asyncio
 
 # Headers the runner refuses: no token, and a token that is not ASCII.
 _REFUSED_TOKEN_HEADERS = ({}, {"x-mindroom-sandbox-token": "runner-tökén"})
-_IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
 
 
 def _shell(paths: RuntimePaths) -> AnyToolkit:
-    """Build the agent's worker-routed shell toolkit as a reply to ``_IDENTITY`` builds it."""
-    config = Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])})
-    toolkit = build_agent_toolkit(
-        "shell",
-        agent_tools=resolve_agent_tools(config, "code", builtin_tool_registry()),
-        placement=tool_placement(paths, builtin_tool_registry()),
-        runtime_paths=paths,
-        execution_identity=_IDENTITY,
-    )
-    assert toolkit is not None
-    return toolkit
+    """Build the agent's worker-routed shell toolkit as a reply to ``IDENTITY`` builds it."""
+    return agent_toolkit("shell", Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])}), paths)
 
 
 def _terminals(toolkit: AnyToolkit) -> WorkerTerminals:

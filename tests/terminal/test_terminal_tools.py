@@ -7,22 +7,20 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agent_loop.tools import PlannedCall, plan_tool_batch
-from mindroom.agents import build_agent_toolkit
+from mindroom.agent_loop.tools import plan_tool_batch
 from mindroom.approval.tool_approval import evaluate_tool_approval
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import terminal as terminal_tools
+from mindroom.terminal.client import TerminalDetachedError
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalEvent
-from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolGate
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import bind_runtime_paths
-from tests.terminal.conftest import primary_paths
+from tests.terminal.conftest import IDENTITY, agent_toolkit, primary_paths
 from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
@@ -34,7 +32,6 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.asyncio
 
-_IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
 # A review script that asks before a shell command that runs rm.
 _RM_REVIEW = "def check(tool_name, arguments, agent_name):\n    return 'rm' in arguments['args'].split()\n"
 _LINE_CHANGED = "Error: the terminal's line changed after these keys were checked"
@@ -52,21 +49,12 @@ def _config(paths: RuntimePaths, tools: list[Any], *, ask_for_rm: bool = False) 
 
 def _functions(config: Config, paths: RuntimePaths) -> dict[str, ToolFunction]:
     """Return the terminal functions the agent's turn is offered, with the gates the approval rules set."""
-    registry = builtin_tool_registry()
-    toolkit = build_agent_toolkit(
-        "terminal",
-        agent_tools=resolve_agent_tools(config, "code", registry),
-        placement=tool_placement(paths, registry),
-        runtime_paths=paths,
-        execution_identity=_IDENTITY,
-    )
-    assert toolkit is not None
-    return gated_functions(toolkit, config)
+    return gated_functions(agent_toolkit("terminal", config, paths), config)
 
 
 def _terminals(config: Config, paths: RuntimePaths) -> WorkerTerminals:
     """Return the same terminals as a person in the room reaches them."""
-    terminals = agent_terminals("code", config, paths, _IDENTITY, create=False)
+    terminals = agent_terminals("code", config, paths, IDENTITY, create=False)
     assert terminals is not None
     return terminals
 
@@ -82,8 +70,7 @@ def _planned(function: ToolFunction, arguments: dict[str, object]) -> dict[str, 
         entity="code",
         failing_tools={},
     )
-    [planned] = batch.calls
-    assert isinstance(planned, PlannedCall)
+    [planned] = batch.planned
     return planned.execution.tool_args or {}
 
 
@@ -130,7 +117,7 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     )
     assert "42" in await _call(functions["terminal_read"], session_id=session_id)
     assert await _call(functions["terminal_list"]) == f"- {session_id}: running"
-    for command in ("ls\x01", "cd /tmp\nls"):
+    for command in ("ls\x01", "\x03ls", "cd /tmp\nls"):
         refused = await _call(functions["terminal_run"], session_id=session_id, command=command)
         assert refused.startswith("Error: a command is one line of plain text;")
     # A line longer than any answer keeps its newest part.
@@ -265,8 +252,6 @@ async def test_a_judged_line_runs_only_as_written(tmp_path: Path, runner: str) -
 class _Chatty:
     """A viewer of a terminal printing far more than a call keeps, then exiting."""
 
-    prompt = None
-
     def __init__(self, chunks: int) -> None:
         self._chunks = chunks
 
@@ -280,3 +265,16 @@ async def test_a_call_keeps_only_the_newest_output_however_much_the_terminal_pri
     output, cut, ended = await terminal_tools._output(_Chatty(64), 10)  # type: ignore[arg-type]
 
     assert (len(output), cut, ended) == (256 * 1024, True, True)
+
+
+class _Gone:
+    """A viewer whose connection to the runner ended."""
+
+    async def receive(self) -> TerminalEvent:
+        raise TerminalDetachedError
+
+
+async def test_a_call_whose_terminal_connection_ends_says_so_rather_than_still_running() -> None:
+    """A lost connection is no timeout, so a run never answers "still running" for it."""
+    with pytest.raises(TerminalDetachedError):
+        await terminal_tools._output(_Gone(), 10, prompt_after=0)  # type: ignore[arg-type]

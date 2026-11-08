@@ -24,7 +24,8 @@ PROMPT_COMMAND = (
     '__mindroom_status=$?; __mindroom_prompt=$((__mindroom_prompt + 1)); printf "\\033]133;D;%s;mindroom=%s\\007" '
     '"$__mindroom_status" "$__mindroom_prompt"'
 )
-_PROMPT_MARK = re.compile(rb"\x1b\]133;D;(\d{1,3});mindroom=(\d{1,18})\x07")
+PROMPT_MARK_START = b"\x1b]133;D;"
+_PROMPT_MARK = re.compile(re.escape(PROMPT_MARK_START) + rb"(\d{1,3});mindroom=(\d{1,18})\x07")
 # Longer than any prompt mark, so an unfinished one waits for the frame that ends it.
 _MAX_MARK_BYTES = 64
 _INTERRUPT = "\x03"
@@ -111,7 +112,6 @@ class TerminalLine:
         # Ctrl-C at the prompt; a command typed onto the line ends at the prompt after them.
         self._owed = 1 if opened else 0
         self.prompts = 0
-        self.status: int | None = None
         # Held across each send, so input reaches the shell in the order it is recorded.
         self.lock = asyncio.Lock()
 
@@ -156,12 +156,12 @@ class TerminalLine:
         self.revision += 1
         self._busy = self._ahead = True
 
-    def prompted(self, number: int, status: int) -> None:
-        """Record the shell's prompt mark ``number``, after a command that exited with ``status``."""
+    def prompted(self, number: int) -> None:
+        """Record the shell's prompt mark ``number``."""
         if number <= self.prompts:
             return
         self._owed = max(0, self._owed - (number - self.prompts))
-        self.prompts, self.status = number, status
+        self.prompts = number
         # A prompt the shell owed from before the Enter, such as after a Ctrl-C, ends no command.
         if self._busy and not self._owed:
             self.typed = None if self._ahead else ""

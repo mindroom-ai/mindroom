@@ -44,17 +44,17 @@ def test_named_keys_are_keys_and_other_text_is_typed_as_written() -> None:
 def test_the_line_follows_typing_from_anyone_until_its_enter_and_the_next_prompt() -> None:
     """After Enter the line is unknown until the shell prompts again; typing meant for that prompt leaves it unknown."""
     line = TerminalLine(opened=True)
-    line.prompted(1, 0)
+    line.prompted(1)
     assert (line.state(), line.empty) == (LineState(0, ""), True)
     line.type("rm -rf ")
     assert line.state() == LineState(1, "rm -rf ")
     line.type("tmp\r")
     assert line.state() == LineState(2, None)
-    line.prompted(2, 0)
+    line.prompted(2)
     assert (line.state(), line.empty) == (LineState(2, ""), True)
     line.type("sleep 5\r")
     line.type("echo ahead")
-    line.prompted(3, 0)
+    line.prompted(3)
     assert line.state() == LineState(4, None)
     line.type("\x03")
     assert line.state() == LineState(5, "")
@@ -65,25 +65,25 @@ def test_the_line_follows_typing_from_anyone_until_its_enter_and_the_next_prompt
 def test_a_prompt_counts_once_and_a_lost_send_leaves_the_next_prompt_unknown() -> None:
     """A mark replayed with another viewer's scrollback ends no command, and a lost send may have typed ahead."""
     line = TerminalLine(opened=True)
-    line.prompted(1, 0)
+    line.prompted(1)
     line.type("sleep 5\r")
-    line.prompted(1, 0)
+    line.prompted(1)
     assert line.state() == LineState(1, None)
-    line.prompted(2, 0)
+    line.prompted(2)
     assert line.state() == LineState(1, "")
     line.lost()
-    line.prompted(3, 0)
+    line.prompted(3)
     assert line.state() == LineState(2, None)
 
 
 def test_ctrl_c_drops_what_a_running_command_left_unread() -> None:
     """The terminal flushes typing a command has not read when Ctrl-C interrupts it, so the next prompt is empty."""
     line = TerminalLine(opened=True)
-    line.prompted(1, 0)
+    line.prompted(1)
     line.type("sleep 5\r")
     line.type("typed ahead\x03")
-    line.prompted(2, 130)
-    assert (line.state(), line.status) == (LineState(2, ""), 130)
+    line.prompted(2)
+    assert line.state() == LineState(2, "")
 
 
 def test_a_prompt_the_shell_owed_from_before_a_command_ends_no_command() -> None:
@@ -94,9 +94,9 @@ def test_a_prompt_the_shell_owed_from_before_a_command_ends_no_command() -> None
     assert (line.state(), line.awaited) == (LineState(1, ""), 2)
     line.type("ls\r")
     for number in (1, 2):
-        line.prompted(number, 0)
+        line.prompted(number)
         assert line.state() == LineState(2, None)
-    line.prompted(3, 0)
+    line.prompted(3)
     assert (line.state(), line.awaited) == (LineState(2, ""), 3)
 
 
@@ -104,7 +104,7 @@ def test_a_terminal_the_primary_did_not_see_open_has_an_unknown_line_until_ctrl_
     """Its prompt, replayed with the scrollback, says nothing of what was typed after it."""
     line = TerminalLine(opened=False)
     assert line.state() == LineState(0, None)
-    line.prompted(4, 0)
+    line.prompted(4)
     assert line.state() == LineState(0, None)
     line.type("\x03")
     assert line.state() == LineState(1, "")

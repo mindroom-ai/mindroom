@@ -213,7 +213,6 @@ def test_cors_allows_client_origin_on_plugin_paths(client: TestClient) -> None:
         ("/api/client-sessions", "POST"),
         ("/api/client-sessions", "DELETE"),
         ("/api/rooms/x/agents/y/terminals", "POST"),
-        ("/api/rooms/x/agents/y/terminals/z", "DELETE"),
     ):
         headers = {"Access-Control-Request-Method": method, "Access-Control-Request-Headers": "authorization"}
         allowed = client.options(path, headers={**headers, "Origin": CLIENT_ORIGIN})

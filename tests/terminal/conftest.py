@@ -10,18 +10,27 @@ import pytest
 import pytest_asyncio
 import uvicorn
 
+from mindroom.agents import build_agent_toolkit
 from mindroom.api import sandbox_runner
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.workers.runtime import reset_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 RUNNER_TOKEN = "runner-token"  # noqa: S105
+# Alice's turn of the agent `code` in a room.
+IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
 
 
 @pytest.fixture(autouse=True)
@@ -79,3 +88,17 @@ def primary_paths(tmp_path: Path, runner_url: str, **env: str) -> RuntimePaths:
             **env,
         },
     )
+
+
+def agent_toolkit(tool_name: str, config: Config, paths: RuntimePaths) -> AnyToolkit:
+    """Build the agent `code`'s toolkit ``tool_name`` as its turn for ``IDENTITY`` builds it."""
+    registry = builtin_tool_registry()
+    toolkit = build_agent_toolkit(
+        tool_name,
+        agent_tools=resolve_agent_tools(config, "code", registry),
+        placement=tool_placement(paths, registry),
+        runtime_paths=paths,
+        execution_identity=IDENTITY,
+    )
+    assert toolkit is not None
+    return toolkit

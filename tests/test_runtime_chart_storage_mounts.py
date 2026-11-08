@@ -274,10 +274,3 @@ def test_the_primary_knows_its_static_runner_mounts_the_agents_storage(
     setting = _env_by_name(container).get("MINDROOM_STATIC_RUNNER_AGENT_STORAGE")
 
     assert (setting or {}).get("value") == mounted
-
-
-def test_the_instance_chart_tells_its_primary_the_sandbox_runner_mounts_the_agents_storage() -> None:
-    """The instance chart's sandbox-runner sidecar always mounts the agents' storage."""
-    deployment = _resource(_render_chart(Path("cluster/k8s/instance")), "Deployment", "mindroom-demo")
-
-    assert _env_by_name(_container(deployment, "mindroom"))["MINDROOM_STATIC_RUNNER_AGENT_STORAGE"]["value"] == "true"

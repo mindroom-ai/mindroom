@@ -38,6 +38,8 @@ router = APIRouter(prefix="/api/rooms/{room_id}", tags=["terminals"])
 # As often as the Computer's stream rechecks its viewer, and each check as long.
 _RECHECK_SECONDS = 15.0
 _NO_TYPING = "Typing in this agent's terminals needs a shell in a worker that mounts its workspace and power to post."
+_Cols = Annotated[int, Field(ge=2, le=1000)]
+_Rows = Annotated[int, Field(ge=1, le=500)]
 
 
 class _Terminal(BaseModel):
@@ -63,8 +65,8 @@ class _OpenTerminal(BaseModel):
     """The size a new terminal starts with."""
 
     model_config = ConfigDict(extra="forbid")
-    cols: int = Field(default=80, ge=2, le=1000)
-    rows: int = Field(default=24, ge=1, le=500)
+    cols: _Cols = 80
+    rows: _Rows = 24
 
 
 class _Input(BaseModel):
@@ -74,8 +76,8 @@ class _Input(BaseModel):
 
 class _Resize(BaseModel):
     type: Literal["resize"]
-    cols: int = Field(ge=2, le=1000)
-    rows: int = Field(ge=1, le=500)
+    cols: _Cols
+    rows: _Rows
 
 
 _FRAME = TypeAdapter(Annotated[_Input | _Resize, Field(discriminator="type")])
@@ -87,10 +89,6 @@ class _StreamEnd(Exception):  # noqa: N818 - how a stream ends, not an error
         super().__init__(reason)
         self.code = code
         self.reason = reason
-
-
-def _http_error(error: TerminalError) -> HTTPException:
-    return HTTPException(error.status_code, error.detail)
 
 
 async def _workspace_terminals(
@@ -138,7 +136,7 @@ async def list_terminals(request: Request, room: _Room, room_id: str) -> _Termin
         try:
             return [_terminal(workspace, info) for info in await terminals.sessions()]
         except TerminalError as error:
-            raise _http_error(error) from None
+            raise HTTPException(error.status_code, error.detail) from None
 
     workspaces = [workspace for workspace in await room.agents() if workspace.terminal != "none"]
     found = await asyncio.gather(*map(listed, workspaces))
@@ -160,7 +158,7 @@ async def open_terminal(
     try:
         return _terminal(workspace, await terminals.open(cols=size.cols, rows=size.rows))
     except TerminalError as error:
-        raise _http_error(error) from None
+        raise HTTPException(error.status_code, error.detail) from None
 
 
 @router.delete("/agents/{agent_user_id}/terminals/{terminal_id}", status_code=204)
@@ -177,7 +175,7 @@ async def close_terminal(
     try:
         await terminals.close(terminal_id)
     except TerminalError as error:
-        raise _http_error(error) from None
+        raise HTTPException(error.status_code, error.detail) from None
     return Response(status_code=204)
 
 
@@ -192,8 +190,6 @@ async def terminal_stream(websocket: WebSocket, room_id: str, agent_user_id: str
     async with client_stream(websocket, room_id) as user:
         try:
             workspace = await (await stream_room_reader(websocket, user, room_id)).agent(agent_user_id)
-            if workspace.terminal == "none":
-                raise HTTPException(403, "This agent has no terminals.")  # noqa: TRY301 - closes the stream below
             terminals = await _workspace_terminals(websocket, room_id, user.user_id, workspace, create=False)
             async with terminals.attach(terminal_id) as terminal:
                 await _Viewer(websocket, terminal, workspace).relay(

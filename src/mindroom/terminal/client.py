@@ -88,7 +88,7 @@ class TerminalStream:
         message = await self._websocket.receive()
         if message.type == aiohttp.WSMsgType.BINARY:
             for number, status in self._marks.feed(message.data):
-                self.line.prompted(number, status)
+                self.line.prompted(number)
                 self.prompt = (number, status)
             return TerminalEvent("output", data=message.data)
         if message.type == aiohttp.WSMsgType.TEXT:
