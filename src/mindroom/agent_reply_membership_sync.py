@@ -129,13 +129,7 @@ class AgentReplyMembershipSync:
             with suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(task), 10)
 
-    async def refresh_when_needed(
-        self,
-        config: Config,
-        refresh: Callable[[], Awaitable[None]],
-        *,
-        stale: bool,
-    ) -> None:
+    async def refresh_when_needed(self, config: Config, refresh: Callable[[], Awaitable[None]], stale: bool) -> None:
         """Refresh at once when grants need it or the caller saw them trail Matrix, even during backoff, and wait.
 
         A refresh in flight serves instead of another, and one started here is the router's own, with its backoff, so

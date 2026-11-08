@@ -125,22 +125,6 @@ def _leaving_out(agent_name: str, room_id: str, *, leave_out: bool) -> Iterator[
         )
 
 
-async def _refresh_memberships(
-    requester_id: str,
-    room_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    memberships: AgentReplyMembershipIndex,
-    refresh_memberships: Callable[[bool], Awaitable[None]],
-) -> None:
-    """Bring ``memberships`` current for ``requester_id``, whom the live roster of ``room_id`` just showed joined.
-
-    The router applies a join from its own sync, which can trail that roster, so a ready view of the room without the
-    requester refreshes as well; one that has them refreshes only when the index needs it.
-    """
-    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
-
-
 async def admit_room_agent(
     requester_id: str,
     room_id: str,
@@ -155,7 +139,8 @@ async def admit_room_agent(
     """Return the name of the agent ``agent_user_id`` names once ``requester_id`` may use it in ``room_id``.
 
     ``joined_members`` returns the room's joined users; the check awaits it only once the agent is found.
-    ``refresh_memberships`` refreshes ``memberships`` when they need it, or when its argument says they are stale.
+    ``refresh_memberships`` refreshes ``memberships`` when they need it, or when its argument says they are stale, as
+    they are while they lack a requester the room's live roster shows joined.
     """
     name = _identities(config, runtime_paths).current_entity_name_for_user_id(agent_user_id, include_router=False)
     if name is None or name not in config.agents:
@@ -163,7 +148,7 @@ async def admit_room_agent(
     joined = await joined_members()
     if requester_id not in joined or agent_user_id not in joined:
         raise HTTPException(403, "Requester and agent must both be joined to this room.")
-    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
+    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
     if not _may_converse(requester_id, name, room_id, config, runtime_paths, memberships):
         raise HTTPException(403, "Requester cannot use this agent.")
     return name
@@ -192,7 +177,7 @@ async def _admitted_agents(
                 joined_agents.append((name, user_id))
     if not joined_agents:
         return []
-    await _refresh_memberships(requester_id, room_id, config, runtime_paths, memberships, refresh_memberships)
+    await refresh_memberships(memberships.misses_member(requester_id, room_id, config, runtime_paths))
     # Without the router's rooms every room grant is unresolved, and an empty answer would read as no agents.
     leave_out = memberships.knows_joined_rooms()
     admitted: list[tuple[str, str]] = []
