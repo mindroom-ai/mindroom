@@ -37,6 +37,7 @@ from tests.identity_helpers import entity_ids
 from tests.test_bot_ready_hook import _validated_reported_membership_admission
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -1027,3 +1028,100 @@ async def test_sync_frame_waits_at_most_ten_seconds_behind_slow_triggers_in_its_
     assert frame.done()
     assert now == 10
     assert all(trigger.done() for trigger in triggers)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_that_times_out_behind_a_slow_one_is_retried(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member change whose reconcile times out in the room's queue still reaches the room state without another trigger.
+
+    Every accounts request takes 3 s: the reload holds the lock until 9 s, so the leave's reconcile times out at 14 s.
+    """
+    config, paths, ids, events, client = room_state
+    loop = asyncio.get_running_loop()
+    now = 0
+    monkeypatch.setattr(loop, "time", lambda: now)
+
+    def slow(answer: Callable[..., Awaitable[object]], *, only: str | None = None) -> Callable[..., Awaitable[object]]:
+        async def answer_after_three_seconds(*args: object, **kwargs: object) -> object:
+            if only is None or only in args:
+                await asyncio.sleep(3)
+            return await answer(*args, **kwargs)
+
+        return answer_after_three_seconds
+
+    client.joined_members.side_effect = slow(client.joined_members.side_effect)
+    for mock in (client.room_get_state_event, client.room_put_state):
+        mock.side_effect = slow(mock.side_effect, only=ACCOUNTS_EVENT_TYPE)
+    duties = _router_duties(room_state)
+    agent2 = ids["agent2"].full_id
+    tasks = [asyncio.create_task(RoomSetup(paths, lambda: config, lambda: client, AsyncMock()).publish_room_state())]
+    for now in range(60):
+        if now == 4:
+            events["m.room.member", agent2] = {"membership": "leave"}
+            tasks.append(
+                asyncio.create_task(
+                    duties.member_event(client.rooms[ROOM_ID], _membership_event(agent2, "leave", "join")),
+                ),
+            )
+        # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
+        for _ in range(50):
+            await asyncio.sleep(0)
+    assert all(task.done() for task in tasks)
+    assert _accounts(room_state) == sorted(ids[name].full_id for name in (ROUTER_AGENT_NAME, "agent1"))
+
+
+@pytest.mark.asyncio
+async def test_failed_reconciles_are_retried_once_per_room(room_state: RoomState) -> None:
+    """Failures schedule one background retry per room, not one per trigger and not a loop."""
+    _, _, ids, _, client = room_state
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    duties = _router_duties(room_state)
+    event = _membership_event(ids["agent2"].full_id, "join", "leave")
+    await asyncio.gather(*(duties.member_event(client.rooms[ROOM_ID], event) for _ in range(2)))
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert len(_writes(client, ACCOUNTS_EVENT_TYPE)) == 3
+
+
+@pytest.mark.asyncio
+async def test_slower_earlier_trigger_cannot_restore_a_replaced_thread_mode(room_state: RoomState) -> None:
+    """Triggers in one room run one at a time, so the mode ends with the latest override."""
+    config, paths, _, events, client = room_state
+    read_event = client.room_get_state_event.side_effect
+
+    async def override_during_first_compare(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == EVENT_TYPE:
+            client.room_get_state_event.side_effect = read_event
+            set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="room")
+            for _ in range(10):
+                await asyncio.sleep(0)
+        return await read_event(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = override_during_first_compare
+    await asyncio.gather(*(reconcile_room_thread_mode(client, config, paths, ROOM_ID) for _ in range(2)))
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["room", "reset"])
+async def test_command_reports_a_failed_publication(room_state: RoomState, command: str) -> None:
+    """The command saves the override but does not claim success when clients cannot see the new mode."""
+    config, paths, _, _, client = room_state
+    set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="thread")
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    reply = await handle_thread_mode_command(
+        command,
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        room_id=ROOM_ID,
+        requester_user_id="@admin:localhost",
+        sender_user_id="@admin:localhost",
+    )
+    assert reply.startswith("⚠️")
+    assert "failed" in reply

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import suppress
 from typing import TYPE_CHECKING, Protocol
 
 import nio
 
+from mindroom.background_tasks import create_background_task
 from mindroom.event_journal import (
     DepartureSource,
     EventKind,
@@ -58,6 +60,7 @@ class AgentReplyMembershipSync:
         self._bots = bots
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
+        self._refresh_task: asyncio.Task[None] | None = None
         self._live_transition_lock = asyncio.Lock()
         self._live_effects_pending = False
 
@@ -113,13 +116,24 @@ class AgentReplyMembershipSync:
         config: Config,
         refresh: Callable[[], Awaitable[None]],
     ) -> None:
-        """Refresh once when due and apply bounded retry backoff on failure."""
-        # A sync gap cannot invalidate explicit-user grants. Do not turn a
-        # no-op rebuild into downstream room and call reconciliation scans.
-        if not self._memberships.needs_refresh(config):
-            return
-        if time.monotonic() < self._refresh_retry_at:
-            return
+        """Refresh once when due, apply bounded retry backoff on failure, and wait for the refresh at most 10 s.
+
+        A slower refresh keeps running in the background, so the router's sync frame never stalls behind a slow
+        homeserver and a large rebuild still finishes; the next frame waits for that refresh instead of starting one.
+        """
+        if self._refresh_task is None or self._refresh_task.done():
+            # A sync gap cannot invalidate explicit-user grants. Do not turn a
+            # no-op rebuild into downstream room and call reconciliation scans.
+            if not self._memberships.needs_refresh(config) or time.monotonic() < self._refresh_retry_at:
+                return
+            self._refresh_task = create_background_task(
+                self._refresh(config, refresh),
+                name="agent_reply_membership_refresh",
+            )
+        with suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(self._refresh_task), 10)
+
+    async def _refresh(self, config: Config, refresh: Callable[[], Awaitable[None]]) -> None:
         await refresh()
         if not self._memberships.needs_refresh(config):
             self._refresh_attempt = 0

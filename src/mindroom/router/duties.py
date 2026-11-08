@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import create_background_task
 from mindroom.commands import config_confirmation
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.hooks import (
@@ -64,6 +65,8 @@ class RouterDuties:
     _member_join_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     # Rooms the router joined since the last sync frame; a local join's room has no members until that frame.
     _joined_room_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    # The one background retry per room that a failed room state reconcile schedules.
+    _room_state_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def _membership_sync(self) -> AgentReplyMembershipSync:
@@ -94,20 +97,32 @@ class RouterDuties:
         self._joined_room_ids.add(room_id)
 
     async def publish_joined_room_state(self) -> None:
-        """Reconcile the thread mode and MindRoom accounts of the rooms the router joined and still holds.
+        """Reconcile the thread mode and MindRoom accounts of the rooms the router joined and still holds."""
+        room_ids, self._joined_room_ids = self._joined_room_ids, set()
+        await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
-        Failures wait for a later trigger.
+    async def _publish_room_state(self, room_id: str) -> None:
+        """Reconcile one held room's thread mode and MindRoom accounts.
+
+        A failure, such as a reconcile that timed out queued behind a slower one, schedules one retry in the background,
+        so the room catches up without another trigger while the caller still waits at most 10 s.
         """
         runtime = self.deps.runtime
-        room_ids, self._joined_room_ids = self._joined_room_ids, set()
-        if runtime.client is not None:
-            await asyncio.gather(
-                *(
-                    reconcile(runtime.client, runtime.config, runtime.runtime_paths, room_id)
-                    for room_id in room_ids
-                    if room_id in runtime.client.rooms
-                    for reconcile in (reconcile_room_thread_mode, reconcile_room_accounts)
-                ),
+        client = runtime.client
+        if client is None or room_id not in client.rooms:
+            return
+        current = await asyncio.gather(
+            reconcile_room_thread_mode(client, runtime.config, runtime.runtime_paths, room_id),
+            reconcile_room_accounts(client, runtime.config, runtime.runtime_paths, room_id),
+        )
+        pending = self._room_state_retries.get(room_id)
+        # Each reconcile ends within 10 s of starting, so a failure seen while a retry is pending comes from that one
+        # retry or from a trigger that started before it, whose change the retry reads.
+        if not all(current) and (pending is None or pending.done()):
+            self._room_state_retries[room_id] = create_background_task(
+                self._publish_room_state(room_id),
+                name="router_room_state_retry",
+                owner=runtime,
             )
 
     def invalidate_memberships(self, *, reason: str) -> None:
@@ -141,15 +156,11 @@ class RouterDuties:
         """Refresh responder presentation and the room's MindRoom accounts, and emit human membership hooks."""
         registry = self.deps.hook_context.registry
         runtime = self.deps.runtime
-        if (
-            event.membership != event.prev_membership
-            and runtime.client is not None
-            and event.state_key in prepared_entity_names_by_user_id(runtime.config, runtime.runtime_paths)
+        if event.membership != event.prev_membership and event.state_key in prepared_entity_names_by_user_id(
+            runtime.config,
+            runtime.runtime_paths,
         ):
-            await asyncio.gather(
-                reconcile_room_thread_mode(runtime.client, runtime.config, runtime.runtime_paths, room.room_id),
-                reconcile_room_accounts(runtime.client, runtime.config, runtime.runtime_paths, room.room_id),
-            )
+            await self._publish_room_state(room.room_id)
         if registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
             leave = room_member_left_from_event(room, event, config=runtime.config, runtime_paths=runtime.runtime_paths)
             if leave is not None:

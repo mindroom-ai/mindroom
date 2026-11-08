@@ -59,15 +59,18 @@ async def handle_thread_mode_command(
 
     if requested in _RESET_ARGUMENTS:
         removed = clear_room_thread_mode_override(runtime_paths, room_id)
-        await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
-        if removed:
-            return "✅ Room thread mode override removed. Agents use their configured modes again."
-        return "This room has no thread mode override."
-
-    mode = cast("RoomThreadMode", requested)
-    set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=mode)
-    await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
-    return (
-        f"✅ This room now uses `{mode}` thread mode for future agent replies.\n\n"
-        "Use `!thread_mode reset` to restore configured modes."
-    )
+        current = await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
+        if not removed:
+            return "This room has no thread mode override."
+        reply = "Room thread mode override removed. Agents use their configured modes again."
+    else:
+        mode = cast("RoomThreadMode", requested)
+        set_room_thread_mode_override(runtime_paths, room_id=room_id, mode=mode)
+        current = await reconcile_room_thread_mode(client, config, runtime_paths, room_id)
+        reply = (
+            f"This room now uses `{mode}` thread mode for future agent replies.\n\n"
+            "Use `!thread_mode reset` to restore configured modes."
+        )
+    if current:
+        return f"✅ {reply}"
+    return f"⚠️ {reply}\n\nUpdating the thread mode clients show for this room failed. Run the command again to retry."

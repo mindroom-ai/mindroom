@@ -381,3 +381,38 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
     await membership_sync.refresh_if_needed(config, failed_refresh)
 
     assert refreshes == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_frame_waits_at_most_ten_seconds_for_a_slow_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow refresh keeps running after the frame stops waiting, and the next frame waits for it instead of another."""
+    config = Config()
+    memberships = MagicMock(spec=AgentReplyMembershipIndex)
+    memberships.needs_refresh.return_value = True
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: ())
+    loop = asyncio.get_running_loop()
+    now = 0
+    monkeypatch.setattr(loop, "time", lambda: now)
+    answered = asyncio.Event()
+    refreshes = 0
+
+    async def slow_refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+        await answered.wait()
+        memberships.needs_refresh.return_value = False
+
+    for frame_started in (0, 10):
+        frame = asyncio.create_task(membership_sync.refresh_if_needed(config, slow_refresh))
+        while not frame.done() and now < 60:
+            # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
+            for _ in range(20):
+                await asyncio.sleep(0)
+            if not frame.done():
+                now += 1
+        assert now == frame_started + 10
+    assert refreshes == 1
+    answered.set()
+    await membership_sync.refresh_if_needed(config, slow_refresh)
+    assert refreshes == 1
+    assert not memberships.needs_refresh(config)
