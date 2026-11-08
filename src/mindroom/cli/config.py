@@ -64,6 +64,15 @@ console = Console()
 # Warnings go to stderr so `config init --print` output stays valid YAML.
 _err_console = Console(stderr=True)
 
+
+def print_literal(markup: str, text: object, suffix: str = "") -> None:
+    """Print fixed Rich markup, then text shown as is, then optional fixed markup, with no markup or emoji codes read from the text.
+
+    The line is not wrapped at the terminal width, so a path or error in it stays whole in logs read at any width.
+    """
+    console.print(markup, console.highlighter(str(text)), suffix, sep="", soft_wrap=True)
+
+
 config_app = typer.Typer(
     cls=PanelOrderedGroup,
     name="config",
@@ -233,6 +242,7 @@ def _config_init_owner_user_id(runtime_paths: RuntimePaths) -> str | None:
             f"[yellow]Warning:[/yellow] {constants.OWNER_MATRIX_USER_ID_ENV} in {escape(source)} "
             f"is not a valid Matrix user ID ({escape(repr(raw_owner_user_id))}), "
             "so the owner placeholders in config.yaml were left for you to replace.",
+            soft_wrap=True,
         )
     return owner_user_id
 
@@ -294,7 +304,7 @@ def _write_env_file(
     """Create or update .env and return whether the file changed."""
     if not env_path.exists():
         write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root, provider_api_key))
-        console.print(f"[green]Env file created:[/green] {env_path}")
+        print_literal("[green]Env file created:[/green] ", env_path)
         return True
 
     if not replace_existing:
@@ -307,7 +317,7 @@ def _write_env_file(
             title="Hosted Matrix defaults for mindroom.chat",
         )
         if changed:
-            console.print(f"[green]Env file updated:[/green] {env_path}")
+            print_literal("[green]Env file updated:[/green] ", env_path)
         # `mindroom run` serves the dashboard on every interface by default, so a kept
         # .env without a dashboard key gets one; an explicitly empty key in .env is the
         # open-access opt-out, and an exported key wins over .env, but an exported blank does not.
@@ -320,19 +330,20 @@ def _write_env_file(
             title="Dashboard API key protecting /api/*; the dashboard login page asks for it",
         ):
             # A service already running without a key reads .env only at startup.
-            console.print(
-                f"[green]Generated MINDROOM_API_KEY in {env_path}[/green]; "
-                "restart MindRoom if it is already running to apply it.",
+            print_literal(
+                "[green]Generated MINDROOM_API_KEY in[/green] ",
+                env_path,
+                "; restart MindRoom if it is already running to apply it.",
             )
             changed = True
         if provider_api_key and (env_key := _preset_api_key_env(selected_preset)):
             upsert_env_values(env_path, {env_key: provider_api_key})
-            console.print(f"[green]Env file updated:[/green] {env_path} ({env_key})")
+            print_literal("[green]Env file updated:[/green] ", f"{env_path} ({env_key})")
             changed = True
         return changed
 
     write_private_env_text(env_path, _env_template(matrix_server, selected_preset, storage_root, provider_api_key))
-    console.print(f"[green]Env file overwritten:[/green] {env_path}")
+    print_literal("[green]Env file overwritten:[/green] ", env_path)
     return True
 
 
@@ -393,7 +404,7 @@ def _print_config_init_next_steps(
     console.print("\nNext steps:")
     if env_changed:
         env_hint = _config_init_env_hint(matrix_server, selected_preset)
-        console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
+        print_literal("  [cyan]Edit[/cyan] ", env_path, f"  {env_hint}")
     _print_local_model_commands(selected_preset)
     console.print("  [cyan]mindroom config edit[/cyan]      Customize your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Verify it's valid")
@@ -424,19 +435,11 @@ def _config_discovery_env(path: Path | None) -> dict[str, str]:
     return process_env
 
 
-def _format_config_search_locations(process_env: Mapping[str, str]) -> list[str]:
-    """Return rendered config search locations with existence labels."""
-    return [
-        f"  {i}. {loc} ({'[green]exists[/green]' if loc.exists() else '[dim]not found[/dim]'})"
-        for i, loc in enumerate(constants.config_search_locations(process_env), 1)
-    ]
-
-
 def print_config_search_locations(process_env: Mapping[str, str], *, title: str) -> None:
-    """Print the config search locations used by CLI commands."""
+    """Print the config search locations used by CLI commands, numbered and labeled with whether each exists."""
     console.print(title)
-    for line in _format_config_search_locations(process_env):
-        console.print(line)
+    for i, loc in enumerate(constants.config_search_locations(process_env), 1):
+        print_literal(f"  {i}. ", loc, " ([green]exists[/green])" if loc.exists() else " ([dim]not found[/dim])")
 
 
 def _yaml_syntax(content: str, *, line_numbers: bool, word_wrap: bool) -> Syntax:
@@ -481,7 +484,7 @@ def format_validation_errors(
     from mindroom.config.main import iter_config_validation_messages  # noqa: PLC0415
 
     if config_path:
-        console.print(f"[red]Error:[/red] Invalid configuration in {config_path}\n")
+        print_literal("[red]Error:[/red] Invalid configuration in ", config_path, "\n")
     else:
         console.print("[red]Error:[/red] Invalid configuration\n")
     console.print("Issues found:")
@@ -550,7 +553,7 @@ def config_init(
     # runs so a missing .env is recreated and hosted defaults are appended.
     keep_existing_config = False
     if target.exists() and not force and not print_config:
-        console.print(f"[yellow]Config file already exists:[/yellow] {target}")
+        print_literal("[yellow]Config file already exists:[/yellow] ", target)
         if no_input:
             console.print("Keeping existing config.yaml. Use --force to overwrite.")
             keep_existing_config = True
@@ -600,9 +603,10 @@ def create_first_run_config(
     elif (selected_preset := _normalize_provider_preset(provider)) is None:
         msg = f"Invalid --provider value. Use: {_PROVIDER_CHOICES_TEXT}."
         raise ValueError(msg)
-    console.print(
-        f"\n[bold]Welcome to MindRoom![/bold] Let's create your config at {escape(str(runtime_paths.config_path))} "
-        "for MindRoom Chat (mindroom.chat).",
+    print_literal(
+        "\n[bold]Welcome to MindRoom![/bold] Let's create your config at ",
+        runtime_paths.config_path,
+        " for MindRoom Chat (mindroom.chat).",
     )
     console.print(
         "[dim]Own Matrix server? Press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.[/dim]",
@@ -620,7 +624,7 @@ def create_first_run_config(
     )
     if (setup := _PROVIDER_PRESETS[selected_preset].setup) is not None:
         console.print("\nMindRoom keeps starting; your agents can answer once you:")
-        console.print(f"  {setup.first_run.format(env_path=runtime_paths.env_path)}")
+        print_literal("  ", setup.first_run.format(env_path=runtime_paths.env_path))
         _print_local_model_commands(selected_preset)
 
 
@@ -642,9 +646,10 @@ def _prompt_provider_key(
         return None
     value = secret(f"{preset.label} API key (input hidden, press Enter to skip)").strip() if interactive else ""
     if not value:
-        console.print(
-            f"Skipped. Connect your provider in the dashboard once MindRoom is running, "
-            f"or add {env_key} to {runtime_paths.env_path} and restart `mindroom run`.",
+        print_literal(
+            f"Skipped. Connect your provider in the dashboard once MindRoom is running, or add {env_key} to ",
+            runtime_paths.env_path,
+            " and restart `mindroom run`.",
         )
         return None
     return value
@@ -709,9 +714,9 @@ def _write_starter_setup(
         console.print(f"[green]Agent docs created:[/green] {created_doc.name}")
 
     if keep_existing_config:
-        console.print(f"[green]Config unchanged:[/green] {target}")
+        print_literal("[green]Config unchanged:[/green] ", target)
     else:
-        console.print(f"[green]Config created:[/green] {target}")
+        print_literal("[green]Config created:[/green] ", target)
     return env_changed
 
 
@@ -730,7 +735,7 @@ def config_show(
     config_file = constants.find_config_path(process_env=process_env)
 
     if not config_file.exists():
-        console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
+        print_literal("[yellow]No config file found at:[/yellow] ", config_file)
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
         raise typer.Exit(1)
@@ -745,7 +750,7 @@ def config_show(
         print(content, end="")
         return
 
-    console.print(f"[bold green]Config file:[/bold green] {config_file}\n")
+    print_literal("[bold green]Config file:[/bold green] ", config_file, "\n")
     console.print(_yaml_syntax(content, line_numbers=True, word_wrap=True))
 
 
@@ -765,7 +770,7 @@ def config_edit(
         raise typer.Exit(1)
 
     editor = _get_editor()
-    console.print(f"[dim]Opening {config_file} with {editor}...[/dim]")
+    print_literal("[dim]Opening[/dim] ", f"{config_file} with {editor}...")
 
     try:
         editor_cmd = shlex.split(editor, posix=os.name != "nt")
@@ -780,7 +785,7 @@ def config_edit(
     try:
         subprocess.run([*editor_cmd, str(config_file)], check=True)
     except FileNotFoundError:
-        console.print(f"[red]Editor '{editor_cmd[0]}' not found.[/red]")
+        print_literal("[red]Editor '[/red]", editor_cmd[0], "[red]' not found.[/red]")
         console.print("Set $EDITOR environment variable to your preferred editor.")
         raise typer.Exit(1) from None
     except subprocess.CalledProcessError as e:
@@ -804,10 +809,10 @@ def config_validate(
     """
     runtime_paths = activate_cli_runtime(path)
     config_path = runtime_paths.config_path
-    console.print(f"Validating configuration: [bold]{config_path}[/bold]\n")
+    print_literal("Validating configuration: ", config_path, "\n")
 
     if not config_path.exists():
-        console.print(f"[red]Error:[/red] Configuration file not found: {config_path}")
+        print_literal("[red]Error:[/red] Configuration file not found: ", config_path)
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         raise typer.Exit(1)
 
@@ -850,7 +855,7 @@ def config_resolve(
     config_path = runtime_paths.config_path
 
     if not config_path.exists():
-        console.print(f"[red]Error:[/red] Configuration file not found: {config_path}")
+        print_literal("[red]Error:[/red] Configuration file not found: ", config_path)
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         raise typer.Exit(1)
 
@@ -879,7 +884,7 @@ def config_path_cmd(
     resolved = constants.find_config_path(process_env=process_env)
     exists = resolved.exists()
     status = "[green]exists[/green]" if exists else "[red]not found[/red]"
-    console.print(f"Resolved config path: {resolved} ({status})")
+    print_literal("Resolved config path: ", resolved, f" ({status})")
 
     print_config_search_locations(process_env, title="\nSearch locations (first match wins):")
 
@@ -1423,9 +1428,10 @@ DEFAULT_API_PORT = 8765
 
 def warn_dashboard_without_key(address: str, remedy: str) -> None:
     """Warn that anyone who can reach the dashboard API at ``address`` can administer MindRoom."""
-    console.print(
-        f"[yellow]Warning:[/yellow] The dashboard API listens on {address} without MINDROOM_API_KEY, "
-        "so anyone who can reach that address can administer MindRoom.",
+    print_literal(
+        "[yellow]Warning:[/yellow] The dashboard API listens on ",
+        address,
+        " without MINDROOM_API_KEY, so anyone who can reach that address can administer MindRoom.",
     )
     console.print(f"  {remedy}")
 
@@ -1458,14 +1464,15 @@ def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, da
         )
     except OSError as exc:
         # Read-only configuration mounts keep the open API; minimal mode then names the missing key.
-        console.print(
-            f"[yellow]Warning:[/yellow] Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
-            f"and {env_path} could not be updated: {escape(str(exc))}",
+        print_literal(
+            "[yellow]Warning:[/yellow] Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, and ",
+            f"{env_path} could not be updated: {exc}",
         )
         return False
-    console.print(
-        f"[green]Generated MINDROOM_API_KEY in {env_path}[/green] because dedicated workers can reach the "
-        "dashboard API; the dashboard login page asks for this key.",
+    print_literal(
+        "[green]Generated MINDROOM_API_KEY in[/green] ",
+        env_path,
+        " because dedicated workers can reach the dashboard API; the dashboard login page asks for this key.",
     )
     return True
 

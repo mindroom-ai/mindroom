@@ -30,7 +30,7 @@ import mindroom.workspaces as workspaces_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
-from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
+from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.doctor import _validate_vertexai_claude_connection
 from mindroom.cli.main import (
     _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
@@ -165,20 +165,137 @@ def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
     assert json.loads(result.stdout) == []
 
 
-def test_format_config_search_locations_numbers_paths_and_statuses(
-    tmp_path: Path,
+@pytest.fixture
+def narrow_markup_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return a folder whose path Rich would read as markup and that passes 80 columns, with the CLI at 80 columns."""
+    directory = tmp_path / "[work]" / ("a-folder-name-that-pushes-the-path-past-eighty-columns-" * 2)
+    directory.mkdir(parents=True)
+    for console in (config_cli.console, config_cli._err_console):
+        monkeypatch.setattr(console, "_width", 80)
+    return directory
+
+
+def test_config_search_locations_print_numbers_paths_and_statuses(
+    narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Config search-location rendering should include numbers and existence status."""
-    monkeypatch.chdir(tmp_path)
-    existing = tmp_path / "config.yaml"
+    """Each search location prints its number, its whole path, and whether it exists, on one line."""
+    monkeypatch.chdir(narrow_markup_dir)
+    existing = narrow_markup_dir / "config.yaml"
     existing.write_text("agents: {}\n", encoding="utf-8")
-    missing = tmp_path / "missing.yaml"
+    missing = narrow_markup_dir / "missing.yaml"
 
-    lines = _format_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)})
+    config_cli.print_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)}, title="Search locations:")
 
-    assert lines[0] == f"  1. {missing.resolve()} ([dim]not found[/dim])"
-    assert lines[1] == f"  2. {existing.resolve()} ([green]exists[/green])"
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == f"  1. {missing.resolve()} (not found)"
+    assert lines[2] == f"  2. {existing.resolve()} (exists)"
+
+
+def test_config_init_prints_env_and_config_paths_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """A path with a bracketed folder, longer than the terminal is wide, prints whole on each `config init` line."""
+    target = narrow_markup_dir / "config.yaml"
+    env_path = narrow_markup_dir / ".env"
+    init = ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--no-input"]
+
+    created = runner.invoke(app, init).output.splitlines()
+    env_path.write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:selfhosted.example\n", encoding="utf-8")
+    kept = runner.invoke(app, init).output.splitlines()
+    overwritten = runner.invoke(app, [*init, "--force"]).output.splitlines()
+
+    assert f"Env file created: {env_path}" in created
+    assert f"Config created: {target}" in created
+    assert f"  Edit {env_path}  Set your API keys (Matrix homeserver is prefilled)" in created
+    assert f"Config file already exists: {target}" in kept
+    assert f"Config unchanged: {target}" in kept
+    assert f"Env file updated: {env_path}" in kept
+    assert f"Generated MINDROOM_API_KEY in {env_path}; restart MindRoom if it is already running to apply it." in kept
+    assert (
+        f"Warning: {OWNER_MATRIX_USER_ID_ENV} in {env_path} is not a valid Matrix user ID "
+        "('@Alice:selfhosted.example'), so the owner placeholders in config.yaml were left for you to replace."
+    ) in kept
+    assert f"Env file overwritten: {env_path}" in overwritten
+
+
+def test_config_inspect_commands_print_the_config_path_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`config show`, `path`, `validate`, `resolve`, and `edit` print a markup-like, long config path whole."""
+    target = narrow_markup_dir / "config.yaml"
+
+    def lines(*args: str, env: dict[str, str] | None = None) -> list[str]:
+        return runner.invoke(app, ["config", *args, "--path", str(target)], env=env).output.splitlines()
+
+    assert f"No config file found at: {target}" in lines("show")
+    assert f"Validating configuration: {target}" in (validate := lines("validate"))
+    assert f"Error: Configuration file not found: {target}" in validate
+    assert f"Error: Configuration file not found: {target}" in lines("resolve")
+    target.write_text("agents: [\n", encoding="utf-8")
+    assert f"Config file: {target}" in lines("show")
+    assert f"Resolved config path: {target} (exists)" in lines("path")
+    assert f"Error: Invalid configuration in {target}" in lines("validate")
+    edit = lines("edit", env={"EDITOR": "[missing]-editor"})
+    assert f"Opening {target} with [missing]-editor..." in edit
+    assert "Editor '[missing]-editor' not found." in edit
+
+
+def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The first-run welcome, skipped key, typed key, and provider setup lines keep a markup-like, long path whole."""
+    runtime_paths = constants_module.resolve_primary_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={},
+    )
+    env_path = runtime_paths.env_path
+    env_path.write_text("", encoding="utf-8")
+
+    config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=False)
+    with patch.object(config_cli, "secret", return_value="sk-typed"):
+        config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=True)
+    config_cli.create_first_run_config(runtime_paths, provider="bedrock_claude", interactive=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        f"Welcome to MindRoom! Let's create your config at {runtime_paths.config_path} for MindRoom Chat (mindroom.chat)."
+    ) in lines
+    assert (
+        "Skipped. Connect your provider in the dashboard once MindRoom is running, "
+        f"or add OPENAI_API_KEY to {env_path} and restart `mindroom run`."
+    ) in lines
+    assert f"Env file updated: {env_path} (OPENAI_API_KEY)" in lines
+    assert f"  Set your AWS Bedrock region and credentials in {env_path} and restart `mindroom run`" in lines
+
+
+def test_dashboard_key_warnings_print_the_address_and_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The open-dashboard warning keeps an IPv6 address Rich would read as markup, and the key lines a long path."""
+    runtime_paths = constants_module.resolve_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    env_path = runtime_paths.env_path
+
+    config_cli.warn_dashboard_without_key("[fe80::1]:8765", "Set MINDROOM_API_KEY.")
+    with patch.object(config_cli, "write_private_env_text", side_effect=OSError("read-only [mount]")):
+        config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+    config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        "Warning: The dashboard API listens on [fe80::1]:8765 without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom."
+    ) in lines
+    assert (
+        "Warning: Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
+        f"and {env_path} could not be updated: read-only [mount]"
+    ) in lines
+    assert (
+        f"Generated MINDROOM_API_KEY in {env_path} because dedicated workers can reach the dashboard API; "
+        "the dashboard login page asks for this key."
+    ) in lines
 
 
 def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> None:
