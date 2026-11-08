@@ -24,6 +24,19 @@ def _non_dm_state() -> nio.RoomGetStateResponse:
     return nio.RoomGetStateResponse([{"type": "m.room.member", "content": {"membership": "join"}}], "!room:server")
 
 
+def _failing_m_direct_client(
+    failed_read: nio.DirectRoomsResponse | nio.DirectRoomsErrorResponse,
+    room_id: str = "!room:server",
+) -> AsyncMock:
+    """Build a client whose first m.direct read fails and whose next lists *room_id*, which its state does not mark."""
+    client = AsyncMock()
+    client.user_id = "@agent:server"
+    client.rooms = {}
+    client.list_direct_rooms.side_effect = [failed_read, _direct_rooms({"@user:server": [room_id]})]
+    client.room_get_state.return_value = _non_dm_state()
+    return client
+
+
 @pytest.mark.asyncio
 class TestDMDetection:
     """Test DM room detection functionality."""
@@ -196,26 +209,44 @@ class TestDMDetection:
             pytest.param(_direct_rooms({}, status=502), id="non-json-error-body"),
         ],
     )
-    async def test_does_not_cache_false_when_m_direct_request_errors(
+    async def test_failed_m_direct_read_answers_unknown_and_reads_again(
         self,
         failed_read: nio.DirectRoomsResponse | nio.DirectRoomsErrorResponse,
     ) -> None:
-        """Test a failed m.direct read leaves the answer uncached so the next call reads m.direct again."""
-        client = AsyncMock()
-        client.user_id = "@agent:server"
-        client.list_direct_rooms.side_effect = [
-            failed_read,
-            _direct_rooms({"@user:server": ["!room:server"]}),
-        ]
-
-        client.room_get_state.return_value = _non_dm_state()
+        """Test a failed m.direct read answers unknown for an unmarked room, and the next call reads m.direct again."""
+        client = _failing_m_direct_client(failed_read)
 
         first_result = await is_dm_room(client, "!room:server")
         second_result = await is_dm_room(client, "!room:server")
 
-        assert first_result is False
+        assert first_result is None
         assert second_result is True
         assert client.list_direct_rooms.call_count == 2
+
+    @pytest.mark.parametrize(
+        ("state_reply", "expected"),
+        [
+            pytest.param(MagicMock(spec=nio.RoomGetStateError), None, id="state-read-fails"),
+            pytest.param(
+                nio.RoomGetStateResponse(
+                    [{"type": "m.room.member", "content": {"membership": "join", "is_direct": True}}],
+                    "!room:server",
+                ),
+                True,
+                id="state-marks-direct",
+            ),
+        ],
+    )
+    async def test_failed_m_direct_read_answers_from_state_only_when_it_marks_direct(
+        self,
+        state_reply: nio.RoomGetStateResponse | nio.RoomGetStateError,
+        expected: bool | None,
+    ) -> None:
+        """Test that after a failed m.direct read only an is_direct marker in the state gives a definite answer."""
+        client = _failing_m_direct_client(nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN"))
+        client.room_get_state.return_value = state_reply
+
+        assert await is_dm_room(client, "!room:server") is expected
 
     async def test_dm_cache_expires_and_rechecks_m_direct(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test stale DM cache entries are refreshed after TTL."""
@@ -239,18 +270,31 @@ class TestDMDetection:
         assert client.list_direct_rooms.call_count == 2
 
     async def test_filter_non_dm_rooms_preserves_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test non-DM room filtering keeps only non-DM rooms in input order."""
+        """Test non-DM room filtering keeps only rooms known not to be DMs, in input order."""
         client = AsyncMock()
-        dm_room_ids = {"!dm1:server", "!dm2:server"}
+        answers = {"!dm1:server": True, "!dm2:server": True, "!unknown:server": None}
 
-        async def mock_is_dm_room(_client: AsyncMock, room_id: str) -> bool:
-            return room_id in dm_room_ids
+        async def mock_is_dm_room(_client: AsyncMock, room_id: str) -> bool | None:
+            return answers.get(room_id, False)
 
         monkeypatch.setattr(rooms, "is_dm_room", mock_is_dm_room)
 
         result = await rooms.filter_non_dm_rooms(
             client,
-            ["!room1:server", "!dm1:server", "!room2:server", "!dm2:server"],
+            ["!room1:server", "!dm1:server", "!unknown:server", "!room2:server", "!dm2:server"],
         )
 
         assert result == ["!room1:server", "!room2:server"]
+
+    async def test_leave_non_dm_rooms_keeps_room_whose_m_direct_read_failed(self) -> None:
+        """Test a failed m.direct read keeps its room, a clean read lets a non-DM go, and a later pass keeps the DM."""
+        client = _failing_m_direct_client(
+            nio.DirectRoomsErrorResponse("Internal server error", "M_UNKNOWN"),
+            room_id="!dm:server",
+        )
+        leave = AsyncMock(return_value=True)
+
+        await rooms.leave_non_dm_rooms(client, ["!dm:server", "!group:server"], leave_room_action=leave)
+        await rooms.leave_non_dm_rooms(client, ["!dm:server"], leave_room_action=leave)
+
+        leave.assert_awaited_once_with("!group:server")

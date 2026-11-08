@@ -494,10 +494,11 @@ class TurnPolicy:
         )
         # Only a DM auto team depends on DM status, and it needs an unthreaded message
         # with several responders, so skip the homeserver lookup otherwise.
+        # An unknown status forms no DM auto team for this message.
         is_dm = (
             not context.is_thread
             and len(available_responders_in_room) > 1
-            and await is_dm_room(self._client(), room.room_id)
+            and await is_dm_room(self._client(), room.room_id) is True
         )
         return decide_team_formation(
             context.mentioned_agents,
