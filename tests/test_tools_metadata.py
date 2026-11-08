@@ -78,7 +78,7 @@ from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_egress_helpers import socks5_connect
 from tests.conftest import preserved_builtin_tools
-from tests.public_fetch_helpers import TrickleBody, serve
+from tests.public_fetch_helpers import TrickleBody, public_dns, serve
 
 _BUILTINS = builtin_tool_registry()
 _CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
@@ -704,13 +704,8 @@ def test_custom_api_tool_returns_at_its_timeout_while_a_hostname_lookup_hangs(mo
 def test_custom_api_tool_tries_the_next_address_when_one_never_answers(monkeypatch: pytest.MonkeyPatch) -> None:
     """An address that drops connection attempts uses up only its own connect limit, not the request's timeout."""
     monkeypatch.setattr(custom_api_module, "CONNECT_TIMEOUT_SECONDS", 0.1)
-    monkeypatch.setattr(
-        "mindroom.server_fetch_url.socket.getaddrinfo",
-        lambda *_args, **_kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 443))
-            for address in ("93.184.216.34", "93.184.216.35")
-        ],
-    )
+    dead, live = "93.184.216.34", "93.184.216.35"
+    public_dns(monkeypatch, (dead, live))
     dialed: list[tuple[str, float | None]] = []
 
     async def connect_tcp(
@@ -721,7 +716,7 @@ def test_custom_api_tool_tries_the_next_address_when_one_never_answers(monkeypat
         **_kwargs: object,
     ) -> None:
         dialed.append((host, timeout))
-        if host == "93.184.216.34":
+        if host == dead:
             # Nothing answers, so the attempt lasts until its connect limit.
             await asyncio.sleep(timeout or 0)
             raise httpcore.ConnectTimeout
@@ -732,7 +727,7 @@ def test_custom_api_tool_tries_the_next_address_when_one_never_answers(monkeypat
 
     payload = json.loads(custom_api_tools()(timeout=1).make_request("https://api.example.com/data"))
 
-    assert dialed == [("93.184.216.34", 0.1), ("93.184.216.35", 0.1)]
+    assert dialed == [(dead, 0.1), (live, 0.1)]
     assert payload == {"error": "Request failed: connection refused"}
 
 
