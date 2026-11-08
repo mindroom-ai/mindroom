@@ -46,7 +46,8 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 _TOKEN = "runner-token"  # noqa: S105
-_NON_ASCII_TOKEN = {"x-mindroom-sandbox-token": "runner-tökén"}
+# Headers the runner refuses: no token, and a token that is not ASCII.
+_REFUSED_TOKEN_HEADERS = ({}, {"x-mindroom-sandbox-token": "runner-tökén"})
 _IDENTITY = ToolExecutionIdentity("matrix", "code", "@alice:localhost", "!room:localhost", None, None, "session")
 
 
@@ -300,7 +301,7 @@ async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str)
     """
     sessions = f"{runner}/api/sandbox-runner/terminal/sessions"
     async with aiohttp.ClientSession() as client:
-        for headers in ({}, _NON_ASCII_TOKEN):
+        for headers in _REFUSED_TOKEN_HEADERS:
             async with client.get(sessions, params={"owner": "x"}, headers=headers) as response:
                 assert response.status == 401
         body = {"request": {"protocol": 1, "tool_name": "python", "function_name": "run_python_code"}}
@@ -323,7 +324,7 @@ async def test_a_terminal_s_stream_needs_the_runner_token_even_with_its_owner(tm
     stream = f"{call.api_root}/terminal/sessions/{info.id}/io"
     params = {"owner": client_module._owner(call.request)}
     async with aiohttp.ClientSession() as client:
-        for headers in ({}, _NON_ASCII_TOKEN):
+        for headers in _REFUSED_TOKEN_HEADERS:
             with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
                 await client.ws_connect(stream, params=params, headers=headers)
             assert refused.value.status == 403
